@@ -17,6 +17,11 @@ import {
     openSync,
     closeSync,
     mkdirSync,
+    constants,
+    fstatSync,
+    lstatSync,
+    fchmodSync,
+    ftruncateSync,
 } from "fs";
 import { join, dirname, basename } from "path";
 import { homedir, platform } from "os";
@@ -1085,7 +1090,6 @@ function gracefulShutdown(server: Server, idleTimer?: ReturnType<typeof setInter
     killPersistentPS();
     killPersistentDarwin();
     server.close(() => {
-        cleanupStateFiles();
         process.exit(0);
     });
     setTimeout(() => process.exit(0), 3000);
@@ -1227,11 +1231,6 @@ function createClipboardServer(token: string, plat: ClipboardPlatform): { server
     return { server, start };
 }
 
-function cleanupStateFiles(): void {
-    try { if (existsSync(PORT_FILE)) unlinkSync(PORT_FILE); } catch { /* ignore */ }
-    try { if (existsSync(STARTING_LOCK)) unlinkSync(STARTING_LOCK); } catch { /* ignore */ }
-}
-
 // === Port File Management ===
 
 function readPortFile(): { port: number; token: string } | null {
@@ -1252,7 +1251,30 @@ function readPortFile(): { port: number; token: string } | null {
 
 function writePortFile(port: number, token: string): void {
     mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
-    writeFileSync(PORT_FILE, `${port}:${token}`, { mode: 0o600 });
+    // Containers bind this file's inode. Publish through a pinned descriptor;
+    // stale bytes remain harmless because readers require authenticated health.
+    const flags = constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+    let fd: number;
+    try {
+        fd = openSync(PORT_FILE, flags | constants.O_CREAT | constants.O_EXCL, 0o600);
+    } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+        fd = openSync(PORT_FILE, flags);
+    }
+    try {
+        const file = fstatSync(fd);
+        const path = lstatSync(PORT_FILE);
+        const uid = process.getuid?.();
+        if (!file.isFile() || file.nlink !== 1 || (uid !== undefined && file.uid !== uid)
+            || !path.isFile() || path.dev !== file.dev || path.ino !== file.ino) {
+            throw new Error("Unsafe clipboard port file");
+        }
+        if (uid !== undefined && (file.mode & 0o777) !== 0o600) fchmodSync(fd, 0o600);
+        ftruncateSync(fd, 0);
+        writeFileSync(fd, `${port}:${token}`);
+    } finally {
+        closeSync(fd);
+    }
 }
 
 // === Server Shutdown (used for version upgrade restart) ===
@@ -1322,7 +1344,6 @@ export async function ensureClipboardServer(): Promise<number> {
             // Brief wait for old server to release the port
             await new Promise((r) => setTimeout(r, 500));
         }
-        cleanupStateFiles();
     }
 
     // Atomic startup lock to prevent race condition
@@ -1343,7 +1364,7 @@ export async function ensureClipboardServer(): Promise<number> {
             }
         }
         // Timeout - try to start ourselves (delete stale lock)
-        cleanupStateFiles();
+        try { unlinkSync(STARTING_LOCK); } catch { /* ignore */ }
         try {
             mkdirSync(DATA_DIR, { recursive: true });
             lockFd = openSync(STARTING_LOCK, "wx");
@@ -1429,9 +1450,6 @@ export function stopClipboardServerIfLast(currentLockFile: string | null): void 
     if (!info) return;
 
     shutdownServer(info.port, info.token);
-
-    // Clean up port file
-    try { unlinkSync(PORT_FILE); } catch { /* ignore */ }
 }
 
 // === Standalone Entry Point ===

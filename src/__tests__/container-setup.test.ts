@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { SpawnSyncReturns } from "child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -263,6 +263,7 @@ describe("container-setup.ts module", () => {
                 const script = (args as string[]).at(-1)!;
                 if (script.startsWith("[ -x ")) return makeResult(0, missing.join("\n"));
                 if (failure && script.includes(failure.command)) return failure.result;
+                if (script.includes("mise where node@22")) return makeResult(0, "MISSING\n");
                 return makeResult(0);
             });
         }
@@ -279,6 +280,168 @@ describe("container-setup.ts module", () => {
             ensureTools(container, codexTool);
             expect(spawnSyncMock).toHaveBeenCalledTimes(1);
             expect(scripts()[0]).toContain("/home/ccc/.local/bin/codex");
+        });
+
+        it("restores a healthy persisted tool without npm or cache mutations", () => {
+            spawnSyncMock.mockImplementation((_cli, args) => {
+                const script = (args as string[]).at(-1)!;
+                if (script.startsWith("[ -x ")) return makeResult(0, "codex\n");
+                if (script.includes("mise where node@22")) return makeResult(0, "READY\n");
+                return makeResult(0);
+            });
+
+            ensureTools(container, codexTool, { activeOnly: true });
+
+            expect(scripts().some((script) => script.includes("cat > /home/ccc/.local/bin/codex"))).toBe(true);
+            expect(scripts().some((script) => /npm|reshim|rm -rf|mise\/shims/.test(script))).toBe(false);
+            expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining("Installing"));
+        });
+
+        it.each([
+            { ...makeResult(1), stderr: "container is not running" },
+            { ...makeResult(124), stderr: "mise resolution timed out" },
+            { ...makeResult(0), status: null, error: new Error("spawn docker ETIMEDOUT") },
+            makeResult(0, ""),
+        ])("preserves persisted-tool probe failures without attempting repair", (result) => {
+            mockNpmSetup(["codex"], { command: "mise where node@22", result });
+            expect(() => ensureTools(container, codexTool, { activeOnly: true }))
+                .toThrow(/verify persisted codex.*(container is not running|timed out|ETIMEDOUT|unexpected verification output)/);
+            expect(scripts()).toHaveLength(2);
+            expect(spawnSyncMock.mock.calls[1][2]).toMatchObject({ timeout: 15_000 });
+        });
+
+        it("preserves independent restoration when an optional cache probe fails", () => {
+            spawnSyncMock.mockImplementation((_cli, args) => {
+                const script = (args as string[]).at(-1)!;
+                if (script.startsWith("[ -x ")) return makeResult(0, "codex\nopencode\n");
+                if (script.includes("mise where node@22")) {
+                    return script.includes('/opencode"')
+                        ? { ...makeResult(1), stderr: "verification transport failed" }
+                        : makeResult(0, "READY\n");
+                }
+                return makeResult(0);
+            });
+            expect(() => ensureTools(container, codexTool)).not.toThrow();
+            expect(console.warn).toHaveBeenCalledWith(expect.stringMatching(/opencode.*verification transport failed.*optional tool/));
+            expect(scripts().some((script) => script.includes("cat > /home/ccc/.local/bin/codex"))).toBe(true);
+            expect(scripts().some((script) => /npm|reshim|rm -rf|mise\/shims/.test(script))).toBe(false);
+        });
+
+        it("limits installation and cleanup to cache misses when another tool is healthy", () => {
+            spawnSyncMock.mockImplementation((_cli, args) => {
+                const script = (args as string[]).at(-1)!;
+                if (script.startsWith("[ -x ")) return makeResult(0, "codex\nopencode\n");
+                if (script.includes("mise where node@22")) {
+                    return makeResult(0, script.includes('/codex"') ? "READY\n" : "MISSING\n");
+                }
+                return makeResult(0);
+            });
+            ensureTools(container, codexTool);
+            const commands = scripts();
+            expect(commands.filter((script) => script.startsWith(npmPrefix))).toEqual([`${npmPrefix}opencode-ai`]);
+            for (const script of commands.filter((command) => command.includes("rm -rf") || command.includes("mise/shims/"))) {
+                expect(script).not.toContain("codex");
+            }
+            expect(commands.findIndex((script) => script.includes("rm -rf")))
+                .toBeGreaterThan(commands.findLastIndex((script) => script.includes("mise where node@22")));
+            expect(commands.some((script) => script.includes("cat > /home/ccc/.local/bin/codex"))).toBe(true);
+        });
+
+        it.each(["codex", "gemini"])("preserves %s wrapper restoration failures", (cmd) => {
+            spawnSyncMock.mockImplementation((_cli, args) => {
+                const script = (args as string[]).at(-1)!;
+                if (script.startsWith("[ -x ")) return makeResult(0, `${cmd}\n`);
+                if (script.includes("mise where node@22")) return makeResult(0, "READY\n");
+                if (script.includes("cat > ")) return { ...makeResult(1), stderr: "Permission denied" };
+                return makeResult(0);
+            });
+            if (cmd === "codex") {
+                expect(() => ensureTools(container, codexTool)).toThrow(/wrapper.*codex.*Permission denied/);
+            } else {
+                expect(() => ensureTools(container, codexTool)).not.toThrow();
+                expect(console.warn).toHaveBeenCalledWith(expect.stringMatching(/wrapper.*gemini.*Permission denied.*optional tool/));
+            }
+            expect(scripts().some((script) => script.includes("npm install"))).toBe(false);
+        });
+
+        it.skipIf(process.platform === "win32").each([
+            "healthy", "missing", "broken", "missing-node", "resolver-failure", "timeout", "killed", "missing-timeout",
+        ])("executes the persisted binary probe with %s state and a PATH decoy", async (outcome) => {
+            mockNpmSetup(["codex"]);
+            ensureTools(container, codexTool, { activeOnly: true });
+            const script = scripts().find((command) => command.includes("mise where node@22"))!;
+            const { spawnSync: actualSpawnSync } = await vi.importActual<typeof import("child_process")>("child_process");
+            const directory = mkdtempSync(join(tmpdir(), "ccc-persisted-tool-"));
+            const bin = join(directory, ".local", "share", "mise", "installs", "node", "22.0.0", "bin");
+            const localBin = join(directory, ".local", "bin");
+            const decoy = join(directory, "decoy");
+            const marker = join(directory, "executed");
+            mkdirSync(bin, { recursive: true });
+            mkdirSync(localBin, { recursive: true });
+            mkdirSync(decoy);
+            writeFileSync(join(localBin, "mise"), `#!/bin/sh
+if [ "$1 $2 $3" = 'exec node@22 --' ]; then
+    shift 3
+    PATH="$CCC_TEST_NODE_DIR/bin:$PATH" exec "$@"
+fi
+[ "$MISE_OFFLINE" = 1 ] && [ "$*" = 'where node@22' ] || exit 92
+if [ "$CCC_TEST_OUTCOME" = resolver-failure ]; then echo 'mise resolution failed' >&2; exit 7; fi
+printf '%s\\n' "$CCC_TEST_NODE_DIR"
+`, { mode: 0o755 });
+            if (outcome !== "missing-node") writeFileSync(join(bin, "node"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+            writeFileSync(join(decoy, "codex"), '#!/bin/sh\nprintf decoy > "$CCC_TEST_MARKER"\n', { mode: 0o755 });
+            if (outcome !== "missing") writeFileSync(join(bin, "codex"), `#!/bin/sh
+[ "$1" = --version ] && [ "\${PATH%%:*}" = "$CCC_TEST_NODE_DIR/bin" ] || exit 91
+printf actual > "$CCC_TEST_MARKER"
+if [ "$CCC_TEST_OUTCOME" = timeout ]; then sleep 5; fi
+if [ "$CCC_TEST_OUTCOME" = killed ]; then kill -KILL $$; fi
+if [ "$CCC_TEST_OUTCOME" = broken ]; then echo 'broken package' >&2; exit 1; fi
+printf '1.0.0\\n'
+`, { mode: 0o755 });
+            try {
+                const probe = actualSpawnSync("/bin/sh", ["-c", script
+                    .replaceAll("~/.local/", '"$CCC_TEST_HOME"/.local/')
+                    .replaceAll("$HOME", "$CCC_TEST_HOME")
+                    .replaceAll("/usr/bin/timeout", outcome === "missing-timeout" ? '"$CCC_TEST_HOME"/missing-timeout' : "/usr/bin/timeout")
+                    .replace("timeout -k 1s 10s", "timeout -k 0.05s 0.05s")], {
+                    encoding: "utf-8", timeout: 2_000,
+                    env: {
+                        ...process.env, MISE_DATA_DIR: join(directory, ".local", "share", "mise"),
+                        PATH: outcome === "missing-timeout" ? decoy : `${decoy}:/usr/bin:/bin`,
+                        CCC_TEST_HOME: directory, CCC_TEST_NODE_DIR: join(bin, ".."),
+                        CCC_TEST_OUTCOME: outcome, CCC_TEST_MARKER: marker,
+                    },
+                });
+                expect(probe.error).toBeUndefined();
+                if (["resolver-failure", "timeout", "killed", "missing-timeout"].includes(outcome)) {
+                    expect(probe.status).not.toBe(0);
+                    expect(probe.stderr).toMatch(/mise resolution failed|Timed out verifying|was killed \(exit 137\)|requires timeout/);
+                    if (outcome === "timeout") expect(probe.status).toBe(124);
+                    if (outcome === "killed") expect(probe.status).toBe(137);
+                } else {
+                    expect(probe.status).toBe(0);
+                    expect(probe.stdout.trim()).toBe(outcome === "healthy" ? "READY" : "MISSING");
+                }
+                if (existsSync(marker)) expect(readFileSync(marker, "utf-8")).toBe("actual");
+                if (["missing", "missing-node"].includes(outcome)) expect(existsSync(marker)).toBe(false);
+                if (outcome === "healthy") {
+                    const wrapperScript = scripts().find((command) => command.includes("cat > /home/ccc/.local/bin/codex"))!;
+                    const env = {
+                        ...process.env, PATH: `${decoy}:/usr/bin:/bin`, CCC_TEST_HOME: directory,
+                        CCC_TEST_NODE_DIR: join(bin, ".."), CCC_TEST_OUTCOME: outcome, CCC_TEST_MARKER: marker,
+                    };
+                    const restored = actualSpawnSync("/bin/sh", ["-c", wrapperScript
+                        .replaceAll("/home/ccc/.local/bin/codex", '"$CCC_TEST_HOME"/.local/bin/codex')
+                        .replaceAll("~/.local/", '"$CCC_TEST_HOME"/.local/')], { encoding: "utf-8", env });
+                    expect(restored.status).toBe(0);
+                    const version = actualSpawnSync(join(localBin, "codex"), ["--version"], { encoding: "utf-8", env });
+                    expect(version.status).toBe(0);
+                    expect(version.stdout.trim()).toBe("1.0.0");
+                    expect(readFileSync(marker, "utf-8")).toBe("actual");
+                }
+            } finally {
+                rmSync(directory, { recursive: true, force: true });
+            }
         });
 
         it("installs missing packages in separate commands and creates each wrapper", () => {

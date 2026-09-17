@@ -176,41 +176,85 @@ function ensureNpmTools(containerName: string, activeTool: ToolDefinition, activ
         return;
     }
 
-    console.log(`Installing ${missing.map((t) => t.cmd).join(", ")}...`);
-
-    const run = (script: string, stdio: "ignore" | "inherit" | "pipe") => spawnSync(
+    const run = (script: string, stdio: "ignore" | "inherit" | "pipe", timeout?: number) => spawnSync(
         runtimeCli(),
         ["exec", "-w", "/home/ccc", containerName, "sh", "-c", script],
-        { stdio },
+        { stdio, ...(timeout === undefined ? {} : { timeout }) },
     );
-
-    const cleanupPatterns = missing.map((t) => {
-        const name = t.pkg.split("/").pop();
-        const scope = t.pkg.includes("/") ? t.pkg.split("/")[0] + "/" : "";
-        return `"$gdir/${scope}.${name}-"*`;
-    }).join(" ");
-
-    run(
-        `gdir=$(~/.local/bin/mise exec node@22 -- npm root -g 2>/dev/null) && rm -rf ${cleanupPatterns} 2>/dev/null; true`,
-        "ignore",
-    );
-
-    // Drop any stale mise shims for the missing tools BEFORE install. If the
-    // mise volume persisted a shim from an earlier install whose underlying
-    // package no longer matches, the shim throws "not a valid shim" — and PATH
-    // would hit it if the wrapper at /home/ccc/.local/bin/<cmd> is gone.
-    const shimNuke = missing.map((t) => `rm -f ~/.local/share/mise/shims/${t.cmd}`).join("; ");
-    run(`${shimNuke}; true`, "ignore");
 
     let activeFailure: Error | undefined;
+    const reportFailure = (cmd: string, failure: Error): void => {
+        if (cmd === activeTool.name) activeFailure = failure;
+        else console.warn(`Warning: ${failure.message} (optional tool)`);
+    };
+    const cached = new Set<string>();
+    const probeFailed = new Set<string>();
+    for (const t of missing) {
+        // Resolve locally, then run the actual global binary, never a PATH shim
+        // or our missing wrapper. Bound the process inside the container too:
+        // killing a timed-out docker exec client alone leaves its process alive.
+        const probe = run(`if [ ! -x /usr/bin/timeout ]; then echo "Tool verification requires timeout" >&2; exit 1; fi
+[ -x ~/.local/bin/mise ] || { echo "mise is unavailable for tool verification" >&2; exit 1; }
+node_installed=false
+for node_binary in "\${MISE_DATA_DIR:-$HOME/.local/share/mise}"/installs/node/22.*/bin/node; do
+    if [ -x "$node_binary" ]; then node_installed=true; break; fi
+done
+if [ "$node_installed" = false ]; then echo MISSING; exit 0; fi
+node_dir=$(MISE_OFFLINE=1 /usr/bin/timeout -k 1s 3s ~/.local/bin/mise where node@22) || exit $?
+[ -x "$node_dir/bin/node" ] || { echo "Installed Node 22 binary is unavailable" >&2; exit 1; }
+if [ ! -x "$node_dir/bin/${t.cmd}" ]; then echo MISSING; exit 0; fi
+PATH="$node_dir/bin:$PATH" /usr/bin/timeout -k 1s 10s "$node_dir/bin/${t.cmd}" --version >/dev/null
+status=$?
+case "$status" in
+    0) echo READY ;;
+    124) echo "Timed out verifying persisted ${t.cmd}" >&2; exit "$status" ;;
+    137) echo "Verification of persisted ${t.cmd} was killed (exit 137)" >&2; exit "$status" ;;
+    *) echo MISSING ;;
+esac`, "pipe", 15_000);
+        const state = probe.stdout?.toString().trim();
+        if (probe.error || probe.status !== 0 || (state !== "READY" && state !== "MISSING")) {
+            probeFailed.add(t.cmd);
+            reportFailure(t.cmd, new Error(`Failed to verify persisted ${t.cmd} (${t.pkg}) in container: ${
+                probe.error || probe.status !== 0 ? npmSetupFailureReason(probe) : "unexpected verification output"
+            }`));
+        } else if (state === "READY") {
+            cached.add(t.cmd);
+        }
+    }
+
+    const needsInstall = missing.filter((t) => !cached.has(t.cmd) && !probeFailed.has(t.cmd));
+    if (needsInstall.length > 0) {
+        console.log(`Installing ${needsInstall.map((t) => t.cmd).join(", ")}...`);
+        const cleanupPatterns = needsInstall.map((t) => {
+            const name = t.pkg.split("/").pop();
+            const scope = t.pkg.includes("/") ? t.pkg.split("/")[0] + "/" : "";
+            return `"$gdir/${scope}.${name}-"*`;
+        }).join(" ");
+
+        run(
+            `gdir=$(~/.local/bin/mise exec node@22 -- npm root -g 2>/dev/null) && rm -rf ${cleanupPatterns} 2>/dev/null; true`,
+            "ignore",
+        );
+
+        // Drop stale shims only for packages requiring installation. Healthy
+        // persisted packages need their wrapper restored without cache changes.
+        const shimNuke = needsInstall.map((t) => `rm -f ~/.local/share/mise/shims/${t.cmd}`).join("; ");
+        run(`${shimNuke}; true`, "ignore");
+    }
+
     let installedAny = false;
     for (const t of missing) {
-        const installResult = run(`~/.local/bin/mise exec node@22 -- npm install -g ${t.pkg}`, "inherit");
+        if (probeFailed.has(t.cmd)) continue;
         let failure: Error | undefined;
-        if (installResult.error || installResult.status !== 0) {
-            failure = new Error(`Failed to install ${t.cmd} (${t.pkg}) in container: ${npmSetupFailureReason(installResult)}`);
-        } else {
-            installedAny = true;
+        if (!cached.has(t.cmd)) {
+            const installResult = run(`~/.local/bin/mise exec node@22 -- npm install -g ${t.pkg}`, "inherit");
+            if (installResult.error || installResult.status !== 0) {
+                failure = new Error(`Failed to install ${t.cmd} (${t.pkg}) in container: ${npmSetupFailureReason(installResult)}`);
+            } else {
+                installedAny = true;
+            }
+        }
+        if (!failure) {
             // A failed write or chmod must not leave an executable broken wrapper.
             const wrapperResult = run(
                 `if cat > /home/ccc/.local/bin/${t.cmd} << 'WRAPPER'\n#!/bin/sh\nexec ~/.local/bin/mise exec node@22 -- ${t.cmd} "$@"\nWRAPPER\nthen\n    chmod +x /home/ccc/.local/bin/${t.cmd} && exit 0\nfi\nrm -f /home/ccc/.local/bin/${t.cmd}\nexit 1`,
@@ -221,8 +265,7 @@ function ensureNpmTools(containerName: string, activeTool: ToolDefinition, activ
             }
         }
         if (failure) {
-            if (t.cmd === activeTool.name) activeFailure = failure;
-            else console.warn(`Warning: ${failure.message} (optional tool)`);
+            reportFailure(t.cmd, failure);
         }
     }
 

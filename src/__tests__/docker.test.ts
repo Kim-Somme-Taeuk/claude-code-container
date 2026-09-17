@@ -848,6 +848,8 @@ describe("docker.ts module exports", () => {
             const warnSpy = vi.spyOn(console, "warn");
             expect(() => ensureImage()).not.toThrow();
             expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Failed to pull"));
+            expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("from the CCC checkout: docker build -t ccc ."));
+            expect(spawnSyncMock.mock.calls.some(([, args]) => (args as string[])[0] === "tag")).toBe(false);
             mockExit.mockRestore();
         });
 

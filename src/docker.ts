@@ -635,6 +635,7 @@ export function ensureImage(): void {
 
     if (localExists) {
         console.warn(`Warning: Failed to pull ${remoteRef}. Using existing image.`);
+        console.warn(`To use the matching source version, run from the CCC checkout: ${runtimeCli()} build -t ccc .`);
         return;
     }
 

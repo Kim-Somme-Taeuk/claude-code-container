@@ -398,3 +398,39 @@ Run CCC from the host shell. Starting CCC again inside its container is rejected
 when it reaches Codex configuration: the nested process cannot share the host's
 configuration lock. This also applies when starting another tool, since CCC
 generates Codex MCP configuration during tool startup.
+
+### Container restarts and source images
+
+CCC keeps `~/.ccc/clipboard.port` after the clipboard server stops so an existing
+container's file mount remains valid. Its saved token does not prove the server
+is running: CCC checks authenticated health before reuse and updates the same
+file when a replacement starts. Each new session refreshes its clipboard URL.
+
+When a container is recreated, CCC restores missing npm tool wrappers from
+healthy packages in the persistent mise volume. It installs a package again
+only when its installed executable is missing or fails verification.
+
+If a source CLI requests a registry image that has not been published, build
+from the root of the matching CCC checkout:
+
+```bash
+docker build -t ccc .
+```
+
+Use `podman` in that command when it is your selected runtime. CCC accepts a
+local development image without a release label. Keep the build output and
+check its exit status; a failed build leaves the previous image in use.
+
+For a browser login whose localhost callback cannot reach the container, use
+device authentication and then check the saved login:
+
+```bash
+ccc codex login --device-auth
+ccc codex login status
+```
+
+Proxy listener detection verifies only that the listener is present. It does
+not verify browser-to-container callback routing. OpenCode's musl platform
+errors can follow an earlier failure of its glibc binary; inspect that binary's
+error before choosing a package workaround. OpenCode installation is independent
+of Codex startup.

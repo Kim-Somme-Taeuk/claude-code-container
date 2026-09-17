@@ -171,6 +171,7 @@ describe("ccc codex login startup", () => {
                 fixture.events.push(`install:${packages.join(",")}`);
                 return result(packages.some((pkg) => fixture.failedPackages.has(pkg)) ? 1 : 0);
             }
+            if (script.includes("mise where node@22")) return result(0, "MISSING\n");
             const wrapper = script.match(/cat > \/home\/ccc\/\.local\/bin\/(\w+)/)?.[1];
             if (wrapper) {
                 if (fixture.failWrapper) return result(1);

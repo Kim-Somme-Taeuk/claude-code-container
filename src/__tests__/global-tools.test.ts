@@ -52,7 +52,8 @@ describe("ensureTools (npm tools)", () => {
 
     it("installs missing tools independently and creates each wrapper", () => {
         // Combined check returns all 3 missing
-        spawnSyncMock.mockReturnValue(makeResult(0));
+        spawnSyncMock.mockImplementation((_cli, args) => makeResult(0,
+            (args as string[]).at(-1)!.includes("mise where node@22") ? "MISSING\n" : ""));
         spawnSyncMock.mockReturnValueOnce(makeResult(0, "gemini\ncodex\nopencode\n"));
 
         ensureTools(container, getToolByName("gemini")!);
@@ -85,6 +86,7 @@ describe("ensureTools (npm tools)", () => {
     it("installs only missing tools (partial)", () => {
         // Combined check returns only codex missing
         spawnSyncMock.mockReturnValueOnce(makeResult(0, "codex\n"));
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, "MISSING\n")); // no persisted binary
         spawnSyncMock.mockReturnValueOnce(makeResult(0)); // cleanup stale dirs
         spawnSyncMock.mockReturnValueOnce(makeResult(0)); // cleanup stale shims
         spawnSyncMock.mockReturnValueOnce(makeResult(0)); // npm install success
@@ -93,11 +95,11 @@ describe("ensureTools (npm tools)", () => {
 
         ensureTools(container, getToolByName("gemini")!);
 
-        // 1 check + 2 cleanups + 1 install + 1 reshim + 1 wrapper = 6 calls
-        expect(spawnSyncMock).toHaveBeenCalledTimes(6);
+        // Readiness + cache verification + 2 cleanups + install + wrapper + reshim
+        expect(spawnSyncMock).toHaveBeenCalledTimes(7);
 
-        // Install only codex (index 3 after cleanup)
-        const installCall = spawnSyncMock.mock.calls[3];
+        // Install only codex after cache verification and cleanup
+        const installCall = spawnSyncMock.mock.calls[4];
         const shCmd = (installCall[1] as string[])[
             (installCall[1] as string[]).length - 1
         ];
@@ -111,6 +113,7 @@ describe("ensureTools (npm tools)", () => {
         spawnSyncMock.mockImplementation((_cli, args) => {
             const script = (args as string[]).at(-1)!;
             if (script.startsWith("[ -x ")) return makeResult(0, "gemini\ncodex\nopencode\n");
+            if (script.includes("mise where node@22")) return makeResult(0, "MISSING\n");
             if (script === "~/.local/bin/mise exec node@22 -- npm install -g @google/gemini-cli") {
                 return { ...makeResult(1), stderr: "npm error EACCES" };
             }
