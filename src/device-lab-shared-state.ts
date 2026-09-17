@@ -181,7 +181,7 @@ function moveMalformedLock(file: string, token: string): boolean {
 export function withSharedMutationLock<T>(
     file: string,
     operation: () => T,
-    options: { waitMs?: number; staleMs?: number } = {},
+    options: { waitMs?: number; staleMs?: number; reclaimStale?: boolean } = {},
 ): T {
     const waitMs = options.waitMs ?? DEFAULT_WAIT_MS;
     const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
@@ -202,10 +202,16 @@ export function withSharedMutationLock<T>(
             if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
             const existing = readLock(file);
             const existingToken = typeof existing?.token === "string" ? existing.token : null;
-            if (existingToken && lockIsStale(file, existing, staleMs)) {
+            const stale = lockIsStale(file, existing, staleMs);
+            if (options.reclaimStale === false && stale) {
+                throw Object.assign(new Error(`Cannot safely reclaim shared mutation lock: ${file}. Close other CCC sessions, remove only this lock file, and retry.`), {
+                    code: "shared-mutation-lock-stale",
+                });
+            }
+            if (existingToken && stale) {
                 if (moveIfTokenMatches(file, existingToken, "stale")) continue;
             }
-            if (!existing && lockIsStale(file, existing, staleMs)) {
+            if (!existing && stale) {
                 if (moveMalformedLock(file, token)) continue;
             }
             if (Date.now() >= deadline) {

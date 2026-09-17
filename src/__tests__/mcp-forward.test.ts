@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+vi.mock("../codex-config-lock.js", () => ({
+    withCodexConfigLock: (operation: () => unknown) => operation(),
+}));
+
 vi.mock("fs", async () => {
     const actual = await vi.importActual<typeof import("fs")>("fs");
     return {

@@ -37,6 +37,7 @@ import { cleanupOwnerDevices } from "./device-lab-admin.js";
 import { deviceLabContainerName } from "./device-lab-owner.js";
 import { getAllCredentialMounts } from "./tool-registry.js";
 import type { CredentialMount } from "./tool-registry.js";
+import { codexConfigFileAclScript } from "./codex-config-acl.js";
 
 const MANAGED_MCP_BUNDLES = ["x11-mcp", "device-lab-mcp", "lab-mcp"] as const;
 const MANAGED_MCP_BUNDLE_MAX_BYTES = 32 * 1024 * 1024;
@@ -314,6 +315,19 @@ export function resolveCredentialHostPath(mount: CredentialMount, profile?: stri
     return join(homedir(), mount.hostDir);
 }
 
+function getCodexContainerUid(containerName: string): string {
+    const result = spawnSync(runtimeCli(), ["exec", containerName, "sh", "-c", "id -u"], { encoding: "utf-8", timeout: 10000 });
+    if (result.error || result.status !== 0) {
+        throw new Error(`Unable to prepare Codex credentials: container user lookup failed (${result.error?.message ?? (result.stderr?.trim() || `exit ${result.status ?? "unknown"}`)})`);
+    }
+    const uid = result.stdout.trim();
+    if (!/^\d+$/.test(uid) || Number(uid) >= 0xffffffff) {
+        throw new Error("Unable to prepare Codex credentials: invalid container user identity");
+    }
+    return uid;
+}
+
+// Retain the historical API name; access is now shared without changing owners.
 export function restoreCodexConfigHostOwnership(containerName: string): void {
     const configFile = getCodexConfigFile();
     const accessMode = constants.R_OK | constants.W_OK;
@@ -333,11 +347,11 @@ export function restoreCodexConfigHostOwnership(containerName: string): void {
     }
 
     // Repair only an inaccessible file, never the credential tree. The parent
-    // must represent the invoking host user before it can be our owner reference.
+    // must represent the invoking host user before it can identify the ACL user.
     // Raw host IDs cannot be used inside rootless Podman's user namespace.
     try {
         if (typeof process.getuid !== "function") {
-            throw new Error("host user identity is unavailable; automatic ownership repair skipped");
+            throw new Error("host user identity is unavailable; automatic access repair skipped");
         }
         const parent = lstatSync(dirname(configFile));
         const config = lstatSync(configFile);
@@ -346,12 +360,10 @@ export function restoreCodexConfigHostOwnership(containerName: string): void {
         }
         const repaired = spawnSync(runtimeCli(), [
             "exec", "--user", "root", containerName, "sh", "-c",
-            'dir=/home/ccc/.codex; file="$dir/config.toml"; '
-            + '[ ! -L "$dir" ] && [ -d "$dir" ] && [ ! -L "$file" ] && [ -f "$file" ] '
-            + '&& owner=$(stat -c %u "$dir") && chown --no-dereference "$owner" "$file" && chmod u+rw "$file"',
+            codexConfigFileAclScript(getCodexContainerUid(containerName)),
         ], { encoding: "utf-8", timeout: 10000 });
         if (repaired.error || repaired.status !== 0) {
-            throw new Error(`container ownership repair failed (${repaired.error?.message ?? `exit ${repaired.status ?? "unknown"}`})`);
+            throw new Error(`container ACL repair failed (${repaired.error?.message ?? (repaired.stderr?.trim() || `exit ${repaired.status ?? "unknown"}`)})`);
         }
         accessSync(configFile, accessMode);
     } catch (error) {
@@ -398,10 +410,7 @@ export function prepareCodexConfigForContainer(containerName: string): void {
     let containerUid: string | undefined;
     const getContainerUid = (): string => {
         if (containerUid === undefined) {
-            containerUid = run("container user lookup", "id -u").stdout.trim();
-            if (!/^\d+$/.test(containerUid)) {
-                throw new Error("Unable to prepare Codex credentials: invalid container user identity");
-            }
+            containerUid = getCodexContainerUid(containerName);
         }
         return containerUid;
     };
@@ -429,7 +438,7 @@ export function prepareCodexConfigForContainer(containerName: string): void {
         validateHostDirectory();
         validateHostConfig();
         const uid = getContainerUid();
-        run("config ownership handoff", `${configGuard} && [ -f "$file" ] && chown --no-dereference "${uid}" "$file" && chmod u+rw "$file"`, true);
+        run("config ACL grant", codexConfigFileAclScript(uid), true);
         run("config access verification", configProbe);
     }
 }

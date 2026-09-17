@@ -37,6 +37,8 @@ import {
 } from "./utils.js";
 
 import { ensureClipboardServer } from "./clipboard-server.js";
+import { ensureCodexHarness } from "./codex-harness.js";
+import { withCodexConfigLock } from "./codex-config-lock.js";
 import { maybeAttachCodexClipboardImage } from "./codex-clipboard-image.js";
 import {
     parseWorktreeArg,
@@ -69,7 +71,7 @@ import {
     getCurrentImageId,
     resolveCredentialHostPath,
     prepareCodexConfigForContainer,
-    restoreCodexConfigHostOwnership,
+    restoreCodexConfigHostOwnership as restoreCodexConfigOwnership,
 } from "./docker.js";
 import {
     DEVICE_BROKER_DEFAULT_HOST,
@@ -109,6 +111,14 @@ import { labsCli } from "./lab-runner-admin.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+function restoreCodexConfigHostOwnership(containerName: string): void {
+    try {
+        withCodexConfigLock(() => restoreCodexConfigOwnership(containerName));
+    } catch (error) {
+        console.warn(`Unable to restore host Codex config access: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
 
 function deviceBrokerBindHostForContainer(): string {
     return DEVICE_BROKER_DEFAULT_HOST;
@@ -243,68 +253,6 @@ export function buildToolInvocation(tool: ToolDefinition, args: string[]): strin
         return [tool.binary, first, ...rest];
     }
     return [tool.binary, ...tool.defaultFlags, ...args];
-}
-
-/**
- * Decide whether a codex exit looks like a real failure worth auto-recovering
- * from. Excludes clean exits (0), user interrupts (SIGINT/SIGTERM, exit 130/143),
- * and signal-terminated exits with `signal` set.
- */
-function isCodexLikelyFailure(status: number | null, signal: NodeJS.Signals | null): boolean {
-    if (signal === "SIGINT" || signal === "SIGTERM" || signal === "SIGHUP") return false;
-    if (status == null) return false;
-    if (status === 0) return false;
-    if (status === 130 || status === 143) return false;
-    return true;
-}
-
-/**
- * Force-update codex inside the container to the latest npm release.
- * Returns true on success.
- */
-function forceUpdateCodexInContainer(containerName: string): boolean {
-    const r = spawnSync(
-        runtimeCli(),
-        [
-            "exec", "-w", "/home/ccc", containerName, "sh", "-c",
-            "~/.local/bin/mise exec node@22 -- npm install -g @openai/codex@latest --force && ~/.local/bin/mise reshim 2>/dev/null; true",
-        ],
-        { stdio: "inherit" },
-    );
-    return r.status === 0;
-}
-
-/**
- * Last-resort recovery when update+retry didn't fix codex's state mismatch.
- * Wipes every file and subdirectory under /home/ccc/.codex except `auth.json`
- * and `config.toml`. Bind-mounted to the host, so this clears the host's
- * ~/.codex too. Then retries the codex command once.
- */
-async function offerCodexStateWipe(containerName: string, execArgs: string[]): Promise<number> {
-    console.error("\n[ccc] codex state is still incompatible after the update.");
-    const answer = await prompt(
-        "Wipe everything in ~/.codex except auth.json + config.toml and retry? Session history is lost. [y/N]: ",
-        true,
-    );
-    if (answer !== "y" && answer !== "yes") {
-        console.error("[ccc] Leaving ~/.codex untouched.");
-        return 1;
-    }
-
-    spawnSync(
-        runtimeCli(),
-        [
-            "exec", containerName, "sh", "-c",
-            // Top-level entries: keep auth.json and config.toml, drop everything else
-            // (subdirectories, sqlite files of any extension, JSON state files, etc.).
-            'find /home/ccc/.codex -mindepth 1 -maxdepth 1 ! -name auth.json ! -name config.toml -exec rm -rf {} + 2>/dev/null; true',
-        ],
-        { stdio: "ignore" },
-    );
-
-    console.error("[ccc] Wiped ~/.codex (kept auth.json + config.toml). Retrying codex...");
-    const retry = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" });
-    return retry.status ?? 1;
 }
 
 export async function maybeAttachCodexClipboardImageForCommand(
@@ -450,8 +398,6 @@ async function exec(
         // container was running when we snapshot-ed status above.
         () => { wasAlreadyRunning = false; },
     );
-    restoreCodexConfigHostOwnership(containerName);
-
     // Skip heavy setup if container was already running (another session set it up)
     if (!wasAlreadyRunning) {
         // Ensure tools are installed (claude via curl + npm tools from registry).
@@ -464,7 +410,7 @@ async function exec(
                     startProjectContainer(fullPath, () => ensureDirs(profile), undefined, undefined, profile);
                 }
                 try {
-                    ensureTools(containerName, setupTool);
+                    ensureTools(containerName, setupTool, { activeOnly: setupTool.name === "codex" });
                     break;
                 } catch (error) {
                     if (attempt === 1) {
@@ -486,7 +432,13 @@ async function exec(
         syncClipboardShims(containerName, __dirname);
 
         progress("Building MCP config...");
-        const forwardedMcp = buildMcpConfig(profile);
+        let forwardedMcp: string[];
+        try {
+            forwardedMcp = buildMcpConfig(profile, () => restoreCodexConfigOwnership(containerName));
+        } catch (error) {
+            cleanupSession();
+            throw error;
+        }
 
         progress("Setting up localhost proxy...");
         setupLocalhostProxy(containerName);
@@ -513,7 +465,13 @@ async function exec(
             }
         }
         // Rebuild MCP config because host settings may have changed.
-        const forwardedMcp = await buildMcpConfig(profile);
+        let forwardedMcp: string[];
+        try {
+            forwardedMcp = buildMcpConfig(profile, () => restoreCodexConfigOwnership(containerName));
+        } catch (error) {
+            cleanupSession();
+            throw error;
+        }
         if (forwardedMcp.length > 0) {
             console.error(`MCP forwarded: ${forwardedMcp.join(", ")}`);
         }
@@ -671,11 +629,12 @@ async function exec(
             runMiseInstall();
         }
         if (commandTool?.name === "codex") {
+            ensureCodexHarness(containerName);
             try {
-                prepareCodexConfigForContainer(containerName);
+                withCodexConfigLock(() => prepareCodexConfigForContainer(containerName));
             } catch (error) {
                 // Preparation can fail before Codex runs. Preserve that cause
-                // and release session state without entering its retry ladder.
+                // and release session state.
                 restoreCodexConfigHostOwnership(containerName);
                 try { unlinkSync(envFile); } catch { /* ignore cleanup error */ }
                 cleanupSession();
@@ -685,37 +644,8 @@ async function exec(
         execArgs.push(...resolvedCmd);
     }
 
-    let resultStatus: number;
-    if (commandTool?.name === "codex") {
-        // Codex recovery ladder:
-        //   1) Run with inherited stdio (preserves the TUI when it works).
-        //   2) On unexpected non-zero exit (anything other than 0/Ctrl-C/SIGTERM),
-        //      force-update codex in the container and retry once.
-        //   3) If the retry still fails the same way, prompt to wipe codex's
-        //      state DB files and retry one more time.
-        // We don't pattern-match stderr because codex sometimes routes startup
-        // errors through stdout (especially on Windows + Docker Desktop), which
-        // is inherited, not captured, when the TUI needs a TTY.
-        const first = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" });
-        resultStatus = first.status ?? 1;
-        if (isCodexLikelyFailure(first.status, first.signal)) {
-            console.error("\n[ccc] codex exited with an unexpected error. Updating codex in container and retrying...");
-            if (forceUpdateCodexInContainer(containerName)) {
-                console.error("[ccc] Retrying codex...");
-                const retry = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" });
-                resultStatus = retry.status ?? 1;
-                if (isCodexLikelyFailure(retry.status, retry.signal)) {
-                    resultStatus = await offerCodexStateWipe(containerName, execArgs);
-                }
-            } else {
-                console.error("[ccc] Codex update failed in container.");
-                resultStatus = await offerCodexStateWipe(containerName, execArgs);
-            }
-        }
-    } else {
-        const result = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" });
-        resultStatus = result.status ?? 1;
-    }
+    const result = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" });
+    const resultStatus = result.status ?? 1;
     restoreCodexConfigHostOwnership(containerName);
     try { unlinkSync(envFile); } catch { /* ignore cleanup error */ }
 

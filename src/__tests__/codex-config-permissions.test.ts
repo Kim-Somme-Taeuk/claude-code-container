@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { accessSync, chmodSync, chownSync, constants, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { CODEX_CONFIG_FILE_ACL, codexConfigFileAclScript } from "../codex-config-acl.js";
 
 const state = vi.hoisted(() => ({ home: "", spawn: vi.fn() }));
 vi.mock("os", async (original) => ({
@@ -43,7 +44,7 @@ beforeEach(async () => {
     }
     access.mockReset().mockImplementation(realFs.accessSync);
     lstat.mockReset().mockImplementation(realFs.lstatSync);
-    state.spawn.mockReset().mockReturnValue({ status: 0, stdout: "", stderr: "" });
+    state.spawn.mockReset().mockImplementation((_cli, args: string[]) => ({ status: 0, stdout: args.at(-1) === "id -u" ? "2001\n" : "", stderr: "" }));
     warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     const runtime = await import("../container-runtime.js");
     runtime._setRuntimeInfoForTest({ runtime: "docker", cli: "docker", flavor: "docker-desktop", remote: true, rootless: false });
@@ -75,18 +76,16 @@ it("does not repair a genuinely absent config", () => {
     expect(warning).not.toHaveBeenCalled();
 });
 
-it.each(["EACCES", "EPERM"])("repairs %s with mapped reference ownership and verifies host access", (code) => {
+it.each(["EACCES", "EPERM"])("repairs %s with both mapped ACL principals and verifies host access", (code) => {
     access.mockImplementationOnce(() => { throw Object.assign(denied(), { code }); });
     restore("ccc-test");
-    expect(state.spawn).toHaveBeenCalledTimes(1);
-    const args = state.spawn.mock.calls[0][1] as string[];
+    expect(state.spawn).toHaveBeenCalledTimes(2);
+    const args = state.spawn.mock.calls[1][1] as string[];
     expect(args.slice(0, 4)).toEqual(["exec", "--user", "root", "ccc-test"]);
-    expect(args.at(-1)).toContain('owner=$(stat -c %u "$dir")');
-    expect(args.at(-1)).toContain('chown --no-dereference "$owner" "$file"');
-    expect(args.at(-1)).not.toContain("--reference=");
-    expect(args.at(-1)).toContain('chmod u+rw "$file"');
-    expect(args.at(-1)).not.toContain(" -R");
-    expect(args.at(-1)).not.toContain("chmod 600");
+    expect(args.at(-1)).toContain("host_uid = os.fstat(directory).st_uid");
+    expect(args.at(-1)).toContain("principals = {host_uid, container_uid}");
+    expect(args.at(-1)).toContain("python3 - 2001");
+    expect(args.at(-1)).not.toMatch(/chown|chmod|setfacl/);
     expect(access).toHaveBeenCalledTimes(2);
     expect(warning).not.toHaveBeenCalled();
 });
@@ -116,9 +115,9 @@ it("uses the same mapped directory reference for rootless Podman", async () => {
     access.mockImplementationOnce(() => { throw denied(); });
     restore("ccc-test");
     expect(state.spawn).toHaveBeenCalledWith("podman", expect.any(Array), expect.any(Object));
-    const script = state.spawn.mock.calls[0][1].at(-1) as string;
-    expect(script).toContain('owner=$(stat -c %u "$dir")');
-    expect(script).not.toMatch(/chown \d+:\d+/);
+    const script = state.spawn.mock.calls[1][1].at(-1) as string;
+    expect(script).toContain("host_uid = os.fstat(directory).st_uid");
+    expect(script).not.toContain("chown");
     expect(warning).not.toHaveBeenCalled();
 });
 
@@ -144,9 +143,9 @@ it.each([
     { status: null, error: new Error("runtime unavailable") },
 ])("warns when runtime repair fails and preserves the file", (result) => {
     access.mockImplementationOnce(() => { throw denied(); });
-    state.spawn.mockReturnValue(result);
+    state.spawn.mockImplementation((_cli, args: string[]) => args.at(-1) === "id -u" ? { status: 0, stdout: "2001\n" } : result);
     expect(() => restore("ccc-test")).not.toThrow();
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining("container ownership repair failed"));
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("container ACL repair failed"));
     expect(readFileSync(configFile, "utf8")).toBe(userConfig);
 });
 
@@ -190,34 +189,45 @@ describe.skipIf(process.platform === "win32")("Unix file types", () => {
         writeFileSync(outside, "untouched", { mode: 0o400 });
         access.mockImplementationOnce(() => { throw denied(); });
         state.spawn.mockImplementation((_cli, args: string[]) => {
+            if (args.at(-1) === "id -u") return { status: 0, stdout: "2001\n" };
             rmSync(configFile);
             symlinkSync(outside, configFile);
             return realProcess.spawnSync("sh", ["-c", args.at(-1)!.replace("/home/ccc/.codex", configDir)], { encoding: "utf8" });
         });
         restore("ccc-test");
-        expect(warning).toHaveBeenCalledWith(expect.stringContaining("container ownership repair failed"));
+        expect(warning).toHaveBeenCalledWith(expect.stringContaining("container ACL repair failed"));
         expect(realFs.statSync(outside).mode & 0o777).toBe(0o400);
         expect(readFileSync(outside, "utf8")).toBe("untouched");
     });
 });
 
 describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)("real host EACCES regression", () => {
-    it("recovers before real MCP generation without losing user/plugin config", () => {
+    it("restores access inside the MCP writer lock after an intervening permission handoff", () => {
+        restore("ccc-test");
+        chmodSync(configFile, 0);
+        const lockFile = join(state.home, ".ccc", "codex-config.lock");
+        buildMcp(undefined, () => {
+            expect(realFs.existsSync(lockFile)).toBe(true);
+            expect(() => readFileSync(configFile, "utf8")).toThrow(expect.objectContaining({ code: "EACCES" }));
+            chmodSync(configFile, 0o600);
+        });
+        expect(readFileSync(configFile, "utf8")).toContain(userConfig.trim());
+        expect(readFileSync(configFile, "utf8")).toContain("# ccc-managed-mcp begin");
+        expect(realFs.existsSync(lockFile)).toBe(false);
+    });
+
+    it.skipIf(process.platform !== "linux")("recovers before real MCP generation without changing owner or losing user/plugin config", () => {
         // A distinct supplementary group proves repair preserves group identity,
         // not just the mode bits (chown --reference would replace this group).
         const alternateGroup = process.getgroups?.().find((gid) => gid !== realFs.statSync(configDir).gid);
         if (alternateGroup !== undefined) chownSync(configFile, process.getuid!(), alternateGroup);
         const originalGroup = realFs.statSync(configFile).gid;
+        const originalOwner = realFs.statSync(configFile).uid;
         chmodSync(configFile, 0o040);
         expect(() => readFileSync(configFile, "utf8")).toThrow(expect.objectContaining({ code: "EACCES" }));
         expect(() => buildMcp()).toThrow(/Unable to read Codex config.*EACCES/);
         state.spawn.mockImplementation((_cli, args: string[]) => {
-            let script = args.at(-1)!.replace("/home/ccc/.codex", configDir);
-            // The simulated Linux container uses host utilities in this fixture.
-            if (process.platform === "darwin") {
-                script = script.replace("stat -c %u", "stat -f %u")
-                    .replace("chown --no-dereference", "chown -h");
-            }
+            const script = args.at(-1)!.replace("/home/ccc/.codex", configDir);
             return realProcess.spawnSync("sh", ["-c", script], { encoding: "utf8" });
         });
         restore("ccc-test");
@@ -225,6 +235,7 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)("real 
         expect(() => realFs.accessSync(configFile, constants.R_OK | constants.W_OK)).not.toThrow();
         expect(realFs.statSync(configFile).mode & 0o777).toBe(0o640);
         expect(realFs.statSync(configFile).gid).toBe(originalGroup);
+        expect(realFs.statSync(configFile).uid).toBe(originalOwner);
         buildMcp();
         const merged = readFileSync(configFile, "utf8");
         expect(merged).toContain(userConfig.trim());
@@ -232,7 +243,7 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)("real 
         buildMcp();
         expect(readFileSync(configFile, "utf8")).toBe(merged);
         restore("ccc-test");
-        expect(state.spawn).toHaveBeenCalledTimes(1);
+        expect(state.spawn).toHaveBeenCalledTimes(2);
     });
 
     it("keeps unresolved access failure fatal at MCP generation, without overwriting config", () => {
@@ -345,7 +356,7 @@ describe("container credential preparation", () => {
         expect(state.spawn.mock.calls.every(([, args]) => !args.includes("--user"))).toBe(true);
     });
 
-    it("hands off only the config owner, preserving GID and existing mode bits", () => {
+    it("grants both users config access without ownership or mode fallback", () => {
         let configChecks = 0;
         simulate((script) => {
             if (isDirectoryProbe(script)) return result();
@@ -353,22 +364,22 @@ describe("container credential preparation", () => {
             return undefined;
         });
         prepare("ccc-test");
-        const handoff = scripts().find((script) => script.includes("chown"))!;
-        expect(handoff).toContain('chown --no-dereference "2001" "$file" && chmod u+rw "$file"');
-        expect(handoff).toContain('[ ! -L "$file" ]');
-        expect(handoff).not.toContain("chmod 600");
+        const grant = scripts().find((script) => script.includes("os.setxattr"))!;
+        expect(grant).toContain("python3 - 2001");
+        expect(grant).toContain("os.O_NOFOLLOW");
+        expect(grant).not.toMatch(/chown|chmod|setfacl/);
         expect(scripts().some(isGrant)).toBe(false);
         expect(configChecks).toBe(2);
     });
 
-    it.each(["handoff", "verification"])("fails explicitly when config %s fails", (failure) => {
+    it.each(["grant", "verification"])("fails explicitly when config %s fails", (failure) => {
         simulate((script) => {
             if (isDirectoryProbe(script)) return result();
             if (isConfigProbe(script)) return result(1, "", "config still denied");
-            if (failure === "handoff" && script.includes("chown")) return result(1, "", "config still denied");
+            if (failure === "grant" && script.includes("os.setxattr")) return result(1, "", "config still denied");
             return undefined;
         });
-        expect(() => prepare("ccc-test")).toThrow(new RegExp(`config ${failure === "handoff" ? "ownership handoff" : "access verification"} failed.*config still denied`));
+        expect(() => prepare("ccc-test")).toThrow(new RegExp(`config ${failure === "grant" ? "ACL grant" : "access verification"} failed.*config still denied`));
     });
 
     describe.skipIf(process.platform === "win32")("native guarded repair scripts", () => {
@@ -430,16 +441,159 @@ describe("container credential preparation", () => {
             simulate((script) => {
                 if (isDirectoryProbe(script)) return result();
                 if (isConfigProbe(script)) return result(1);
-                if (script.includes("chown")) {
+                if (script.includes("os.setxattr")) {
                     rmSync(configFile);
                     symlinkSync(outside, configFile);
                     return realProcess.spawnSync("sh", ["-c", script.replace("/home/ccc/.codex", configDir)], { encoding: "utf8" });
                 }
                 return undefined;
             });
-            expect(() => prepare("ccc-test")).toThrow(/config ownership handoff failed/);
+            expect(() => prepare("ccc-test")).toThrow(/config ACL grant failed/);
             expect(realFs.statSync(outside).mode & 0o777).toBe(0o400);
             expect(readFileSync(outside, "utf8")).toBe("untouched");
         });
     });
+});
+
+describe.skipIf(process.platform !== "linux")("native config file ACL", () => {
+    const undefinedId = 0xffffffff;
+    type Entry = [number, number, number];
+    const runPython = (script: string, ...args: string[]) => realProcess.spawnSync("python3", ["-c", script, ...args], { encoding: "utf8" });
+    const grant = (prefix = "") => runPython(`${prefix}\n${CODEX_CONFIG_FILE_ACL.replace("/home/ccc/.codex", configDir)}`, "2001");
+    const readAcl = (path = configFile): Entry[] | null => {
+        const result = runPython(`import errno, json, os, struct, sys
+try:
+    data = os.getxattr(sys.argv[1], "system.posix_acl_access")
+    print(json.dumps(list(struct.iter_unpack("<HHI", data[4:]))))
+except OSError as error:
+    if error.errno != errno.ENODATA: raise
+    print("null")`, path);
+        expect(result.status, result.stderr).toBe(0);
+        return JSON.parse(result.stdout);
+    };
+    const setAcl = (entries: Entry[]): void => {
+        const result = runPython(`import json, os, struct, sys
+os.setxattr(sys.argv[1], "system.posix_acl_access", struct.pack("<I", 2) + b"".join(
+    struct.pack("<HHI", *entry) for entry in json.loads(sys.argv[2])))`, configFile, JSON.stringify(entries));
+        expect(result.status, result.stderr).toBe(0);
+    };
+    const metadata = () => {
+        const { uid, gid, mode } = realFs.statSync(configFile);
+        return { uid, gid, mode };
+    };
+
+    it("adds shared access to an unreadable file, retaining owner execute, group rights and identities", () => {
+        const original = metadata();
+        chmodSync(configFile, 0o100);
+        const result = grant();
+        expect(result.status, result.stderr).toBe(0);
+        expect(metadata()).toMatchObject({ uid: original.uid, gid: original.gid });
+        expect(readAcl()).toEqual([
+            [1, 7, undefinedId], [2, 6, 2001], [4, 0, undefinedId],
+            [16, 6, undefinedId], [32, 0, undefinedId],
+        ]);
+        expect(readFileSync(configFile, "utf8")).toBe(userConfig);
+    });
+
+    it("preserves existing target execute and unrelated effective custom ACL rights", () => {
+        setAcl([
+            [1, 7, undefinedId], [2, 1, 2001], [2, 1, 3001], [4, 1, undefinedId],
+            [8, 1, 3002], [16, 1, undefinedId], [32, 0, undefinedId],
+        ]);
+        const original = metadata();
+        const result = grant();
+        expect(result.status, result.stderr).toBe(0);
+        expect(metadata()).toMatchObject({ uid: original.uid, gid: original.gid });
+        expect(readAcl()).toEqual([
+            [1, 7, undefinedId], [2, 7, 2001], [2, 1, 3001], [4, 1, undefinedId],
+            [8, 1, 3002], [16, 7, undefinedId], [32, 0, undefinedId],
+        ]);
+    });
+
+    it.each([
+        [[1, 6, undefinedId], [2, 6, 3001], [4, 0, undefinedId], [16, 4, undefinedId], [32, 0, undefinedId]],
+        [[1, 6, undefinedId], [4, 2, undefinedId], [16, 0, undefinedId], [32, 0, undefinedId]],
+        [[1, 6, undefinedId], [4, 0, undefinedId], [8, 2, 3002], [16, 0, undefinedId], [32, 0, undefinedId]],
+    ] as Entry[][])("refuses mask expansion that unmasks unrelated permissions: %j", (...entries: Entry[]) => {
+        setAcl(entries);
+        const original = metadata();
+        const originalAcl = readAcl();
+        const result = grant();
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("mask expansion would grant unrelated access");
+        expect(metadata()).toEqual(original);
+        expect(readAcl()).toEqual(originalAcl);
+        expect(readFileSync(configFile, "utf8")).toBe(userConfig);
+    });
+
+    it.each(["getxattr", "setxattr"])("does not change mode or ownership when %s rejects unsupported ACLs", (operation) => {
+        chmodSync(configFile, 0o640);
+        const original = metadata();
+        const result = grant(`import errno, os
+def unsupported(*args):
+    raise OSError(errno.ENOTSUP, "ACL filesystem unsupported")
+os.${operation} = unsupported`);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("ACL filesystem unsupported");
+        expect(metadata()).toEqual(original);
+        expect(readAcl()).toBeNull();
+        expect(readFileSync(configFile, "utf8")).toBe(userConfig);
+    });
+
+    it.each([
+        "b'bad'",
+        "struct.pack('<I', 3)",
+        "struct.pack('<IHHI', 2, 1, 6, 0xffffffff)",
+        "struct.pack('<I', 2) + struct.pack('<HHI', 1, 6, 0xffffffff) * 2",
+        "struct.pack('<IHHI', 2, 2, 6, 0xffffffff)",
+        "struct.pack('<IHHI', 2, 1, 8, 0xffffffff)",
+    ])("rejects malformed ACL data without a mutation: %s", (data) => {
+        const original = metadata();
+        const result = grant(`import os, struct
+os.getxattr = lambda *args: ${data}
+def unexpected_write(*args):
+    raise AssertionError("attempted ACL mutation")
+os.setxattr = unexpected_write`);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("malformed config ACL");
+        expect(result.stderr).not.toContain("attempted ACL mutation");
+        expect(metadata()).toEqual(original);
+        expect(readAcl()).toBeNull();
+    });
+
+    it("updates only the pinned inode when its path is replaced with a symlink", () => {
+        const outside = join(state.home, "outside");
+        const previous = join(configDir, "config.previous");
+        writeFileSync(outside, "untouched", { mode: 0o400 });
+        const result = grant(`import os
+original_getxattr = os.getxattr
+def replace_path(*args):
+    os.rename(${JSON.stringify(configFile)}, ${JSON.stringify(previous)})
+    os.symlink(${JSON.stringify(outside)}, ${JSON.stringify(configFile)})
+    return original_getxattr(*args)
+os.getxattr = replace_path`);
+        expect(result.status, result.stderr).toBe(0);
+        expect(readAcl(previous)).toContainEqual([2, 6, 2001]);
+        expect(readAcl(outside)).toBeNull();
+        expect(realFs.statSync(outside).mode & 0o777).toBe(0o400);
+        expect(readFileSync(outside, "utf8")).toBe("untouched");
+    });
+
+    it("regrants access after atomic file replacement without changing either owner", () => {
+        expect(grant().status).toBe(0);
+        const replacement = join(configDir, "replacement");
+        writeFileSync(replacement, userConfig + "# replaced\n", { mode: 0o600 });
+        realFs.renameSync(replacement, configFile);
+        const original = metadata();
+        expect(readAcl()).toBeNull();
+        const result = grant();
+        expect(result.status, result.stderr).toBe(0);
+        expect(metadata()).toMatchObject({ uid: original.uid, gid: original.gid });
+        expect(readAcl()).toContainEqual([2, 6, 2001]);
+        expect(readFileSync(configFile, "utf8")).toBe(userConfig + "# replaced\n");
+    });
+});
+
+it.each(["", "-1", "4294967295", "2001; touch /tmp/unsafe"])("rejects unsafe or unmapped UID %j before building a privileged ACL script", (uid) => {
+    expect(() => codexConfigFileAclScript(uid)).toThrow(/invalid container user identity/);
 });

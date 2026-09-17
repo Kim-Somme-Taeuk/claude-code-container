@@ -13,6 +13,7 @@ const fixture = vi.hoisted(() => ({
     unlink: vi.fn(),
     restore: vi.fn(),
     prepare: vi.fn(),
+    harness: vi.fn(),
     buildMcp: vi.fn(),
     cleanup: vi.fn(),
 }));
@@ -71,9 +72,19 @@ vi.mock("../session.js", () => ({
     cleanupSession: fixture.cleanup,
 }));
 vi.mock("../mcp-forward.js", () => ({ buildMcpConfig: fixture.buildMcp }));
+vi.mock("../codex-harness.js", () => ({ ensureCodexHarness: fixture.harness }));
+vi.mock("../codex-config-lock.js", () => ({ withCodexConfigLock: (operation: () => unknown) => operation() }));
 vi.mock("../localhost-proxy-setup.js", () => ({ setupLocalhostProxy: vi.fn() }));
 
 import { main } from "../index.js";
+import { prompt, writeEnvFile } from "../utils.js";
+import { createSessionLock } from "../session.js";
+import { startProjectContainer } from "../docker.js";
+import { tmpdir } from "os";
+import { join } from "path";
+import { withSharedMutationLock } from "../device-lab-shared-state.js";
+
+const realFs = await vi.importActual<typeof import("fs")>("fs");
 
 const originalArgv = process.argv;
 
@@ -132,7 +143,9 @@ describe("ccc codex login startup", () => {
             }
         });
         fixture.prepare.mockImplementation(() => fixture.events.push("container-access"));
-        fixture.buildMcp.mockImplementation(() => {
+        fixture.harness.mockImplementation(() => fixture.events.push("harness"));
+        fixture.buildMcp.mockImplementation((_profile, restoreAccess?: () => void) => {
+            restoreAccess?.();
             fixture.events.push("mcp");
             return [];
         });
@@ -182,31 +195,34 @@ describe("ccc codex login startup", () => {
         expect(fixture.restore).toHaveBeenCalledTimes(2);
         expect(fixture.events.indexOf("host-access")).toBeLessThan(fixture.events.indexOf("mcp"));
         expect(fixture.events.indexOf("mcp")).toBeLessThan(fixture.events.indexOf("container-access"));
+        expect(fixture.events.indexOf("mcp")).toBeLessThan(fixture.events.indexOf("harness"));
+        expect(fixture.events.indexOf("harness")).toBeLessThan(fixture.events.indexOf("container-access"));
         expect(fixture.events.slice(-4)).toEqual(["login", "host-access", "unlink-env", "cleanup"]);
     });
 
-    it("repairs missing Codex in a running container without installing unrelated tools", async () => {
-        fixture.running = true;
-        fixture.missing.add("opencode");
-
-        expect(await runLogin()).toBe(0);
-        expect(fixture.events).toContain("probe:codex");
-        expect(fixture.events).toContain("install:@openai/codex");
-        expect(fixture.events).toContain("wrapper:codex");
-        expect(fixture.events).not.toContain("install:opencode-ai");
-        expect(fixture.missing.has("opencode")).toBe(true);
-        expect(fixture.events.indexOf("wrapper:codex")).toBeLessThan(fixture.events.indexOf("login"));
-    });
-
-    it("launches login after Codex succeeds and optional OpenCode installation fails", async () => {
+    it.each([false, true])("installs only Codex when every npm tool is missing (running=%s)", async (running) => {
+        fixture.running = running;
+        fixture.missing.add("gemini");
         fixture.missing.add("opencode");
         fixture.failedPackages.add("opencode-ai");
 
         expect(await runLogin()).toBe(0);
+        expect(fixture.events.filter((event) => event.startsWith("probe:"))).toEqual(["probe:codex"]);
+        expect(fixture.events.filter((event) => event.startsWith("install:"))).toEqual(["install:@openai/codex"]);
         expect(fixture.events).toContain("wrapper:codex");
-        expect(fixture.events).not.toContain("wrapper:opencode");
-        expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("opencode"));
+        expect(fixture.missing.has("gemini")).toBe(true);
+        expect(fixture.missing.has("opencode")).toBe(true);
+        expect(console.warn).not.toHaveBeenCalled();
         expect(loginCalls()).toHaveLength(1);
+        expect(fixture.events.indexOf("wrapper:codex")).toBeLessThan(fixture.events.indexOf("login"));
+    });
+
+    it("does not bootstrap Harness for another coding tool", async () => {
+        fixture.running = true;
+        process.argv = [process.execPath, "ccc", "gemini"];
+
+        expect(await runLogin()).toBe(0);
+        expect(fixture.harness).not.toHaveBeenCalled();
     });
 
     it.each(["install", "wrapper", "probe"])("retains the active %s error after cold setup retries and never launches login", async (failure) => {
@@ -258,7 +274,76 @@ describe("ccc codex login startup", () => {
         expect(args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     });
 
-    it("preserves command status and cleanup when post-command ownership repair warns", async () => {
+    it.each([false, true])("cleans up when MCP refuses a stale lock before login (running=%s)", async (running) => {
+        fixture.running = running;
+        fixture.missing.clear();
+        const directory = realFs.mkdtempSync(join(tmpdir(), "ccc-startup-stale-lock-"));
+        const lock = join(directory, "codex-config.lock");
+        const contents = "{interrupted";
+        realFs.writeFileSync(lock, contents, { mode: 0o600 });
+        const old = new Date(Date.now() - 60_000);
+        realFs.utimesSync(lock, old, old);
+        const before = realFs.lstatSync(lock);
+        const operation = vi.fn();
+        let failure: unknown;
+        fixture.buildMcp.mockImplementation(() => {
+            try {
+                return withSharedMutationLock(lock, operation, { waitMs: 0, reclaimStale: false });
+            } catch (error) {
+                failure = error;
+                throw error;
+            }
+        });
+
+        try {
+            await expect(runLogin()).rejects.toMatchObject({ code: "shared-mutation-lock-stale" });
+            expect(failure).toBeInstanceOf(Error);
+            expect(createSessionLock).toHaveBeenCalledOnce();
+            expect(startProjectContainer).toHaveBeenCalledOnce();
+            expect(fixture.cleanup).toHaveBeenCalledOnce();
+            expect(operation).not.toHaveBeenCalled();
+            expect(loginCalls()).toHaveLength(0);
+            expect(writeEnvFile).not.toHaveBeenCalled();
+            expect(fixture.harness).not.toHaveBeenCalled();
+            expect(fixture.unlink).not.toHaveBeenCalled();
+            expect(realFs.readFileSync(lock, "utf8")).toBe(contents);
+            expect(realFs.lstatSync(lock)).toMatchObject({ ino: before.ino, mtimeMs: before.mtimeMs });
+        } finally {
+            realFs.rmSync(directory, { recursive: true, force: true });
+        }
+    });
+
+    it.each([false, true])("preserves MCP access failure and cleans up (running=%s)", async (running) => {
+        fixture.running = running;
+        fixture.missing.clear();
+        const failure = Object.assign(new Error("Unable to read Codex config: EACCES"), { code: "EACCES" });
+        fixture.buildMcp.mockImplementation(() => { throw failure; });
+
+        await expect(runLogin()).rejects.toBe(failure);
+        expect(fixture.cleanup).toHaveBeenCalledOnce();
+        expect(loginCalls()).toHaveLength(0);
+        expect(writeEnvFile).not.toHaveBeenCalled();
+    });
+
+    it.each([0, 1, 2, 42, 125, 126, 127, 130, 143])("returns status %s after one execution without updating or wiping Codex state", async (status) => {
+        fixture.running = true;
+        fixture.missing.clear();
+        fixture.exitStatus = status;
+
+        expect(await runLogin()).toBe(status);
+        expect(loginCalls()).toHaveLength(1);
+        expect(fixture.spawn).toHaveBeenCalledWith("docker", loginCalls()[0], { stdio: "inherit" });
+        expect(fixture.events.some((event) => event.startsWith("install:"))).toBe(false);
+        expect(fixture.spawn.mock.calls.some(([, args]) =>
+            (args as string[]).some((arg) => /rm\s+-rf|\bfind\b|npm install/.test(arg)),
+        )).toBe(false);
+        expect(prompt).not.toHaveBeenCalled();
+        expect(fixture.unlink).toHaveBeenCalledExactlyOnceWith("/tmp/ccc-login-startup.env");
+        expect(fixture.cleanup).toHaveBeenCalledOnce();
+        expect(fixture.events.slice(-4)).toEqual(["login", "host-access", "unlink-env", "cleanup"]);
+    });
+
+    it("preserves command status and cleanup when post-command access repair warns", async () => {
         fixture.running = true;
         fixture.missing.clear();
         fixture.exitStatus = 143;

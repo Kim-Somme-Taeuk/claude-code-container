@@ -50,24 +50,23 @@ ccc shell                  # Open bash shell
 ccc npm test               # Run arbitrary command
 ```
 
-### Codex startup recovery
+### Codex startup and permissions
 
-`ccc codex login` installs missing npm tools independently. An optional tool's
-installation failure, such as OpenCode's `EBADPLATFORM` error, is reported with
-the tool name and does not prevent a successful Codex installation from being
-used. If Codex itself cannot be installed or its wrapper cannot be created,
-CCC stops with the setup error. Retrying the command also checks and repairs a
-missing Codex installation in an already-running container.
+`ccc codex` installs only Codex when it is missing, on both fresh and reused
+containers. Gemini and OpenCode are not installed as a side effect. A failed
+Codex installation or wrapper creation stops startup with the setup error.
+Codex commands run once and retain their exit status; ordinary errors do not
+trigger forced updates, retries, or deletion of history and plugin state.
 
 Before generating MCP settings, CCC checks host access to
-`~/.ccc/codex/config.toml`. If access is denied, it attempts to restore access
-only for that regular file, using its host-owned parent directory as the
-owner reference. It preserves configuration content, the file group and group
-permissions, and verifies access after repair. Symlinks and directories owned
-by a different host user require manual inspection; CCC does not recursively
-change credential ownership. Failed repair warns, and unresolved MCP access
-still fails explicitly. Ownership handoff does not guarantee simultaneous
-config access by host and container users with different UIDs.
+`~/.ccc/codex/config.toml`. It can grant host and container users read/write
+access through a file ACL without changing the file owner or group. Existing
+configuration contents and unrelated effective permissions are preserved.
+Unsafe targets and ACL changes that would expose other users' masked rights
+require manual inspection. Host recovery warns on failure; unresolved MCP
+access still fails explicitly. CCC rechecks access at startup and after exit;
+arbitrary external atomic file replacement can require repair at the next
+boundary and is not synchronized with running sessions.
 
 Before launching Codex, CCC also checks whether its container user can write the
 credential directory. When host and container UIDs differ, it can grant that
@@ -375,3 +374,27 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture, development setup, and 
 ## License
 
 MIT
+
+### Harness in CCC Codex
+
+On `ccc codex` commands, CCC installs Harness for Codex if no Harness configuration
+exists. Installation runs as the container user using a pinned revision of the
+official Harness installer. It stores the runtime in the existing Codex home
+(host `~/.ccc/codex`), so subsequent starts and container recreation reuse it
+without downloading it again. First installation needs network access.
+
+Existing disabled or custom Harness settings are preserved. Incomplete existing
+installations produce a diagnostic instead of being forcibly replaced. An
+installation failure warns that Harness is unavailable and leaves Codex usable.
+Automatic runtime installation does not initialize Harness in your project.
+After starting Codex, inspect `/skills` and `/mcp` to check the loaded integration.
+
+If an interrupted startup leaves a stale `~/.ccc/codex-config.lock`, CCC stops
+with a recovery message. Close other CCC/Codex sessions, remove only that lock
+file, and retry. CCC does not automatically reclaim stale or malformed Codex
+locks because doing so can admit simultaneous configuration writers.
+
+Run CCC from the host shell. Starting CCC again inside its container is rejected
+when it reaches Codex configuration: the nested process cannot share the host's
+configuration lock. This also applies when starting another tool, since CCC
+generates Codex MCP configuration during tool startup.

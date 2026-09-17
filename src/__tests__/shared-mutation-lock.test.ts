@@ -35,19 +35,23 @@ describe("device-lab shared mutation lock", () => {
         expect(existsSync(file)).toBe(false);
     });
 
-    it("recovers an old malformed lock without removing a live lock", () => {
-        const malformed = lockPath();
-        writeFileSync(malformed, "");
-        const old = new Date(Date.now() - 5000);
-        utimesSync(malformed, old, old);
-        expect(withSharedMutationLock(malformed, () => "recovered", { waitMs: 1000, staleMs: 1000 })).toBe("recovered");
-        expect(existsSync(malformed)).toBe(false);
+    it("retains default stale recovery without removing a live lock", () => {
+        for (const acquire of [withHostSharedMutationLock, withNestedSharedMutationLock]) {
+            for (const contents of ["", JSON.stringify({ token: "abandoned", pid: process.pid, host: hostname(), bootId: "previous-boot" })]) {
+                const stale = lockPath();
+                writeFileSync(stale, contents);
+                const old = new Date(Date.now() - 5000);
+                utimesSync(stale, old, old);
+                expect(acquire(stale, () => "recovered", { waitMs: 1000, staleMs: 1000 })).toBe("recovered");
+                expect(existsSync(stale)).toBe(false);
+            }
 
-        const live = lockPath();
-        const record = { token: "live-token", pid: process.pid, host: hostname(), createdAt: new Date().toISOString() };
-        writeFileSync(live, JSON.stringify(record));
-        expect(() => withSharedMutationLock(live, () => "unexpected", { waitMs: 30, staleMs: 1 })).toThrow(/Timed out acquiring shared mutation lock/);
-        expect(JSON.parse(readFileSync(live, "utf8"))).toEqual(record);
+            const live = lockPath();
+            const record = { token: "live-token", pid: process.pid, host: hostname(), createdAt: new Date().toISOString() };
+            writeFileSync(live, JSON.stringify(record));
+            expect(() => acquire(live, () => "unexpected", { waitMs: 30, staleMs: 1 })).toThrow(/Timed out acquiring shared mutation lock/);
+            expect(JSON.parse(readFileSync(live, "utf8"))).toEqual(record);
+        }
     });
 
     it.runIf(process.platform !== "win32")("does not follow linked lock records or use the target modification time", () => {
