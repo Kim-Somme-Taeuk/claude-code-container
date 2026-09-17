@@ -43,12 +43,16 @@ const SERVER_VERSION = getServerHash();
 const DATA_DIR = join(homedir(), ".ccc");
 const LOCKS_DIR = join(DATA_DIR, "locks");
 const PORT_FILE = join(DATA_DIR, "clipboard.port");
-const STARTING_LOCK = join(DATA_DIR, "clipboard.starting");
+const STARTING_LOCK = join(DATA_DIR, "clipboard.starting.v2");
 export const CLIPBOARD_SERVER_ORPHAN_GRACE_MS = 15000;
 const CLIPBOARD_SERVER_ORPHAN_CHECK_INTERVAL_MS = 5000;
 const HEALTH_CHECK_TIMEOUT_MS = 2000;
 const STARTUP_POLL_INTERVAL_MS = 100;
 const STARTUP_POLL_TIMEOUT_MS = 5000;
+const SHUTDOWN_TIMEOUT_MS = 2000;
+const UPGRADE_SHUTDOWN_GRACE_MS = 3500;
+const STARTUP_LOCK_TIMEOUT_MS = HEALTH_CHECK_TIMEOUT_MS + SHUTDOWN_TIMEOUT_MS
+    + UPGRADE_SHUTDOWN_GRACE_MS + STARTUP_POLL_TIMEOUT_MS + 1000;
 const PS_MARKER = "<<<CCC_CB_DONE>>>";
 
 // === Security Helpers ===
@@ -1282,7 +1286,7 @@ function writePortFile(port: number, token: string): void {
 function shutdownServer(port: number, token?: string): Promise<boolean> {
     return new Promise((resolve) => {
         let req: ReturnType<typeof httpRequest> | undefined;
-        const timeout = setTimeout(() => { req?.destroy(); resolve(false); }, 2000);
+        const timeout = setTimeout(() => { req?.destroy(); resolve(false); }, SHUTDOWN_TIMEOUT_MS);
         const finish = (acknowledged: boolean) => { clearTimeout(timeout); resolve(acknowledged); };
         try {
             const headers: Record<string, string> = {};
@@ -1346,20 +1350,10 @@ export async function ensureClipboardServer(): Promise<number> {
     const bindAddr = "127.0.0.1";
 
     // Check if server already running
-    const existing = readPortFile();
+    let existing = readPortFile();
     if (existing) {
         const health = await checkServerHealth(existing.port, existing.token, bindAddr);
-        if (health.alive) {
-            // Version match → reuse existing server
-            if (health.version === SERVER_VERSION) return existing.port;
-            // Version mismatch → shutdown old server, start new one
-            if (!await shutdownServer(existing.port, existing.token)) {
-                throw new Error("Failed to acknowledge clipboard server shutdown for upgrade");
-            }
-            // Legacy daemons unlink state on close. Wait beyond their 3-second
-            // forced exit before publishing state that their cleanup could delete.
-            await new Promise((r) => setTimeout(r, 3500));
-        }
+        if (health.alive && health.version === SERVER_VERSION) return existing.port;
     }
 
     // Atomic startup lock to prevent race condition
@@ -1370,13 +1364,13 @@ export async function ensureClipboardServer(): Promise<number> {
         closeSync(lockFd);
     } catch {
         // Another process is starting the server - wait for port file
-        const deadline = Date.now() + STARTUP_POLL_TIMEOUT_MS;
+        const deadline = Date.now() + STARTUP_LOCK_TIMEOUT_MS;
         while (Date.now() < deadline) {
             await new Promise((r) => setTimeout(r, STARTUP_POLL_INTERVAL_MS));
             const info = readPortFile();
             if (info && info.token !== existing?.token) {
                 const health = await checkServerHealth(info.port, info.token, bindAddr);
-                if (health.alive) return info.port;
+                if (health.alive && health.version === SERVER_VERSION) return info.port;
             }
         }
         // Timeout - try to start ourselves (delete stale lock)
@@ -1390,8 +1384,25 @@ export async function ensureClipboardServer(): Promise<number> {
         }
     }
 
-    // We hold the startup lock - fork the server
+    // Keep upgrade shutdown, legacy grace and publication under the v2 lock.
+    // Legacy cleanup only knows the old lock pathname and cannot release this one.
     try {
+        const current = readPortFile();
+        if (current) {
+            const health = await checkServerHealth(current.port, current.token, bindAddr);
+            if (health.alive) {
+                if (health.version === SERVER_VERSION) return current.port;
+                if (health.version !== SERVER_VERSION) {
+                    if (!await shutdownServer(current.port, current.token)) {
+                        throw new Error("Failed to acknowledge clipboard server shutdown for upgrade");
+                    }
+                    // Wait beyond the legacy daemon's 3-second forced exit before publication.
+                    await new Promise((r) => setTimeout(r, UPGRADE_SHUTDOWN_GRACE_MS));
+                }
+            }
+        }
+        existing = current;
+
         const __filename = fileURLToPath(import.meta.url);
         const serverScript = __filename.replace(/\.ts$/, ".js");
 
@@ -1409,17 +1420,13 @@ export async function ensureClipboardServer(): Promise<number> {
             const info = readPortFile();
             if (info && info.token !== existing?.token) {
                 const health = await checkServerHealth(info.port, info.token, bindAddr);
-                if (health.alive) {
-                    try { unlinkSync(STARTING_LOCK); } catch { /* ignore */ }
-                    return info.port;
-                }
+                if (health.alive && health.version === SERVER_VERSION) return info.port;
             }
         }
 
         throw new Error("Clipboard server failed to start within timeout");
-    } catch (err) {
+    } finally {
         try { unlinkSync(STARTING_LOCK); } catch { /* ignore */ }
-        throw err;
     }
 }
 

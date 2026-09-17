@@ -34,7 +34,7 @@ describe("clipboard state across real daemon restarts", () => {
                 const dataDir = require("path").join(require("os").homedir(), ".ccc");
                 const holdStartup = require("path").join(dataDir, "hold-startup");
                 if (fs.existsSync(holdStartup)) {
-                    fs.writeFileSync(require("path").join(dataDir, "startup-held"), "");
+                    fs.appendFileSync(require("path").join(dataDir, "startup-held"), "started\\n");
                     const deadline = Date.now() + 10000;
                     const signal = new Int32Array(new SharedArrayBuffer(4));
                     while (fs.existsSync(holdStartup)) {
@@ -47,7 +47,9 @@ describe("clipboard state across real daemon restarts", () => {
                 http.createServer = (listener) => createServer((req, res) => {
                     const dropHealth = require("path").join(dataDir, "drop-next-health");
                     if (req.url === "/health" && fs.existsSync(dropHealth)) {
-                        fs.unlinkSync(dropHealth);
+                        const remaining = Number(fs.readFileSync(dropHealth, "utf8")) || 1;
+                        if (remaining > 1) fs.writeFileSync(dropHealth, String(remaining - 1));
+                        else fs.unlinkSync(dropHealth);
                         req.socket.destroy();
                         return;
                     }
@@ -91,6 +93,7 @@ describe("clipboard state across real daemon restarts", () => {
                         }
                         process.exit(0);
                     });
+                    writeFileSync(join(dataDir, "legacy-closing"), "");
                     setTimeout(() => process.exit(0), 3000);
                 }
             });
@@ -103,7 +106,7 @@ describe("clipboard state across real daemon restarts", () => {
     beforeEach(() => {
         home = mkdtempSync(join(fixtureRoot, "home-"));
         portFile = join(home, ".ccc", "clipboard.port");
-        startingLock = join(home, ".ccc", "clipboard.starting");
+        startingLock = join(home, ".ccc", "clipboard.starting.v2");
         ownLock = join(home, ".ccc", "locks", "test.lock");
         mkdirSync(join(home, ".ccc", "locks"), { recursive: true });
         writeFileSync(ownLock, String(process.pid));
@@ -280,6 +283,76 @@ describe("clipboard state across real daemon restarts", () => {
         }
     });
 
+    it("recovers an interrupted upgrade without publishing before legacy cleanup finishes", async () => {
+        const legacy = start("legacy-peer.js");
+        const old = await published();
+        const pending = connect(old.port, "127.0.0.1");
+        sockets.push(pending);
+        pending.on("error", () => {});
+        await new Promise<void>((resolve) => pending.once("connect", resolve));
+        pending.write("GET /health HTTP/1.1\r\nHost: localhost\r\n");
+        const first = start("driver.js", "ensure-exit");
+        let earlyPublication: ReturnType<typeof readRecord> | undefined;
+        try {
+            await waitFor(() => existsSync(join(home, ".ccc", "legacy-closing")));
+            const startedAt = Date.now();
+            const second = start("driver.js", "ensure-exit");
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            if (existsSync(portFile) && readRecord().bytes !== old.bytes) earlyPublication = readRecord();
+            first.child.kill("SIGKILL");
+            await first.exited;
+            pending.destroy();
+            expect((await legacy.exited).code).toBe(0);
+            const lockSurvivedLegacyCleanup = existsSync(startingLock);
+            const result = await second.exited;
+            expect(result.code, result.stderr).toBe(0);
+            const fresh = readRecord();
+            expect(Number(result.stdout.trim())).toBe(fresh.port);
+            expect(earlyPublication).toBeUndefined();
+            expect(lockSurvivedLegacyCleanup).toBe(true);
+            expect(Date.now() - startedAt).toBeLessThan(20000);
+            expect(JSON.parse(await send(fresh, "/health")).valid).toBe(true);
+        } finally {
+            pending.destroy();
+            if (earlyPublication) await send(earlyPublication, "/shutdown", "POST").catch(() => {});
+        }
+    }, 25000);
+
+    it("keeps the current startup lock through early legacy cleanup and publishes only one replacement", async () => {
+        const legacy = start("legacy-peer.js");
+        await published();
+        const holdStartup = join(home, ".ccc", "hold-startup");
+        const old = readRecord();
+        const pending = connect(old.port, "127.0.0.1");
+        sockets.push(pending);
+        await new Promise<void>((resolve) => pending.once("connect", resolve));
+        pending.write("GET /health HTTP/1.1\r\nHost: localhost\r\n");
+        writeFileSync(holdStartup, "");
+        const first = start("driver.js", "ensure-exit");
+        try {
+            await waitFor(() => existsSync(join(home, ".ccc", "legacy-closing")));
+            pending.destroy();
+            expect((await legacy.exited).code).toBe(0);
+            expect(existsSync(startingLock)).toBe(true);
+            const second = start("driver.js", "ensure-exit");
+            await waitFor(() => existsSync(join(home, ".ccc", "startup-held")));
+            await new Promise((resolve) => setTimeout(resolve, 350));
+            expect(readFileSync(join(home, ".ccc", "startup-held"), "utf8")).toBe("started\n");
+            expect(first.child.exitCode).toBeNull();
+            expect(second.child.exitCode).toBeNull();
+            rmSync(holdStartup);
+            const fresh = await published(old.bytes);
+            for (const result of await Promise.all([first.exited, second.exited])) {
+                expect(result.code, result.stderr).toBe(0);
+                expect(Number(result.stdout.trim())).toBe(fresh.port);
+            }
+        } finally {
+            pending.destroy();
+            rmSync(holdStartup, { force: true });
+            if (existsSync(join(home, ".ccc", "startup-held"))) await published(old.bytes);
+        }
+    });
+
     it.each(["reject", "timeout"])("does not publish when legacy shutdown acknowledgement fails: %s", async (mode) => {
         const legacy = start("legacy-peer.js", mode);
         const old = await published();
@@ -318,13 +391,26 @@ describe("clipboard state across real daemon restarts", () => {
         expect(statSync(portFile).ino).toBe(inode);
     });
 
+    it("reuses a current daemon that recovers before the startup lock holder forks", async () => {
+        start("clipboard-server.js", "--serve");
+        const old = await published();
+        const inode = statSync(portFile).ino;
+        writeFileSync(join(home, ".ccc", "drop-next-health"), "");
+        const result = await start("driver.js", "ensure-exit").exited;
+        expect(result.code, result.stderr).toBe(0);
+        expect(Number(result.stdout.trim())).toBe(old.port);
+        expect(readFileSync(portFile, "utf8")).toBe(old.bytes);
+        expect(statSync(portFile).ino).toBe(inode);
+        expect(existsSync(startingLock)).toBe(false);
+    });
+
     it.each(["new startup", "existing startup lock"])("waits for fresh publication when old health recovers during %s", async (mode) => {
         start("clipboard-server.js", "--serve");
         const old = await published();
         const inode = statSync(portFile).ino;
         const dropHealth = join(home, ".ccc", "drop-next-health");
         const holdStartup = join(home, ".ccc", "hold-startup");
-        writeFileSync(dropHealth, "");
+        writeFileSync(dropHealth, mode === "new startup" ? "2" : "1");
         writeFileSync(holdStartup, "");
         if (mode === "existing startup lock") writeFileSync(startingLock, "startup-in-progress");
         const restarting = start("driver.js", "ensure");

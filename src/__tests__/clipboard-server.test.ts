@@ -113,7 +113,7 @@ function httpPost(port: number, path: string, headers?: Record<string, string>):
 const DATA_DIR = join("/home/testuser", ".ccc");
 const LOCKS_DIR = join(DATA_DIR, "locks");
 const PORT_FILE = join(DATA_DIR, "clipboard.port");
-const STARTING_LOCK = join(DATA_DIR, "clipboard.starting");
+const STARTING_LOCK = join(DATA_DIR, "clipboard.starting.v2");
 
 // ─── Test Suite ───────────────────────────────────────────────────────────────
 
@@ -3785,7 +3785,7 @@ describe("clipboard-server", () => {
 
             // port 9997 health check will fail (no real server)
             await expect(mod.ensureClipboardServer()).rejects.toThrow();
-        }, 15000);
+        }, 25000);
     });
 
     // ═══════════════════════════════════════════════════════════════════════
