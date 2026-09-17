@@ -364,7 +364,8 @@ describe("container-setup.ts module", () => {
             expect(scripts().some((script) => script.includes("npm install"))).toBe(false);
         });
 
-        it.skipIf(process.platform === "win32").each([
+        // This runs the Linux container probe verbatim, including coreutils timeout.
+        it.skipIf(process.platform !== "linux").each([
             "healthy", "missing", "broken", "missing-node", "resolver-failure", "timeout", "killed", "missing-timeout",
         ])("executes the persisted binary probe with %s state and a PATH decoy", async (outcome) => {
             mockNpmSetup(["codex"]);

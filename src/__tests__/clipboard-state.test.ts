@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "child_process";
-import { chownSync, closeSync, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
+import { chownSync, closeSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { request } from "http";
 import { connect, type Socket } from "net";
 import { tmpdir } from "os";
@@ -29,6 +29,31 @@ describe("clipboard state across real daemon restarts", () => {
         }
         writeFileSync(join(fixtureRoot, "home.cjs"), `
             require("os").homedir = () => process.env.CCC_CLIPBOARD_TEST_HOME;
+            if (process.argv.includes("--serve")) {
+                const fs = require("fs");
+                const dataDir = require("path").join(require("os").homedir(), ".ccc");
+                const holdStartup = require("path").join(dataDir, "hold-startup");
+                if (fs.existsSync(holdStartup)) {
+                    fs.writeFileSync(require("path").join(dataDir, "startup-held"), "");
+                    const deadline = Date.now() + 10000;
+                    const signal = new Int32Array(new SharedArrayBuffer(4));
+                    while (fs.existsSync(holdStartup)) {
+                        if (Date.now() > deadline) throw new Error("Fixture startup was not released");
+                        Atomics.wait(signal, 0, 0, 25);
+                    }
+                }
+                const http = require("http");
+                const createServer = http.createServer;
+                http.createServer = (listener) => createServer((req, res) => {
+                    const dropHealth = require("path").join(dataDir, "drop-next-health");
+                    if (req.url === "/health" && fs.existsSync(dropHealth)) {
+                        fs.unlinkSync(dropHealth);
+                        req.socket.destroy();
+                        return;
+                    }
+                    return listener(req, res);
+                });
+            }
             require("module").syncBuiltinESMExports();
         `);
         writeFileSync(join(fixtureRoot, "driver.js"), `
@@ -212,27 +237,60 @@ describe("clipboard state across real daemon restarts", () => {
         expect(statSync(portFile).ino).toBe(inode);
     });
 
-    it.each(["symlink", "hardlink", "directory"])("refuses a %s target without modifying its sentinel", async (kind) => {
-        const sentinel = join(home, "sentinel");
-        writeFileSync(sentinel, "private-sentinel-bytes", { mode: 0o640 });
-        if (kind === "symlink") symlinkSync(sentinel, portFile);
-        else if (kind === "hardlink") linkSync(sentinel, portFile);
-        else {
-            mkdirSync(portFile);
-            writeFileSync(join(portFile, "sentinel"), "directory-sentinel");
+    it.each(["new startup", "existing startup lock"])("waits for fresh publication when old health recovers during %s", async (mode) => {
+        start("clipboard-server.js", "--serve");
+        const old = await published();
+        const inode = statSync(portFile).ino;
+        const dropHealth = join(home, ".ccc", "drop-next-health");
+        const holdStartup = join(home, ".ccc", "hold-startup");
+        writeFileSync(dropHealth, "");
+        writeFileSync(holdStartup, "");
+        if (mode === "existing startup lock") writeFileSync(startingLock, "startup-in-progress");
+        const restarting = start("driver.js", "ensure");
+        let returnedBeforePublication: boolean;
+        let fresh: ReturnType<typeof readRecord>;
+        try {
+            await waitFor(() => !existsSync(dropHealth));
+            if (mode === "existing startup lock") start("clipboard-server.js", "--serve");
+            await waitFor(() => existsSync(join(home, ".ccc", "startup-held")));
+            expect(JSON.parse(await send(old, "/health")).valid).toBe(true);
+            await new Promise((resolve) => setTimeout(resolve, 350));
+            returnedBeforePublication = restarting.child.exitCode !== null;
+            expect(readFileSync(portFile, "utf8")).toBe(old.bytes);
+        } finally {
+            rmSync(holdStartup, { force: true });
+            fresh = await published(old.bytes);
         }
-        const before = statSync(sentinel);
-        const targetBefore = lstatSync(portFile);
-        const result = await start("clipboard-server.js", "--serve").exited;
-        expect(result.code).toBe(1);
-        expect(result.stderr).toContain("Failed to start clipboard server");
-        expect(readFileSync(sentinel, "utf8")).toBe("private-sentinel-bytes");
-        expect(statSync(sentinel)).toMatchObject({ ino: before.ino, mode: before.mode, uid: before.uid, size: before.size });
-        expect(lstatSync(portFile)).toMatchObject({ ino: targetBefore.ino, mode: targetBefore.mode });
-        if (kind === "directory") expect(readFileSync(join(portFile, "sentinel"), "utf8")).toBe("directory-sentinel");
+        const result = await restarting.exited;
+        expect(result.code, result.stderr).toBe(0);
+        expect(Number(result.stdout.trim())).toBe(fresh.port);
+        expect(returnedBeforePublication).toBe(false);
+        expect(statSync(portFile).ino).toBe(inode);
     });
 
-    it("refuses a dangling symlink without creating its target", async () => {
+    for (const kind of ["symlink", "hardlink", "directory"]) {
+        it.skipIf(kind === "symlink" && process.platform === "win32")(`refuses a ${kind} target without modifying its sentinel`, async () => {
+            const sentinel = join(home, "sentinel");
+            writeFileSync(sentinel, "private-sentinel-bytes", { mode: 0o640 });
+            if (kind === "symlink") symlinkSync(sentinel, portFile);
+            else if (kind === "hardlink") linkSync(sentinel, portFile);
+            else {
+                mkdirSync(portFile);
+                writeFileSync(join(portFile, "sentinel"), "directory-sentinel");
+            }
+            const before = statSync(sentinel);
+            const targetBefore = lstatSync(portFile);
+            const result = await start("clipboard-server.js", "--serve").exited;
+            expect(result.code).toBe(1);
+            expect(result.stderr).toContain("Failed to start clipboard server");
+            expect(readFileSync(sentinel, "utf8")).toBe("private-sentinel-bytes");
+            expect(statSync(sentinel)).toMatchObject({ ino: before.ino, mode: before.mode, uid: before.uid, size: before.size });
+            expect(lstatSync(portFile)).toMatchObject({ ino: targetBefore.ino, mode: targetBefore.mode });
+            if (kind === "directory") expect(readFileSync(join(portFile, "sentinel"), "utf8")).toBe("directory-sentinel");
+        });
+    }
+
+    it.skipIf(process.platform === "win32")("refuses a dangling symlink without creating its target", async () => {
         const target = join(home, "must-stay-missing");
         symlinkSync(target, portFile);
         const before = lstatSync(portFile);

@@ -1358,7 +1358,7 @@ export async function ensureClipboardServer(): Promise<number> {
         while (Date.now() < deadline) {
             await new Promise((r) => setTimeout(r, STARTUP_POLL_INTERVAL_MS));
             const info = readPortFile();
-            if (info) {
+            if (info && info.token !== existing?.token) {
                 const health = await checkServerHealth(info.port, info.token, bindAddr);
                 if (health.alive) return info.port;
             }
@@ -1391,7 +1391,7 @@ export async function ensureClipboardServer(): Promise<number> {
         while (Date.now() < deadline) {
             await new Promise((r) => setTimeout(r, STARTUP_POLL_INTERVAL_MS));
             const info = readPortFile();
-            if (info) {
+            if (info && info.token !== existing?.token) {
                 const health = await checkServerHealth(info.port, info.token, bindAddr);
                 if (health.alive) {
                     try { unlinkSync(STARTING_LOCK); } catch { /* ignore */ }
