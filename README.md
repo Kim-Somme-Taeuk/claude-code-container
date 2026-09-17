@@ -406,6 +406,11 @@ container's file mount remains valid. Its saved token does not prove the server
 is running: CCC checks authenticated health before reuse and updates the same
 file when a replacement starts. Each new session refreshes its clipboard URL.
 
+On a clipboard-server version change, CCC waits for the old server's bounded
+shutdown before starting its replacement. Upgrading from a version that deleted
+the port file may require one container recreation because that old process can
+still remove the original mount source. Later restarts retain the file.
+
 When a container is recreated, CCC restores missing npm tool wrappers from
 healthy packages in the persistent mise volume. It installs a package again
 only when its installed executable is missing or fails verification.

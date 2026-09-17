@@ -58,8 +58,45 @@ describe("clipboard state across real daemon restarts", () => {
         `);
         writeFileSync(join(fixtureRoot, "driver.js"), `
             import { ensureClipboardServer, stopClipboardServerIfLast } from "./clipboard-server.js";
-            if (process.argv[2] === "ensure") console.log(await ensureClipboardServer());
+            if (process.argv[2] === "ensure-exit") {
+                console.log(await ensureClipboardServer());
+                process.exit(0);
+            } else if (process.argv[2] === "ensure") console.log(await ensureClipboardServer());
             else stopClipboardServerIfLast(process.argv[3] || null);
+        `);
+        // Compatibility peer preserves the historical close-time unlink and 3-second forced exit.
+        writeFileSync(join(fixtureRoot, "legacy-peer.js"), `
+            import { createServer } from "http";
+            import { existsSync, unlinkSync, writeFileSync } from "fs";
+            import { homedir } from "os";
+            import { join } from "path";
+            const dataDir = join(homedir(), ".ccc");
+            const token = "a".repeat(32);
+            const server = createServer((req, res) => {
+                if (req.headers.authorization !== "Bearer " + token) {
+                    res.writeHead(401); res.end(); return;
+                }
+                if (req.url === "/health") {
+                    res.end(JSON.stringify({ service: "ccc-clipboard", valid: true, version: "legacy" }));
+                    return;
+                }
+                if (req.url === "/shutdown") {
+                    if (process.argv[2] === "reject") { res.writeHead(503); res.end(); return; }
+                    if (process.argv[2] === "timeout") return;
+                    res.end("shutting down");
+                    server.close(() => {
+                        for (const name of ["clipboard.port", "clipboard.starting"]) {
+                            const path = join(dataDir, name);
+                            if (existsSync(path)) unlinkSync(path);
+                        }
+                        process.exit(0);
+                    });
+                    setTimeout(() => process.exit(0), 3000);
+                }
+            });
+            server.listen(0, "127.0.0.1", () => {
+                writeFileSync(join(dataDir, "clipboard.port"), server.address().port + ":" + token, { mode: 0o600 });
+            });
         `);
     });
 
@@ -217,6 +254,50 @@ describe("clipboard state across real daemon restarts", () => {
         expect(statSync(portFile).ino).toBe(inode);
         expect(readFileSync(startingLock, "utf8")).toBe("successor-startup-lock");
         expect(JSON.parse(await send(successor, "/health")).valid).toBe(true);
+    });
+
+    it("waits out legacy shutdown before publishing even when the upgrading caller exits immediately", async () => {
+        const legacy = start("legacy-peer.js");
+        const old = await published();
+        const pending = connect(old.port, "127.0.0.1");
+        sockets.push(pending);
+        pending.on("error", () => { /* the legacy forced exit closes this held request */ });
+        await new Promise<void>((resolve) => pending.once("connect", resolve));
+        pending.write("GET /health HTTP/1.1\r\nHost: localhost\r\n");
+        let successor: ReturnType<typeof readRecord> | undefined;
+        try {
+            const result = await start("driver.js", "ensure-exit").exited;
+            expect(result.code, result.stderr).toBe(0);
+            successor = await published(old.bytes);
+            pending.destroy();
+            expect((await legacy.exited).code).toBe(0);
+            expect(readFileSync(portFile, "utf8")).toBe(successor.bytes);
+            expect(Number(result.stdout.trim())).toBe(successor.port);
+            expect(JSON.parse(await send(successor, "/health")).valid).toBe(true);
+        } finally {
+            pending.destroy();
+            if (successor) await send(successor, "/shutdown", "POST").catch(() => {});
+        }
+    });
+
+    it.each(["reject", "timeout"])("does not publish when legacy shutdown acknowledgement fails: %s", async (mode) => {
+        const legacy = start("legacy-peer.js", mode);
+        const old = await published();
+        const inode = statSync(portFile).ino;
+        try {
+            const startedAt = Date.now();
+            const result = await start("driver.js", "ensure-exit").exited;
+            expect(result.code).not.toBe(0);
+            expect(result.stderr).toContain("Failed to acknowledge clipboard server shutdown for upgrade");
+            expect(Date.now() - startedAt).toBeLessThan(4500);
+            expect(readFileSync(portFile, "utf8")).toBe(old.bytes);
+            expect(statSync(portFile).ino).toBe(inode);
+            expect(existsSync(startingLock)).toBe(false);
+            expect(JSON.parse(await send(old, "/health")).valid).toBe(true);
+        } finally {
+            legacy.child.kill("SIGKILL");
+            await legacy.exited;
+        }
     });
 
     it("stale callers wait for the existing startup lock and share authenticated successor state", async () => {

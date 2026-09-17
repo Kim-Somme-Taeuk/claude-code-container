@@ -1279,15 +1279,28 @@ function writePortFile(port: number, token: string): void {
 
 // === Server Shutdown (used for version upgrade restart) ===
 
-function shutdownServer(port: number, token?: string): void {
-    const headers: Record<string, string> = {};
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-    const req = httpRequest(
-        { hostname: "127.0.0.1", port, path: "/shutdown", method: "POST", timeout: 2000, headers },
-        () => { /* response doesn't matter */ },
-    );
-    req.on("error", () => { /* server may already be gone */ });
-    req.end();
+function shutdownServer(port: number, token?: string): Promise<boolean> {
+    return new Promise((resolve) => {
+        let req: ReturnType<typeof httpRequest> | undefined;
+        const timeout = setTimeout(() => { req?.destroy(); resolve(false); }, 2000);
+        const finish = (acknowledged: boolean) => { clearTimeout(timeout); resolve(acknowledged); };
+        try {
+            const headers: Record<string, string> = {};
+            if (token) headers["Authorization"] = `Bearer ${token}`;
+            req = httpRequest(
+                { hostname: "127.0.0.1", port, path: "/shutdown", method: "POST", headers },
+                (res) => {
+                    res.on("error", () => finish(false));
+                    res.on("end", () => finish(res.statusCode === 200));
+                    res.resume();
+                },
+            );
+            req.on("error", () => finish(false));
+            req.end();
+        } catch {
+            finish(false);
+        }
+    });
 }
 
 // === Health Check ===
@@ -1340,9 +1353,12 @@ export async function ensureClipboardServer(): Promise<number> {
             // Version match → reuse existing server
             if (health.version === SERVER_VERSION) return existing.port;
             // Version mismatch → shutdown old server, start new one
-            shutdownServer(existing.port, existing.token);
-            // Brief wait for old server to release the port
-            await new Promise((r) => setTimeout(r, 500));
+            if (!await shutdownServer(existing.port, existing.token)) {
+                throw new Error("Failed to acknowledge clipboard server shutdown for upgrade");
+            }
+            // Legacy daemons unlink state on close. Wait beyond their 3-second
+            // forced exit before publishing state that their cleanup could delete.
+            await new Promise((r) => setTimeout(r, 3500));
         }
     }
 
