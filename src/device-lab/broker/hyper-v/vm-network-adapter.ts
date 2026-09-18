@@ -98,7 +98,16 @@ async function resolveOwnedVm(
     return { kind: "id", id: match.id };
 }
 
-async function observe(
+/**
+ * Reads everything a discovery pass needs, and nothing a teardown does.
+ *
+ * Teardown deliberately does not use this: it decides from the VM's own adapters alone, and
+ * the host reads below -- management adapters, host addresses, one neighbour read per
+ * interface -- are each another way for it to throw. Teardown runs on the success path of a
+ * device start, where a throw turns a guest that booted and finalized into a reported
+ * failure, so it reads only what it decides from.
+ */
+async function observeForDiscovery(
     client: HyperVWindowsNetworkClient,
     selector: HyperVVirtualMachineSelector,
 ): Promise<HyperVBootstrapHostObservation> {
@@ -139,7 +148,10 @@ export async function discoverDeviceLabHyperVBootstrapNetwork(
     vm: DeviceLabHyperVOwnedVm,
 ): Promise<DeviceLabHyperVBootstrapNetworkObservation> {
     const selector = await resolveOwnedVm(client, vm);
-    const outcome = discoverHyperVBootstrapAddresses(await observe(client, selector), BOOTSTRAP_EXPECTATION);
+    const outcome = discoverHyperVBootstrapAddresses(
+        await observeForDiscovery(client, selector),
+        BOOTSTRAP_EXPECTATION,
+    );
     return {
         ok: true,
         addresses: [...outcome.addresses],
@@ -163,7 +175,7 @@ export async function teardownDeviceLabHyperVBootstrapNetwork(
     const expectedMacAddress = deviceLabHyperVBootstrapMacAddress(managedMacAddress);
     const selector = await resolveOwnedVm(client, vm);
     const decision = planHyperVBootstrapTeardown(
-        await observe(client, selector),
+        await client.getVMNetworkAdapters({ selector }),
         BOOTSTRAP_EXPECTATION,
         expectedMacAddress,
     );

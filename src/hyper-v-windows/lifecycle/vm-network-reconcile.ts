@@ -23,6 +23,20 @@ const MAXIMUM_BOOTSTRAP_ADDRESSES = 8;
 // that has not yet taken a DHCP lease reports its link-local address, so admitting
 // 169.254.0.0/16 would report a booting guest as ready at an address nothing can reach.
 const UNREACHABLE_PREFIXES = ["0.", "127.", "169.254."];
+// Neighbour states whose address is worth trying. Windows keeps an entry after it has
+// concluded the address is dead, and `Unreachable` is exactly that conclusion -- taking its
+// address would answer the probe with somewhere the host has already proven it cannot reach.
+// `Incomplete` is the other excluded state: resolution is still in flight, so the entry's
+// link-layer address is not yet established to belong to that address. The remaining states
+// are the ones the PowerShell this replaces accepted, and the set is closed for the same
+// reason it was there: a state nobody has reasoned about should not silently qualify.
+const USABLE_NEIGHBOR_STATES: ReadonlySet<string> = new Set([
+    "Reachable",
+    "Stale",
+    "Delay",
+    "Probe",
+    "Permanent",
+]);
 
 function ipv4Octets(value: string): readonly number[] | null {
     if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) return null;
@@ -109,10 +123,10 @@ function hostPrefixesFrom(
 }
 
 function bootstrapAdaptersOf(
-    observation: HyperVBootstrapHostObservation,
+    vmAdapters: readonly HyperVVMNetworkAdapter[],
     expectation: HyperVBootstrapAdapterExpectation,
 ): readonly HyperVVMNetworkAdapter[] {
-    return observation.vmAdapters.filter((adapter) => adapter.name === expectation.adapterName);
+    return vmAdapters.filter((adapter) => adapter.name === expectation.adapterName);
 }
 
 /**
@@ -127,7 +141,7 @@ export function discoverHyperVBootstrapAddresses(
     observation: HyperVBootstrapHostObservation,
     expectation: HyperVBootstrapAdapterExpectation,
 ): HyperVBootstrapDiscoveryOutcome {
-    const adapters = bootstrapAdaptersOf(observation, expectation);
+    const adapters = bootstrapAdaptersOf(observation.vmAdapters, expectation);
     if (adapters.length > 1) {
         return { addresses: [], diagnosticCode: "hyper-v-bootstrap-network-adapter-ambiguous" };
     }
@@ -155,10 +169,12 @@ export function discoverHyperVBootstrapAddresses(
         ? []
         : observation.neighbors
             // Only entries for this adapter's own address, learned on an interface that is on
-            // the bootstrap network. A neighbour entry on any other interface describes a
-            // different network where the same address may belong to something else.
+            // the bootstrap network, and in a state that still asserts the address works. A
+            // neighbour entry on any other interface describes a different network where the
+            // same address may belong to something else.
             .filter((neighbor) => neighbor.linkLayerAddress === adapter.macAddress
-                && hostInterfaceIndexes.has(neighbor.interfaceIndex as number))
+                && hostInterfaceIndexes.has(neighbor.interfaceIndex as number)
+                && USABLE_NEIGHBOR_STATES.has(neighbor.state))
             .map((neighbor) => neighbor.address as string);
 
     return {
@@ -176,13 +192,19 @@ export function discoverHyperVBootstrapAddresses(
  * Removal requires the adapter's name, its switch, and a usable address all to agree with
  * what was expected. Any disagreement refuses rather than guesses: this adapter is removed
  * from a VM the caller owns, and an adapter that is not the one expected is someone else's.
+ *
+ * This takes the VM's adapters rather than a whole host observation because they are the only
+ * thing it reads. The narrower parameter is the point: passing a full observation would let a
+ * caller gather the host's addresses and neighbour tables for a decision that never consults
+ * them, and every one of those reads is another way for a teardown -- which runs on the
+ * success path of a device start -- to fail over something it did not need.
  */
 export function planHyperVBootstrapTeardown(
-    observation: HyperVBootstrapHostObservation,
+    vmAdapters: readonly HyperVVMNetworkAdapter[],
     expectation: HyperVBootstrapAdapterExpectation,
     expectedMacAddress: HyperVMacAddress,
 ): HyperVBootstrapTeardownDecision {
-    const adapters = bootstrapAdaptersOf(observation, expectation)
+    const adapters = bootstrapAdaptersOf(vmAdapters, expectation)
         .filter((adapter) => adapter.macAddress === expectedMacAddress);
     if (adapters.length > 1) {
         return { kind: "refuse", diagnosticCode: "hyper-v-bootstrap-network-adapter-ambiguous" };

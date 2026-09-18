@@ -229,6 +229,39 @@ describe("Device Lab bootstrap teardown", () => {
         )).rejects.toThrow("hyper-v-bootstrap-network-containment-failed");
     });
 
+    // Teardown decides from the VM's own adapters alone. It used to gather the host's
+    // management adapters, addresses and neighbour tables too -- data no branch of the
+    // decision reads -- and it runs on the success path of a device start, where anything it
+    // throws turns a guest that booted and finalized into a reported failure. So a host read
+    // that is broken, slow, or simply unavailable must not be able to fail a teardown.
+    it("does not read host state it cannot decide from", async () => {
+        const getManagementNetworkAdapters = vi.fn(async () => {
+            throw new Error("host-read-must-not-be-reached");
+        });
+        const getNetIPAddresses = vi.fn(async () => {
+            throw new Error("host-read-must-not-be-reached");
+        });
+        const getNetNeighbors = vi.fn(async () => {
+            throw new Error("host-read-must-not-be-reached");
+        });
+        const removeVMNetworkAdapter = vi.fn(async () => undefined);
+        await expect(teardownDeviceLabHyperVBootstrapNetwork(
+            client({
+                getManagementNetworkAdapters,
+                getNetIPAddresses,
+                getNetNeighbors,
+                removeVMNetworkAdapter,
+            } as unknown as ClientOverrides),
+            OWNED_VM,
+            MANAGED_MAC,
+        )).resolves.toEqual({ ok: true, removed: true, alreadyMissing: false });
+
+        expect(removeVMNetworkAdapter).toHaveBeenCalledTimes(1);
+        expect(getManagementNetworkAdapters).not.toHaveBeenCalled();
+        expect(getNetIPAddresses).not.toHaveBeenCalled();
+        expect(getNetNeighbors).not.toHaveBeenCalled();
+    });
+
     it("refuses rather than guessing when the adapter sits on an unexpected switch", async () => {
         const removeVMNetworkAdapter = vi.fn(async () => undefined);
         await expect(teardownDeviceLabHyperVBootstrapNetwork(

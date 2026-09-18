@@ -165,6 +165,33 @@ describe("bootstrap address discovery", () => {
         )).toEqual({ addresses: [], diagnosticCode: null });
     });
 
+    // Windows keeps a neighbour entry after it has concluded the address is dead, and keeps
+    // the link-layer address on it -- so without a state filter these entries answer the probe
+    // with an address the host has already proven unreachable, and the caller then spends its
+    // whole readiness budget on it. `Incomplete` is excluded for the other reason: resolution
+    // has not finished, so the entry does not yet establish that the address is this adapter's.
+    it.each([["Unreachable"], ["Incomplete"]])(
+        "ignores a neighbour entry in %s state",
+        (state) => {
+            expect(discoverHyperVBootstrapAddresses(
+                observation({ neighbors: [neighbor("172.20.0.9", BOOTSTRAP_MAC, 12, state)] }),
+                EXPECTATION,
+            )).toEqual({ addresses: [], diagnosticCode: null });
+        },
+    );
+
+    // The states the PowerShell this replaces accepted. Each one still asserts the mapping is
+    // good, whether or not the host has probed it recently.
+    it.each([["Reachable"], ["Stale"], ["Delay"], ["Probe"], ["Permanent"]])(
+        "accepts a neighbour entry in %s state",
+        (state) => {
+            expect(discoverHyperVBootstrapAddresses(
+                observation({ neighbors: [neighbor("172.20.0.9", BOOTSTRAP_MAC, 12, state)] }),
+                EXPECTATION,
+            )).toEqual({ addresses: ["172.20.0.9"], diagnosticCode: null });
+        },
+    );
+
     it("merges both sources without reporting the shared address twice", () => {
         expect(discoverHyperVBootstrapAddresses(
             observation({
@@ -225,7 +252,7 @@ describe("bootstrap address discovery", () => {
 
 describe("bootstrap teardown planning", () => {
     it("names the exact identity to remove when everything agrees", () => {
-        expect(planHyperVBootstrapTeardown(observation(), EXPECTATION, BOOTSTRAP_MAC)).toEqual({
+        expect(planHyperVBootstrapTeardown([adapter()], EXPECTATION, BOOTSTRAP_MAC)).toEqual({
             kind: "remove",
             adapterName: "CCC Bootstrap DHCP",
             macAddress: BOOTSTRAP_MAC,
@@ -235,28 +262,28 @@ describe("bootstrap teardown planning", () => {
     // Teardown runs after the guest is finalized and must be safe to repeat, including after
     // a crash between the removal and the record of it.
     it.each([
-        ["the adapter is already gone", { vmAdapters: [] }],
-        ["only an adapter with a different address remains", { vmAdapters: [adapter({ macAddress: OTHER_MAC })] }],
-        ["the remaining adapter has no address at all", { vmAdapters: [adapter({ macAddress: null })] }],
-        ["only an adapter with a different name remains", { vmAdapters: [adapter({ name: "CCC Device Network" })] }],
-    ])("removes nothing when %s", (_label, overrides) => {
-        expect(planHyperVBootstrapTeardown(observation(overrides), EXPECTATION, BOOTSTRAP_MAC))
+        ["the adapter is already gone", []],
+        ["only an adapter with a different address remains", [adapter({ macAddress: OTHER_MAC })]],
+        ["the remaining adapter has no address at all", [adapter({ macAddress: null })]],
+        ["only an adapter with a different name remains", [adapter({ name: "CCC Device Network" })]],
+    ])("removes nothing when %s", (_label, vmAdapters) => {
+        expect(planHyperVBootstrapTeardown(vmAdapters, EXPECTATION, BOOTSTRAP_MAC))
             .toEqual({ kind: "already-absent" });
     });
 
     it.each([
         [
             "two adapters carry the same name and address",
-            { vmAdapters: [adapter(), adapter()] },
+            [adapter(), adapter()],
             "hyper-v-bootstrap-network-adapter-ambiguous",
         ],
         [
             "the adapter sits on an unexpected switch",
-            { vmAdapters: [adapter({ switchName: "ccc-internal" })] },
+            [adapter({ switchName: "ccc-internal" })],
             "hyper-v-bootstrap-network-adapter-identity-mismatch",
         ],
-    ])("refuses rather than guessing when %s", (_label, overrides, diagnosticCode) => {
-        expect(planHyperVBootstrapTeardown(observation(overrides), EXPECTATION, BOOTSTRAP_MAC))
+    ])("refuses rather than guessing when %s", (_label, vmAdapters, diagnosticCode) => {
+        expect(planHyperVBootstrapTeardown(vmAdapters, EXPECTATION, BOOTSTRAP_MAC))
             .toEqual({ kind: "refuse", diagnosticCode });
     });
 });
