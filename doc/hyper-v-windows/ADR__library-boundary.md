@@ -191,6 +191,18 @@ on one owned VM, so it needs no crash-recovery intent journal either. What it
 does keep is the host-wide containment re-check after removal: that is the
 property proving the address is free for the next device that derives it.
 
+**Slice 2B's compatibility branch is reachable in production, and 2A's is not.**
+For 2A the legacy host-fabric helpers run only through the explicit injected
+seam, as stated above. 2B's seam resolves the PowerShell executable itself and
+takes the `legacy-compatibility` branch when it can resolve none — which is a
+production path, not only a test one. That is deliberate: the legacy generator
+builds its command from the executable the caller supplied, so it still works
+where the typed client, which must name a binary to run against, cannot be
+built at all. Failing instead would turn a host that previously worked into one
+that does not. The difference is recorded because it changes what has to be true
+before the legacy generators can be deleted: for 2A, that no test injects them;
+for 2B, that as well as executable resolution never failing on a supported host.
+
 **A decision reads only what it decides from.** Bootstrap teardown originally
 took the same host observation discovery takes, though it consults only the VM's
 own adapters. The extra reads were not merely wasted: teardown runs on the
