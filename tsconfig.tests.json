@@ -29,7 +29,8 @@
     // the call sites still passed the old argument shape, and nothing typechecked them. That
     // is the drift this file exists to catch, so these files belong in it.
     "src/__tests__/hyper-v-windows-vm-network-lifecycle.test.ts",
-    "src/__tests__/device-lab-hyper-v-vm-network-adapter.test.ts"
+    "src/__tests__/device-lab-hyper-v-vm-network-adapter.test.ts",
+    "src/__tests__/hyper-v-windows-vm-create-lifecycle.test.ts"
   ],
   "exclude": []
 }

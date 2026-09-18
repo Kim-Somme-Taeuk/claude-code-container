@@ -8,7 +8,8 @@
   },
   "include": [
     "src/hyper-v-windows/**/*.ts",
-    "src/__tests__/hyper-v-windows-network-type-contracts.ts"
+    "src/__tests__/hyper-v-windows-network-type-contracts.ts",
+    "src/__tests__/hyper-v-windows-vm-create-type-contracts.ts"
   ],
   "exclude": []
 }

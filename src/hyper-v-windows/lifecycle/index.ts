@@ -58,3 +58,14 @@ export type {
     HyperVBootstrapHostObservation,
     HyperVBootstrapTeardownDecision,
 } from "./vm-network-contracts.js";
+export {
+    planHyperVVirtualMachineCreation,
+    planHyperVVirtualMachineCreationCompensation,
+} from "./vm-create-reconcile.js";
+export type {
+    HyperVCreateCompensation,
+    HyperVCreateEffect,
+    HyperVCreateNetworkIntent,
+    HyperVCreateStep,
+    HyperVCreateVirtualMachineRequest,
+} from "./vm-create-contracts.js";

@@ -284,9 +284,15 @@ describe("Hyper-V Windows PowerShell transport", () => {
         // Every VM-scoped operation resolves exactly one virtual machine before touching it,
         // and Get-VM itself is the only exception. The count rises with each such operation:
         // the disk, DVD and snapshot reads, start, stop, remove, checkpoint, snapshot removal
-        // and restore, plus the VM-scoped adapter read and the adapter removal.
+        // and restore, plus the VM-scoped adapter read and the adapter removal -- and, from
+        // the creation slice, the VM/memory/processor/BIOS settings, the firmware read and
+        // write, and the adapter add, rename and address.
+        //
+        // New-VM is deliberately absent: it is the call that brings the VM into existence, so
+        // there is nothing to resolve. If it ever appears in this count, it has been given a
+        // selector it cannot have.
         expect(source.match(/\$VirtualMachine = Assert-HyperVWindowsSingleVirtualMachine \$VirtualMachines/g))
-            .toHaveLength(11);
+            .toHaveLength(20);
         expect(source).toContain("Get-VMSnapshot -VM $VirtualMachine -ErrorAction Stop");
         expect(source).toContain("Checkpoint-VM -VM $VirtualMachine -SnapshotName $SnapshotName -Passthru -ErrorAction Stop");
         expect(source).toContain("Remove-VMSnapshot -VMSnapshot $Snapshot -Confirm:$false -ErrorAction Stop");

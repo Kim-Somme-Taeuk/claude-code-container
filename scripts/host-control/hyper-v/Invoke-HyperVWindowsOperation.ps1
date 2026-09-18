@@ -229,6 +229,18 @@ function Convert-HyperVWindowsVMNetworkAdapter([object]$Adapter) {
     }
 }
 
+# Hyper-V permits two adapters on one VM to share a name, so a name alone is not an identity.
+# The non-destructive adapter operations still resolve through it because that is the only handle
+# their callers hold; refusing an ambiguous match here keeps them from acting on the wrong one.
+function Get-HyperVWindowsVMNetworkAdapterByName([object]$VirtualMachine, [string]$AdapterName) {
+    $AdapterMatches = @(Hyper-V\Get-VMNetworkAdapter -VM $VirtualMachine -ErrorAction Stop | Where-Object {
+        [string]$_.Name -ceq $AdapterName
+    })
+    if ($AdapterMatches.Count -eq 0) { throw "vm-network-adapter-not-found" }
+    if ($AdapterMatches.Count -ne 1) { throw "vm-network-adapter-ambiguous" }
+    return $AdapterMatches[0]
+}
+
 function Convert-HyperVWindowsHostNetworkAdapter([object]$Adapter) {
     [ordered]@{
         interfaceIndex = [int]$Adapter.ifIndex
@@ -305,15 +317,24 @@ try {
         "Start-VM", "Stop-VM", "Remove-VM",
         "Checkpoint-VM", "Remove-VMSnapshot", "Restore-VMSnapshot",
         "Get-VMSwitch", "New-VMSwitch", "Set-VMSwitch", "Remove-VMSwitch",
-        "Get-VMNetworkAdapter", "Remove-VMNetworkAdapter", "Get-NetAdapter",
+        "New-VM", "Set-VM", "Set-VMMemory", "Set-VMProcessor",
+        "Get-VMFirmware", "Set-VMFirmware", "Set-VMBios",
+        "Get-VMNetworkAdapter", "Add-VMNetworkAdapter", "Rename-VMNetworkAdapter",
+        "Set-VMNetworkAdapter", "Remove-VMNetworkAdapter", "Get-NetAdapter",
         "Get-NetIPAddress", "New-NetIPAddress", "Remove-NetIPAddress", "Get-NetNeighbor",
         "Get-NetNat", "New-NetNat", "Remove-NetNat"
     )) {
         throw "operation-invalid"
     }
+    # New-VM is deliberately absent: it creates the virtual machine, so there is no existing
+    # record for a selector to resolve. Every other virtual-machine operation names one that
+    # must already exist, and is refused here before any native call when it does not.
     $VmSelectorOperations = @(
         "Get-VMHardDiskDrive", "Get-VMDvdDrive", "Get-VMSnapshot", "Start-VM", "Stop-VM",
         "Remove-VM", "Checkpoint-VM", "Remove-VMSnapshot", "Restore-VMSnapshot",
+        "Set-VM", "Set-VMMemory", "Set-VMProcessor",
+        "Get-VMFirmware", "Set-VMFirmware", "Set-VMBios",
+        "Add-VMNetworkAdapter", "Rename-VMNetworkAdapter", "Set-VMNetworkAdapter",
         "Remove-VMNetworkAdapter"
     )
     $GetVmByNames = $Operation -eq "Get-VM" -and $null -ne $Request.names
@@ -340,6 +361,9 @@ try {
         "Get-VM", "Get-VMHardDiskDrive", "Get-VMDvdDrive", "Get-VMSnapshot", "Start-VM", "Stop-VM",
         "Remove-VM", "Checkpoint-VM", "Remove-VMSnapshot", "Restore-VMSnapshot",
         "Get-VMSwitch", "New-VMSwitch", "Set-VMSwitch", "Remove-VMSwitch", "Get-VMNetworkAdapter",
+        "New-VM", "Set-VM", "Set-VMMemory", "Set-VMProcessor",
+        "Get-VMFirmware", "Set-VMFirmware", "Set-VMBios",
+        "Add-VMNetworkAdapter", "Rename-VMNetworkAdapter", "Set-VMNetworkAdapter",
         "Remove-VMNetworkAdapter"
     )) { Import-HyperVWindowsTrustedModule "Hyper-V" }
     if ($Operation -eq "Get-NetAdapter") { Import-HyperVWindowsTrustedModule "NetAdapter" }
@@ -500,6 +524,154 @@ try {
             Hyper-V\Remove-VMSwitch -VMSwitch $VirtualSwitch -Force -Confirm:$false -ErrorAction Stop
             Write-HyperVWindowsSuccess $Operation @()
         }
+        "New-VM" {
+            $VirtualMachineName = [string]$Request.name
+            if ([string]::IsNullOrEmpty($VirtualMachineName)) { throw "virtual-machine-name-invalid" }
+            $Generation = [int]$Request.generation
+            if ($Generation -notin @(1, 2)) { throw "virtual-machine-generation-invalid" }
+            $MemoryStartupBytes = [long]$Request.memoryStartupBytes
+            if ($MemoryStartupBytes -le 0) { throw "virtual-machine-memory-invalid" }
+            # Splatted rather than branched over every present/absent combination: the optional
+            # disk and switch are independent, and the parameters they select belong to different
+            # native parameter sets, so a literal call per combination is four calls to keep in
+            # agreement. Every value here is still a bound parameter, never command text.
+            $NewVmParameters = @{
+                Name = $VirtualMachineName
+                Generation = $Generation
+                MemoryStartupBytes = $MemoryStartupBytes
+                ErrorAction = "Stop"
+            }
+            if ($null -ne $Request.vhdPath) {
+                $VhdPath = [string]$Request.vhdPath
+                if ([string]::IsNullOrEmpty($VhdPath)) { throw "virtual-machine-vhd-path-invalid" }
+                $NewVmParameters["VHDPath"] = $VhdPath
+            } else {
+                # Absent means create the VM with no disk attached, and -NoVHD is the native
+                # parameter set that says so. Stated rather than left to the default, because
+                # the other two sets create a VHDX this library never asked for and, having no
+                # record of, would never clean up.
+                $NewVmParameters["NoVHD"] = $true
+            }
+            if ($null -ne $Request.switchName) {
+                $SwitchName = [string]$Request.switchName
+                if ([string]::IsNullOrEmpty($SwitchName)) { throw "virtual-switch-name-invalid" }
+                $NewVmParameters["SwitchName"] = $SwitchName
+            }
+            $Created = @(Hyper-V\New-VM @NewVmParameters)
+            if ($Created.Count -ne 1) { throw "virtual-machine-create-result-ambiguous" }
+            Write-HyperVWindowsSuccess $Operation @(Convert-HyperVWindowsVirtualMachine $Created[0])
+        }
+        "Set-VM" {
+            $VirtualMachine = Assert-HyperVWindowsSingleVirtualMachine $VirtualMachines
+            $SetVmParameters = @{ VM = $VirtualMachine; ErrorAction = "Stop" }
+            $AppliedSettings = 0
+            if ($null -ne $Request.notes) {
+                $SetVmParameters["Notes"] = [string]$Request.notes
+                $AppliedSettings++
+            }
+            if ($null -ne $Request.automaticCheckpointsEnabled) {
+                if ($Request.automaticCheckpointsEnabled -isnot [bool]) { throw "automatic-checkpoints-setting-invalid" }
+                $SetVmParameters["AutomaticCheckpointsEnabled"] = [bool]$Request.automaticCheckpointsEnabled
+                $AppliedSettings++
+            }
+            if ($null -ne $Request.checkpointType) {
+                $CheckpointType = [string]$Request.checkpointType
+                if ($CheckpointType -notin @("Disabled", "Production", "ProductionOnly", "Standard")) {
+                    throw "checkpoint-type-invalid"
+                }
+                $SetVmParameters["CheckpointType"] = $CheckpointType
+                $AppliedSettings++
+            }
+            # Native applies only the parameters it is given, so a request naming none of them is
+            # a call that reports success without changing anything. Refused here as well as in
+            # the caller, because a no-op indistinguishable from a mutation is the one result
+            # neither side can audit afterwards.
+            if ($AppliedSettings -eq 0) { throw "virtual-machine-settings-empty" }
+            Hyper-V\Set-VM @SetVmParameters
+            Write-HyperVWindowsSuccess $Operation @()
+        }
+        "Set-VMMemory" {
+            $VirtualMachine = Assert-HyperVWindowsSingleVirtualMachine $VirtualMachines
+            if ($Request.dynamicMemoryEnabled -isnot [bool]) { throw "dynamic-memory-setting-invalid" }
+            Hyper-V\Set-VMMemory -VM $VirtualMachine -DynamicMemoryEnabled ([bool]$Request.dynamicMemoryEnabled) -ErrorAction Stop
+            Write-HyperVWindowsSuccess $Operation @()
+        }
+        "Set-VMProcessor" {
+            $VirtualMachine = Assert-HyperVWindowsSingleVirtualMachine $VirtualMachines
+            $ProcessorCount = [int]$Request.count
+            if ($ProcessorCount -lt 1) { throw "virtual-machine-processor-count-invalid" }
+            Hyper-V\Set-VMProcessor -VM $VirtualMachine -Count $ProcessorCount -ErrorAction Stop
+            Write-HyperVWindowsSuccess $Operation @()
+        }
+        "Get-VMFirmware" {
+            $VirtualMachine = Assert-HyperVWindowsSingleVirtualMachine $VirtualMachines
+            $Firmware = Hyper-V\Get-VMFirmware -VM $VirtualMachine -ErrorAction Stop
+            # Only a disk entry carries a path; a network or DVD entry has none. Reporting "" for
+            # those would be a value that compares equal to nothing the caller can check, so the
+            # absent case stays absent.
+            $BootOrder = @($Firmware.BootOrder)
+            $FirstBootDevicePath = $null
+            if ($BootOrder.Count -ge 1) {
+                $FirstBootDevice = $BootOrder[0].Device
+                if ($null -ne $FirstBootDevice -and -not [string]::IsNullOrEmpty([string]$FirstBootDevice.Path)) {
+                    $FirstBootDevicePath = [string]$FirstBootDevice.Path
+                }
+            }
+            $FirmwareItem = [ordered]@{
+                # Taken from the resolved VM rather than from the firmware record. The two are
+                # the same id, but this one is already proven to exist -- selector resolution
+                # produced it -- whereas VMFirmware.VMId is an assumption no test on this host
+                # can check, and there is no PowerShell here to check it with.
+                vmId = ([Guid]$VirtualMachine.Id).ToString("D").ToLowerInvariant()
+                secureBoot = [string]$Firmware.SecureBoot
+                secureBootTemplate = if ($null -eq $Firmware.SecureBootTemplate) { "" } else { [string]$Firmware.SecureBootTemplate }
+                firstBootDevicePath = $FirstBootDevicePath
+            }
+            Write-HyperVWindowsSuccess $Operation @($FirmwareItem)
+        }
+        "Set-VMFirmware" {
+            $VirtualMachine = Assert-HyperVWindowsSingleVirtualMachine $VirtualMachines
+            $SecureBoot = $Request.secureBoot
+            if ($null -eq $SecureBoot -or $SecureBoot.enabled -isnot [bool]) { throw "secure-boot-setting-invalid" }
+            $FirmwareParameters = @{ VM = $VirtualMachine; ErrorAction = "Stop" }
+            if ([bool]$SecureBoot.enabled) {
+                $SecureBootTemplate = [string]$SecureBoot.template
+                if ([string]::IsNullOrEmpty($SecureBootTemplate)) { throw "secure-boot-template-invalid" }
+                $FirmwareParameters["EnableSecureBoot"] = "On"
+                # Native rejects a template while Secure Boot is off, so the parameter is only
+                # ever present on the enabled branch rather than passed with an empty value.
+                $FirmwareParameters["SecureBootTemplate"] = $SecureBootTemplate
+            } else {
+                $FirmwareParameters["EnableSecureBoot"] = "Off"
+            }
+            if ($null -ne $Request.firstBootDiskPath) {
+                $FirstBootDiskPath = [string]$Request.firstBootDiskPath
+                if ([string]::IsNullOrEmpty($FirstBootDiskPath)) { throw "vm-first-boot-disk-path-invalid" }
+                # The caller names the boot entry by the disk path it holds; native wants the
+                # device object. Case-insensitive because Windows path identity is, and exactly
+                # one match because a boot order pointed at a guessed device boots the wrong disk.
+                $FirstBootDisks = @(Hyper-V\Get-VMHardDiskDrive -VM $VirtualMachine -ErrorAction Stop | Where-Object {
+                    -not [string]::IsNullOrEmpty([string]$_.Path) -and [string]$_.Path -ieq $FirstBootDiskPath
+                })
+                if ($FirstBootDisks.Count -eq 0) { throw "vm-first-boot-disk-not-found" }
+                if ($FirstBootDisks.Count -ne 1) { throw "vm-first-boot-disk-ambiguous" }
+                $FirmwareParameters["FirstBootDevice"] = $FirstBootDisks[0]
+            }
+            Hyper-V\Set-VMFirmware @FirmwareParameters
+            Write-HyperVWindowsSuccess $Operation @()
+        }
+        "Set-VMBios" {
+            $VirtualMachine = Assert-HyperVWindowsSingleVirtualMachine $VirtualMachines
+            $StartupOrder = @(@($Request.startupOrder) | ForEach-Object { [string]$_ })
+            if ($StartupOrder.Count -lt 1) { throw "vm-bios-startup-order-invalid" }
+            foreach ($StartupDevice in $StartupOrder) {
+                if ($StartupDevice -notin @("IDE", "CD", "LegacyNetworkAdapter", "Floppy")) {
+                    throw "vm-bios-startup-order-invalid"
+                }
+            }
+            Hyper-V\Set-VMBios -VM $VirtualMachine -StartupOrder $StartupOrder -ErrorAction Stop
+            Write-HyperVWindowsSuccess $Operation @()
+        }
         "Get-VMNetworkAdapter" {
             $Adapters = if ($GetAdaptersByVm) {
                 $VirtualMachine = Assert-HyperVWindowsSingleVirtualMachine $VirtualMachines
@@ -511,6 +683,41 @@ try {
             }
             $Items = @($Adapters | ForEach-Object { Convert-HyperVWindowsVMNetworkAdapter $_ })
             Write-HyperVWindowsSuccess $Operation $Items
+        }
+        "Add-VMNetworkAdapter" {
+            $VirtualMachine = Assert-HyperVWindowsSingleVirtualMachine $VirtualMachines
+            $AdapterName = [string]$Request.name
+            if ([string]::IsNullOrEmpty($AdapterName)) { throw "vm-network-adapter-name-invalid" }
+            $SwitchName = [string]$Request.switchName
+            if ([string]::IsNullOrEmpty($SwitchName)) { throw "virtual-switch-name-invalid" }
+            Hyper-V\Add-VMNetworkAdapter -VM $VirtualMachine -Name $AdapterName -SwitchName $SwitchName -ErrorAction Stop
+            Write-HyperVWindowsSuccess $Operation @()
+        }
+        "Rename-VMNetworkAdapter" {
+            $VirtualMachine = Assert-HyperVWindowsSingleVirtualMachine $VirtualMachines
+            $AdapterName = [string]$Request.name
+            if ([string]::IsNullOrEmpty($AdapterName)) { throw "vm-network-adapter-name-invalid" }
+            $NewAdapterName = [string]$Request.newName
+            if ([string]::IsNullOrEmpty($NewAdapterName)) { throw "vm-network-adapter-new-name-invalid" }
+            $Adapter = Get-HyperVWindowsVMNetworkAdapterByName $VirtualMachine $AdapterName
+            Hyper-V\Rename-VMNetworkAdapter -VMNetworkAdapter $Adapter -NewName $NewAdapterName -ErrorAction Stop
+            Write-HyperVWindowsSuccess $Operation @()
+        }
+        "Set-VMNetworkAdapter" {
+            $VirtualMachine = Assert-HyperVWindowsSingleVirtualMachine $VirtualMachines
+            $AdapterName = [string]$Request.name
+            if ([string]::IsNullOrEmpty($AdapterName)) { throw "vm-network-adapter-name-invalid" }
+            # Normalised to bare hex the same way the remove branch normalises its expected
+            # address, so one spelling of a MAC reaches native no matter which one the caller
+            # records. The all-zero address is native's "not assigned yet" placeholder, not an
+            # address anything may be set to.
+            $StaticMacAddress = ([string]$Request.staticMacAddress -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
+            if ($StaticMacAddress -notmatch '^[0-9A-F]{12}$' -or $StaticMacAddress -eq '000000000000') {
+                throw "vm-network-adapter-mac-invalid"
+            }
+            $Adapter = Get-HyperVWindowsVMNetworkAdapterByName $VirtualMachine $AdapterName
+            Hyper-V\Set-VMNetworkAdapter -VMNetworkAdapter $Adapter -StaticMacAddress $StaticMacAddress -ErrorAction Stop
+            Write-HyperVWindowsSuccess $Operation @()
         }
         "Remove-VMNetworkAdapter" {
             $VirtualMachine = Assert-HyperVWindowsSingleVirtualMachine $VirtualMachines

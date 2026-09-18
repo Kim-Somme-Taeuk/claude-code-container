@@ -1,14 +1,26 @@
 import type {
+    HyperVAddVMNetworkAdapterRequest,
+    HyperVBiosStartupDevice,
     HyperVCheckpointVirtualMachineRequest,
     HyperVDvdDrive,
     HyperVHardDiskDrive,
+    HyperVNewVirtualMachineRequest,
     HyperVRemoveSnapshotRequest,
     HyperVRemoveVirtualMachineRequest,
+    HyperVRenameVMNetworkAdapterRequest,
     HyperVRestoreSnapshotRequest,
+    HyperVSecureBootSetting,
+    HyperVSetVirtualMachineRequest,
+    HyperVSetVMBiosRequest,
+    HyperVSetVMFirmwareRequest,
+    HyperVSetVMMemoryRequest,
+    HyperVSetVMNetworkAdapterRequest,
+    HyperVSetVMProcessorRequest,
     HyperVSnapshotSelector,
     HyperVStartVirtualMachineRequest,
     HyperVStopVirtualMachineRequest,
     HyperVVirtualMachine,
+    HyperVVirtualMachineFirmware,
     HyperVVirtualMachineSelector,
     HyperVVirtualMachineSnapshot,
     HyperVWindowsCallOptions,
@@ -318,6 +330,49 @@ function expectNoItems(operation: HyperVWindowsOperation, envelope: SuccessEnvel
     if (envelope.items.length !== 0) throw error("protocol", operation, "result-ambiguous");
 }
 
+const BIOS_STARTUP_DEVICES: readonly HyperVBiosStartupDevice[] = ["IDE", "CD", "LegacyNetworkAdapter", "Floppy"];
+// Hyper-V's own floor. Below it native refuses, and a request that cannot succeed should fail
+// here rather than after a process launch.
+const MINIMUM_MEMORY_BYTES = 32 * 1024 * 1024;
+const MAXIMUM_PROCESSOR_COUNT = 512;
+
+function parseVirtualMachineFirmware(value: unknown): HyperVVirtualMachineFirmware | null {
+    const item = record(value);
+    if (!item || !hasExactKeys(item, ["vmId", "secureBoot", "secureBootTemplate", "firstBootDevicePath"])) return null;
+    const vmId = canonicalGuid(item.vmId);
+    if (!vmId || !boundedString(item.secureBoot, false) || !boundedString(item.secureBootTemplate)) return null;
+    // Absent is a real answer here: the first boot entry may be a network or DVD device, which
+    // has no path. A caller checking "does the VM boot from my disk" must be able to tell that
+    // apart from a path that failed to decode, so only null and a usable string are accepted.
+    if (item.firstBootDevicePath !== null && !boundedString(item.firstBootDevicePath, false)) return null;
+    return {
+        vmId,
+        secureBoot: item.secureBoot,
+        secureBootTemplate: item.secureBootTemplate,
+        firstBootDevicePath: item.firstBootDevicePath as string | null,
+    };
+}
+
+// Secure Boot off carries no template, because native rejects one. Validating the pair here
+// keeps the client from sending a combination the host will only reject after a process launch.
+function normalizeSecureBoot(
+    operation: HyperVWindowsOperation,
+    setting: HyperVSecureBootSetting,
+): HyperVSecureBootSetting {
+    const candidate = record(setting);
+    if (!candidate) throw error("validation", operation, "secure-boot-invalid");
+    if (candidate.enabled === false) {
+        if (!hasExactKeys(candidate, ["enabled"])) throw error("validation", operation, "secure-boot-invalid");
+        return { enabled: false };
+    }
+    if (candidate.enabled === true) {
+        if (!hasExactKeys(candidate, ["enabled", "template"])) throw error("validation", operation, "secure-boot-invalid");
+        if (!validNativeName(candidate.template)) throw error("validation", operation, "secure-boot-template-invalid");
+        return { enabled: true, template: candidate.template };
+    }
+    throw error("validation", operation, "secure-boot-invalid");
+}
+
 function decodeSingleItem<T>(
     operation: HyperVWindowsOperation,
     envelope: SuccessEnvelope,
@@ -440,6 +495,195 @@ export function createHyperVWindowsClient(executor: HyperVWindowsExecutor): Hype
                 operation,
                 selector: normalizeSelector(operation, request?.selector),
                 snapshot: normalizeSnapshotSelector(operation, request?.snapshot),
+            }, options);
+            expectNoItems(operation, envelope);
+        },
+        async newVM(request: HyperVNewVirtualMachineRequest, options?: HyperVWindowsCallOptions) {
+            const operation = "New-VM";
+            if (!request || !validNativeName(request.name)) throw error("validation", operation, "name-invalid");
+            if (request.generation !== 1 && request.generation !== 2) {
+                throw error("validation", operation, "generation-invalid");
+            }
+            if (!safeInteger(request.memoryStartupBytes, MINIMUM_MEMORY_BYTES)) {
+                throw error("validation", operation, "memory-startup-bytes-invalid");
+            }
+            if (request.vhdPath !== undefined && !boundedString(request.vhdPath, false)) {
+                throw error("validation", operation, "vhd-path-invalid");
+            }
+            if (request.switchName !== undefined && !validNativeName(request.switchName)) {
+                throw error("validation", operation, "switch-name-invalid");
+            }
+            const envelope = await execute(executor, {
+                schemaVersion: 1,
+                operation,
+                name: request.name,
+                generation: request.generation,
+                memoryStartupBytes: request.memoryStartupBytes,
+                ...(request.vhdPath === undefined ? {} : { vhdPath: request.vhdPath }),
+                ...(request.switchName === undefined ? {} : { switchName: request.switchName }),
+            }, options);
+            // Decoded, not assumed: the id native assigns is what every following step selects
+            // by, so reading it back from the creating call is what keeps the rest of creation
+            // from having to re-find the VM by a name that is not unique until it exists.
+            return decodeSingleItem(operation, envelope, parseVirtualMachine);
+        },
+        async setVM(request: HyperVSetVirtualMachineRequest, options?: HyperVWindowsCallOptions) {
+            const operation = "Set-VM";
+            if (!request) throw error("validation", operation, "request-invalid");
+            if (request.notes !== undefined && !boundedString(request.notes)) {
+                throw error("validation", operation, "notes-invalid");
+            }
+            if (request.automaticCheckpointsEnabled !== undefined
+                && typeof request.automaticCheckpointsEnabled !== "boolean") {
+                throw error("validation", operation, "automatic-checkpoints-enabled-invalid");
+            }
+            if (request.checkpointType !== undefined
+                && !["Disabled", "Production", "ProductionOnly", "Standard"].includes(request.checkpointType)) {
+                throw error("validation", operation, "checkpoint-type-invalid");
+            }
+            // Native applies only the parameters it is given, so a request naming none of them
+            // is a call that mutates nothing. Refusing it keeps a caller from reading success
+            // as "the settings I meant were applied".
+            if (request.notes === undefined
+                && request.automaticCheckpointsEnabled === undefined
+                && request.checkpointType === undefined) {
+                throw error("validation", operation, "request-empty");
+            }
+            const envelope = await execute(executor, {
+                schemaVersion: 1,
+                operation,
+                selector: normalizeSelector(operation, request.selector),
+                ...(request.notes === undefined ? {} : { notes: request.notes }),
+                ...(request.automaticCheckpointsEnabled === undefined
+                    ? {}
+                    : { automaticCheckpointsEnabled: request.automaticCheckpointsEnabled }),
+                ...(request.checkpointType === undefined ? {} : { checkpointType: request.checkpointType }),
+            }, options);
+            expectNoItems(operation, envelope);
+        },
+        async setVMMemory(request: HyperVSetVMMemoryRequest, options?: HyperVWindowsCallOptions) {
+            const operation = "Set-VMMemory";
+            if (!request || typeof request.dynamicMemoryEnabled !== "boolean") {
+                throw error("validation", operation, "dynamic-memory-enabled-invalid");
+            }
+            const envelope = await execute(executor, {
+                schemaVersion: 1,
+                operation,
+                selector: normalizeSelector(operation, request.selector),
+                dynamicMemoryEnabled: request.dynamicMemoryEnabled,
+            }, options);
+            expectNoItems(operation, envelope);
+        },
+        async setVMProcessor(request: HyperVSetVMProcessorRequest, options?: HyperVWindowsCallOptions) {
+            const operation = "Set-VMProcessor";
+            if (!request || !safeInteger(request.count, 1) || request.count > MAXIMUM_PROCESSOR_COUNT) {
+                throw error("validation", operation, "count-invalid");
+            }
+            const envelope = await execute(executor, {
+                schemaVersion: 1,
+                operation,
+                selector: normalizeSelector(operation, request.selector),
+                count: request.count,
+            }, options);
+            expectNoItems(operation, envelope);
+        },
+        async getVMFirmware(selector: HyperVVirtualMachineSelector, options?: HyperVWindowsCallOptions) {
+            const operation = "Get-VMFirmware";
+            const envelope = await execute(executor, {
+                schemaVersion: 1,
+                operation,
+                selector: normalizeSelector(operation, selector),
+            }, options);
+            return decodeSingleItem(operation, envelope, parseVirtualMachineFirmware);
+        },
+        async setVMFirmware(request: HyperVSetVMFirmwareRequest, options?: HyperVWindowsCallOptions) {
+            const operation = "Set-VMFirmware";
+            if (!request) throw error("validation", operation, "request-invalid");
+            if (request.firstBootDiskPath !== undefined && !boundedString(request.firstBootDiskPath, false)) {
+                throw error("validation", operation, "first-boot-disk-path-invalid");
+            }
+            const envelope = await execute(executor, {
+                schemaVersion: 1,
+                operation,
+                selector: normalizeSelector(operation, request.selector),
+                secureBoot: normalizeSecureBoot(operation, request.secureBoot),
+                ...(request.firstBootDiskPath === undefined ? {} : { firstBootDiskPath: request.firstBootDiskPath }),
+            }, options);
+            expectNoItems(operation, envelope);
+        },
+        async setVMBios(request: HyperVSetVMBiosRequest, options?: HyperVWindowsCallOptions) {
+            const operation = "Set-VMBios";
+            if (!request || !Array.isArray(request.startupOrder) || request.startupOrder.length === 0) {
+                throw error("validation", operation, "startup-order-invalid");
+            }
+            if (request.startupOrder.length > BIOS_STARTUP_DEVICES.length) {
+                throw error("validation", operation, "startup-order-invalid");
+            }
+            for (const device of request.startupOrder) {
+                if (!BIOS_STARTUP_DEVICES.includes(device)) {
+                    throw error("validation", operation, "startup-order-device-invalid");
+                }
+            }
+            // Native keeps the order given and ignores a repeat, so a duplicate means the
+            // caller believes it asked for something the host will not do.
+            if (new Set(request.startupOrder).size !== request.startupOrder.length) {
+                throw error("validation", operation, "startup-order-duplicated");
+            }
+            const envelope = await execute(executor, {
+                schemaVersion: 1,
+                operation,
+                selector: normalizeSelector(operation, request.selector),
+                startupOrder: [...request.startupOrder],
+            }, options);
+            expectNoItems(operation, envelope);
+        },
+        async addVMNetworkAdapter(request: HyperVAddVMNetworkAdapterRequest, options?: HyperVWindowsCallOptions) {
+            const operation = "Add-VMNetworkAdapter";
+            if (!request || !validNativeName(request.name)) throw error("validation", operation, "name-invalid");
+            if (!validNativeName(request.switchName)) throw error("validation", operation, "switch-name-invalid");
+            const envelope = await execute(executor, {
+                schemaVersion: 1,
+                operation,
+                selector: normalizeSelector(operation, request.selector),
+                name: request.name,
+                switchName: request.switchName,
+            }, options);
+            expectNoItems(operation, envelope);
+        },
+        async renameVMNetworkAdapter(request: HyperVRenameVMNetworkAdapterRequest, options?: HyperVWindowsCallOptions) {
+            const operation = "Rename-VMNetworkAdapter";
+            if (!request || !validNativeName(request.name)) throw error("validation", operation, "name-invalid");
+            if (!validNativeName(request.newName)) throw error("validation", operation, "new-name-invalid");
+            // A rename to the name it already has is not a rename. Native accepts it, but the
+            // caller asking for it has confused two adapters or two states of one.
+            if (request.name === request.newName) throw error("validation", operation, "new-name-unchanged");
+            const envelope = await execute(executor, {
+                schemaVersion: 1,
+                operation,
+                selector: normalizeSelector(operation, request.selector),
+                name: request.name,
+                newName: request.newName,
+            }, options);
+            expectNoItems(operation, envelope);
+        },
+        async setVMNetworkAdapter(request: HyperVSetVMNetworkAdapterRequest, options?: HyperVWindowsCallOptions) {
+            const operation = "Set-VMNetworkAdapter";
+            if (!request || !validNativeName(request.name)) throw error("validation", operation, "name-invalid");
+            // Canonicalised to bare uppercase hex, which is the only spelling native accepts
+            // for -StaticMacAddress. The all-zero address is refused: native reports it for an
+            // adapter with no address yet, so setting it would be asking for that state rather
+            // than for an address.
+            const macAddress = typeof request.staticMacAddress === "string"
+                ? request.staticMacAddress.replace(/[:-]/g, "").toUpperCase()
+                : "";
+            if (!/^[0-9A-F]{12}$/.test(macAddress)) throw error("validation", operation, "static-mac-address-invalid");
+            if (macAddress === "000000000000") throw error("validation", operation, "static-mac-address-unassigned");
+            const envelope = await execute(executor, {
+                schemaVersion: 1,
+                operation,
+                selector: normalizeSelector(operation, request.selector),
+                name: request.name,
+                staticMacAddress: macAddress,
             }, options);
             expectNoItems(operation, envelope);
         },

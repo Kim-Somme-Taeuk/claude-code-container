@@ -128,7 +128,9 @@ are not Hyper-V operations and would contradict this boundary.
 | 2A. Host networking | host-fabric portions of `hyperVEnsureNetworkCommand`, `hyperVCleanupNetworkCommand`, and `hyperVInspectNetworkAllocationsCommand` | switch, host-adapter/interface, gateway, NAT, attachment, and bounded exact-name VM inventory primitives |
 | 2B. VM networking (done) | `hyperVBootstrapNetworkCommand`, `hyperVBootstrapNetworkCleanupCommand` | VM-scoped and management-OS `Get-VMNetworkAdapter`, `Get-NetNeighbor`, `Remove-VMNetworkAdapter` |
 | 2C. Setup-network retirement (done) | private network ensure logic embedded in the Windows setup command | reuses the typed 2A adapter; no second host-fabric implementation |
-| 3. Creation and VHD | `hyperVCreateCommand`, the VHD portion of `hyperVPrepareBaseImageCommand` | `New-VM`, `Set-VMMemory`, `Set-VMProcessor`, `Set-VMFirmware`, `Add-VMHardDiskDrive`, `Add-VMDvdDrive`, `New-VHD`, `Convert-VHD`, `Optimize-VHD` |
+| 3A. Creation primitives and compensation (done) | none yet — nothing is routed | `New-VM`, `Set-VM`, `Set-VMMemory`, `Set-VMProcessor`, `Get-VMFirmware`, `Set-VMFirmware`, `Set-VMBios`, `Add-VMNetworkAdapter`, `Rename-VMNetworkAdapter`, `Set-VMNetworkAdapter` |
+| 3B. The create transaction moves | `hyperVCreateCommand` | none new — routes 3A's primitives and moves host capacity, ACL, hashing and the disk copy into Node |
+| 3C. VHD | the VHD portion of `hyperVPrepareBaseImageCommand` | `Get-VHD`, `New-VHD`, `Convert-VHD`, `Optimize-VHD`, `Resize-VHD`, `Mount-VHD`, `Dismount-VHD` |
 | 4. Guest PowerShell Direct | `hyperVGuestExecCommand`, `hyperVGuestUploadCommand`, `hyperVGuestDownloadCommand`, `hyperVGuestReadyCommand`, `hyperVGuestBootDiagnosticCommand`, `hyperVGuestProvisionCommand` | PowerShell Direct session primitives |
 | 5. Lifecycle residue | `hyperVStatusCommand`, `hyperVRebootCommand`, `hyperVDeleteCommand`, `hyperVRecoverOrphanCommand` | `Restart-VM`, plus adapter migration onto the existing operations |
 
@@ -170,6 +172,55 @@ Slice 2B (done) moved the two bootstrap commands the roadmap names. Slice 2C
 setup. Image acquisition and the Linux SSH/cloud-init paths remain in
 host-control: they are not Hyper-V primitives and are not part of any slice 2
 claim.
+
+### What slice 3A settled
+
+**Slice 3 is three slices, and not for the reason first assumed.** The expected
+difficulty was rollback atomicity. Measuring `hyperVCreateCommand` found two
+larger facts. Roughly 60% of its 261 lines contain no Hyper-V cmdlet at all —
+host capacity via CIM, `Get-PSDrive`, reparse-point checks, ACL application and
+verification, SHA-256 over a multi-GB file, and a streaming byte copy. Under
+this ADR those do not belong in `hyper-v-windows/`, by the same rule that keeps
+image acquisition in host-control. They also need not stay in PowerShell:
+`providerCommandForCreate` already calls `lstatSync` on the base image, so the
+broker's Node process reaches that filesystem directly.
+
+The second fact is the harder one. Slices 2A and 2B replaced a seam inside an
+`async` path. Creation is not reached that way — `providerCommandForCreate` is
+**synchronous** and returns a command descriptor for something else to run
+later. So creation cannot be migrated by substituting a typed client at the call
+site; the call site has to stop being a descriptor builder. That is a change to
+how creation is dispatched, not to how it is implemented, and it is why the
+slice is large.
+
+**Compensation derives from what was done, never from what was asked.** The
+legacy rollback kept `$CreatedVm` and `$DeviceRootExisted` and consulted those,
+not the request. That is reproduced here as recorded effects: a directory that
+already existed produces no effect, so nothing can remove it. Creation deleting
+a device root it found rather than made is the failure this shape exists to
+prevent, and re-deriving the undo from the request is exactly how that happens.
+
+Effects are undone in reverse, because the later a change was made the more it
+depends on the earlier ones — the VM holds its disk, the directory holds the
+disk. Applied to what the legacy script recorded, reverse order reproduces its
+rollback sequence exactly, which is how the two were checked against each other.
+Each entry is independent and best-effort, as the legacy `catch` was: a caller
+that stops at the first failure leaves the residue the rest exists to clear.
+
+**Generation and firmware are one value.** A generation-1 VM has a BIOS and no
+firmware object; a generation-2 VM has firmware and no BIOS. The legacy command
+carried the generation as a number beside the settings it applied, so nothing
+stopped the wrong branch being written, and "Secure Boot on generation 1" needed
+a runtime `throw` reached only on a real host. Modelled as a union, the pairing
+is the type: `Set-VMFirmware` takes only the generation-2 member and
+`Set-VMBios` only the generation-1 member, and Secure Boot disabled with a
+template — which native rejects — cannot be written either. Those three are
+pinned by a type-contract file that fails by compiling.
+
+**`New-VM` returns the VM it made.** Every later step selects by that id. A
+creating call that returned nothing would force a read-back by name, and a name
+is not unique until the VM exists — so the read-back would be the one step that
+cannot tell its own VM from someone else's.
 
 ### What slice 2B settled
 
