@@ -21,6 +21,7 @@ import type {
     HyperVStopVirtualMachineRequest,
     HyperVVirtualMachine,
     HyperVVirtualMachineFirmware,
+    HyperVVMNetworkAdapterTarget,
     HyperVVirtualMachineSelector,
     HyperVVirtualMachineSnapshot,
     HyperVWindowsCallOptions,
@@ -334,6 +335,9 @@ const BIOS_STARTUP_DEVICES: readonly HyperVBiosStartupDevice[] = ["IDE", "CD", "
 // Hyper-V's own floor. Below it native refuses, and a request that cannot succeed should fail
 // here rather than after a process launch.
 const MINIMUM_MEMORY_BYTES = 32 * 1024 * 1024;
+// Hyper-V's own per-VM ceiling. Like the memory floor above it this is a native fact, not a
+// consumer policy: a request above it cannot succeed, so it fails here rather than after a
+// process launch.
 const MAXIMUM_PROCESSOR_COUNT = 512;
 
 function parseVirtualMachineFirmware(value: unknown): HyperVVirtualMachineFirmware | null {
@@ -371,6 +375,27 @@ function normalizeSecureBoot(
         return { enabled: true, template: candidate.template };
     }
     throw error("validation", operation, "secure-boot-invalid");
+}
+
+// The adapter New-VM creates carries a display-language name, so a literal for it is wrong on
+// a localized host. `sole` says "the VM's only adapter" and resolves only when that is true --
+// the same assertion the PowerShell this replaces made before it took index 0.
+function normalizeAdapterTarget(
+    operation: HyperVWindowsOperation,
+    target: HyperVVMNetworkAdapterTarget,
+): HyperVVMNetworkAdapterTarget {
+    const candidate = record(target);
+    if (!candidate) throw error("validation", operation, "adapter-target-invalid");
+    if (candidate.kind === "sole") {
+        if (!hasExactKeys(candidate, ["kind"])) throw error("validation", operation, "adapter-target-invalid");
+        return { kind: "sole" };
+    }
+    if (candidate.kind === "name") {
+        if (!hasExactKeys(candidate, ["kind", "name"])) throw error("validation", operation, "adapter-target-invalid");
+        if (!validNativeName(candidate.name)) throw error("validation", operation, "adapter-target-name-invalid");
+        return { kind: "name", name: candidate.name };
+    }
+    throw error("validation", operation, "adapter-target-kind-invalid");
 }
 
 function decodeSingleItem<T>(
@@ -616,9 +641,6 @@ export function createHyperVWindowsClient(executor: HyperVWindowsExecutor): Hype
             if (!request || !Array.isArray(request.startupOrder) || request.startupOrder.length === 0) {
                 throw error("validation", operation, "startup-order-invalid");
             }
-            if (request.startupOrder.length > BIOS_STARTUP_DEVICES.length) {
-                throw error("validation", operation, "startup-order-invalid");
-            }
             for (const device of request.startupOrder) {
                 if (!BIOS_STARTUP_DEVICES.includes(device)) {
                     throw error("validation", operation, "startup-order-device-invalid");
@@ -652,23 +674,27 @@ export function createHyperVWindowsClient(executor: HyperVWindowsExecutor): Hype
         },
         async renameVMNetworkAdapter(request: HyperVRenameVMNetworkAdapterRequest, options?: HyperVWindowsCallOptions) {
             const operation = "Rename-VMNetworkAdapter";
-            if (!request || !validNativeName(request.name)) throw error("validation", operation, "name-invalid");
-            if (!validNativeName(request.newName)) throw error("validation", operation, "new-name-invalid");
+            if (!request || !validNativeName(request.newName)) throw error("validation", operation, "new-name-invalid");
+            const adapter = normalizeAdapterTarget(operation, request.adapter);
             // A rename to the name it already has is not a rename. Native accepts it, but the
-            // caller asking for it has confused two adapters or two states of one.
-            if (request.name === request.newName) throw error("validation", operation, "new-name-unchanged");
+            // caller asking for it has confused two adapters or two states of one. Only
+            // checkable when the target names one; `sole` does not know its own name yet.
+            if (adapter.kind === "name" && adapter.name === request.newName) {
+                throw error("validation", operation, "new-name-unchanged");
+            }
             const envelope = await execute(executor, {
                 schemaVersion: 1,
                 operation,
                 selector: normalizeSelector(operation, request.selector),
-                name: request.name,
+                adapter,
                 newName: request.newName,
             }, options);
             expectNoItems(operation, envelope);
         },
         async setVMNetworkAdapter(request: HyperVSetVMNetworkAdapterRequest, options?: HyperVWindowsCallOptions) {
             const operation = "Set-VMNetworkAdapter";
-            if (!request || !validNativeName(request.name)) throw error("validation", operation, "name-invalid");
+            if (!request) throw error("validation", operation, "request-invalid");
+            const adapter = normalizeAdapterTarget(operation, request.adapter);
             // Canonicalised to bare uppercase hex, which is the only spelling native accepts
             // for -StaticMacAddress. The all-zero address is refused: native reports it for an
             // adapter with no address yet, so setting it would be asking for that state rather
@@ -682,7 +708,7 @@ export function createHyperVWindowsClient(executor: HyperVWindowsExecutor): Hype
                 schemaVersion: 1,
                 operation,
                 selector: normalizeSelector(operation, request.selector),
-                name: request.name,
+                adapter,
                 staticMacAddress: macAddress,
             }, options);
             expectNoItems(operation, envelope);

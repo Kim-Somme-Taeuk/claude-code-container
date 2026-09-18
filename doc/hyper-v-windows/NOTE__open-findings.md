@@ -103,3 +103,59 @@ part of it.
 `device-lab-hyper-v-vm-network-adapter.test.ts` ends in a double assertion,
 which defeats part of the point of adding that file to `tsconfig.tests.json`.
 Pre-existing, from `6c7a59bd`.
+
+## From the slice 3A review (2026-09-18)
+
+Code review returned FAIL on four findings; all four were fixed. The ones below
+were judged real and deliberately left for the slice that owns the creation
+transaction, because each is about executing the plan rather than producing it.
+
+**Three legacy checks cannot be hoisted ahead of the plan.** The contracts file
+says non-mutating inspection belongs to the caller, which can refuse before
+anything starts. That is true of host capacity, ACLs and path checks; it is not
+true of these, which can only run partway through:
+
+- the bootstrap MAC conflict re-read after the adapter is addressed, which is
+  race detection between two devices deriving the same `06:` address;
+- the created-disk attachment check. It survives only incidentally and only for
+  generation 2, because the `Set-VMFirmware` branch resolves the disk by path.
+  A generation-1 VM goes to `Set-VMBios`, which resolves no disk, so for
+  generation 1 the check is gone outright;
+- the boot-order verification after firmware is set. 3A ships the primitive
+  (`getVMFirmware`) but no step kind can express a verification, only a mutation.
+
+A creation plan that can only describe mutations cannot describe its own
+preconditions. Whether verification becomes a step kind or stays the executor's
+job is the design question 3B opens with.
+
+**Stream disposal is a precondition of the disk delete, not just cleanup.** The
+legacy rollback disposes three file streams before deleting the disk, and the
+copy target is opened `FileShare::None` — so the delete takes a sharing
+violation if the handle is still open. Omitting the streams as *effects* is
+right (they are execution-time resources, not host residue), but the ordering
+obligation is real and is not stated in the compensation contract, which does
+spell out three other executor obligations.
+
+**The compensation contract does not carry the guards the legacy delete had.**
+Legacy wraps each rollback delete in `Assert-NoReparsePath` and uses
+`-Recurse -Force`. `delete-directory` says neither whether it is recursive nor
+that the path must not be a reparse point. A compensation that follows a
+junction out of the device root is the failure that guard exists to prevent.
+
+**A departure worth recording rather than fixing.** Legacy deletes the disk
+path unconditionally on failure, with no equivalent of `$DeviceRootExisted`, so
+it would delete a pre-existing disk when `CreateNew` failed. The effect-derived
+plan cannot do that, because a disk it did not create produces no effect. That
+is an improvement, not a port error.
+
+**The ownership marker is written late.** `set-vm-settings` carries it, and it
+runs after processor and memory, matching the legacy exactly. Until it runs the
+VM exists and orphan recovery cannot recognise it as ccc's. The legacy has the
+same exposure so 3A matches it, but whether creation should write the marker
+immediately after `New-VM` belongs to the slice that owns the transaction.
+
+**Five valid-but-wrong values still compile:** an empty `startupOrder`, a
+duplicated one, `{enabled: true, template: ""}`, and a `managed-and-bootstrap`
+intent whose two adapter names are equal. The client rejects the first three at
+runtime; the fourth produces a plan that renames and adds the same name, which
+native then refuses as ambiguous.

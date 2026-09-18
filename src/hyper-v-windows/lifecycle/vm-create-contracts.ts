@@ -1,4 +1,7 @@
-import type { HyperVVirtualMachineGeneration } from "../low-level/contracts.js";
+import type {
+    HyperVVirtualMachineGeneration,
+    HyperVVMNetworkAdapterTarget,
+} from "../low-level/contracts.js";
 
 /**
  * What one VM creation needs, with the parts that cannot vary together already resolved.
@@ -51,8 +54,11 @@ export type HyperVCreateNetworkIntent =
         readonly macAddress: string;
         readonly bootstrapSwitchName: string;
         readonly bootstrapAdapterName: string;
-        readonly bootstrapMacAddress: string;
     };
+// The bootstrap address is DERIVED from the managed one, never supplied beside it. The two
+// adapters of one device differ in the locally administered prefix and nowhere else, so a
+// second field would let a caller hand in a pair that is accidentally equal -- an invariant
+// the PowerShell this replaces got for free by computing it.
 
 /**
  * One step of creation, in the order it must run.
@@ -80,8 +86,12 @@ export type HyperVCreateStep =
         // carry DHCP -- the device adapter is added afterwards.
         readonly switchName: string | null;
     }
-    | { readonly kind: "rename-adapter"; readonly from: string; readonly to: string }
-    | { readonly kind: "set-adapter-mac"; readonly adapterName: string; readonly macAddress: string }
+    // Carries no source name. The adapter New-VM creates is spelled in the host's display
+    // language, so naming it would be a literal that is wrong on a localized Hyper-V -- and
+    // the PowerShell this replaces never named it either: it asserted the VM had exactly one
+    // adapter and took that one. `sole` is that assertion.
+    | { readonly kind: "rename-adapter"; readonly adapter: HyperVVMNetworkAdapterTarget; readonly to: string }
+    | { readonly kind: "set-adapter-mac"; readonly adapter: HyperVVMNetworkAdapterTarget; readonly macAddress: string }
     | { readonly kind: "add-adapter"; readonly adapterName: string; readonly switchName: string }
     | { readonly kind: "set-processor-count"; readonly count: number }
     | { readonly kind: "disable-dynamic-memory" }

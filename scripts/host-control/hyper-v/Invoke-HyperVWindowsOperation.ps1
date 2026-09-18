@@ -241,6 +241,27 @@ function Get-HyperVWindowsVMNetworkAdapterByName([object]$VirtualMachine, [strin
     return $AdapterMatches[0]
 }
 
+# Resolves the adapter a request names. "sole" means the VM's only adapter and refuses when it
+# has any other number -- the adapter New-VM creates is spelled in the host's display language,
+# so matching it by a literal name is wrong on a localized Hyper-V. The command this replaces
+# read the VM's adapters, asserted the count was one, and took that one.
+function Get-HyperVWindowsVMNetworkAdapterTarget([object]$VirtualMachine, [object]$Target) {
+    if ($null -eq $Target) { throw "vm-network-adapter-target-invalid" }
+    $TargetKind = [string]$Target.kind
+    if ($TargetKind -ceq "sole") {
+        $AllAdapters = @(Hyper-V\Get-VMNetworkAdapter -VM $VirtualMachine -ErrorAction Stop)
+        if ($AllAdapters.Count -eq 0) { throw "vm-network-adapter-not-found" }
+        if ($AllAdapters.Count -ne 1) { throw "vm-network-adapter-ambiguous" }
+        return $AllAdapters[0]
+    }
+    if ($TargetKind -ceq "name") {
+        $TargetName = [string]$Target.name
+        if ([string]::IsNullOrEmpty($TargetName)) { throw "vm-network-adapter-name-invalid" }
+        return Get-HyperVWindowsVMNetworkAdapterByName $VirtualMachine $TargetName
+    }
+    throw "vm-network-adapter-target-invalid"
+}
+
 function Convert-HyperVWindowsHostNetworkAdapter([object]$Adapter) {
     [ordered]@{
         interfaceIndex = [int]$Adapter.ifIndex
@@ -695,18 +716,14 @@ try {
         }
         "Rename-VMNetworkAdapter" {
             $VirtualMachine = Assert-HyperVWindowsSingleVirtualMachine $VirtualMachines
-            $AdapterName = [string]$Request.name
-            if ([string]::IsNullOrEmpty($AdapterName)) { throw "vm-network-adapter-name-invalid" }
             $NewAdapterName = [string]$Request.newName
             if ([string]::IsNullOrEmpty($NewAdapterName)) { throw "vm-network-adapter-new-name-invalid" }
-            $Adapter = Get-HyperVWindowsVMNetworkAdapterByName $VirtualMachine $AdapterName
+            $Adapter = Get-HyperVWindowsVMNetworkAdapterTarget $VirtualMachine $Request.adapter
             Hyper-V\Rename-VMNetworkAdapter -VMNetworkAdapter $Adapter -NewName $NewAdapterName -ErrorAction Stop
             Write-HyperVWindowsSuccess $Operation @()
         }
         "Set-VMNetworkAdapter" {
             $VirtualMachine = Assert-HyperVWindowsSingleVirtualMachine $VirtualMachines
-            $AdapterName = [string]$Request.name
-            if ([string]::IsNullOrEmpty($AdapterName)) { throw "vm-network-adapter-name-invalid" }
             # Normalised to bare hex the same way the remove branch normalises its expected
             # address, so one spelling of a MAC reaches native no matter which one the caller
             # records. The all-zero address is native's "not assigned yet" placeholder, not an
@@ -715,7 +732,7 @@ try {
             if ($StaticMacAddress -notmatch '^[0-9A-F]{12}$' -or $StaticMacAddress -eq '000000000000') {
                 throw "vm-network-adapter-mac-invalid"
             }
-            $Adapter = Get-HyperVWindowsVMNetworkAdapterByName $VirtualMachine $AdapterName
+            $Adapter = Get-HyperVWindowsVMNetworkAdapterTarget $VirtualMachine $Request.adapter
             Hyper-V\Set-VMNetworkAdapter -VMNetworkAdapter $Adapter -StaticMacAddress $StaticMacAddress -ErrorAction Stop
             Write-HyperVWindowsSuccess $Operation @()
         }

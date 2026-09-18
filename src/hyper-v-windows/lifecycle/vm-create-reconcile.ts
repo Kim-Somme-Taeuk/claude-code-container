@@ -24,9 +24,12 @@ import type {
 export function planHyperVVirtualMachineCreation(
     request: HyperVCreateVirtualMachineRequest,
 ): readonly HyperVCreateStep[] {
+    const diskDirectory = diskDirectoryOf(request.diskPath);
     const steps: HyperVCreateStep[] = [
         { kind: "ensure-directory", path: request.deviceRoot },
-        { kind: "ensure-directory", path: diskDirectoryOf(request.diskPath) },
+        ...(diskDirectory === null || diskDirectory === request.deviceRoot
+            ? []
+            : [{ kind: "ensure-directory", path: diskDirectory } as const]),
         {
             kind: "copy-base-image",
             source: request.baseImagePath,
@@ -49,20 +52,24 @@ export function planHyperVVirtualMachineCreation(
         // default name. Renaming it before adding the second one keeps the two apart by name
         // at every moment in between -- if the device adapter were added first, both would
         // briefly answer to names the caller cannot tell apart.
-        steps.push({ kind: "rename-adapter", from: DEFAULT_ADAPTER_NAME, to: network.bootstrapAdapterName });
+        steps.push({ kind: "rename-adapter", adapter: { kind: "sole" }, to: network.bootstrapAdapterName });
         steps.push({
             kind: "set-adapter-mac",
-            adapterName: network.bootstrapAdapterName,
-            macAddress: network.bootstrapMacAddress,
+            adapter: { kind: "name", name: network.bootstrapAdapterName },
+            macAddress: bootstrapMacAddressOf(network.macAddress),
         });
         steps.push({ kind: "add-adapter", adapterName: network.adapterName, switchName: network.switchName });
-        steps.push({ kind: "set-adapter-mac", adapterName: network.adapterName, macAddress: network.macAddress });
+        steps.push({
+            kind: "set-adapter-mac",
+            adapter: { kind: "name", name: network.adapterName },
+            macAddress: network.macAddress,
+        });
     } else if (network.kind === "managed") {
-        steps.push({ kind: "rename-adapter", from: DEFAULT_ADAPTER_NAME, to: network.adapterName });
+        steps.push({ kind: "rename-adapter", adapter: { kind: "sole" }, to: network.adapterName });
         if (network.macAddress !== null) {
             steps.push({
                 kind: "set-adapter-mac",
-                adapterName: network.adapterName,
+                adapter: { kind: "name", name: network.adapterName },
                 macAddress: network.macAddress,
             });
         }
@@ -103,21 +110,38 @@ export function planHyperVVirtualMachineCreationCompensation(
     for (let index = effects.length - 1; index >= 0; index -= 1) {
         const effect = effects[index];
         if (effect === undefined) continue;
-        if (effect.kind === "vm-created") {
-            compensations.push({ kind: "remove-vm", vmId: effect.vmId });
-        } else if (effect.kind === "file-created") {
-            compensations.push({ kind: "delete-file", path: effect.path });
-        } else {
-            compensations.push({ kind: "delete-directory", path: effect.path });
+        // Every effect kind is named. There is deliberately no catch-all: an `else` here would
+        // make the next path-carrying effect anyone adds silently become a recursive delete of
+        // whatever path it happens to carry, which is exactly the one thing this design exists
+        // to forbid. A new kind must break compilation below instead.
+        switch (effect.kind) {
+            case "vm-created":
+                compensations.push({ kind: "remove-vm", vmId: effect.vmId });
+                break;
+            case "file-created":
+                compensations.push({ kind: "delete-file", path: effect.path });
+                break;
+            case "directory-created":
+                compensations.push({ kind: "delete-directory", path: effect.path });
+                break;
+            default:
+                assertEveryEffectCompensated(effect);
         }
     }
     return Object.freeze(compensations);
 }
 
-// Native's name for the adapter New-VM creates when it is given a switch. Renaming off it is
-// what makes an adapter identifiable, so the spelling is part of the plan rather than a
-// detail of whoever executes it.
-const DEFAULT_ADAPTER_NAME = "Network Adapter";
+/**
+ * Derives the bootstrap address from the managed one, as the PowerShell this replaces did.
+ *
+ * Deriving rather than accepting a second address is what keeps the two adapters of one device
+ * from ever colliding: they differ in the locally administered prefix and nowhere else, so a
+ * caller cannot hand in a pair that is accidentally equal. Taking two independent strings would
+ * lose an invariant the legacy command got for free.
+ */
+function bootstrapMacAddressOf(managedMacAddress: string): string {
+    return `06${managedMacAddress.slice(2)}`;
+}
 
 // The switch New-VM itself attaches to. For a bootstrap guest that is deliberately the
 // bootstrap switch and not the device switch: New-VM creates exactly one adapter, and the one
@@ -129,7 +153,60 @@ function newVMSwitchNameOf(request: HyperVCreateVirtualMachineRequest): string |
     return network.switchName;
 }
 
-function diskDirectoryOf(diskPath: string): string {
+// A disk path with no directory part has no directory to create, and one whose only separator
+// is the drive root resolves to that root. Returning the disk's own path -- which a naive
+// `lastIndexOf` does for a bare filename -- would ask the executor to create a directory where
+// the disk is about to be written.
+function diskDirectoryOf(diskPath: string): string | null {
     const separator = Math.max(diskPath.lastIndexOf("\\"), diskPath.lastIndexOf("/"));
-    return separator <= 0 ? diskPath : diskPath.slice(0, separator);
+    if (separator < 0) return null;
+    if (separator === 0) return diskPath.slice(0, 1);
+    // "C:\\x.vhdx" -> "C:\\", not "C:", which names the drive's current directory instead.
+    if (diskPath[separator - 1] === ":") return diskPath.slice(0, separator + 1);
+    return diskPath.slice(0, separator);
+}
+
+/**
+ * Says which effect a step produces when it succeeds, or `null` when it changes nothing that
+ * has to be undone.
+ *
+ * This is what makes "a step cannot be added without saying how to undo it" true rather than
+ * merely intended. The switch is exhaustive, so a new step kind fails to compile until it is
+ * named here -- and naming it forces the author to decide whether it leaves residue. An
+ * `ensure-directory` that found the directory already there produces nothing, which is why
+ * this answers in terms of a kind and the executor supplies whether it actually created it.
+ */
+export function effectKindOfStep(step: HyperVCreateStep): HyperVCreateEffect["kind"] | null {
+    switch (step.kind) {
+        case "ensure-directory":
+            // Only when it did not already exist. The executor decides that; the plan decides
+            // that this is the step which can produce it.
+            return "directory-created";
+        case "copy-base-image":
+            return "file-created";
+        case "create-vm":
+            return "vm-created";
+        case "rename-adapter":
+        case "set-adapter-mac":
+        case "add-adapter":
+        case "set-processor-count":
+        case "disable-dynamic-memory":
+        case "set-vm-settings":
+        case "configure-firmware":
+            // These change the VM, and removing the VM undoes all of them at once. None leaves
+            // residue that outlives it, so none has an effect of its own.
+            return null;
+        default:
+            return assertEveryStepAccountedFor(step);
+    }
+}
+
+// Reached only if a new member is added to the union without being handled. The parameter type
+// makes that a compile error at the call site rather than a surprise at runtime.
+function assertEveryStepAccountedFor(step: never): never {
+    throw new Error(`hyper-v-create-step-unhandled:${JSON.stringify(step)}`);
+}
+
+function assertEveryEffectCompensated(effect: never): never {
+    throw new Error(`hyper-v-create-effect-uncompensated:${JSON.stringify(effect)}`);
 }

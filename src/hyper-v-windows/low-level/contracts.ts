@@ -203,11 +203,11 @@ export type HyperVWindowsExecutionRequest =
         readonly switchName: string;
     })
     | (HyperVWindowsExecutionRequestBase<"Rename-VMNetworkAdapter"> & {
-        readonly name: string;
+        readonly adapter: HyperVVMNetworkAdapterTarget;
         readonly newName: string;
     })
     | (HyperVWindowsExecutionRequestBase<"Set-VMNetworkAdapter"> & {
-        readonly name: string;
+        readonly adapter: HyperVVMNetworkAdapterTarget;
         readonly staticMacAddress: string;
     });
 
@@ -360,15 +360,29 @@ export type HyperVAddVMNetworkAdapterRequest = {
     readonly switchName: string;
 };
 
+/**
+ * Which of a VM's adapters an operation acts on.
+ *
+ * `sole` exists because the adapter `New-VM` creates carries a name this library must not
+ * depend on: native spells it in the host's display language, so a literal like
+ * "Network Adapter" is a name that is simply wrong on a localized Hyper-V. The PowerShell
+ * this replaces never spelled it either -- it read the VM's adapters, asserted there was
+ * exactly one, and took that one. `sole` is that assertion, kept as an assertion: it resolves
+ * only when the VM has exactly one adapter, and refuses rather than guessing when it has more.
+ */
+export type HyperVVMNetworkAdapterTarget =
+    | { readonly kind: "sole" }
+    | { readonly kind: "name"; readonly name: string };
+
 export type HyperVRenameVMNetworkAdapterRequest = {
     readonly selector: HyperVVirtualMachineSelector;
-    readonly name: string;
+    readonly adapter: HyperVVMNetworkAdapterTarget;
     readonly newName: string;
 };
 
 export type HyperVSetVMNetworkAdapterRequest = {
     readonly selector: HyperVVirtualMachineSelector;
-    readonly name: string;
+    readonly adapter: HyperVVMNetworkAdapterTarget;
     // Static only. Native also accepts -DynamicMacAddress, but that is a different operation
     // on the same cmdlet: it clears an address rather than setting one, and the two have no
     // shared caller here.
