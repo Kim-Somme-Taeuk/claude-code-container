@@ -132,7 +132,14 @@ describe("bootstrap address selection", () => {
     // address parser these candidates are handed to rejects it, so a guard written that way
     // would throw out of the pass rather than skip -- the very behaviour this documents away.
     it.each([
-        ["an octet above 255", "999.20.0.9"],
+        // Both positions, because different things screen them and only one reaches the range
+        // check. Out of range in the network bits never gets there: the prefix comparison
+        // rejects it on the first byte. Put it in the host bits and the prefix matches, so the
+        // range check is the only thing between it and the address parser -- which throws,
+        // losing every good address in the same pass. Without this row the range check has no
+        // coverage anywhere in the suite, while the table reads as though it does.
+        ["an octet above 255 in the network bits", "999.20.0.9"],
+        ["an octet above 255 in the host bits", "172.20.0.999"],
         ["a leading zero", "172.020.0.9"],
         ["too few octets", "172.20.9"],
         ["too many octets", "172.20.0.9.1"],
