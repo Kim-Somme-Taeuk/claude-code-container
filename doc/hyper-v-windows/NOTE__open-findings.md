@@ -68,6 +68,37 @@ read per host interface with no cap (host configuration, not caller-controlled).
 The host-prefix floor accepts `/8` where `createHyperVHostNetworkSpec` requires
 `/16`-`/30`.
 
+### A flaky test that will read as a mystery CI red
+
+`device-lab-hyper-v-linux-broker.test.ts`, the "runs create, cloud-init, SSH,
+transfer, snapshot, and cleanup through one owner-fenced backend" case, asserts
+that the exhausted-boot readiness error is one of three codes. Under full-suite
+load it intermittently produces a fourth, `hyper-v-bootstrap-network-probe-failed`,
+and fails. Observed once in two full-suite runs on 2026-09-18; passes in
+isolation and under artificial CPU load.
+
+**It is not a slice 2B regression.** The classifier branch that emits it
+(`device-lab-broker.ts`, `bootstrapProbeAttempts > 0 && bootstrapProbeSuccesses === 0`)
+predates the 2B migration commit. The operation stubs in the test are
+deterministic; what varies is only whether the bootstrap probe finishes inside
+the shrinking remaining budget, since the case runs with `bootTimeoutMs: 1000`.
+Under load it does not, so successes stays 0 and the classification flips.
+
+**Do not fix it by adding the fourth code to the list.** That list has already
+been widened once for exactly this reason, when
+`hyper-v-bootstrap-address-unavailable` was added; this would be the third
+outcome the same race has produced, and the list would still not be closed. The
+test is pinning a timing-dependent classification against a 1 s budget and
+calling it a fixed set.
+
+Two honest repairs, neither done here because both are a design decision rather
+than a patch: make the case deterministic about whether the probe is allowed to
+complete, so exactly one classification is reachable; or assert the property the
+test actually means -- the boot budget was exhausted, the device is reported
+not-ready, and specifically not as `hyper-v-guest-boot-signal-timeout` -- against
+the classifier's own closed set of codes rather than a hand-maintained copy of
+part of it.
+
 **One `as unknown as` in the adapter test helper.** `client()` in
 `device-lab-hyper-v-vm-network-adapter.test.ts` ends in a double assertion,
 which defeats part of the point of adding that file to `tsconfig.tests.json`.
