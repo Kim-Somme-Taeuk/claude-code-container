@@ -134,13 +134,24 @@ export function planHyperVVirtualMachineCreationCompensation(
 /**
  * Derives the bootstrap address from the managed one, as the PowerShell this replaces did.
  *
- * Deriving rather than accepting a second address is what keeps the two adapters of one device
- * from ever colliding: they differ in the locally administered prefix and nowhere else, so a
- * caller cannot hand in a pair that is accidentally equal. Taking two independent strings would
- * lose an invariant the legacy command got for free.
+ * Deriving rather than accepting a second address is most of what keeps the two adapters of
+ * one device from colliding -- but not all of it, and the difference matters. The legacy
+ * command earned the invariant with a guard this library does not have: it required the
+ * managed address to match `^02(?::[0-9A-F]{2}){5}$` before deriving, so `06` + the rest was
+ * necessarily different. Here the address is an opaque string, and deriving from one that
+ * already starts with `06` returns the same address.
+ *
+ * So the equality is checked rather than assumed. Two adapters on one VM holding the same
+ * static address is a state native accepts and nothing downstream re-reads -- the legacy's
+ * post-assignment conflict check is deferred with the rest of the transaction -- which makes
+ * this the last place it can be caught.
  */
 function bootstrapMacAddressOf(managedMacAddress: string): string {
-    return `06${managedMacAddress.slice(2)}`;
+    const derived = `06${managedMacAddress.slice(2)}`;
+    if (derived === managedMacAddress) {
+        throw new Error("hyper-v-create-bootstrap-mac-address-not-derivable");
+    }
+    return derived;
 }
 
 // The switch New-VM itself attaches to. For a bootstrap guest that is deliberately the

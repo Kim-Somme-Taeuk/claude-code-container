@@ -55,10 +55,10 @@ export type HyperVCreateNetworkIntent =
         readonly bootstrapSwitchName: string;
         readonly bootstrapAdapterName: string;
     };
-// The bootstrap address is DERIVED from the managed one, never supplied beside it. The two
-// adapters of one device differ in the locally administered prefix and nowhere else, so a
-// second field would let a caller hand in a pair that is accidentally equal -- an invariant
-// the PowerShell this replaces got for free by computing it.
+// The bootstrap address is DERIVED from the managed one, never supplied beside it: a second
+// field would let a caller hand in a pair that is accidentally equal. Deriving is not on its
+// own sufficient -- a managed address already in the `06` range derives to itself -- so the
+// planner rejects that case rather than planning two adapters onto one address.
 
 /**
  * One step of creation, in the order it must run.

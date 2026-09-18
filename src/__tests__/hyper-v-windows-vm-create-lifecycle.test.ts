@@ -40,6 +40,145 @@ function kindsOf(network: HyperVCreateNetworkIntent): readonly string[] {
     return planHyperVVirtualMachineCreation(request({ network })).map((step) => step.kind);
 }
 
+// Asserting whole step objects rather than their `kind`s is the point of this block. A plan
+// checked only for its shape passed while `create-vm` attached the shared golden base image
+// instead of the device's own disk -- every device would have booted and written to the image
+// every later device is cloned from. Order was pinned; payload was not.
+describe("the whole plan, every field", () => {
+    it("plans a VM with no network", () => {
+        expect(planHyperVVirtualMachineCreation(request())).toEqual([
+            { kind: "ensure-directory", path: DEVICE_ROOT },
+            { kind: "ensure-directory", path: DISK_DIRECTORY },
+            {
+                kind: "copy-base-image",
+                source: "C:\\ccc\\images\\base.vhdx",
+                destination: DISK_PATH,
+                expectedSha256: "a".repeat(64),
+            },
+            {
+                kind: "create-vm",
+                vmName: "ccc-device-lab-abc",
+                generation: 2,
+                memoryStartupBytes: 4096 * 1024 * 1024,
+                // The device's own disk, never the base image it was copied from.
+                vhdPath: DISK_PATH,
+                switchName: null,
+            },
+            { kind: "set-processor-count", count: 2 },
+            { kind: "disable-dynamic-memory" },
+            {
+                kind: "set-vm-settings",
+                // The ownership marker. Without it the VM exists and orphan recovery can
+                // never claim it, so an empty value here is a leak, not a cosmetic default.
+                notes: "ccc-device-lab:owner-1:device-1:incarnation-1",
+                checkpointType: "ProductionOnly",
+            },
+            {
+                kind: "configure-firmware",
+                firmware: { generation: 2, secureBoot: { enabled: true, template: "MicrosoftWindows" } },
+                firstBootDiskPath: DISK_PATH,
+            },
+        ]);
+    });
+
+    it("plans a VM with a bootstrap adapter", () => {
+        expect(planHyperVVirtualMachineCreation(request({
+            network: {
+                kind: "managed-and-bootstrap",
+                switchName: "ccc-internal",
+                adapterName: "CCC Device Network",
+                macAddress: "02:15:5d:01:1a:2c",
+                bootstrapSwitchName: "Default Switch",
+                bootstrapAdapterName: "CCC Bootstrap DHCP",
+            },
+        }))).toEqual([
+            { kind: "ensure-directory", path: DEVICE_ROOT },
+            { kind: "ensure-directory", path: DISK_DIRECTORY },
+            {
+                kind: "copy-base-image",
+                source: "C:\\ccc\\images\\base.vhdx",
+                destination: DISK_PATH,
+                expectedSha256: "a".repeat(64),
+            },
+            {
+                kind: "create-vm",
+                vmName: "ccc-device-lab-abc",
+                generation: 2,
+                memoryStartupBytes: 4096 * 1024 * 1024,
+                vhdPath: DISK_PATH,
+                switchName: "Default Switch",
+            },
+            // `sole`, not a name: the adapter New-VM made is spelled in the host's display
+            // language, so any literal here is wrong on a localized Hyper-V. This assertion
+            // is what keeps that fix from being silently reverted.
+            { kind: "rename-adapter", adapter: { kind: "sole" }, to: "CCC Bootstrap DHCP" },
+            {
+                kind: "set-adapter-mac",
+                adapter: { kind: "name", name: "CCC Bootstrap DHCP" },
+                macAddress: "06:15:5d:01:1a:2c",
+            },
+            { kind: "add-adapter", adapterName: "CCC Device Network", switchName: "ccc-internal" },
+            {
+                kind: "set-adapter-mac",
+                adapter: { kind: "name", name: "CCC Device Network" },
+                macAddress: "02:15:5d:01:1a:2c",
+            },
+            { kind: "set-processor-count", count: 2 },
+            { kind: "disable-dynamic-memory" },
+            {
+                kind: "set-vm-settings",
+                notes: "ccc-device-lab:owner-1:device-1:incarnation-1",
+                checkpointType: "ProductionOnly",
+            },
+            {
+                kind: "configure-firmware",
+                firmware: { generation: 2, secureBoot: { enabled: true, template: "MicrosoftWindows" } },
+                firstBootDiskPath: DISK_PATH,
+            },
+        ]);
+    });
+
+    it("plans a generation-1 VM down to its BIOS startup order", () => {
+        const steps = planHyperVVirtualMachineCreation(request({
+            firmware: { generation: 1, startupOrder: ["IDE", "CD"] },
+        }));
+        expect(steps.find((step) => step.kind === "create-vm"))
+            .toEqual({
+                kind: "create-vm",
+                vmName: "ccc-device-lab-abc",
+                generation: 1,
+                memoryStartupBytes: 4096 * 1024 * 1024,
+                vhdPath: DISK_PATH,
+                switchName: null,
+            });
+        expect(steps[steps.length - 1]).toEqual({
+            kind: "configure-firmware",
+            firmware: { generation: 1, startupOrder: ["IDE", "CD"] },
+            firstBootDiskPath: DISK_PATH,
+        });
+    });
+
+    it("plans a managed VM's adapter by position, then by name", () => {
+        const steps = planHyperVVirtualMachineCreation(request({
+            network: {
+                kind: "managed",
+                switchName: "ccc-internal",
+                adapterName: "CCC Device Network",
+                macAddress: "02:15:5d:01:1a:2c",
+            },
+        }));
+        expect(steps.filter((step) => step.kind === "rename-adapter" || step.kind === "set-adapter-mac"))
+            .toEqual([
+                { kind: "rename-adapter", adapter: { kind: "sole" }, to: "CCC Device Network" },
+                {
+                    kind: "set-adapter-mac",
+                    adapter: { kind: "name", name: "CCC Device Network" },
+                    macAddress: "02:15:5d:01:1a:2c",
+                },
+            ]);
+    });
+});
+
 describe("virtual machine creation planning", () => {
     // The disk is attached by New-VM, so it has to exist first. Any plan that creates the VM
     // before copying the image asks native to attach a file that is not there.
@@ -125,9 +264,10 @@ describe("virtual machine creation planning, bootstrap networking", () => {
         ]);
     });
 
-    // Nothing pinned this, and a mutation returning null here survived the whole suite. A
-    // managed VM created with no switch gets no adapter at all, so the rename that follows
-    // fails on the host and the device ends up with no network.
+    // Nothing pinned this, and a mutation returning null here survived the whole suite. New-VM
+    // always makes one adapter, so without a switch it makes a DISCONNECTED one -- the rename
+    // then succeeds and the device silently has an adapter attached to nothing, which is worse
+    // than failing. Pinning the switch is what keeps that from being a quiet outcome.
     it("gives New-VM the device switch when there is no bootstrap adapter", () => {
         const create = planHyperVVirtualMachineCreation(request({
             network: {
@@ -247,28 +387,66 @@ describe("virtual machine creation planning is pure", () => {
     });
 });
 
+// Every step the planner can produce, across every network intent.
+const EVERY_STEP_KIND: readonly HyperVCreateStep[] = ([
+    { kind: "none" },
+    { kind: "managed", switchName: "ccc-internal", adapterName: "CCC Device Network", macAddress: "02:15:5d:01:1a:2c" },
+    {
+        kind: "managed-and-bootstrap",
+        switchName: "ccc-internal",
+        adapterName: "CCC Device Network",
+        macAddress: "02:15:5d:01:1a:2c",
+        bootstrapSwitchName: "Default Switch",
+        bootstrapAdapterName: "CCC Bootstrap DHCP",
+    },
+] as readonly HyperVCreateNetworkIntent[]).flatMap((network) =>
+    [...planHyperVVirtualMachineCreation(request({ network }))]);
+
 describe("every step says whether it leaves residue", () => {
     // The pairing the plan promised. `effectKindOfStep` is exhaustive, so a new step kind does
     // not compile until someone decides whether it leaves something behind -- which is what
     // makes "a step cannot be added without saying how to undo it" true rather than intended.
-    it("answers for every step the planner can emit", () => {
-        const networks: readonly HyperVCreateNetworkIntent[] = [
-            { kind: "none" },
-            { kind: "managed", switchName: "ccc-internal", adapterName: "CCC Device Network", macAddress: null },
-            {
-                kind: "managed-and-bootstrap",
-                switchName: "ccc-internal",
-                adapterName: "CCC Device Network",
-                macAddress: "02:15:5d:01:1a:2c",
-                bootstrapSwitchName: "Default Switch",
-                bootstrapAdapterName: "CCC Bootstrap DHCP",
-            },
-        ];
-        for (const network of networks) {
-            for (const step of planHyperVVirtualMachineCreation(request({ network }))) {
-                expect(() => effectKindOfStep(step)).not.toThrow();
-            }
-        }
+    // Asserting the exact answer, not merely that there is one. A `not.toThrow()` here could
+    // not fail: the throw is reachable only through an unhandled kind, which does not compile.
+    // A test with no failing input is the defect this file fixed in its own freeze test, and
+    // it let `rename-adapter` claim to produce a `vm-created` effect -- which would schedule a
+    // remove-vm for a rename.
+    it.each([
+        ["ensure-directory", "directory-created"],
+        ["copy-base-image", "file-created"],
+        ["create-vm", "vm-created"],
+        ["rename-adapter", null],
+        ["set-adapter-mac", null],
+        ["add-adapter", null],
+        ["set-processor-count", null],
+        ["disable-dynamic-memory", null],
+        ["set-vm-settings", null],
+        ["configure-firmware", null],
+    ] as readonly (readonly [HyperVCreateStep["kind"], HyperVCreateEffect["kind"] | null])[])(
+        "maps %s to %s",
+        (kind, expected) => {
+            const step = EVERY_STEP_KIND.find((candidate) => candidate.kind === kind);
+            expect(step, `no planner emits a ${kind} step`).toBeDefined();
+            expect(effectKindOfStep(step as HyperVCreateStep)).toBe(expected);
+        },
+    );
+
+    // Every kind above must actually be reachable from the planner, or the table is asserting
+    // about steps nothing produces.
+    it("covers every step kind the planner can emit", () => {
+        expect([...new Set(EVERY_STEP_KIND.map((step) => step.kind))].sort())
+            .toEqual([
+                "add-adapter",
+                "configure-firmware",
+                "copy-base-image",
+                "create-vm",
+                "disable-dynamic-memory",
+                "ensure-directory",
+                "rename-adapter",
+                "set-adapter-mac",
+                "set-processor-count",
+                "set-vm-settings",
+            ]);
     });
 
     // Only three steps can leave residue. Everything else changes the VM, and removing the VM
@@ -315,8 +493,10 @@ describe("the disk directory a plan asks for", () => {
         expect(directories).toEqual(expected === null ? ["D:\\elsewhere"] : ["D:\\elsewhere", expected]);
     });
 
-    // The device root is already the first step, and asking for it twice would have the
-    // executor record two directory-created effects for one directory.
+    // The device root is already the first step. Asking for it twice would not double the
+    // effects -- the second call finds what the first made and records nothing -- but it does
+    // put a step in the plan that can never do anything, and a plan whose steps are not all
+    // meaningful is harder to check against the command it replaces.
     it("does not ask twice when the disk sits directly in the device root", () => {
         const directories = planHyperVVirtualMachineCreation(request({
             deviceRoot: "C:\\ccc\\devices\\d",
@@ -370,5 +550,24 @@ describe("the VM settings order", () => {
             "set-vm-settings",
             "configure-firmware",
         ]);
+    });
+});
+
+describe("the derived bootstrap address", () => {
+    // Deriving `06` from `02` is what keeps a device's two adapters apart. An address already
+    // in the `06` range derives to itself, which would plan both adapters onto one address --
+    // native accepts that and nothing downstream re-reads it, so this is the last place to
+    // catch it.
+    it("refuses a managed address that derives to itself", () => {
+        expect(() => planHyperVVirtualMachineCreation(request({
+            network: {
+                kind: "managed-and-bootstrap",
+                switchName: "ccc-internal",
+                adapterName: "CCC Device Network",
+                macAddress: "06:15:5d:01:1a:2c",
+                bootstrapSwitchName: "Default Switch",
+                bootstrapAdapterName: "CCC Bootstrap DHCP",
+            },
+        }))).toThrow("hyper-v-create-bootstrap-mac-address-not-derivable");
     });
 });
