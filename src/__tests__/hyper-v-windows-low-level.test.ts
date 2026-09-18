@@ -336,3 +336,123 @@ describe("Hyper-V Windows PowerShell transport", () => {
             .toThrow("hyper-v-windows-powershell-asset-integrity-failed");
     });
 });
+
+// The ten creation primitives. `normalizeAdapterTarget` in particular arrived with five error
+// paths and no coverage at all, while being the thing that keeps the rename off a literal
+// adapter name -- which is wrong on any localized Hyper-V.
+describe("Hyper-V Windows creation primitives", () => {
+    function recordingClient(): { client: ReturnType<typeof createHyperVWindowsClient>; requests: HyperVWindowsExecutionRequest[] } {
+        const requests: HyperVWindowsExecutionRequest[] = [];
+        const client = createHyperVWindowsClient(executorUsing((request) => {
+            requests.push(request);
+            return response(request.operation, request.operation === "New-VM" ? [virtualMachine] : []);
+        }));
+        return { client, requests };
+    }
+
+    it("sends one native operation per method, with normalized parameters", async () => {
+        const { client, requests } = recordingClient();
+        await client.newVM({ name: "vm", generation: 2, memoryStartupBytes: 2 * 1024 * 1024 * 1024, vhdPath: "C:\\d\\r.vhdx" });
+        await client.setVM({ selector, notes: "marker", checkpointType: "ProductionOnly" });
+        await client.setVMMemory({ selector, dynamicMemoryEnabled: false });
+        await client.setVMProcessor({ selector, count: 4 });
+        await client.setVMFirmware({ selector, secureBoot: { enabled: true, template: "MicrosoftWindows" } });
+        await client.setVMBios({ selector, startupOrder: ["IDE", "CD"] });
+        await client.addVMNetworkAdapter({ selector, name: "CCC Device Network", switchName: "ccc-internal" });
+        await client.renameVMNetworkAdapter({ selector, adapter: { kind: "sole" }, newName: "CCC Bootstrap DHCP" });
+        await client.setVMNetworkAdapter({
+            selector,
+            adapter: { kind: "name", name: "CCC Bootstrap DHCP" },
+            // Accepted in any spelling and canonicalized to the bare uppercase hex native wants.
+            staticMacAddress: "06:15:5d:01:1a:2c",
+        });
+
+        expect(requests.map((request) => request.operation)).toEqual([
+            "New-VM", "Set-VM", "Set-VMMemory", "Set-VMProcessor",
+            "Set-VMFirmware", "Set-VMBios", "Add-VMNetworkAdapter",
+            "Rename-VMNetworkAdapter", "Set-VMNetworkAdapter",
+        ]);
+        // New-VM carries no selector: it is the call that brings the VM into existence.
+        expect(requests[0]).toEqual({
+            schemaVersion: 1,
+            operation: "New-VM",
+            name: "vm",
+            generation: 2,
+            memoryStartupBytes: 2 * 1024 * 1024 * 1024,
+            vhdPath: "C:\\d\\r.vhdx",
+        });
+        expect(requests[7]).toEqual({
+            schemaVersion: 1,
+            operation: "Rename-VMNetworkAdapter",
+            selector: { kind: "id", id: canonicalVmId },
+            adapter: { kind: "sole" },
+            newName: "CCC Bootstrap DHCP",
+        });
+        expect(requests[8]).toMatchObject({ staticMacAddress: "06155D011A2C" });
+    });
+
+    it("returns the VM native created, so later steps need not re-find it by name", async () => {
+        const { client } = recordingClient();
+        await expect(client.newVM({ name: "vm", generation: 2, memoryStartupBytes: 2 * 1024 * 1024 * 1024 }))
+            .resolves.toMatchObject({ id: canonicalVmId, name: "library-test" });
+    });
+
+    it.each([
+        ["a target that is not an object", "hello"],
+        ["a target with no kind", {}],
+        ["an unknown kind", { kind: "first" }],
+        ["a sole target carrying extra keys", { kind: "sole", name: "x" }],
+        ["a named target with no name", { kind: "name" }],
+        ["a named target whose name is a wildcard", { kind: "name", name: "CCC *" }],
+        ["a named target whose name is empty", { kind: "name", name: "" }],
+    ])("refuses %s before reaching the host", async (_label, adapter) => {
+        const { client, requests } = recordingClient();
+        await expect(client.renameVMNetworkAdapter({
+            selector,
+            adapter: adapter as never,
+            newName: "CCC Bootstrap DHCP",
+        })).rejects.toThrow(/adapter-target/);
+        expect(requests).toHaveLength(0);
+    });
+
+    // Native accepts it, but a caller asking for it has confused two adapters or two states of
+    // one. Only checkable when the target names one -- `sole` does not know its own name yet.
+    it("refuses a rename to the name the adapter already has", async () => {
+        const { client } = recordingClient();
+        await expect(client.renameVMNetworkAdapter({
+            selector,
+            adapter: { kind: "name", name: "CCC Bootstrap DHCP" },
+            newName: "CCC Bootstrap DHCP",
+        })).rejects.toThrow("new-name-unchanged");
+    });
+
+    it.each([
+        ["a Set-VM naming no setting at all", () => ({ selector })],
+        ["a processor count of zero", () => ({ selector, count: 0 })],
+    ])("refuses %s", async (_label, build) => {
+        const { client, requests } = recordingClient();
+        const request = build() as never;
+        await expect("count" in (request as object)
+            ? client.setVMProcessor(request)
+            : client.setVM(request)).rejects.toThrow();
+        expect(requests).toHaveLength(0);
+    });
+
+    it.each([
+        ["the all-zero address, which is native's not-assigned-yet placeholder", "00:00:00:00:00:00"],
+        ["an address that is not twelve hex digits", "06:15:5d:01:1a"],
+    ])("refuses %s as a static MAC", async (_label, staticMacAddress) => {
+        const { client } = recordingClient();
+        await expect(client.setVMNetworkAdapter({
+            selector,
+            adapter: { kind: "sole" },
+            staticMacAddress,
+        })).rejects.toThrow(/static-mac-address/);
+    });
+
+    it("refuses a BIOS startup order that repeats a device", async () => {
+        const { client } = recordingClient();
+        await expect(client.setVMBios({ selector, startupOrder: ["IDE", "IDE"] }))
+            .rejects.toThrow("startup-order-duplicated");
+    });
+});
