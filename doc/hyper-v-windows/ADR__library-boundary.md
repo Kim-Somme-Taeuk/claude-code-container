@@ -191,6 +191,27 @@ on one owned VM, so it needs no crash-recovery intent journal either. What it
 does keep is the host-wide containment re-check after removal: that is the
 property proving the address is free for the next device that derives it.
 
+**A decision reads only what it decides from.** Bootstrap teardown originally
+took the same host observation discovery takes, though it consults only the VM's
+own adapters. The extra reads were not merely wasted: teardown runs on the
+success path of a device start, so a failure in any of them reported a guest
+that had booted and finalized as a failed start — a way to fail that the legacy
+command, with its three native calls, did not have. The fix is in the signature
+rather than in the call: `planHyperVBootstrapTeardown` takes adapters, so the
+wide read is not expressible. Reviews of later slices should treat "this
+observation carries fields this decision never reads" as a defect, not as
+tidiness.
+
+**A native value must be validated once, by the strictest rule that will be
+applied to it.** Candidate addresses were screened by a lax pattern and then
+handed to a parser that throws on a stricter one, so a shape the screen admitted
+and the parser refused — a leading zero, say — threw out of the whole discovery
+pass. That is exactly the behaviour the departure note above claims was removed;
+it held only for the one case a test pinned. Where a guard exists so that bad
+input is skipped rather than fatal, the guard has to be at least as strict as
+every parser downstream of it, and that relationship belongs in a comment beside
+the guard, since nothing in the types enforces it.
+
 **A MAC address is an opaque value with one canonical form.** Native spells it
 three ways depending on the cmdlet — bare hex from `Get-VMNetworkAdapter`,
 hyphen groups from `Get-NetNeighbor` — and ccc records its own with colons.

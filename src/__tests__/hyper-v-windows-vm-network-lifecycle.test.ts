@@ -126,8 +126,19 @@ describe("bootstrap address selection", () => {
 
     // The PowerShell threw here -- [Net.IPAddress]::Parse rejects an octet above 255 -- and
     // the throw failed the whole discovery pass, losing the good addresses with the bad one.
-    it("skips an out-of-range octet instead of losing the whole answer", () => {
-        expect(selectHyperVBootstrapAddresses(["999.20.0.9", "172.20.0.9"], hostPrefixes)).toEqual(["172.20.0.9"]);
+    // Each malformed shape is paired with a good address on the same host network, because
+    // the claim is not "the bad one is dropped" but "the good one still survives it". A
+    // leading zero is here for a specific reason: it passes a `\d{1,3}` guard while the
+    // address parser these candidates are handed to rejects it, so a guard written that way
+    // would throw out of the pass rather than skip -- the very behaviour this documents away.
+    it.each([
+        ["an octet above 255", "999.20.0.9"],
+        ["a leading zero", "172.020.0.9"],
+        ["too few octets", "172.20.9"],
+        ["too many octets", "172.20.0.9.1"],
+        ["something that is not an address at all", "not-an-address"],
+    ])("skips %s instead of losing the whole answer", (_label, malformed) => {
+        expect(selectHyperVBootstrapAddresses([malformed, "172.20.0.9"], hostPrefixes)).toEqual(["172.20.0.9"]);
     });
 });
 

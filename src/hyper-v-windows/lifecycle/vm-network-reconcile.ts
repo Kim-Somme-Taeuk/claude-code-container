@@ -38,8 +38,13 @@ const USABLE_NEIGHBOR_STATES: ReadonlySet<string> = new Set([
     "Permanent",
 ]);
 
+// Accepts exactly what `parseIPv4Address` accepts, leading zeros included -- it rejects them,
+// so `020` must be refused here too. Two spellings of "valid IPv4" would not merely be
+// duplication: everything that passes this guard is later handed to that parser, which throws,
+// and a throw in the middle of a discovery pass loses every address alongside the bad one.
+// Skipping is only the documented behaviour while this stays the stricter of the two.
 function ipv4Octets(value: string): readonly number[] | null {
-    if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) return null;
+    if (!/^(0|[1-9]\d{0,2})(?:\.(0|[1-9]\d{0,2})){3}$/.test(value)) return null;
     const octets = value.split(".").map(Number);
     return octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255) ? octets : null;
 }
