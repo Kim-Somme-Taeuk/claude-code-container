@@ -1,0 +1,74 @@
+# Open findings in the typed Hyper-V library
+
+Findings raised by review that were judged real but deliberately not fixed in
+the slice that surfaced them. Each says why it was deferred, so a later slice
+inherits the reasoning rather than rediscovering the problem.
+
+This lives here rather than in the task directory because `doc/harness/tasks/`
+is gitignored: a finding recorded only there is lost the moment the task
+directory is cleaned, which is exactly when someone would want it.
+
+## From the slice 2B review (2026-09-18)
+
+Independent read-only review of `24aaefcc..e8c6c628`. Code review returned FAIL
+on two findings, security review returned PASS with no exploitable findings, and
+a re-review of the fixes (`78859a4a`, `7f1f2d65`) returned PASS.
+
+Fixed at the time, each pinned by a test that fails when the fix is reverted:
+teardown reading host state it never decides from; the dropped neighbour `State`
+filter; two disagreeing IPv4 validators. The rules those established are in
+`ADR__library-boundary.md` under "What slice 2B settled".
+
+### Still open
+
+**`Get-NetNeighbor` swallows real read failures.** The operation script uses
+`-ErrorAction SilentlyContinue`, justified as "an interface with no neighbours
+is the ordinary case" — true, but it swallows every non-terminating error, not
+just no-match. The legacy path used `-ErrorAction Stop` and mapped the catch to
+`hyper-v-bootstrap-neighbor-inspection-failed`. That code is still in the
+broker's public union and is now unreachable. A real neighbour-read failure is
+indistinguishable from an empty table: discovery silently loses one of its two
+address sources and the create times out as `hyper-v-bootstrap-address-unavailable`
+with no clue why. Fixing it means distinguishing no-match from error on the
+PowerShell side. Either make the code reachable or remove it from the union;
+leaving a public code that nothing can emit is the worst of the three.
+
+**Empty host prefixes are reported as an inspection failure.** Discovery returns
+`hyper-v-bootstrap-host-prefix-inspection-failed` when no host prefix is found.
+In the PowerShell that code meant only "the `Get-NetIPAddress` read threw"; a
+successful read yielding zero prefixes returned a clean empty with no diagnostic.
+So this now names a failure for a state where nothing was inspected badly. The
+typed path also drops `hyper-v-bootstrap-management-adapter-inspection-failed`
+entirely. Fixing it needs a diagnostic for "no host address on this network"
+distinct from "the read failed", which widens a closed union the broker consumes.
+
+**Two copies of the interface filter.** The adapter picks which interfaces to
+read neighbours on; the reconciler picks which host addresses count as prefixes.
+The adapter's copy omits the reconciler's `prefixLength` bound. Safe today only
+because the adapter's is strictly wider, and nothing pins that relationship. If
+it ever narrows, neighbours on a legitimate interface are never read and
+discovery silently loses half its sources.
+
+**`resolveOwnedVm` cannot say "the VM is gone".** It reports
+`hyper-v-vm-ownership-mismatch` both for a VM that is missing and for one that
+belongs to someone else. Both codes exist and both are terminal, so behaviour is
+unaffected, but an operator loses a real distinction.
+
+**`confirmHyperVBootstrapContainment` reasons negatively over an absent value.**
+A MAC that fails to parse decodes to absent, and absent matches nothing. That is
+the right default for destructive selection and the wrong one for a containment
+proof, which is asserting that nothing holds the address. Not reachable today,
+since native always spells a MAC parseably.
+
+**Defence-in-depth, from the security review, none exploitable.** The native
+`Remove-VMNetworkAdapter` re-resolves the VM by id and re-checks adapter name and
+MAC, but does not re-check the ownership marker, leaving a TOCTOU window that
+requires host privileges to exploit. `observeForDiscovery` issues one neighbour
+read per host interface with no cap (host configuration, not caller-controlled).
+The host-prefix floor accepts `/8` where `createHyperVHostNetworkSpec` requires
+`/16`-`/30`.
+
+**One `as unknown as` in the adapter test helper.** `client()` in
+`device-lab-hyper-v-vm-network-adapter.test.ts` ends in a double assertion,
+which defeats part of the point of adding that file to `tsconfig.tests.json`.
+Pre-existing, from `6c7a59bd`.

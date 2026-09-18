@@ -251,7 +251,7 @@ describe("Device Lab bootstrap teardown", () => {
                 getNetIPAddresses,
                 getNetNeighbors,
                 removeVMNetworkAdapter,
-            } as unknown as ClientOverrides),
+            } as ClientOverrides),
             OWNED_VM,
             MANAGED_MAC,
         )).resolves.toEqual({ ok: true, removed: true, alreadyMissing: false });
