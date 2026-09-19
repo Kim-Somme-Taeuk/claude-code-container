@@ -77,10 +77,12 @@ load it intermittently produces a fourth, `hyper-v-bootstrap-network-probe-faile
 and fails. Observed once in two full-suite runs on 2026-09-18; passes in
 isolation and under artificial CPU load.
 
-Frequency, updated 2026-09-19: hit on 3 of 4 full-suite runs across two machines
-on that date, against 1 of 2 when first observed. It did not hit on the run where
-it was looked for specifically. Load-dependent, not commit-dependent — the two
-runs that hit and the one that did not were the same code.
+Frequency, updated 2026-09-19: 3 of 4 full-suite runs that day, against 1 of 2
+when first observed. Two sessions, but the same checkout and the same
+homedir-scoped broker state, so most likely one host — which makes it a stronger
+load-dependence signal than the same ratio spread over two machines would be.
+One session hit it on its first run and not on its second with no intervening
+change to that test, so it is not commit-dependent.
 
 **It is not a slice 2B regression.** The classifier branch that emits it
 (`device-lab-broker.ts`, `bootstrapProbeAttempts > 0 && bootstrapProbeSuccesses === 0`)

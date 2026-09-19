@@ -93,6 +93,15 @@ export function biosStartupOrderHasNoBootDisk(step: HyperVCreateStep): string {
     return step.firstBootDiskPath;
 }
 
+// That `kind` alone narrows to a member is the whole justification for splitting the step, and
+// it was the one claim nothing in this repo checked -- it was proven by compiling a consumer
+// against the barrel, which lives in no commit. This passes by compiling. Remove the guard and
+// it fails with TS2339, which is the control that makes it mean something.
+export function biosStepNarrowsToItsOwnFields(step: HyperVCreateStep): readonly HyperVBiosStartupDevice[] {
+    if (step.kind !== "set-bios-startup-order") return [];
+    return step.startupOrder;
+}
+
 // The converse: the UEFI step has no startup order, because Set-VMFirmware does not take one.
 export function firmwareStepHasNoStartupOrder(step: HyperVCreateStep): readonly string[] {
     if (step.kind !== "configure-firmware") return [];

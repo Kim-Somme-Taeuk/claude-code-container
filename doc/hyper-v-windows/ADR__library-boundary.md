@@ -60,11 +60,13 @@ read to resolve that. `Rename-VMNetworkAdapter` and `Set-VMNetworkAdapter` read
 `Get-VMNetworkAdapter` — which is what lets a target be "the VM's only adapter"
 rather than a literal name that is wrong on a localized host — and
 `Set-VMFirmware` with a first-boot disk reads `Get-VMHardDiskDrive`, because
-native wants a device object where the caller has a path. All of this is
-resolution inside the single attempt, not retry or lifecycle policy, and the
-count that matters is one *target* invocation. The earlier wording allowed only
-the `Get-VM` read and was already stale when 2B's `Remove-VMNetworkAdapter`
-landed; it is the rule that was wrong, not the three operations.
+native wants a device object where the caller has a path. `Remove-VMNetworkAdapter`
+is the fourth: it resolves its own adapter inline, matching on name and MAC
+together, which is why it does not go through the shared target resolver. All of
+this is resolution inside the single attempt, not retry or lifecycle policy, and
+the count that matters is one *target* invocation. The earlier wording allowed
+only the `Get-VM` read and was already stale when `Remove-VMNetworkAdapter`
+landed in 2B; it is the rule that was wrong, not the four operations.
 Selector resolution enumerates with `Get-VM -ErrorAction Stop` and filters exact
 ID/name matches. Only a successful zero-match enumeration means absence; a
 missing cmdlet/module or any host/native error fails closed.
