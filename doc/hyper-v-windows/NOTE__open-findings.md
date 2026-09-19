@@ -154,6 +154,24 @@ VM exists and orphan recovery cannot recognise it as ccc's. The legacy has the
 same exposure so 3A matches it, but whether creation should write the marker
 immediately after `New-VM` belongs to the slice that owns the transaction.
 
+**The effect-recording timing is a stated obligation with no executor to test it
+against.** `HyperVCreateEffect` now says `directory-created` and `file-created`
+are recorded the moment the host object comes into existence, not when the step
+succeeds — the distinction that decides whether a half-written multi-gigabyte
+VHDX survives a failed base-image copy. 3A ships no executor, so nothing
+exercises it. The first 3B executor test should assert that a `copy-base-image`
+which fails after creating its destination still records `file-created`, and
+therefore still gets its `delete-file`.
+
+**`ensure-directory` has a second, narrower version of the same window.**
+Executed as `New-Item -Force` it creates intermediate parents, so a nested
+create could leave a parent behind while failing on the leaf, and only one
+`directory-created` effect would name the leaf. Parity rather than regression:
+the legacy rollback removed `$DeviceRoot` recursively and nothing above it. It
+is invisible today because the plan only ever emits `deviceRoot` and a disk
+directory normally nested under it. It would stop being invisible if a caller
+ever passed a `diskPath` outside `deviceRoot`.
+
 **Five valid-but-wrong values still compile:** an empty `startupOrder`, a
 duplicated one, `{enabled: true, template: ""}`, and a `managed-and-bootstrap`
 intent whose two adapter names are equal. The client rejects the first three at
