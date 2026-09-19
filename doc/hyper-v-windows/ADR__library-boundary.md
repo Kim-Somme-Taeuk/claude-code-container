@@ -200,6 +200,28 @@ already existed produces no effect, so nothing can remove it. Creation deleting
 a device root it found rather than made is the failure this shape exists to
 prevent, and re-deriving the undo from the request is exactly how that happens.
 
+**An effect is recorded when the host object appears, not when the step ends.**
+The two are different only for the base-image copy, and that is the case that
+matters: a copy that creates its destination and then fails on a hash or length
+mismatch has already put a partial multi-gigabyte VHDX in the device root.
+Recording on success would produce no `file-created` effect and therefore no
+`delete-file`, leaving it there — the effect-derived plan would be strictly
+weaker than the `catch` it replaces, which deleted the disk path unconditionally.
+So the timing is part of the contract rather than an executor detail.
+
+**The plan says `AutomaticCheckpointsEnabled $false`, typed as a literal.** On a
+client Hyper-V host automatic checkpoints default ON, and then every `Start-VM`
+of a device switches its OS disk onto an AVHDX differencing chain: the
+created-disk identity check no longer describes what the VM boots, the snapshot
+machinery collides with checkpoints nobody asked for, and storage grows silently.
+`CheckpointType` does not cover it — that picks which kind of checkpoint is
+taken, not whether the host takes one unasked. The field is `false` rather than
+`boolean` because there is no correct `true` here; it can widen the day a caller
+needs one, and widening a literal is compatible where narrowing later would not
+be. The first version of the plan dropped the flag while every other layer kept
+it, which is the shape of omission a whole-plan assertion catches and a
+shape-only assertion pins as correct.
+
 Effects are undone in reverse, because the later a change was made the more it
 depends on the earlier ones — the VM holds its disk, the directory holds the
 disk. Applied to what the legacy script recorded, reverse order reproduces its

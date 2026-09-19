@@ -99,6 +99,14 @@ export type HyperVCreateStep =
         readonly kind: "set-vm-settings";
         readonly notes: string;
         readonly checkpointType: "Disabled" | "Production" | "ProductionOnly" | "Standard";
+        // Typed `false` rather than `boolean` because there is no correct `true`. On a client
+        // Hyper-V host automatic checkpoints default ON, and then every `Start-VM` switches the
+        // OS disk onto an AVHDX differencing chain -- which breaks the created-disk identity
+        // check, collides with the snapshot machinery, and grows storage with nothing asking
+        // it to. `checkpointType` does not cover this: it picks which kind of checkpoint is
+        // taken, not whether the host takes one unasked. The literal can widen to `boolean`
+        // the day a caller needs it; widening is compatible, narrowing later would not be.
+        readonly automaticCheckpointsEnabled: false;
     }
     | {
         readonly kind: "configure-firmware";
@@ -114,6 +122,15 @@ export type HyperVCreateStep =
  * those rather than re-deriving intent from the request. A directory that was already there
  * produces no effect and is therefore never removed, which is the single most important
  * property here: creation must not delete a device root it did not create.
+ *
+ * WHEN each is recorded is part of the contract, not an executor detail. `directory-created`
+ * and `file-created` are recorded the moment the host object comes into existence -- not when
+ * the step that makes it succeeds. A base-image copy that creates its destination and then
+ * fails partway (hash mismatch, length mismatch, plain I/O) has already put a partial
+ * multi-gigabyte VHDX in the device root, and recording only on success would leave it there
+ * forever. The legacy rollback deleted the disk path unconditionally, so recording late would
+ * make this plan strictly weaker than the script it replaces on exactly that sequence.
+ * `vm-created` has no such window: native either returns a VM or it does not.
  */
 export type HyperVCreateEffect =
     | { readonly kind: "directory-created"; readonly path: string }

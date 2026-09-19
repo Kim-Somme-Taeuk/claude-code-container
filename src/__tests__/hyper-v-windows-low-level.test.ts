@@ -33,6 +33,13 @@ const virtualMachine = {
     checkpointType: "FutureCheckpoint",
 };
 
+const virtualMachineFirmware = {
+    vmId,
+    secureBoot: "On",
+    secureBootTemplate: "MicrosoftWindows",
+    firstBootDevicePath: "C:\\devices\\device-1\\root.vhdx",
+};
+
 function response(
     operation: HyperVWindowsOperation,
     items: readonly unknown[] = [],
@@ -339,13 +346,17 @@ describe("Hyper-V Windows PowerShell transport", () => {
 
 // The ten creation primitives. `normalizeAdapterTarget` in particular arrived with five error
 // paths and no coverage at all, while being the thing that keeps the rename off a literal
-// adapter name -- which is wrong on any localized Hyper-V.
+// adapter name -- which is wrong on any localized Hyper-V. `getVMFirmware` was the tenth and
+// was missed on the first pass: the block claimed ten and exercised nine, so
+// `parseVirtualMachineFirmware` could swap its two Secure Boot fields and stay green.
 describe("Hyper-V Windows creation primitives", () => {
     function recordingClient(): { client: ReturnType<typeof createHyperVWindowsClient>; requests: HyperVWindowsExecutionRequest[] } {
         const requests: HyperVWindowsExecutionRequest[] = [];
         const client = createHyperVWindowsClient(executorUsing((request) => {
             requests.push(request);
-            return response(request.operation, request.operation === "New-VM" ? [virtualMachine] : []);
+            if (request.operation === "New-VM") return response(request.operation, [virtualMachine]);
+            if (request.operation === "Get-VMFirmware") return response(request.operation, [virtualMachineFirmware]);
+            return response(request.operation, []);
         }));
         return { client, requests };
     }
@@ -356,6 +367,7 @@ describe("Hyper-V Windows creation primitives", () => {
         await client.setVM({ selector, notes: "marker", checkpointType: "ProductionOnly" });
         await client.setVMMemory({ selector, dynamicMemoryEnabled: false });
         await client.setVMProcessor({ selector, count: 4 });
+        await client.getVMFirmware(selector);
         await client.setVMFirmware({ selector, secureBoot: { enabled: true, template: "MicrosoftWindows" } });
         await client.setVMBios({ selector, startupOrder: ["IDE", "CD"] });
         await client.addVMNetworkAdapter({ selector, name: "CCC Device Network", switchName: "ccc-internal" });
@@ -369,7 +381,7 @@ describe("Hyper-V Windows creation primitives", () => {
 
         expect(requests.map((request) => request.operation)).toEqual([
             "New-VM", "Set-VM", "Set-VMMemory", "Set-VMProcessor",
-            "Set-VMFirmware", "Set-VMBios", "Add-VMNetworkAdapter",
+            "Get-VMFirmware", "Set-VMFirmware", "Set-VMBios", "Add-VMNetworkAdapter",
             "Rename-VMNetworkAdapter", "Set-VMNetworkAdapter",
         ]);
         // New-VM carries no selector: it is the call that brings the VM into existence.
@@ -381,20 +393,74 @@ describe("Hyper-V Windows creation primitives", () => {
             memoryStartupBytes: 2 * 1024 * 1024 * 1024,
             vhdPath: "C:\\d\\r.vhdx",
         });
-        expect(requests[7]).toEqual({
+        expect(requests[8]).toEqual({
             schemaVersion: 1,
             operation: "Rename-VMNetworkAdapter",
             selector: { kind: "id", id: canonicalVmId },
             adapter: { kind: "sole" },
             newName: "CCC Bootstrap DHCP",
         });
-        expect(requests[8]).toMatchObject({ staticMacAddress: "06155D011A2C" });
+        expect(requests[9]).toMatchObject({ staticMacAddress: "06155D011A2C" });
     });
 
     it("returns the VM native created, so later steps need not re-find it by name", async () => {
         const { client } = recordingClient();
         await expect(client.newVM({ name: "vm", generation: 2, memoryStartupBytes: 2 * 1024 * 1024 * 1024 }))
             .resolves.toMatchObject({ id: canonicalVmId, name: "library-test" });
+    });
+
+    // This is the read that answers "does this VM boot from my disk". Decoding it into the
+    // wrong fields is silent: both are opaque native strings, so a swap type-checks and only
+    // shows up as a boot-order verification that passes on a VM that boots from the network.
+    it("decodes firmware into the fields it names", async () => {
+        const { client } = recordingClient();
+        await expect(client.getVMFirmware(selector)).resolves.toEqual({
+            vmId: canonicalVmId,
+            secureBoot: "On",
+            secureBootTemplate: "MicrosoftWindows",
+            firstBootDevicePath: "C:\\devices\\device-1\\root.vhdx",
+        });
+    });
+
+    // Absent is a real answer, not a decode failure: a VM whose first boot entry is a network
+    // or DVD device has no path. A caller must be able to tell that apart from a path that
+    // failed to decode, which is why null passes and an empty string does not.
+    it("accepts a null first boot device path and refuses an empty one", async () => {
+        const firmwareReturning = (item: unknown) => createHyperVWindowsClient(executorUsing(
+            (request) => response(request.operation, [item]),
+        ));
+
+        await expect(firmwareReturning({ ...virtualMachineFirmware, firstBootDevicePath: null })
+            .getVMFirmware(selector)).resolves.toMatchObject({ firstBootDevicePath: null });
+        await expect(firmwareReturning({ ...virtualMachineFirmware, firstBootDevicePath: "" })
+            .getVMFirmware(selector)).rejects.toThrow(/result-shape-invalid/);
+    });
+
+    it.each([
+        ["a missing key", { vmId, secureBoot: "On", secureBootTemplate: "MicrosoftWindows" }],
+        ["an extra key", { ...virtualMachineFirmware, extra: "x" }],
+        ["a vmId that is not a GUID", { ...virtualMachineFirmware, vmId: "not-a-guid" }],
+        ["an empty secureBoot", { ...virtualMachineFirmware, secureBoot: "" }],
+        ["a non-string secureBootTemplate", { ...virtualMachineFirmware, secureBootTemplate: 2 }],
+    ])("refuses firmware carrying %s rather than decoding it partly", async (_label, item) => {
+        const client = createHyperVWindowsClient(executorUsing((request) => response(request.operation, [item])));
+        await expect(client.getVMFirmware(selector)).rejects.toThrow(/result-shape-invalid/);
+    });
+
+    // Native rejects a template alongside Secure Boot off, and rejects an empty one when it is
+    // on. Both fail here instead, so the caller learns before a process launch.
+    it.each([
+        ["a setting that is not an object", "on"],
+        ["a non-boolean enabled", { enabled: "yes" }],
+        ["disabled carrying a template", { enabled: false, template: "MicrosoftWindows" }],
+        ["enabled with no template", { enabled: true }],
+        ["enabled with an empty template", { enabled: true, template: "" }],
+        ["enabled with a wildcard template", { enabled: true, template: "Microsoft*" }],
+    ])("refuses Secure Boot as %s before reaching the host", async (_label, secureBoot) => {
+        const { client, requests } = recordingClient();
+        await expect(client.setVMFirmware({ selector, secureBoot: secureBoot as never }))
+            .rejects.toThrow(/secure-boot/);
+        expect(requests).toHaveLength(0);
     });
 
     it.each([

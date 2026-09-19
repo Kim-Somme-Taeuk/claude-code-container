@@ -72,6 +72,9 @@ describe("the whole plan, every field", () => {
                 // never claim it, so an empty value here is a leak, not a cosmetic default.
                 notes: "ccc-device-lab:owner-1:device-1:incarnation-1",
                 checkpointType: "ProductionOnly",
+                // Not cosmetic. Left on, every Start-VM of this device takes an automatic
+                // checkpoint and moves the OS disk onto an AVHDX chain.
+                automaticCheckpointsEnabled: false,
             },
             {
                 kind: "configure-firmware",
@@ -129,6 +132,9 @@ describe("the whole plan, every field", () => {
                 kind: "set-vm-settings",
                 notes: "ccc-device-lab:owner-1:device-1:incarnation-1",
                 checkpointType: "ProductionOnly",
+                // Not cosmetic. Left on, every Start-VM of this device takes an automatic
+                // checkpoint and moves the OS disk onto an AVHDX chain.
+                automaticCheckpointsEnabled: false,
             },
             {
                 kind: "configure-firmware",

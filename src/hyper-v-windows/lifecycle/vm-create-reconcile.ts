@@ -77,7 +77,12 @@ export function planHyperVVirtualMachineCreation(
 
     steps.push({ kind: "set-processor-count", count: request.processorCount });
     steps.push({ kind: "disable-dynamic-memory" });
-    steps.push({ kind: "set-vm-settings", notes: request.notes, checkpointType: request.checkpointType });
+    steps.push({
+        kind: "set-vm-settings",
+        notes: request.notes,
+        checkpointType: request.checkpointType,
+        automaticCheckpointsEnabled: false,
+    });
     steps.push({
         kind: "configure-firmware",
         firmware: request.firmware,
@@ -178,8 +183,10 @@ function diskDirectoryOf(diskPath: string): string | null {
 }
 
 /**
- * Says which effect a step produces when it succeeds, or `null` when it changes nothing that
- * has to be undone.
+ * Says which effect a step can produce, or `null` when it changes nothing that has to be
+ * undone. Not "when it succeeds": a step that fails partway can already have created the thing
+ * it was making, and `HyperVCreateEffect` says the executor records it at that moment rather
+ * than at the end of the step. Compensation for a half-finished copy is the reason.
  *
  * This is what makes "a step cannot be added without saying how to undo it" true rather than
  * merely intended. The switch is exhaustive, so a new step kind fails to compile until it is
