@@ -244,6 +244,38 @@ export function parseHyperVBootstrapNetworkObservation(stdout: string): HyperVBo
     };
 }
 
+export type HyperVCreatePrologueObservation = {
+    readonly ok: true;
+    readonly deviceRootExisted: boolean;
+    readonly diskDirectoryExisted: boolean;
+    readonly deviceRoot: string;
+    readonly diskDirectory: string;
+};
+
+/**
+ * Reads which directories the prologue created, which is the one thing compensation cannot
+ * derive for itself.
+ *
+ * Deliberately strict about the two booleans rather than defaulting them. A default would have
+ * to be one of two wrong answers: `true` makes creation unable to remove a device root it did
+ * make, and `false` makes it remove one it found. Refusing to decode is the only honest
+ * outcome when the host did not say.
+ */
+export function parseHyperVCreatePrologueObservation(stdout: string): HyperVCreatePrologueObservation | null {
+    const parsed = parseLastJsonObject(stdout);
+    if (!parsed || parsed.ok !== true) return null;
+    if (typeof parsed.deviceRootExisted !== "boolean" || typeof parsed.diskDirectoryExisted !== "boolean") return null;
+    if (typeof parsed.deviceRoot !== "string" || !parsed.deviceRoot) return null;
+    if (typeof parsed.diskDirectory !== "string" || !parsed.diskDirectory) return null;
+    return {
+        ok: true,
+        deviceRootExisted: parsed.deviceRootExisted,
+        diskDirectoryExisted: parsed.diskDirectoryExisted,
+        deviceRoot: parsed.deviceRoot,
+        diskDirectory: parsed.diskDirectory,
+    };
+}
+
 export function parseHyperVVmObservation(stdout: string): HyperVVmObservation | null {
     const parsed = parseLastJsonObject(stdout);
     if (!parsed || parsed.ok !== true || typeof parsed.vmId !== "string" || !VM_ID_PATTERN.test(parsed.vmId) || typeof parsed.vmName !== "string") return null;

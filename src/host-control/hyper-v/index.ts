@@ -42,6 +42,7 @@ export { hyperVSnapshotName, hyperVVmName, ownershipMarker } from "./core.js";
 export { hyperVReadinessCommand, hyperVRebootCommand, hyperVSetupCommand, hyperVEnsureNetworkCommand, hyperVCleanupNetworkCommand } from "./host.js";
 export { hyperVInspectNetworkAllocationsCommand } from "./network-allocations.js";
 export { hyperVCreateCommand } from "./vm-create.js";
+export { hyperVCreatePrologueCommand, type HyperVCreatePrologueOptions } from "./vm-create-prologue.js";
 export { hyperVLinuxSeedCommand, hyperVLinuxSshReadyCommand, hyperVBootstrapNetworkCommand, hyperVLinuxNetworkFinalizeCommand, hyperVBootstrapNetworkCleanupCommand, hyperVLinuxSshExecCommand, hyperVLinuxScpUploadCommand, hyperVLinuxScpDownloadCommand } from "./linux-guest.js";
 export { hyperVPrepareBaseImageCommand, hyperVAcquireBaseImageCommand } from "./images.js";
 export { hyperVStatusCommand, hyperVStartCommand, hyperVGuestReadyCommand, hyperVGuestBootDiagnosticCommand, hyperVStopCommand, hyperVDeleteCommand, hyperVRecoverOrphanCommand } from "./lifecycle.js";

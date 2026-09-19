@@ -1,6 +1,6 @@
 import { createHash } from "crypto";
 import { constants as fsConstants, promises as fsPromises } from "fs";
-import { dirname } from "path";
+import { dirname, resolve } from "path";
 import { cpus, totalmem } from "os";
 
 import { assertDeviceLabPathWithinRoot } from "../../../device-lab-state-file.js";
@@ -86,10 +86,21 @@ export function assertHyperVHostCapacity(request: HyperVHostCapacityRequest): vo
  * truncation.
  */
 export async function assertHyperVDiskCapacity(diskPath: string, diskMaxBytes: number): Promise<void> {
-    // The directory, not the disk: the disk is what this is deciding whether to create, so it
-    // does not exist yet. The PowerShell asked `Get-PSDrive` about the path's drive for the
-    // same reason. Asking about the file would fail with ENOENT on every real call.
-    const stats = await fsPromises.statfs(dirname(diskPath));
+    // Neither the disk nor its directory necessarily exists: this decides whether to create
+    // them, and it has to answer before anything is made. The PowerShell asked `Get-PSDrive`
+    // about the path's drive for the same reason. Walking up to the nearest existing ancestor
+    // reaches the same volume, which is the only thing the answer depends on.
+    let probe = resolve(diskPath);
+    while (true) {
+        const parent = dirname(probe);
+        if (parent === probe) break;
+        probe = parent;
+        try {
+            await fsPromises.stat(probe);
+            break;
+        } catch { /* keep walking toward the volume root */ }
+    }
+    const stats = await fsPromises.statfs(probe);
     const freeBytes = stats.bavail * stats.bsize;
     if (freeBytes < diskMaxBytes + DISK_RESERVE_BYTES) throw new Error("hyper-v-host-disk-capacity-exceeded");
 }

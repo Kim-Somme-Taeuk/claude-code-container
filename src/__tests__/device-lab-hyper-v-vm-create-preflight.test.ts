@@ -87,6 +87,16 @@ describe("Hyper-V disk capacity", () => {
         await expect(assertHyperVDiskCapacity(diskPath, Number.MAX_SAFE_INTEGER))
             .rejects.toThrow(/hyper-v-host-disk-capacity-exceeded/);
     });
+
+    // It has to answer before the directories exist, because its answer decides whether to
+    // make them. The nearest existing ancestor is on the same volume, which is the only thing
+    // the answer depends on.
+    it("answers for a path whose directories are not there yet", async () => {
+        const unborn = join(root, "not", "yet", "made", "root.vhdx");
+        await expect(assertHyperVDiskCapacity(unborn, 1)).resolves.toBeUndefined();
+        await expect(assertHyperVDiskCapacity(unborn, Number.MAX_SAFE_INTEGER))
+            .rejects.toThrow(/hyper-v-host-disk-capacity-exceeded/);
+    });
 });
 
 describe("cloning the base image", () => {
