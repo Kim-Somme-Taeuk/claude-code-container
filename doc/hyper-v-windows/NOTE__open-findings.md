@@ -77,6 +77,11 @@ load it intermittently produces a fourth, `hyper-v-bootstrap-network-probe-faile
 and fails. Observed once in two full-suite runs on 2026-09-18; passes in
 isolation and under artificial CPU load.
 
+Frequency, updated 2026-09-19: hit on 3 of 4 full-suite runs across two machines
+on that date, against 1 of 2 when first observed. It did not hit on the run where
+it was looked for specifically. Load-dependent, not commit-dependent — the two
+runs that hit and the one that did not were the same code.
+
 **It is not a slice 2B regression.** The classifier branch that emits it
 (`device-lab-broker.ts`, `bootstrapProbeAttempts > 0 && bootstrapProbeSuccesses === 0`)
 predates the 2B migration commit. The operation stubs in the test are
@@ -177,6 +182,13 @@ no unrecorded intermediates at all. Depth is the trigger, not containment --
 `assertPathInside`, and still leaves `a` unrecorded. A `diskPath` outside
 `deviceRoot` is the worst instance rather than the condition, since then the
 intermediates are not even under a directory the device-root delete might reach.
+
+**Constructing an effect is knowledge every executor repeats.** `effectKindOfStep`
+answers with a kind, but `vm-created` carries a `vmId` and the other two carry a
+`path`, so an executor still branches on the kind to build the effect it records.
+This is inherent — only the executor holds the id or the path — and the union
+keeps it type-safe, so it is recorded as a seam to expect rather than a defect to
+fix. Found by compiling a 3B executor skeleton against the public barrel.
 
 **Five valid-but-wrong values still compile:** an empty `startupOrder`, a
 duplicated one, `{enabled: true, template: ""}`, and a `managed-and-bootstrap`

@@ -257,10 +257,14 @@ firmware object; a generation-2 VM has firmware and no BIOS. The legacy command
 carried the generation as a number beside the settings it applied, so nothing
 stopped the wrong branch being written, and "Secure Boot on generation 1" needed
 a runtime `throw` reached only on a real host. Modelled as a union, the pairing
-is the type: `Set-VMFirmware` takes only the generation-2 member and
-`Set-VMBios` only the generation-1 member, and Secure Boot disabled with a
-template — which native rejects — cannot be written either. Those three are
-pinned by a type-contract file that fails by compiling.
+is the type: only by narrowing the union does a caller reach a startup order or
+a Secure Boot setting, and the two are on opposite members, so no code path
+holds both. The primitives sit one level below that and take the settings
+themselves — `Set-VMBios` a startup order, `Set-VMFirmware` a Secure Boot
+setting — rather than a member of the union; the planner is the only thing that
+unpacks it, and it cannot cross the branches. Secure Boot disabled with a
+template — which native rejects — cannot be written either. These are pinned by
+a type-contract file that fails by compiling.
 
 **`New-VM` returns the VM it made.** Every later step selects by that id. A
 creating call that returned nothing would force a read-back by name, and a name

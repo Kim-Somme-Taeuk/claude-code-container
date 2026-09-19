@@ -82,8 +82,11 @@ export const directoryEffectCarriesNoVmId: HyperVCreateEffect = {
 };
 
 // Generation 1 and generation 2 are different steps because they are different cmdlets, and
-// the boot disk rides only on the one that can use it. A consumer narrowing on `kind` -- which
-// is how every other step is handled -- reaches a BIOS step with no boot-disk field at all.
+// the boot disk rides only on the one that can use it. What these two prove is the absence:
+// the field is on no other member either, so the error stands with or without the narrowing
+// above it. That the narrowing itself works -- that `kind` alone is enough to reach a member
+// without the field -- is a separate claim, and it is proven by compiling a consumer against
+// the barrel, not here.
 export function biosStartupOrderHasNoBootDisk(step: HyperVCreateStep): string {
     if (step.kind !== "set-bios-startup-order") return "";
     // @ts-expect-error Set-VMBios takes a startup order and resolves no disk
