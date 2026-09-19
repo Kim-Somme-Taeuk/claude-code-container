@@ -6,6 +6,7 @@ import type {
 import type {
     HyperVCreateEffect,
     HyperVCreateNetworkIntent,
+    HyperVCreateStep,
 } from "../hyper-v-windows/lifecycle/vm-create-contracts.js";
 
 // These assertions fail by COMPILING. Each `@ts-expect-error` is a claim that the combination
@@ -78,4 +79,28 @@ export const directoryEffectCarriesNoVmId: HyperVCreateEffect = {
     path: "C:\\ccc\\devices\\device-1",
     // @ts-expect-error a directory was not a virtual machine
     vmId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+};
+
+// Generation 1 and generation 2 are different steps because they are different cmdlets, and
+// the boot disk rides only on the one that can use it. A consumer narrowing on `kind` -- which
+// is how every other step is handled -- reaches a BIOS step with no boot-disk field at all.
+export function biosStartupOrderHasNoBootDisk(step: HyperVCreateStep): string {
+    if (step.kind !== "set-bios-startup-order") return "";
+    // @ts-expect-error Set-VMBios takes a startup order and resolves no disk
+    return step.firstBootDiskPath;
+}
+
+// The converse: the UEFI step has no startup order, because Set-VMFirmware does not take one.
+export function firmwareStepHasNoStartupOrder(step: HyperVCreateStep): readonly string[] {
+    if (step.kind !== "configure-firmware") return [];
+    // @ts-expect-error a startup order belongs to Set-VMBios, not Set-VMFirmware
+    return step.startupOrder;
+}
+
+// And the boot disk is not optional on the step that does read it: a generation-2 VM that
+// names no first boot device is the legacy's silent-boot-order bug, not a valid plan.
+// @ts-expect-error Set-VMFirmware names the disk to boot, so the path is required
+export const firmwareStepNeedsItsBootDisk: HyperVCreateStep = {
+    kind: "configure-firmware",
+    secureBoot: { enabled: false },
 };

@@ -78,7 +78,7 @@ describe("the whole plan, every field", () => {
             },
             {
                 kind: "configure-firmware",
-                firmware: { generation: 2, secureBoot: { enabled: true, template: "MicrosoftWindows" } },
+                secureBoot: { enabled: true, template: "MicrosoftWindows" },
                 firstBootDiskPath: DISK_PATH,
             },
         ]);
@@ -138,7 +138,7 @@ describe("the whole plan, every field", () => {
             },
             {
                 kind: "configure-firmware",
-                firmware: { generation: 2, secureBoot: { enabled: true, template: "MicrosoftWindows" } },
+                secureBoot: { enabled: true, template: "MicrosoftWindows" },
                 firstBootDiskPath: DISK_PATH,
             },
         ]);
@@ -157,10 +157,13 @@ describe("the whole plan, every field", () => {
                 vhdPath: DISK_PATH,
                 switchName: null,
             });
+        // No firstBootDiskPath. Generation 1 routes to Set-VMBios, which takes a startup order
+        // and no disk, so carrying the path here would be a field with no reader -- and an
+        // executor would have to know not to consult it. The whole-object assertion is what
+        // makes the absence a fact rather than an oversight.
         expect(steps[steps.length - 1]).toEqual({
-            kind: "configure-firmware",
-            firmware: { generation: 1, startupOrder: ["IDE", "CD"] },
-            firstBootDiskPath: DISK_PATH,
+            kind: "set-bios-startup-order",
+            startupOrder: ["IDE", "CD"],
         });
     });
 
@@ -209,9 +212,11 @@ describe("virtual machine creation planning", () => {
 
     // Firmware names the disk as first boot device, and a disk is only attached once the VM
     // exists. It is also the last thing that can fail before the VM is usable.
-    it("configures firmware last", () => {
-        const kinds = kindsOf({ kind: "none" });
-        expect(kinds[kinds.length - 1]).toBe("configure-firmware");
+    it("configures firmware last, by whichever cmdlet the generation uses", () => {
+        expect(kindsOf({ kind: "none" }).at(-1)).toBe("configure-firmware");
+        expect(planHyperVVirtualMachineCreation(request({
+            firmware: { generation: 1, startupOrder: ["IDE", "CD"] },
+        })).map((step) => step.kind).at(-1)).toBe("set-bios-startup-order");
     });
 
     it("creates a VM with no switch when no network is wanted", () => {
@@ -406,7 +411,13 @@ const EVERY_STEP_KIND: readonly HyperVCreateStep[] = ([
         bootstrapAdapterName: "CCC Bootstrap DHCP",
     },
 ] as readonly HyperVCreateNetworkIntent[]).flatMap((network) =>
-    [...planHyperVVirtualMachineCreation(request({ network }))]);
+    [...planHyperVVirtualMachineCreation(request({ network }))])
+    // Generation 1 is the only way to reach `set-bios-startup-order`; every network intent
+    // above uses the default generation-2 request, so without this the table below would be
+    // asserting about a step no planner in it emits.
+    .concat([...planHyperVVirtualMachineCreation(request({
+        firmware: { generation: 1, startupOrder: ["IDE", "CD"] },
+    }))]);
 
 describe("every step says whether it leaves residue", () => {
     // The pairing the plan promised. `effectKindOfStep` is exhaustive, so a new step kind does
@@ -427,6 +438,7 @@ describe("every step says whether it leaves residue", () => {
         ["set-processor-count", null],
         ["disable-dynamic-memory", null],
         ["set-vm-settings", null],
+        ["set-bios-startup-order", null],
         ["configure-firmware", null],
     ] as readonly (readonly [HyperVCreateStep["kind"], HyperVCreateEffect["kind"] | null])[])(
         "maps %s to %s",
@@ -450,6 +462,7 @@ describe("every step says whether it leaves residue", () => {
                 "ensure-directory",
                 "rename-adapter",
                 "set-adapter-mac",
+                "set-bios-startup-order",
                 "set-processor-count",
                 "set-vm-settings",
             ]);

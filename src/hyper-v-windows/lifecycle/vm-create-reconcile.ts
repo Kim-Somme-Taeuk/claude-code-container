@@ -83,11 +83,13 @@ export function planHyperVVirtualMachineCreation(
         checkpointType: request.checkpointType,
         automaticCheckpointsEnabled: false,
     });
-    steps.push({
-        kind: "configure-firmware",
-        firmware: request.firmware,
-        firstBootDiskPath: request.diskPath,
-    });
+    steps.push(request.firmware.generation === 1
+        ? { kind: "set-bios-startup-order", startupOrder: request.firmware.startupOrder }
+        : {
+            kind: "configure-firmware",
+            secureBoot: request.firmware.secureBoot,
+            firstBootDiskPath: request.diskPath,
+        });
     return Object.freeze(steps);
 }
 
@@ -210,6 +212,7 @@ export function effectKindOfStep(step: HyperVCreateStep): HyperVCreateEffect["ki
         case "set-processor-count":
         case "disable-dynamic-memory":
         case "set-vm-settings":
+        case "set-bios-startup-order":
         case "configure-firmware":
             // These change the VM, and removing the VM undoes all of them at once. None leaves
             // residue that outlives it, so none has an effect of its own.

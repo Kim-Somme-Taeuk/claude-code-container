@@ -379,28 +379,87 @@ describe("Hyper-V Windows creation primitives", () => {
             staticMacAddress: "06:15:5d:01:1a:2c",
         });
 
-        expect(requests.map((request) => request.operation)).toEqual([
-            "New-VM", "Set-VM", "Set-VMMemory", "Set-VMProcessor",
-            "Get-VMFirmware", "Set-VMFirmware", "Set-VMBios", "Add-VMNetworkAdapter",
-            "Rename-VMNetworkAdapter", "Set-VMNetworkAdapter",
+        // Every wire field of every call, not the operation names plus a spot check. The name
+        // is the one part a wrong parameter never changes: a Set-VMProcessor that hardcodes
+        // one vCPU, or a Set-VM that drops automaticCheckpointsEnabled, still sends exactly
+        // "Set-VMProcessor" and "Set-VM". Pinning the sequence and two of ten objects left
+        // seven able to send anything -- the same shape-not-content gap that let the creation
+        // plan attach the shared golden base image, one layer down.
+        const id = { kind: "id", id: canonicalVmId };
+        expect(requests).toEqual([
+            // New-VM carries no selector: it is the call that brings the VM into existence.
+            {
+                schemaVersion: 1,
+                operation: "New-VM",
+                name: "vm",
+                generation: 2,
+                memoryStartupBytes: 2 * 1024 * 1024 * 1024,
+                vhdPath: "C:\\d\\r.vhdx",
+            },
+            {
+                schemaVersion: 1,
+                operation: "Set-VM",
+                selector: id,
+                notes: "marker",
+                checkpointType: "ProductionOnly",
+            },
+            { schemaVersion: 1, operation: "Set-VMMemory", selector: id, dynamicMemoryEnabled: false },
+            { schemaVersion: 1, operation: "Set-VMProcessor", selector: id, count: 4 },
+            { schemaVersion: 1, operation: "Get-VMFirmware", selector: id },
+            {
+                schemaVersion: 1,
+                operation: "Set-VMFirmware",
+                selector: id,
+                secureBoot: { enabled: true, template: "MicrosoftWindows" },
+            },
+            { schemaVersion: 1, operation: "Set-VMBios", selector: id, startupOrder: ["IDE", "CD"] },
+            {
+                schemaVersion: 1,
+                operation: "Add-VMNetworkAdapter",
+                selector: id,
+                name: "CCC Device Network",
+                switchName: "ccc-internal",
+            },
+            {
+                schemaVersion: 1,
+                operation: "Rename-VMNetworkAdapter",
+                selector: id,
+                adapter: { kind: "sole" },
+                newName: "CCC Bootstrap DHCP",
+            },
+            {
+                schemaVersion: 1,
+                operation: "Set-VMNetworkAdapter",
+                selector: id,
+                adapter: { kind: "name", name: "CCC Bootstrap DHCP" },
+                staticMacAddress: "06155D011A2C",
+            },
         ]);
-        // New-VM carries no selector: it is the call that brings the VM into existence.
-        expect(requests[0]).toEqual({
-            schemaVersion: 1,
-            operation: "New-VM",
-            name: "vm",
-            generation: 2,
-            memoryStartupBytes: 2 * 1024 * 1024 * 1024,
-            vhdPath: "C:\\d\\r.vhdx",
-        });
-        expect(requests[8]).toEqual({
-            schemaVersion: 1,
-            operation: "Rename-VMNetworkAdapter",
-            selector: { kind: "id", id: canonicalVmId },
-            adapter: { kind: "sole" },
-            newName: "CCC Bootstrap DHCP",
-        });
-        expect(requests[9]).toMatchObject({ staticMacAddress: "06155D011A2C" });
+    });
+
+    // Omitting a field and sending it are different wire shapes, and the optional ones are
+    // where a drop hides: Set-VM applies only the parameters it is given, so a client that
+    // quietly loses one reports success for settings it never sent.
+    it("sends exactly the optional fields it was given, and no key for the rest", async () => {
+        const { client, requests } = recordingClient();
+        await client.setVM({ selector, automaticCheckpointsEnabled: false });
+        await client.setVMFirmware({ selector, secureBoot: { enabled: false }, firstBootDiskPath: "C:\\d\\r.vhdx" });
+
+        expect(requests).toEqual([
+            {
+                schemaVersion: 1,
+                operation: "Set-VM",
+                selector: { kind: "id", id: canonicalVmId },
+                automaticCheckpointsEnabled: false,
+            },
+            {
+                schemaVersion: 1,
+                operation: "Set-VMFirmware",
+                selector: { kind: "id", id: canonicalVmId },
+                secureBoot: { enabled: false },
+                firstBootDiskPath: "C:\\d\\r.vhdx",
+            },
+        ]);
     });
 
     it("returns the VM native created, so later steps need not re-find it by name", async () => {

@@ -1,4 +1,6 @@
 import type {
+    HyperVBiosStartupDevice,
+    HyperVSecureBootSetting,
     HyperVVirtualMachineGeneration,
     HyperVVMNetworkAdapterTarget,
 } from "../low-level/contracts.js";
@@ -108,9 +110,27 @@ export type HyperVCreateStep =
         // the day a caller needs it; widening is compatible, narrowing later would not be.
         readonly automaticCheckpointsEnabled: false;
     }
+    // Two kinds, not one carrying an optional path. Three reasons, in order of weight.
+    //
+    // A generation-1 VM routes to `Set-VMBios` and a generation-2 VM to `Set-VMFirmware`.
+    // Every other step kind here names exactly one cmdlet; a single `configure-firmware`
+    // naming two was the only place that stopped being true.
+    //
+    // The boot-disk path has no generation-1 consumer -- `Set-VMBios` takes a selector and a
+    // startup order and resolves no disk -- so carrying it on a shared member would be a field
+    // no decision reads, which this slice adopted as a defect.
+    //
+    // And the discriminant has to be `kind` to do any work: TypeScript does not narrow a union
+    // by a nested property, so two members distinguished only by `firmware.generation` would
+    // still hand a consumer a union it cannot narrow. Splitting on `kind` is what makes the
+    // absence reachable by the executor rather than merely true on paper.
+    | {
+        readonly kind: "set-bios-startup-order";
+        readonly startupOrder: readonly HyperVBiosStartupDevice[];
+    }
     | {
         readonly kind: "configure-firmware";
-        readonly firmware: HyperVVirtualMachineGeneration;
+        readonly secureBoot: HyperVSecureBootSetting;
         readonly firstBootDiskPath: string;
     };
 

@@ -59,6 +59,10 @@ export type {
     HyperVBootstrapTeardownDecision,
 } from "./vm-network-contracts.js";
 export {
+    // Exported because an executor needs it, not for symmetry. It is what makes "a step cannot
+    // be added without saying how to undo it" true; a consumer that cannot reach it hand-rolls
+    // the step-to-effect mapping, which is the duplication the function exists to prevent.
+    effectKindOfStep,
     planHyperVVirtualMachineCreation,
     planHyperVVirtualMachineCreationCompensation,
 } from "./vm-create-reconcile.js";

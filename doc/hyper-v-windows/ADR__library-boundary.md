@@ -53,9 +53,18 @@ lifecycle slice was `Get-VM`, `Get-VMHardDiskDrive`, `Get-VMDvdDrive`,
 `Checkpoint-VM`, `Remove-VMSnapshot`, and `Restore-VMSnapshot`. It owns request validation, a single transport
 invocation, strict bounded response decoding, native-faithful result types, and
 stable typed validation/transport/protocol/native errors. The PowerShell
-transport may perform one `Get-VM` selector-resolution read before exactly one
-target primitive for operations other than `Get-VM`; this is resolution inside
-the single attempt, not retry or lifecycle policy.
+transport may perform resolution reads before exactly one target primitive for
+operations other than `Get-VM`: one `Get-VM` to resolve the selector, and where
+the target names something inside the VM rather than the VM itself, one further
+read to resolve that. `Rename-VMNetworkAdapter` and `Set-VMNetworkAdapter` read
+`Get-VMNetworkAdapter` — which is what lets a target be "the VM's only adapter"
+rather than a literal name that is wrong on a localized host — and
+`Set-VMFirmware` with a first-boot disk reads `Get-VMHardDiskDrive`, because
+native wants a device object where the caller has a path. All of this is
+resolution inside the single attempt, not retry or lifecycle policy, and the
+count that matters is one *target* invocation. The earlier wording allowed only
+the `Get-VM` read and was already stale when 2B's `Remove-VMNetworkAdapter`
+landed; it is the rule that was wrong, not the three operations.
 Selector resolution enumerates with `Get-VM -ErrorAction Stop` and filters exact
 ID/name matches. Only a successful zero-match enumeration means absence; a
 missing cmdlet/module or any host/native error fails closed.
@@ -228,6 +237,20 @@ disk. Applied to what the legacy script recorded, reverse order reproduces its
 rollback sequence exactly, which is how the two were checked against each other.
 Each entry is independent and best-effort, as the legacy `catch` was: a caller
 that stops at the first failure leaves the residue the rest exists to clear.
+
+**One step, one cmdlet — which cost `configure-firmware` its second job.** Every
+step kind names exactly one native cmdlet, except that firmware configuration
+named two: `Set-VMBios` for generation 1 and `Set-VMFirmware` for generation 2.
+Carrying both on one kind meant the step also carried a first-boot disk path
+that generation 1 has no use for, since `Set-VMBios` resolves no disk — a field
+no decision reads, which this slice adopted as a defect in its own right.
+
+Splitting it produced a fact worth recording, because the obvious fix does not
+work: two members distinguished only by `firmware.generation` change nothing,
+as TypeScript does not narrow a union by a nested property. A consumer would
+still hold an unnarrowable union. The discriminant has to be `kind`, which is
+what every other step already uses, so the split restores the one-cmdlet rule
+and makes the absent field absent to a consumer rather than only on paper.
 
 **Generation and firmware are one value.** A generation-1 VM has a BIOS and no
 firmware object; a generation-2 VM has firmware and no BIOS. The legacy command
