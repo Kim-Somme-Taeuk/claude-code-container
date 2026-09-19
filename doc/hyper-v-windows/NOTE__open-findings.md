@@ -164,13 +164,19 @@ which fails after creating its destination still records `file-created`, and
 therefore still gets its `delete-file`.
 
 **`ensure-directory` has a second, narrower version of the same window.**
-Executed as `New-Item -Force` it creates intermediate parents, so a nested
-create could leave a parent behind while failing on the leaf, and only one
-`directory-created` effect would name the leaf. Parity rather than regression:
-the legacy rollback removed `$DeviceRoot` recursively and nothing above it. It
-is invisible today because the plan only ever emits `deviceRoot` and a disk
-directory normally nested under it. It would stop being invisible if a caller
-ever passed a `diskPath` outside `deviceRoot`.
+If 3B executes it as the legacy did, with `New-Item -Force`, it creates
+intermediate parents, so a nested create could leave a parent behind while
+failing on the leaf, and only one `directory-created` effect would name the
+leaf. Parity rather than regression: the legacy rollback removed `$DeviceRoot`
+recursively and nothing above it.
+
+It would stop being invisible the moment a `diskPath`'s directory sits more than
+one level below `deviceRoot`; today's shape puts it directly under, so there are
+no unrecorded intermediates at all. Depth is the trigger, not containment --
+`deviceRoot\a\b\root.vhdx` is inside `deviceRoot`, passes the legacy's
+`assertPathInside`, and still leaves `a` unrecorded. A `diskPath` outside
+`deviceRoot` is the worst instance rather than the condition, since then the
+intermediates are not even under a directory the device-root delete might reach.
 
 **Five valid-but-wrong values still compile:** an empty `startupOrder`, a
 duplicated one, `{enabled: true, template: ""}`, and a `managed-and-bootstrap`
