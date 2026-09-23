@@ -10,6 +10,8 @@ vi.mock("child_process", async (importOriginal) => {
     const actual = (await importOriginal()) as Record<string, unknown>;
     return { ...actual, spawnSync: spawnSyncMock };
 });
+vi.mock("../opencode-data-access.js", () => ({ prepareOpenCodeDataDirectory: vi.fn() }));
+const { prepareOpenCodeDataDirectory } = await import("../opencode-data-access.js");
 
 // Import AFTER mocks
 const {
@@ -36,6 +38,7 @@ describe("container-setup.ts module", () => {
 
     beforeEach(() => {
         spawnSyncMock.mockReset();
+        vi.mocked(prepareOpenCodeDataDirectory).mockReset();
         vi.spyOn(console, "log").mockImplementation(() => {});
         vi.spyOn(console, "warn").mockImplementation(() => {});
     });
@@ -280,6 +283,56 @@ describe("container-setup.ts module", () => {
             ensureTools(container, codexTool);
             expect(spawnSyncMock).toHaveBeenCalledTimes(1);
             expect(scripts()[0]).toContain("/home/ccc/.local/bin/codex");
+        });
+
+        it("prepares active OpenCode even when its wrapper is already installed", () => {
+            mockNpmSetup([]);
+            ensureTools(container, getToolByName("opencode")!, { activeOnly: true });
+            expect(prepareOpenCodeDataDirectory).toHaveBeenCalledExactlyOnceWith(container);
+            expect(scripts()).toHaveLength(1);
+        });
+
+        it.each(["MISSING", "READY"])("prepares OpenCode before its %s persisted-binary probe", (state) => {
+            const events: string[] = [];
+            vi.mocked(prepareOpenCodeDataDirectory).mockImplementation(() => { events.push("prepare"); });
+            spawnSyncMock.mockImplementation((_cli, args) => {
+                const script = (args as string[]).at(-1)!;
+                if (script.startsWith("[ -x ")) return makeResult(0, "opencode\n");
+                if (script.includes("mise where node@22")) {
+                    events.push("probe");
+                    return makeResult(0, `${state}\n`);
+                }
+                if (script.startsWith(npmPrefix)) events.push("install");
+                return makeResult(0);
+            });
+            ensureTools(container, getToolByName("opencode")!, { activeOnly: true });
+            expect(events).toEqual(state === "READY" ? ["prepare", "probe"] : ["prepare", "probe", "install"]);
+            expect(scripts().some((script) => script.includes("cat > /home/ccc/.local/bin/opencode"))).toBe(true);
+            if (state === "READY") expect(scripts().some((script) => /npm|rm -rf|mise\/shims/.test(script))).toBe(false);
+        });
+
+        it("skips optional OpenCode entirely after preparation failure while installing Codex", () => {
+            mockNpmSetup(["codex", "opencode"]);
+            vi.mocked(prepareOpenCodeDataDirectory).mockImplementation(() => { throw new Error("OpenCode data EACCES"); });
+            ensureTools(container, codexTool);
+            expect(console.warn).toHaveBeenCalledWith("Warning: OpenCode data EACCES (optional tool)");
+            expect(scripts().slice(1).some((script) => script.includes("opencode"))).toBe(false);
+            expect(scripts()).toContain(`${npmPrefix}@openai/codex`);
+        });
+
+        it.each([{ missing: [] }, { missing: ["opencode"] }])("stops active OpenCode on preparation failure, missing=$missing", ({ missing }) => {
+            mockNpmSetup(missing);
+            vi.mocked(prepareOpenCodeDataDirectory).mockImplementation(() => { throw new Error("OpenCode data EACCES"); });
+            expect(() => ensureTools(container, getToolByName("opencode")!, { activeOnly: true })).toThrow("OpenCode data EACCES");
+            expect(scripts()).toHaveLength(1);
+            expect(console.warn).not.toHaveBeenCalled();
+        });
+
+        it("does not prepare optional installed OpenCode or any OpenCode for Codex-only startup", () => {
+            mockNpmSetup([]);
+            ensureTools(container, getToolByName("gemini")!);
+            ensureTools(container, codexTool, { activeOnly: true });
+            expect(prepareOpenCodeDataDirectory).not.toHaveBeenCalled();
         });
 
         it("restores a healthy persisted tool without npm or cache mutations", () => {

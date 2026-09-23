@@ -435,7 +435,18 @@ ccc codex login status
 ```
 
 Proxy listener detection verifies only that the listener is present. It does
-not verify browser-to-container callback routing. OpenCode's musl platform
-errors can follow an earlier failure of its glibc binary; inspect that binary's
-error before choosing a package workaround. OpenCode installation is independent
-of Codex startup.
+not verify browser-to-container callback routing.
+
+OpenCode's `--version` check can create directories inside its data folder.
+When the container user cannot write the host-mounted `~/.local/share/opencode`,
+that check fails with `EACCES`; OpenCode 1.18.31's installer hides the native
+error and may then report musl `EBADPLATFORM` errors. CCC checks data access
+before installation, cached-binary verification, and active OpenCode startup.
+For a real host-owned directory, it grants the container user a directory ACL
+while preserving ownership and unrelated effective permissions. It leaves
+healthy directories unchanged and refuses unsafe paths or custom/default ACLs
+that require alteration. Unsupported ACL operations or missing Python in an
+older image produce a path-specific setup error. Existing inaccessible child
+directories and config files still require manual inspection; CCC does not
+recursively change their permissions. Optional OpenCode preparation failures
+warn and skip OpenCode. Codex startup does not prepare or install OpenCode.

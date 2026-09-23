@@ -13,6 +13,7 @@ const fixture = vi.hoisted(() => ({
     unlink: vi.fn(),
     restore: vi.fn(),
     prepare: vi.fn(),
+    openCodeData: vi.fn(),
     harness: vi.fn(),
     buildMcp: vi.fn(),
     cleanup: vi.fn(),
@@ -73,6 +74,7 @@ vi.mock("../session.js", () => ({
 }));
 vi.mock("../mcp-forward.js", () => ({ buildMcpConfig: fixture.buildMcp }));
 vi.mock("../codex-harness.js", () => ({ ensureCodexHarness: fixture.harness }));
+vi.mock("../opencode-data-access.js", () => ({ prepareOpenCodeDataDirectory: fixture.openCodeData }));
 vi.mock("../codex-config-lock.js", () => ({ withCodexConfigLock: (operation: () => unknown) => operation() }));
 vi.mock("../localhost-proxy-setup.js", () => ({ setupLocalhostProxy: vi.fn() }));
 
@@ -143,6 +145,7 @@ describe("ccc codex login startup", () => {
             }
         });
         fixture.prepare.mockImplementation(() => fixture.events.push("container-access"));
+        fixture.openCodeData.mockReset().mockImplementation(() => fixture.events.push("opencode-data"));
         fixture.harness.mockImplementation(() => fixture.events.push("harness"));
         fixture.buildMcp.mockImplementation((_profile, restoreAccess?: () => void) => {
             restoreAccess?.();
@@ -273,6 +276,32 @@ describe("ccc codex login startup", () => {
         const [args] = loginCalls();
         expect(args.slice(args.indexOf("ccc-startup-test") + 1)).toEqual(["codex", "login"]);
         expect(args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+        expect(fixture.openCodeData).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])("prepares an installed active OpenCode before launch (running=%s)", async (running) => {
+        fixture.running = running;
+        fixture.missing.clear();
+        process.argv = [process.execPath, "ccc", "opencode", "--version"];
+        expect(await runLogin()).toBe(0);
+        const calls = fixture.spawn.mock.calls.map(([, args]) => args as string[]);
+        const launch = calls.findIndex((args) => args.includes("opencode") && args.includes("--version"));
+        expect(launch).toBeGreaterThan(-1);
+        expect(fixture.openCodeData).toHaveBeenCalledExactlyOnceWith("ccc-startup-test");
+        expect(fixture.openCodeData.mock.invocationCallOrder[0]).toBeLessThan(fixture.spawn.mock.invocationCallOrder[launch]);
+        expect(fixture.events.some((event) => event.startsWith("install:"))).toBe(false);
+    });
+
+    it.each([false, true])("cleans up active OpenCode data failures before launching (running=%s)", async (running) => {
+        fixture.running = running;
+        fixture.missing.clear();
+        process.argv = [process.execPath, "ccc", "opencode", "--version"];
+        fixture.openCodeData.mockImplementation(() => { throw new Error("OpenCode data EACCES"); });
+        if (running) await expect(runLogin()).rejects.toThrow("OpenCode data EACCES");
+        else expect(await runLogin()).toBe(1);
+        expect(fixture.spawn.mock.calls.some(([, args]) => (args as string[]).includes("opencode"))).toBe(false);
+        expect(fixture.cleanup).toHaveBeenCalledOnce();
+        expect(writeEnvFile).not.toHaveBeenCalled();
     });
 
     it.each([false, true])("cleans up when MCP refuses a stale lock before login (running=%s)", async (running) => {

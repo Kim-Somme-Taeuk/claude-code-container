@@ -6,6 +6,7 @@
 import { spawnSync, type SpawnSyncReturns } from "child_process";
 import { getNpmTools, getToolByName, type ToolDefinition } from "./tool-registry.js";
 import { runtimeCli } from "./container-runtime.js";
+import { prepareOpenCodeDataDirectory } from "./opencode-data-access.js";
 
 // Claude binary persist path inside the mise volume
 export const CLAUDE_PERSIST_DIR = "/home/ccc/.local/share/mise/.claude-bin";
@@ -170,7 +171,19 @@ function ensureNpmTools(containerName: string, activeTool: ToolDefinition, activ
         throw new Error(`Failed to check npm tool readiness for ${activeTool.name} in container: ${npmSetupFailureReason(checkResult)}`);
     }
     const missingCmds = new Set((checkResult.stdout ?? "").trim().split("\n").filter(Boolean));
-    const missing = tools.filter((t) => missingCmds.has(t.cmd));
+    let missing = tools.filter((t) => missingCmds.has(t.cmd));
+
+    // OpenCode's version probe creates data directories even during postinstall.
+    // Prepare active installations too, including already-present wrappers.
+    if (activeTool.name === "opencode" || missing.some((tool) => tool.cmd === "opencode")) {
+        try {
+            prepareOpenCodeDataDirectory(containerName);
+        } catch (error) {
+            if (activeTool.name === "opencode") throw error;
+            console.warn(`Warning: ${error instanceof Error ? error.message : String(error)} (optional tool)`);
+            missing = missing.filter((tool) => tool.cmd !== "opencode");
+        }
+    }
 
     if (missing.length === 0) {
         return;
