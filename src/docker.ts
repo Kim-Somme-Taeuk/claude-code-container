@@ -32,6 +32,8 @@ import {
     IMAGE_NAME,
     CONTAINER_PID_LIMIT,
     MISE_VOLUME_NAME,
+    CODEX_PACKAGES_VOLUME_NAME,
+    CODEX_PACKAGES_CONTAINER_DIR,
     CLI_VERSION,
     DOCKER_REGISTRY_IMAGE,
     CLIPBOARD_FILES_DIR,
@@ -773,6 +775,7 @@ export function buildDockerRunArgs(opts: DockerRunArgsOptions): string[] {
     }
     // Named volume — never gets :Z (mount helper auto-detects host-path vs name)
     args.push(...bindMountArgs(opts.miseVolumeName, "/home/ccc/.local/share/mise"));
+    args.push(...bindMountArgs(CODEX_PACKAGES_VOLUME_NAME, CODEX_PACKAGES_CONTAINER_DIR));
     if (opts.labRunner) {
         args.push(...bindMountArgs(opts.labRunner.stateVolumeName, opts.labRunner.stateContainerDir));
     }
@@ -1083,6 +1086,20 @@ export function resolveCredentialHostPath(mount: CredentialMount, profile?: stri
         return getClaudeDir(profile);
     }
     return join(homedir(), mount.hostDir);
+}
+
+/**
+ * Create a credential mount's host directory. For the codex mount, also create
+ * the mount point of the nested packages volume, so Docker does not create it
+ * on the host as root.
+ */
+export function ensureCredentialHostDir(mount: CredentialMount, profile?: string): string {
+    const hostPath = resolveCredentialHostPath(mount, profile);
+    mkdirSync(hostPath, { recursive: true });
+    if (posix.dirname(CODEX_PACKAGES_CONTAINER_DIR) === mount.containerDir) {
+        mkdirSync(join(hostPath, posix.basename(CODEX_PACKAGES_CONTAINER_DIR)), { recursive: true });
+    }
+    return hostPath;
 }
 
 export function restoreCodexConfigHostOwnership(containerName: string): void {
@@ -2368,8 +2385,7 @@ export function startProjectContainer(
 
     const debug = !!process.env.DEBUG;
     const credentialMounts = getAllCredentialMounts().map((mount) => {
-        const hostPath = resolveCredentialHostPath(mount, profile);
-        mkdirSync(hostPath, { recursive: true });
+        const hostPath = ensureCredentialHostDir(mount, profile);
         return { hostPath, containerPath: mount.containerDir };
     });
     const gitIdentityMounts = getHostGitIdentityMounts();
@@ -2427,6 +2443,13 @@ export function startProjectContainer(
         {
             hostPath: MISE_VOLUME_NAME,
             containerPath: "/home/ccc/.local/share/mise",
+            readonly: false,
+            type: "volume",
+            presence: "additive",
+        },
+        {
+            hostPath: CODEX_PACKAGES_VOLUME_NAME,
+            containerPath: CODEX_PACKAGES_CONTAINER_DIR,
             readonly: false,
             type: "volume",
             presence: "additive",

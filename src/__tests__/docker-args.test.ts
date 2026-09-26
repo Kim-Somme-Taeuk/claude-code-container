@@ -440,6 +440,14 @@ describe("buildDockerRunArgs — volume mounts", () => {
         );
     });
 
+    it("mounts codex daemon packages as a named volume nested in the codex credential dir", () => {
+        const args = buildDockerRunArgs(makeOpts());
+        const mounts = extractVolumeMounts(args);
+        expect(mounts).toContain(
+            "ccc-codex-packages:/home/ccc/.codex/packages",
+        );
+    });
+
     it("mounts device-lab state when provided", () => {
         const args = buildDockerRunArgs(makeOpts({
             deviceLabStateHostDir: "/home/user/.ccc/devices",
@@ -466,34 +474,34 @@ describe("buildDockerRunArgs — volume mounts", () => {
         );
     });
 
-    it("has exactly 7 volume mounts without SSH when device-lab state is mounted", () => {
+    it("has exactly 8 volume mounts without SSH when device-lab state is mounted", () => {
         const args = buildDockerRunArgs(makeOpts({ hostSshDir: null, sshAgentSocket: null, deviceLabStateHostDir: "/home/user/.ccc/devices" }));
         const mounts = extractVolumeMounts(args);
-        expect(mounts).toHaveLength(7);
+        expect(mounts).toHaveLength(8);
     });
 
-    it("has exactly 8 volume mounts with SSH keys only when device-lab state is mounted", () => {
+    it("has exactly 9 volume mounts with SSH keys only when device-lab state is mounted", () => {
         const args = buildDockerRunArgs(
             makeOpts({ hostSshDir: "/home/user/.ssh", sshAgentSocket: null, deviceLabStateHostDir: "/home/user/.ccc/devices" }),
         );
         const mounts = extractVolumeMounts(args);
-        expect(mounts).toHaveLength(8);
+        expect(mounts).toHaveLength(9);
     });
 
-    it("has exactly 8 volume mounts with agent socket only when device-lab state is mounted", () => {
+    it("has exactly 9 volume mounts with agent socket only when device-lab state is mounted", () => {
         const args = buildDockerRunArgs(
             makeOpts({ hostSshDir: null, sshAgentSocket: "/tmp/agent.sock", deviceLabStateHostDir: "/home/user/.ccc/devices" }),
         );
         const mounts = extractVolumeMounts(args);
-        expect(mounts).toHaveLength(8);
+        expect(mounts).toHaveLength(9);
     });
 
-    it("has exactly 9 volume mounts with both SSH keys and agent socket when device-lab state is mounted", () => {
+    it("has exactly 10 volume mounts with both SSH keys and agent socket when device-lab state is mounted", () => {
         const args = buildDockerRunArgs(
             makeOpts({ hostSshDir: "/home/user/.ssh", sshAgentSocket: "/tmp/agent.sock", deviceLabStateHostDir: "/home/user/.ccc/devices" }),
         );
         const mounts = extractVolumeMounts(args);
-        expect(mounts).toHaveLength(9);
+        expect(mounts).toHaveLength(10);
     });
 });
 

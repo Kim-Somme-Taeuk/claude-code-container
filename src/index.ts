@@ -8,7 +8,7 @@ import {
     readFileSync,
     unlinkSync,
 } from "fs";
-import { basename, dirname, join, relative, resolve } from "path";
+import { basename, dirname, join, posix, relative, resolve } from "path";
 import { fileURLToPath } from "url";
 import {
     formatScannedFiles,
@@ -34,6 +34,7 @@ import {
     collectForwardedEnv,
     writeEnvFile,
     LAB_RUNNER_PROFILE_NAME,
+    CODEX_PACKAGES_CONTAINER_DIR,
 } from "./utils.js";
 
 import { ensureClipboardServer } from "./clipboard-server.js";
@@ -84,7 +85,7 @@ import {
     syncClipboardShims,
     getContainerStatus,
     getCurrentImageId,
-    resolveCredentialHostPath,
+    ensureCredentialHostDir,
     prepareCodexConfigForContainer,
     restoreCodexConfigHostOwnership,
 } from "./docker.js";
@@ -353,7 +354,7 @@ function ensureDirs(profile?: string): void {
     // Prepare every coding-agent credential dir unconditionally so any tool the
     // user later invokes already has its host source on disk.
     for (const mount of getAllCredentialMounts()) {
-        mkdirSync(resolveCredentialHostPath(mount, profile), { recursive: true });
+        ensureCredentialHostDir(mount, profile);
     }
 }
 
@@ -475,16 +476,24 @@ function forceUpdateCodexInContainer(containerName: string): boolean {
     return r.status === 0;
 }
 
+// Top-level entries: keep auth.json and config.toml, drop everything else
+// (subdirectories, sqlite files of any extension, JSON state files, etc.).
+// packages is the ccc-codex-packages volume shared by every project's
+// container, so it is never part of one project's wipe.
+export const CODEX_STATE_WIPE_COMMAND =
+    `find ${posix.dirname(CODEX_PACKAGES_CONTAINER_DIR)} -mindepth 1 -maxdepth 1 ! -name auth.json ! -name config.toml `
+    + `! -name ${posix.basename(CODEX_PACKAGES_CONTAINER_DIR)} -exec rm -rf {} + 2>/dev/null; true`;
+
 /**
  * Last-resort recovery when update+retry didn't fix codex's state mismatch.
- * Wipes every file and subdirectory under /home/ccc/.codex except `auth.json`
- * and `config.toml`. Bind-mounted to the host, so this clears the host's
- * ~/.codex too. Then retries the codex command once.
+ * Wipes every file and subdirectory under /home/ccc/.codex except `auth.json`,
+ * `config.toml`, and the shared `packages` volume. Bind-mounted to the host, so
+ * this clears the host's ~/.codex too. Then retries the codex command once.
  */
 async function offerCodexStateWipe(containerName: string, execArgs: string[]): Promise<number> {
     console.error("\n[ccc] codex state is still incompatible after the update.");
     const answer = await prompt(
-        "Wipe everything in ~/.codex except auth.json + config.toml and retry? Session history is lost. [y/N]: ",
+        "Wipe everything in ~/.codex except auth.json, config.toml and the shared daemon packages, then retry? Session history is lost. [y/N]: ",
         true,
     );
     if (answer !== "y" && answer !== "yes") {
@@ -496,14 +505,12 @@ async function offerCodexStateWipe(containerName: string, execArgs: string[]): P
         runtimeCli(),
         [
             "exec", containerName, "sh", "-c",
-            // Top-level entries: keep auth.json and config.toml, drop everything else
-            // (subdirectories, sqlite files of any extension, JSON state files, etc.).
-            'find /home/ccc/.codex -mindepth 1 -maxdepth 1 ! -name auth.json ! -name config.toml -exec rm -rf {} + 2>/dev/null; true',
+            CODEX_STATE_WIPE_COMMAND,
         ],
         { stdio: "ignore" },
     );
 
-    console.error("[ccc] Wiped ~/.codex (kept auth.json + config.toml). Retrying codex...");
+    console.error("[ccc] Wiped ~/.codex (kept auth.json, config.toml, packages). Retrying codex...");
     const retry = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" });
     return retry.status ?? 1;
 }

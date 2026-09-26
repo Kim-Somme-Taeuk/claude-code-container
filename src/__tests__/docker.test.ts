@@ -232,6 +232,7 @@ const {
     qualifyImageRefForRuntime,
     getHostGitIdentityMounts,
     resolveCredentialHostPath,
+    ensureCredentialHostDir,
     prepareCodexConfigForContainer,
     CODEX_CONFIG_PREPARE_TIMEOUT_MS,
     restoreCodexConfigHostOwnership,
@@ -250,6 +251,8 @@ const {
     CLIPBOARD_FILES_DIR,
     CLIPBOARD_FILES_CONTAINER_DIR,
     MISE_VOLUME_NAME,
+    CODEX_PACKAGES_VOLUME_NAME,
+    CODEX_PACKAGES_CONTAINER_DIR,
     getClaudeJsonFile,
     getProjectId,
 } = await import("../utils.js");
@@ -330,6 +333,7 @@ function fullCredentialMountsJson(
     const hostSshPath = join(homedir(), ".ssh");
     const coreMounts = [
         { Source: MISE_VOLUME_NAME, Destination: "/home/ccc/.local/share/mise", Type: "volume", RW: true },
+        { Source: CODEX_PACKAGES_VOLUME_NAME, Destination: CODEX_PACKAGES_CONTAINER_DIR, Type: "volume", RW: true },
         { Source: "/var/run/docker.sock", Destination: "/var/run/docker.sock", Type: "bind", RW: true },
         ...(mockExistsSync(hostSshPath)
             ? [{ Source: hostSshPath, Destination: "/home/ccc/.ssh", Type: "bind", RW: false }]
@@ -1249,6 +1253,22 @@ describe("docker.ts module exports", () => {
 
             expect(resolveCredentialHostPath(claudeMount, "work")).toMatch(/\/\.ccc\/profiles\/work\/claude$/);
             expect(resolveCredentialHostPath(codexMount, "work")).toMatch(/\/\.ccc\/codex$/);
+        });
+
+        it("creates the codex packages mount point on the host but no extra dir for other tools", () => {
+            const codexMount = { hostDir: ".ccc/codex", containerDir: "/home/ccc/.codex" };
+            const claudeMount = { hostDir: ".ccc/claude", containerDir: "/home/ccc/.claude" };
+            mockMkdirSync.mockClear();
+
+            const codexHost = ensureCredentialHostDir(codexMount);
+            expect(mockMkdirSync.mock.calls.map((c: unknown[]) => c[0])).toEqual([
+                codexHost,
+                join(codexHost, "packages"),
+            ]);
+
+            mockMkdirSync.mockClear();
+            const claudeHost = ensureCredentialHostDir(claudeMount);
+            expect(mockMkdirSync.mock.calls.map((c: unknown[]) => c[0])).toEqual([claudeHost]);
         });
 
         it("includes -v for claude.json mount independently of credentialMounts", () => {
@@ -2990,6 +3010,31 @@ describe("docker.ts module exports", () => {
             )).toBe(getContainerName(projectPath));
             expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(
                 `missing mount ${compatibilityMount.containerPath}`,
+            ));
+            expectNoContainerReplacement();
+        });
+
+        it("defers the codex packages volume for a running container that predates it", () => {
+            const inspected = JSON.parse(fullCredentialMountsJson());
+            inspected.Mounts = inspected.Mounts.filter(
+                (item: { Destination: string }) => item.Destination !== CODEX_PACKAGES_CONTAINER_DIR,
+            );
+            spawnSyncMock.mockImplementation((_command: unknown, argsValue: unknown) => {
+                const args = argsValue as string[];
+                if (args[0] === "images") return makeResult(0, "sha256:abc\n");
+                if (args[0] === "image" && args[1] === "inspect") return makeResult(0, "<no value>\n");
+                if (args[0] === "inspect") return makeResult(0, JSON.stringify(inspected));
+                if (args[0] === "ps") return makeResult(0, "abc123\n");
+                if (args[0] === "exec" && args.at(-1) === "true") return makeResult(0);
+                return makeResult(0);
+            });
+            const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+            expect(startProjectContainer(
+                projectPath, ensureDirs, undefined, undefined, undefined, undefined, () => false,
+            )).toBe(getContainerName(projectPath));
+            expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(
+                `missing mount ${CODEX_PACKAGES_CONTAINER_DIR}`,
             ));
             expectNoContainerReplacement();
         });
@@ -5094,6 +5139,41 @@ describe("docker.ts module exports", () => {
                 (c: unknown[]) => c[0] === "docker" && (c[1] as string[])[0] === "stop"
             );
             expect(stopCall).toBeUndefined();
+        });
+
+        it("recreates a stopped container that predates the codex packages volume", () => {
+            vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+            _setRuntimeInfoForTest({
+                runtime: "docker",
+                flavor: "docker-native",
+                remote: false,
+                rootless: false,
+            });
+            mockExistsSync.mockImplementation((p: string) => p === "/dev/kvm");
+            mockStatSync.mockReturnValue({ gid: 108 });
+            const inspected = JSON.parse(fullCredentialMountsJson());
+            inspected.Mounts = inspected.Mounts.filter(
+                (item: { Destination: string }) => item.Destination !== CODEX_PACKAGES_CONTAINER_DIR,
+            );
+
+            spawnSyncMock
+                .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
+                .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected))) // inspect -> no packages volume
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
+                .mockReturnValueOnce(makeResult(0))                  // docker rm
+                .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
+                .mockReturnValueOnce(makeResult(0, ""))              // isContainerExists -> false
+                .mockReturnValueOnce(makeResult(0, "c0ffee123456\n")); // docker run
+
+            startWithApprovedReplacement();
+
+            const runCall = spawnSyncMock.mock.calls.find(
+                (c: unknown[]) => c[0] === "docker" && (c[1] as string[])[0] === "run"
+            );
+            expect(runCall).toBeDefined();
+            expect(runCall![1]).toContain(`${CODEX_PACKAGES_VOLUME_NAME}:${CODEX_PACKAGES_CONTAINER_DIR}`);
         });
 
         it("recreates existing default container when durable lab state mount is missing", () => {

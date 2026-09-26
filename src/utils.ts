@@ -50,6 +50,11 @@ export const IMAGE_NAME = "ccc";
 export const DOCKER_REGISTRY_IMAGE = process.env.CCC_REGISTRY || "luxusio/claude-code-container";
 export const CONTAINER_PID_LIMIT = "-1"; // -1 = unlimited (same as host)
 export const MISE_VOLUME_NAME = "ccc-mise-cache";
+// Codex installs its app-server daemon under $CODEX_HOME/packages. Keeping that
+// subtree on a named volume avoids a rename that Windows-backed bind mounts
+// reject right after a binary inside it ran (doc/common/REQ__codex-daemon-packages-volume.md).
+export const CODEX_PACKAGES_VOLUME_NAME = "ccc-codex-packages";
+export const CODEX_PACKAGES_CONTAINER_DIR = "/home/ccc/.codex/packages";
 export const LAB_RUNNER_PROFILE_NAME = "lab-runner";
 export const LAB_RUNNER_STATE_CONTAINER_DIR = "/home/ccc/.ccc/labs";
 export const DEFAULT_ENV_FORWARD_BYTE_LIMIT = 64 * 1024;

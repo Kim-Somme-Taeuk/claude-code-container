@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { canonicalProjectPath, projectPathsEquivalent, projectIdentityPath, hashPath, getProjectId } from '../utils.js'
 import { getContainerName, isContainerImageOutdated } from '../docker.js'
 import { MISE_VOLUME_NAME, CONTAINER_ENV_KEY, CONTAINER_ENV_VALUE, EXCLUDE_ENV_KEYS } from '../utils.js'
-import { parseArgs, workspaceRemovalFailureNote, informationalCommand, resolveExecTools, maybeAttachCodexClipboardImageForCommand, buildToolInvocation, replaceStoppedContainerWithoutInterruptingSessions, stoppedContainerReplacementBlockReason, containerReplacementBlockReason, withWorkspaceRemovalLifecycleLock, removeWorkspaceContainerByIdentity, removeManagedWorkspaceContainerByIdentity, removeWorkspaceContainers, listWorkspaceContainerNames, prepareWorkspaceContainerRemovalPlan, removePreparedWorkspaceContainers, createWorktreeSessionLock, runWorktreeLifecycleOperation, workspaceRemovalCompleted, workspaceRemovalAdvice, removeWorkspaceThenContainers, RUNNING_CONTAINER_UPDATE_DEFERRED_MESSAGE, INITIALLY_RUNNING_CONTAINER_UPDATE_DEFERRED_MESSAGE, containerUpdateDeferredMessage, CONTAINER_SETUP_RESTART_MESSAGE, ensureSetupContainerAvailable, ensureToolsForSetupContainer, withContainerSetupReadiness, strandedBranchNotice } from '../index.js'
+import { parseArgs, workspaceRemovalFailureNote, informationalCommand, resolveExecTools, maybeAttachCodexClipboardImageForCommand, buildToolInvocation, replaceStoppedContainerWithoutInterruptingSessions, stoppedContainerReplacementBlockReason, containerReplacementBlockReason, withWorkspaceRemovalLifecycleLock, removeWorkspaceContainerByIdentity, removeManagedWorkspaceContainerByIdentity, removeWorkspaceContainers, listWorkspaceContainerNames, prepareWorkspaceContainerRemovalPlan, removePreparedWorkspaceContainers, createWorktreeSessionLock, runWorktreeLifecycleOperation, workspaceRemovalCompleted, workspaceRemovalAdvice, removeWorkspaceThenContainers, RUNNING_CONTAINER_UPDATE_DEFERRED_MESSAGE, INITIALLY_RUNNING_CONTAINER_UPDATE_DEFERRED_MESSAGE, containerUpdateDeferredMessage, CONTAINER_SETUP_RESTART_MESSAGE, ensureSetupContainerAvailable, ensureToolsForSetupContainer, withContainerSetupReadiness, strandedBranchNotice, CODEX_STATE_WIPE_COMMAND } from '../index.js'
 import { getToolByName } from '../tool-registry.js'
 
 vi.mock('fs', async () => {
@@ -1333,5 +1333,31 @@ describe('strandedBranchNotice escaping', () => {
   // An exported function has callers the guard at the one current call site does not cover.
   it('says nothing when nothing is held', () => {
     expect(strandedBranchNotice('feat', [])).toBe('')
+  })
+})
+
+describe('CODEX_STATE_WIPE_COMMAND', () => {
+  it('keeps auth.json, config.toml and the shared packages volume, and removes other state', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, readdirSync, rmSync } = await vi.importActual<typeof import('fs')>('fs')
+    const { tmpdir } = await vi.importActual<typeof import('os')>('os')
+    const { join } = await vi.importActual<typeof import('path')>('path')
+    const { spawnSync } = await vi.importActual<typeof import('child_process')>('child_process')
+    const home = mkdtempSync(join(tmpdir(), 'ccc-codex-wipe-'))
+    try {
+      writeFileSync(join(home, 'auth.json'), '{}')
+      writeFileSync(join(home, 'config.toml'), '')
+      writeFileSync(join(home, 'state_5.sqlite'), '')
+      mkdirSync(join(home, 'sessions'))
+      mkdirSync(join(home, 'packages', 'app-server-daemon'), { recursive: true })
+
+      const command = CODEX_STATE_WIPE_COMMAND.replace('/home/ccc/.codex', home)
+      expect(command).not.toBe(CODEX_STATE_WIPE_COMMAND)
+      expect(spawnSync('sh', ['-c', command]).status).toBe(0)
+
+      expect(readdirSync(home).sort()).toEqual(['auth.json', 'config.toml', 'packages'])
+      expect(readdirSync(join(home, 'packages'))).toEqual(['app-server-daemon'])
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })

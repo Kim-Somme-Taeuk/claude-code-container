@@ -146,9 +146,11 @@ WORKDIR /home/ccc
 # Trust all directories (container is isolated, ownership mismatches from bind mounts)
 RUN git config --global --add safe.directory '*'
 USER root
-RUN mkdir -p /home/ccc/.ccc/labs /host-stage && \
+# /home/ccc/.codex/packages is the mount point of the ccc-codex-packages volume;
+# owning it here makes Docker initialize a new volume as ccc:ccc.
+RUN mkdir -p /home/ccc/.ccc/labs /home/ccc/.codex/packages /host-stage && \
     touch /host-stage/gitconfig && \
-    chown -R ccc:ccc /home/ccc/.ccc /host-stage
+    chown -R ccc:ccc /home/ccc/.ccc /home/ccc/.codex /host-stage
 USER ccc
 
 # ============================================================
