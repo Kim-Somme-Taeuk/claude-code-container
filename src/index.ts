@@ -63,6 +63,8 @@ import {
     needsSubmoduleSetup,
     initWithSubmodules,
     DamagedWorkspaceMetadataError,
+    MissingWorkspaceRootRegistrationError,
+    canRecreateMissingWorkspaceRootRegistration,
     WorktreeContentConflictError,
     setAsideConflictingContent,
     repairWorkspaceWorktree,
@@ -1146,7 +1148,46 @@ async function prepareWorktreeUnlocked(
     if (workspaceExists(cwd, branch)) {
         if (hasGitMetadata(cwd)) {
             repairWorkspaceRootOwnership(wsPath, cwd, branch);
-            assertWorkspaceRootOwnership(wsPath, cwd);
+            try {
+                assertWorkspaceRootOwnership(wsPath, cwd);
+            } catch (error) {
+                if (!(error instanceof MissingWorkspaceRootRegistrationError)) throw error;
+                console.error(error.message);
+                console.error("");
+                let preflightFence: (() => void) | undefined;
+                if (!canRecreateMissingWorkspaceRootRegistration(
+                    wsPath,
+                    cwd,
+                    branch,
+                    (assertUnchanged) => { preflightFence = assertUnchanged; },
+                )) throw error;
+                const answer = await prompt(
+                    `Recreate the missing Git worktree registration now? (y/N) `,
+                    true,
+                );
+                if (answer !== "y" && answer !== "yes") throw error;
+                let recoveryFailure: string | undefined;
+                const repaired = repairWorkspaceRootOwnership(
+                    wsPath,
+                    cwd,
+                    branch,
+                    {
+                        confirmedMissingRegistration: true,
+                        reportFailure: (reason) => { recoveryFailure = reason; },
+                        preflightFence,
+                    },
+                );
+                if (!repaired) {
+                    throw new Error(
+                        `Could not recreate the missing Git worktree registration for '${wsPath}'. Workspace files were left unchanged.`
+                        + (recoveryFailure
+                            ? ` Reason: ${terminalSafeLiteral(recoveryFailure.slice(0, 500))}`
+                            : " Reason: Git registration conditions changed during recovery."),
+                    );
+                }
+                console.log(`Recreated Git worktree registration: ${wsPath}`);
+                assertWorkspaceRootOwnership(wsPath, cwd);
+            }
         } else {
             assertWorkspaceBranch(wsPath, branch, spawnSync, cwd);
         }
