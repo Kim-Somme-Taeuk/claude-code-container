@@ -852,6 +852,17 @@ export function labProviderStatus(options = {}) {
     };
 }
 
+// Inside a ccc container that cannot run nested VMs there is no lab state volume, so
+// anything written under stateRoot would land in the container layer and be lost.
+function labStateUnavailable(ctx) {
+    if (ctx.env.CCC_LAB_RUNNER !== "1" || ctx.env.CCC_LAB_RUNNER_STATUS === "ready") return null;
+    return {
+        ok: false,
+        error: "lab-provider-unsupported",
+        unsupportedReason: ctx.env.CCC_LAB_RUNNER_UNSUPPORTED_REASON || `lab-runner status is ${ctx.env.CCC_LAB_RUNNER_STATUS || "unset"}`,
+    };
+}
+
 export function listLabs(options = {}) {
     const ctx = context(options);
     const labsRoot = join(ctx.ownerRoot, "labs");
@@ -890,6 +901,8 @@ export function listImages(options = {}) {
 
 export function importImage(args = {}, options = {}) {
     const ctx = context(options);
+    const unavailable = labStateUnavailable(ctx);
+    if (unavailable) return unavailable;
     const name = String(args.name || "").trim();
     const imageId = args.imageId ? String(args.imageId) : slug(name);
     if (!name) return { ok: false, error: "missing-image-name" };
@@ -989,6 +1002,8 @@ function qemuImgCreateOverlay(lab, source, options = {}, dryRun = false) {
 
 export function createLab(args = {}, options = {}) {
     const ctx = context(options);
+    const unavailable = labStateUnavailable(ctx);
+    if (unavailable) return unavailable;
     const name = String(args.name || "").trim();
     const labId = args.labId ? String(args.labId) : slug(name);
     if (!name) return { ok: false, error: "missing-lab-name" };

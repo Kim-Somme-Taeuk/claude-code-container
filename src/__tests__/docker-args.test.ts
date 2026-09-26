@@ -781,7 +781,7 @@ describe("buildDockerRunArgs — lab-runner profile", () => {
         expect(args).not.toContain("--privileged");
     });
 
-    it("mounts durable lab state and reports unsupported without exposing /dev/kvm", () => {
+    it("reports unsupported without a lab state volume or /dev/kvm", () => {
         const args = buildDockerRunArgs(makeOpts({
             labRunner: {
                 status: "unsupported",
@@ -794,7 +794,7 @@ describe("buildDockerRunArgs — lab-runner profile", () => {
         const mounts = extractVolumeMounts(args);
         const envs = extractEnvVars(args);
 
-        expect(mounts).toContain("ccc-project-lab-state:/home/ccc/.ccc/labs");
+        expect(mounts.some((mount) => mount.endsWith(":/home/ccc/.ccc/labs"))).toBe(false);
         expect(envs["CCC_LAB_RUNNER"]).toBe("1");
         expect(envs["CCC_LAB_RUNNER_STATUS"]).toBe("unsupported");
         expect(envs["CCC_LAB_STATE_DIR"]).toBe("/home/ccc/.ccc/labs");

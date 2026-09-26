@@ -3262,6 +3262,86 @@ describe("docker.ts module exports", () => {
             expectNoContainerReplacement();
         });
 
+        it.each([
+            ["without the lab state volume", false],
+            ["that still carries its lab state volume", true],
+        ])("reuses a running container on a host without nested VMs %s", (_name, labState) => {
+            _setRuntimeInfoForTest({ runtime: "docker", flavor: "docker-desktop", remote: true, dockerDesktop: true });
+            const inspected = JSON.parse(fullCredentialMountsJson([], {
+                status: "unsupported", kvmDevice: false, groupAdd: [], labState,
+                unsupportedReason: "docker-desktop is VM-backed; nested KVM is not exposed to CCC containers by default",
+            }));
+            inspected.Mounts.find((item: { Destination: string }) => item.Destination === "/var/run/docker.sock").Source = "/var/run/docker.sock.raw";
+            spawnSyncMock.mockImplementation((_command: unknown, argsValue: unknown) => {
+                const args = argsValue as string[];
+                if (args[0] === "images") return makeResult(0, "sha256:abc\n");
+                if (args[0] === "image" && args[1] === "inspect") return makeResult(0, "<no value>\n");
+                if (args[0] === "inspect") return makeResult(0, JSON.stringify(inspected));
+                if (args[0] === "ps") return makeResult(0, "abc123\n");
+                if (args[0] === "exec" && args.at(-1) === "true") return makeResult(0);
+                return makeResult(0);
+            });
+            const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+            expect(startProjectContainer(
+                projectPath, ensureDirs, undefined, undefined, undefined, undefined, () => false,
+            )).toBe(getContainerName(projectPath));
+            // Joined under the strict contract: nothing deferred, nothing replaced.
+            expect(warnSpy.mock.calls.map((call) => String(call[0])).join("\n")).not.toContain("Container update deferred");
+            expectNoContainerReplacement();
+        });
+
+        it("refuses a running container with a different volume at the lab state path on a host without nested VMs", () => {
+            _setRuntimeInfoForTest({ runtime: "docker", flavor: "docker-desktop", remote: true, dockerDesktop: true });
+            const inspected = JSON.parse(fullCredentialMountsJson([], {
+                status: "unsupported", kvmDevice: false, groupAdd: [],
+            }));
+            inspected.Mounts.find((item: { Destination: string }) => item.Destination === "/var/run/docker.sock").Source = "/var/run/docker.sock.raw";
+            inspected.Mounts.find((item: { Destination: string }) => item.Destination === "/home/ccc/.ccc/labs").Source = "foreign-volume";
+            spawnSyncMock.mockImplementation((_command: unknown, argsValue: unknown) => {
+                const args = argsValue as string[];
+                if (args[0] === "images") return makeResult(0, "sha256:abc\n");
+                if (args[0] === "image" && args[1] === "inspect") return makeResult(0, "<no value>\n");
+                if (args[0] === "inspect") return makeResult(0, JSON.stringify(inspected));
+                if (args[0] === "ps") return makeResult(0, "abc123\n");
+                return makeResult(0);
+            });
+
+            expect(() => startProjectContainer(
+                projectPath, ensureDirs, undefined, undefined, undefined, undefined, () => false,
+            )).toThrow("contract failed safety validation");
+            expectNoContainerReplacement();
+        });
+
+        it("recreates a stopped container with a different volume at the lab state path on a host without nested VMs", () => {
+            _setRuntimeInfoForTest({ runtime: "docker", flavor: "docker-desktop", remote: true, dockerDesktop: true });
+            const inspected = JSON.parse(fullCredentialMountsJson([], {
+                status: "unsupported", kvmDevice: false, groupAdd: [],
+                unsupportedReason: "docker-desktop is VM-backed; nested KVM is not exposed to CCC containers by default",
+            }));
+            inspected.Mounts.find((item: { Destination: string }) => item.Destination === "/var/run/docker.sock").Source = "/var/run/docker.sock.raw";
+            inspected.Mounts.find((item: { Destination: string }) => item.Destination === "/home/ccc/.ccc/labs").Source = "foreign-volume";
+
+            spawnSyncMock
+                .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
+                .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected))) // inspect -> foreign lab volume
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
+                .mockReturnValueOnce(makeResult(0))                  // docker rm
+                .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
+                .mockReturnValueOnce(makeResult(0, ""))              // isContainerExists -> false
+                .mockReturnValueOnce(makeResult(0, "c0ffee123456\n")); // docker run
+
+            startWithApprovedReplacement();
+
+            const runCall = spawnSyncMock.mock.calls.find(
+                (c: unknown[]) => c[0] === "docker" && (c[1] as string[])[0] === "run"
+            );
+            expect(runCall).toBeDefined();
+            expect((runCall![1] as string[]).some((arg) => arg.endsWith(":/home/ccc/.ccc/labs"))).toBe(false);
+        });
+
         it("restarts a stopped Docker Desktop container whose socket source is docker.sock.raw", () => {
             _setRuntimeInfoForTest({
                 runtime: "docker",
@@ -4482,7 +4562,7 @@ describe("docker.ts module exports", () => {
             })).toHaveLength(2);
             const runArgs = runCall![1] as string[];
             expect(runArgs.some((arg) => /^CCC_DEVICE_LAB_OWNER_BASIS=/.test(arg))).toBe(false);
-            expect(runArgs).toContain(`${name}-lab-state:/home/ccc/.ccc/labs`);
+            expect(runArgs.some((arg) => arg.endsWith(":/home/ccc/.ccc/labs"))).toBe(false);
             expect(runArgs).toContain("CCC_LAB_RUNNER=1");
             expect(runArgs).toContain("CCC_LAB_RUNNER_STATUS=unsupported");
             expect(runArgs).toContain("CCC_LAB_NET_MODE=user");
@@ -5021,12 +5101,13 @@ describe("docker.ts module exports", () => {
                 (c: unknown[]) => c[0] === "docker" && (c[1] as string[])[0] === "run"
             );
             const runArgs = runCall![1] as string[];
-            expect(runArgs).toContain(`${name}-lab-state:/home/ccc/.ccc/labs`);
+            expect(runArgs.some((arg) => arg.endsWith(":/home/ccc/.ccc/labs"))).toBe(false);
             expect(runArgs).toContain("CCC_LAB_RUNNER_STATUS=unsupported");
             expect(runArgs.some((arg) => arg.startsWith("CCC_LAB_RUNNER_UNSUPPORTED_REASON="))).toBe(true);
             expect(runArgs).not.toContain("--device");
             expect(runArgs).not.toContain("/dev/kvm:/dev/kvm");
             expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("lab-runner profile requested"));
+            expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("no lab state volume is mounted"));
         });
 
         it("mounts every registered tool credential path when creating a container", () => {

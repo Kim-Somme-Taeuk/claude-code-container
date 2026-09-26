@@ -127,3 +127,39 @@ describe("bind mount verification", () => {
         expect(combineMountVerification(mismatch, deferred)).toBe(mismatch);
     });
 });
+
+describe("optional volume mounts", () => {
+    const optionalVolume: RequiredMountContract = {
+        containerPath: "/home/ccc/.ccc/labs",
+        readonly: false,
+        type: "volume",
+        presence: "optional",
+        sourceKind: "volume",
+    };
+    const verify = (
+        observed: Array<Record<string, unknown>>,
+        volumeSourceMatches: boolean,
+        policy: "strict" | "safe-defer",
+    ) => verifyMountSet(
+        [optionalVolume],
+        observed,
+        new Map<string, MountEvidence>(observed.length ? [[optionalVolume.containerPath, { volumeSourceMatches }]] : []),
+        { policy },
+    );
+
+    it.each(["strict", "safe-defer"] as const)("accepts an absent optional volume under %s", (policy) => {
+        expect(verify([], false, policy)).toEqual({ kind: "verified", via: "shape" });
+    });
+
+    it.each(["strict", "safe-defer"] as const)("accepts the exact optional volume when present under %s", (policy) => {
+        // Podman-shaped: Name carries the volume, Source is a host storage path.
+        expect(verify([{ Name: "ccc-p-lab-state", Source: "/var/lib/containers/storage/volumes/ccc-p-lab-state/_data", Destination: "/home/ccc/.ccc/labs", Type: "volume", RW: true }], true, policy))
+            .toEqual({ kind: "verified", via: "source" });
+    });
+
+    it.each(["strict", "safe-defer"] as const)("rejects a different volume, a bind, or read-only access at that path under %s", (policy) => {
+        expect(verify([{ Source: "foreign", Destination: "/home/ccc/.ccc/labs", Type: "volume", RW: true }], false, policy).kind).toBe("mismatch");
+        expect(verify([{ Source: "/host/labs", Destination: "/home/ccc/.ccc/labs", Type: "bind", RW: true }], false, policy).kind).toBe("mismatch");
+        expect(verify([{ Source: "ccc-p-lab-state", Destination: "/home/ccc/.ccc/labs", Type: "volume", RW: false }], true, policy).kind).toBe("mismatch");
+    });
+});

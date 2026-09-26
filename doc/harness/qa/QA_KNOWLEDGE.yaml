@@ -161,3 +161,16 @@
     `python3 -c 'import socket;s=socket.socket(socket.AF_UNIX);s.bind("/var/run/docker.sock")'`
     then chown/chmod. Use throwaway names (ccc-qa-*) and strip --label ccc.managed to keep ccc
     from treating them as project containers.
+- discovered: 2026-09-26
+  topic: device-lab-mcp-runtime-in-throwaway-container
+  note: >-
+    To exercise the shipped device-lab MCP (dist/device-lab-mcp/server.mjs, a single bundle) with a
+    container's CCC_LAB_* env, `docker cp dist/device-lab-mcp <c>:/tmp/dlm` into a throwaway ccc
+    container and drive it with a small stdio JSON-RPC client (initialize, notifications/initialized,
+    tools/call). Node is on the mise shim path when ccc-mise-cache is mounted. linux-vm tools:
+    device_create / device_image_import / device_image_list with backend "linux-vm";
+    device_backends {"broker":false} lists linux-vm status/missing without the host broker.
+    Override env per call with `docker exec -e CCC_LAB_RUNNER_STATUS=ready -e CCC_LAB_STATE_DIR=/tmp/x`
+    for a negative control. `ccc clean --volumes --dry-run` is safe (lists only) and also lists the
+    ccc image. Unrelated postgres/minio test containers on this host create anonymous volumes
+    concurrently; diff volume lists by name pattern, not whole-list.

@@ -168,7 +168,7 @@ type RequiredContainerMount = {
     containerPath: string;
     readonly?: boolean;
     type?: "bind" | "tmpfs" | "volume";
-    presence: "core" | "additive";
+    presence: "core" | "additive" | "optional";
     sourceProof?:
         | {
             kind: "filesystem";
@@ -783,7 +783,10 @@ export function buildDockerRunArgs(opts: DockerRunArgsOptions): string[] {
     args.push(...bindMountArgs(opts.miseVolumeName, "/home/ccc/.local/share/mise"));
     args.push(...bindMountArgs(CODEX_PACKAGES_VOLUME_NAME, CODEX_PACKAGES_CONTAINER_DIR));
     if (opts.labRunner) {
-        args.push(...bindMountArgs(opts.labRunner.stateVolumeName, opts.labRunner.stateContainerDir));
+        // Lab state only matters where container-QEMU labs can run (REQ__lab-state-volume.md).
+        if (opts.labRunner.status === "ready") {
+            args.push(...bindMountArgs(opts.labRunner.stateVolumeName, opts.labRunner.stateContainerDir));
+        }
     }
     // Container-manager socket: Docker uses /var/run/docker.sock,
     // Podman substitutes its own socket on the host side but keeps the same
@@ -2557,7 +2560,9 @@ export function startProjectContainer(
         containerPath: labRunner.stateContainerDir,
         readonly: false,
         type: "volume",
-        presence: "additive",
+        // New containers on hosts without nested VMs no longer get this volume; older ones
+        // may still carry it, which is fine as long as it is exactly this volume.
+        presence: labRunner.status === "ready" ? "additive" : "optional",
     });
     const assertRequiredFilesystemMountSources = () => {
         for (const mount of requiredMounts) {
@@ -2814,7 +2819,7 @@ export function startProjectContainer(
 
         if (isLabRunnerProfile(profile) && labRunner.status === "unsupported") {
             console.warn(`[ccc] lab-runner profile requested but nested VM support is unavailable: ${labRunner.unsupportedReason}`);
-            console.warn("[ccc] lab state volume will still be mounted; device-lab should report linux-vm as unsupported/SKIP.");
+            console.warn("[ccc] no lab state volume is mounted; device-lab reports linux-vm as unsupported/SKIP.");
         }
 
         const args = buildDockerRunArgs({

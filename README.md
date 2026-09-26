@@ -73,9 +73,12 @@ ccc ui                     # Launch the desktop app (Tauri 2). Set CCC_DEV=1 for
 CCC configures ordinary project containers and the built-in `lab-runner`
 profile with the same lazy `device-lab` Linux VM contract. On supported native Linux
 hosts, containers receive a durable owner-scoped lab state volume plus bounded
-`/dev/kvm` access for in-container QEMU. On unsupported hosts, CCC still mounts
-the lab state volume and injects clear unsupported diagnostics, without using
-`--privileged`, host TUN devices, or manual environment variables.
+`/dev/kvm` access for in-container QEMU. On unsupported hosts (Docker Desktop,
+rootless runtimes, or no `/dev/kvm`), new containers get no lab state volume;
+CCC injects clear unsupported diagnostics and lab creation reports
+`lab-provider-unsupported`, without using `--privileged`, host TUN devices, or
+manual environment variables. Older containers keep an existing volume until
+they are recreated; see `doc/common/REQ__lab-state-volume.md` for cleanup.
 Both `Dockerfile` and `Containerfile` include the QEMU/KVM userland packages
 needed by this optional path, so Docker and Podman image builds keep the same
 zero-configuration VM capability contract.

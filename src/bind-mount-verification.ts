@@ -9,7 +9,8 @@ export type LiveSourceProof =
     | { kind: "retryable"; reason: string }
     | { kind: "mismatch"; reason: string };
 
-export type MountPresence = "core" | "additive";
+// "optional" is for volume mounts only: absent is fine, present must still match exactly.
+export type MountPresence = "core" | "additive" | "optional";
 export type MountPresencePolicy = "strict" | "safe-defer";
 
 export interface RequiredMountContract {
@@ -73,6 +74,7 @@ export function classifyRequiredMount(
         return { kind: "mismatch", reason: evidence.authoritativeMismatch, containerPath: path };
     }
     if (!observed) {
+        if (required.presence === "optional") return { kind: "verified", via: "shape" };
         return policy === "safe-defer" && required.presence === "additive"
             ? { kind: "deferred", reason: `missing mount ${path}`, containerPath: path }
             : { kind: "mismatch", reason: `missing mount ${path}`, containerPath: path };

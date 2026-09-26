@@ -37,6 +37,23 @@ describe("device-lab Linux VM container-QEMU provider", () => {
         return root;
     }
 
+    it("refuses lab creation and image import where the container cannot run nested VMs", () => {
+        const root = tempRoot();
+        const env = { CCC_LAB_RUNNER: "1", CCC_LAB_RUNNER_STATUS: "unsupported", CCC_LAB_RUNNER_UNSUPPORTED_REASON: "no nested VMs here" };
+        const source = join(root, "..", `${root.split("/").pop()}-source.qcow2`);
+        writeFileSync(source, "QFI\xfb");
+        roots.push(source);
+
+        expect(createLab({ name: "No Nested VMs" }, { env, stateRoot: root })).toEqual({
+            ok: false, error: "lab-provider-unsupported", unsupportedReason: "no nested VMs here",
+        });
+        expect(importImage({ name: "Base", sourcePath: source }, { env, stateRoot: root })).toEqual({
+            ok: false, error: "lab-provider-unsupported", unsupportedReason: "no nested VMs here",
+        });
+        // Nothing is written: without the lab state volume it would land in the container layer.
+        expect(existsSync(join(root, "owners"))).toBe(false);
+    });
+
     it("uses the canonical device-lab owner identity", () => {
         const env = { CCC_PROFILE: "linux-vm-owner" };
         expect(ownerId(env)).toBe(deviceLabOwnerId(env));

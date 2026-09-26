@@ -72,7 +72,7 @@ volume per container. `.withReuse(true)` has no effect unless
 
 To remove volumes that are already orphaned, run `docker volume prune`. On Docker
 23 and later it removes only unused **anonymous** volumes, so ccc's named volumes
-(`ccc-mise-cache`, `ccc-codex-packages`, `ccc-*-lab-state`) are kept unless `-a` is
+(`ccc-mise-cache`, `ccc-codex-packages`, and any `ccc-*-lab-state`) are kept unless `-a` is
 passed. Confirm
 first: `docker volume prune --help` lists `-a, --all` only on versions with that
 behavior. On older versions, remove the anonymous volumes by name instead.

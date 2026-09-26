@@ -364,13 +364,13 @@ Lab-runner container profile status:
   ordinary in-container `lab-mcp` VM execution is available without starting a
   lab or host runner.
 - The default CCC container is also VM-capable when the host/runtime satisfies
-  the same bounded KVM gates. CCC mounts a per-container durable named volume,
-  injects `CCC_LAB_RUNNER=1`, `CCC_LAB_RUNNER_STATUS`, `CCC_LAB_STATE_DIR`, and
+  the same bounded KVM gates. CCC mounts a per-container durable named volume
+  only when they pass (REQ__lab-state-volume.md), always injects `CCC_LAB_RUNNER=1`, `CCC_LAB_RUNNER_STATUS`, `CCC_LAB_STATE_DIR`, and
   `CCC_LAB_NET_MODE=user`, and exposes `/dev/kvm` only on supported native
   Linux/rootful runtimes. This lets agents call `lab-mcp` from the ordinary
   project container without host shell control or user-provided environment
   variables.
-- CCC mounts a per-container durable named
+- On hosts where those gates pass, CCC mounts a per-container durable named
   volume at `/home/ccc/.ccc/labs` for lab metadata, VM disks, overlays, caches,
   snapshots, and artifacts. The volume name is derived from the container name,
   so recreating the same container/profile preserves named-lab state without
@@ -386,10 +386,10 @@ Lab-runner container profile status:
   diagnostic, but no container receives `/dev/net/tun` in this host networking
   model.
 - On Docker Desktop, podman-machine, rootless Docker/Podman, non-Linux hosts, or
-  hosts without `/dev/kvm`, CCC still creates containers with the durable state
-  volume and sets `CCC_LAB_RUNNER_STATUS=unsupported` plus a reason. The later
-  lab provider must report SKIP/unsupported instead of falling back to host
-  control.
+  hosts without `/dev/kvm`, CCC creates new containers without the durable state
+  volume (REQ__lab-state-volume.md) and sets `CCC_LAB_RUNNER_STATUS=unsupported`
+  plus a reason. The lab provider reports SKIP/unsupported, refuses lab creation
+  and image import, and never falls back to host control.
 - The Docker and Podman image definitions now include QEMU/KVM userland
   prerequisites (`qemu-system-x86`, `qemu-utils`, `ovmf`, and `cpu-checker`) so
   a supported default container or lab-runner profile can run container-local
