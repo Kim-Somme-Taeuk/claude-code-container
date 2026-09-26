@@ -110,7 +110,8 @@ function httpPost(port: number, path: string, headers?: Record<string, string>):
 }
 
 // ─── Constants derived from source (mirror calculation) ──────────────────────
-const DATA_DIR = join("/home/testuser", ".ccc");
+// Runtime files live under ~/.ccc/run (doc/common/REQ__ccc-home-layout.md).
+const DATA_DIR = join("/home/testuser", ".ccc", "run");
 const LOCKS_DIR = join(DATA_DIR, "locks");
 const PORT_FILE = join(DATA_DIR, "clipboard.port");
 const STARTING_LOCK = join(DATA_DIR, "clipboard.starting");
@@ -1122,7 +1123,7 @@ describe("clipboard-server", () => {
             it("should return binary path when binary exists on darwin", () => {
                 mockPlatform.mockReturnValue("darwin");
                 mockExistsSync.mockReturnValue(true);
-                const binaryPath = "/home/testuser/.ccc/bin/clipboard-helper-darwin";
+                const binaryPath = "/home/testuser/.ccc/run/bin/clipboard-helper-darwin";
                 const plat = mockPlatform();
                 const binaryExists = mockExistsSync(binaryPath);
                 const result = plat !== "darwin" ? null : !binaryExists ? null : binaryPath;

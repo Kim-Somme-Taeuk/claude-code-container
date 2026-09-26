@@ -37,7 +37,8 @@ import {
     CODEX_PACKAGES_CONTAINER_DIR,
 } from "./utils.js";
 
-import { ensureClipboardServer } from "./clipboard-server.js";
+import { ensureClipboardServer, hasAnyActiveSessionsExcept, retireClipboardServerFromPortFile } from "./clipboard-server.js";
+import { clipboardPortFile as clipboardPortFilePath, DEFAULT_PROFILE_NAME, defaultProfileDir, ensureDefaultProfileDir, migrateHomeLayout, normalizeProfile } from "./home-layout.js";
 import { maybeAttachCodexClipboardImage } from "./codex-clipboard-image.js";
 import {
     parseWorktreeArg,
@@ -346,9 +347,11 @@ export function containerReplacementBlockReason(
 
 // === Helpers ===
 function ensureDirs(profile?: string): void {
-    mkdirSync(DATA_DIR, { recursive: true });
+    mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
     const claudeDir = getClaudeDir(profile);
-    mkdirSync(claudeDir, { recursive: true });
+    // A new default-profile folder is marked as the no-profile account (home-layout.ts).
+    if (claudeDir === join(defaultProfileDir(), "claude")) ensureDefaultProfileDir();
+    mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
     // Ensure claude.json exists for file mount (onboarding state)
     const claudeJsonFile = getClaudeJsonFile(profile);
     if (!existsSync(claudeJsonFile)) {
@@ -622,7 +625,7 @@ async function exec(
     // the port file exists and can be bind-mounted (file mount requires the file
     // to already exist at docker run time).
     const clipboardPort = await ensureClipboardServer().catch(() => null);
-    const clipboardPortFile = join(DATA_DIR, "clipboard.port");
+    const clipboardPortFile = clipboardPortFilePath();
 
     // Detect worktree mounts (source .git directories needed for git operations)
     const worktreeMounts = getWorktreeGitMounts(
@@ -833,7 +836,7 @@ async function exec(
     let clipboardToken: string | null = null;
     if (clipboardPort) {
         try {
-            const portFileContent = readFileSync(join(DATA_DIR, "clipboard.port"), "utf-8").trim();
+            const portFileContent = readFileSync(clipboardPortFilePath(), "utf-8").trim();
             clipboardToken = portFileContent.split(":").slice(1).join(":") || null;
         } catch {
             clipboardToken = null;
@@ -1849,6 +1852,22 @@ export function informationalCommand(args: string[]): "help" | "version" | null 
     return null;
 }
 
+// Move a pre-layout ~/.ccc into profiles/ and run/ (doc/common/REQ__ccc-home-layout.md).
+// Host-side only: inside a ccc container ~/.ccc holds container state, not the host layout.
+function migrateHostHomeLayout(): void {
+    if (process.env[CONTAINER_ENV_KEY] === CONTAINER_ENV_VALUE) return;
+    try {
+        migrateHomeLayout({
+            // Sessions of an older ccc use ~/.ccc/locks even when run/locks exists.
+            hasLiveSessions: () => [join(DATA_DIR, "locks"), join(DATA_DIR, "run", "locks")]
+                .some((directory) => hasAnyActiveSessionsExcept(null, directory)),
+            retireLegacyClipboard: retireClipboardServerFromPortFile,
+        });
+    } catch (error) {
+        console.error(`ccc: ~/.ccc layout migration skipped (${(error as Error).message}); the old paths keep working.`);
+    }
+}
+
 // === Main ===
 async function main(): Promise<void> {
     const args = process.argv.slice(2);
@@ -1868,13 +1887,16 @@ async function main(): Promise<void> {
         return;
     }
 
-    // Profile from CCC_PROFILE env var
-    const profile = process.env.CCC_PROFILE || undefined;
+    migrateHostHomeLayout();
+
+    // Profile from CCC_PROFILE env var; "default" is the no-profile account.
+    const requestedProfile = process.env.CCC_PROFILE || undefined;
+    if (requestedProfile !== undefined && !validateProfileName(requestedProfile)) {
+        console.error(`Error: Invalid CCC_PROFILE="${requestedProfile}". Use lowercase letters, digits, ., _, - only.`);
+        process.exit(1);
+    }
+    const profile = normalizeProfile(requestedProfile);
     if (profile !== undefined) {
-        if (!validateProfileName(profile)) {
-            console.error(`Error: Invalid CCC_PROFILE="${profile}". Use lowercase letters, digits, ., _, - only.`);
-            process.exit(1);
-        }
         if (!profileExists(profile)) {
             if (isBuiltinProfile(profile)) {
                 ensureProfile(profile);
@@ -1896,7 +1918,12 @@ async function main(): Promise<void> {
                 console.error(`Unknown tool: ${nextArg}. Available: ${getAllTools().map(t => t.name).join(", ")}`);
                 process.exit(1);
             }
-            setDefaultToolPreference(nextArg);
+            try {
+                setDefaultToolPreference(nextArg);
+            } catch (error) {
+                console.error(`Error: ${(error as Error).message}`);
+                process.exit(1);
+            }
             console.log(`Default tool set to: ${nextArg}`);
             return;
         } else {
@@ -2098,6 +2125,10 @@ async function main(): Promise<void> {
                         console.error(`Error: Invalid profile name "${name}".`);
                         process.exit(1);
                     }
+                    if (name === DEFAULT_PROFILE_NAME) {
+                        console.error(`Error: "${DEFAULT_PROFILE_NAME}" is the account used without CCC_PROFILE; it always exists.`);
+                        process.exit(1);
+                    }
                     if (profileExists(name)) {
                         console.error(`Error: Profile "${name}" already exists.`);
                         process.exit(1);
@@ -2110,6 +2141,10 @@ async function main(): Promise<void> {
                 case "rm": {
                     if (!name) {
                         console.error("Usage: ccc profile rm <name>");
+                        process.exit(1);
+                    }
+                    if (name === DEFAULT_PROFILE_NAME) {
+                        console.error(`Error: the "${DEFAULT_PROFILE_NAME}" profile cannot be removed; it holds the credentials used without CCC_PROFILE.`);
                         process.exit(1);
                     }
                     if (!profileExists(name)) {

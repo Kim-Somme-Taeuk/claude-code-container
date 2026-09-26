@@ -5,46 +5,39 @@ import {createInterface} from "readline";
 import {realpathSync, writeFileSync} from "fs";
 import {homedir, tmpdir} from "os";
 import {basename, dirname, join, resolve} from "path";
+import {normalizeProfile, profileClaudeDir, profileClaudeJsonFile, profileCodexDir} from "./home-layout.js";
 
 // === CLI Version (injected at build time) ===
 export const CLI_VERSION: string = "__CLI_VERSION__";
 
 // === Shared Constants ===
 export const DATA_DIR = join(homedir(), ".ccc");
-export const CLAUDE_DIR = join(DATA_DIR, "claude");
-export const CLAUDE_JSON_FILE = join(DATA_DIR, "claude.json"); // ~/.claude.json in container (onboarding state)
-export const CODEX_DIR = join(DATA_DIR, "codex");
-export const CODEX_CONFIG_FILE = join(CODEX_DIR, "config.toml");
-export const CLIPBOARD_FILES_DIR = join(DATA_DIR, "clipboard-files");
 export const CLIPBOARD_FILES_CONTAINER_DIR = "/run/ccc/clipboard-files";
-export const REMOTE_CONFIG_DIR = join(DATA_DIR, "remote");
-export const PROFILES_DIR = join(DATA_DIR, "profiles");
 
 function useMountedCredentialPaths(): boolean {
     return process.env.container === CONTAINER_ENV_VALUE
         && !Object.keys(process.env).some((key) => key === "VITEST" || key.startsWith("VITEST_"));
 }
 
+// Host paths come from home-layout.ts (doc/common/REQ__ccc-home-layout.md).
+// Inside a ccc container the credentials are the mounted ~/.claude and ~/.codex.
 export function getClaudeDir(profile?: string): string {
-    if (!profile && useMountedCredentialPaths()) return join(homedir(), ".claude");
-    if (!profile) return CLAUDE_DIR;
-    return join(PROFILES_DIR, profile, "claude");
+    if (!normalizeProfile(profile) && useMountedCredentialPaths()) return join(homedir(), ".claude");
+    return profileClaudeDir(profile);
 }
 
 export function getClaudeJsonFile(profile?: string): string {
-    if (!profile && useMountedCredentialPaths()) return join(homedir(), ".claude.json");
-    if (!profile) return CLAUDE_JSON_FILE;
-    return join(PROFILES_DIR, profile, "claude.json");
+    if (!normalizeProfile(profile) && useMountedCredentialPaths()) return join(homedir(), ".claude.json");
+    return profileClaudeJsonFile(profile);
 }
 
-export function getCodexDir(): string {
+export function getCodexDir(profile?: string): string {
     if (useMountedCredentialPaths()) return join(homedir(), ".codex");
-    return CODEX_DIR;
+    return profileCodexDir(profile);
 }
 
-export function getCodexConfigFile(): string {
-    if (useMountedCredentialPaths()) return join(getCodexDir(), "config.toml");
-    return CODEX_CONFIG_FILE;
+export function getCodexConfigFile(profile?: string): string {
+    return join(getCodexDir(profile), "config.toml");
 }
 export const IMAGE_NAME = "ccc";
 export const DOCKER_REGISTRY_IMAGE = process.env.CCC_REGISTRY || "luxusio/claude-code-container";

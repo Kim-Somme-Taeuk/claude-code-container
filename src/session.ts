@@ -2,33 +2,32 @@ import { spawnSync } from "child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { randomBytes } from "crypto";
-import { getProjectId, DATA_DIR } from "./utils.js";
+import { getProjectId } from "./utils.js";
+import { locksDir } from "./home-layout.js";
 import { runtimeCli } from "./container-runtime.js";
 import { cleanupOwnerDevices } from "./device-lab-admin.js";
 import { withSharedMutationLock, withSharedMutationLockAsync } from "./device-lab-shared-state.js";
 import { observeProcessStarts, processStartToken, sessionLockLiveness, sessionLockOwner } from "./session-lock-liveness.js";
 
-const locksDir = join(DATA_DIR, "locks");
-
 function containerLifecycleLock(containerPrefix: string): string {
-    return join(locksDir, `${containerPrefix}.container-lifecycle.guard`);
+    return join(locksDir(), `${containerPrefix}.container-lifecycle.guard`);
 }
 
 function containerSetupLock(containerPrefix: string): string {
-    return join(locksDir, `${containerPrefix}.container-setup.guard`);
+    return join(locksDir(), `${containerPrefix}.container-setup.guard`);
 }
 
 function projectFamilyLifecycleLock(projectId: string): string {
-    return join(locksDir, `${projectId}.project-family-lifecycle.guard`);
+    return join(locksDir(), `${projectId}.project-family-lifecycle.guard`);
 }
 
 function ensureLocksDirectory(): void {
-    mkdirSync(locksDir, { recursive: true, mode: 0o700 });
-    const observed = lstatSync(locksDir);
+    mkdirSync(locksDir(), { recursive: true, mode: 0o700 });
+    const observed = lstatSync(locksDir());
     if (!observed.isDirectory() || observed.isSymbolicLink()) {
         throw new Error("CCC session lock path must be a real directory");
     }
-    if (process.platform !== "win32") chmodSync(locksDir, 0o700);
+    if (process.platform !== "win32") chmodSync(locksDir(), 0o700);
 }
 
 export function withContainerLifecycleLock<T>(containerPrefix: string, operation: () => T): T {
@@ -92,7 +91,7 @@ export function createSessionLock(projectId: string, profile?: string): string {
     ensureLocksDirectory();
     const sessionId = randomBytes(16).toString("hex");
     const prefix = profile ? `${projectId}--p--${profile}` : projectId;
-    const lockFile = join(locksDir, `${prefix}--${sessionId}.lock`);
+    const lockFile = join(locksDir(), `${prefix}--${sessionId}.lock`);
     withContainerLifecycleLock(prefix, () => {
         const startToken = processStartToken(process.pid);
         const record = startToken
@@ -128,7 +127,7 @@ export function getActiveSessionsForContainer(
     let entries: string[];
     try {
         ensureLocksDirectory();
-        entries = readdirSync(locksDir);
+        entries = readdirSync(locksDir());
     } catch (error) {
         // The directory was just established above. Any observation failure,
         // including a concurrent ENOENT, must not authorize container cleanup.
@@ -177,12 +176,12 @@ function sessionLockClaimsForContainer(entries: string[], containerPrefix: strin
  */
 export function getSessionLockClaimsForContainer(containerPrefix: string): string[] {
     ensureLocksDirectory();
-    return sessionLockClaimsForContainer(readdirSync(locksDir), containerPrefix);
+    return sessionLockClaimsForContainer(readdirSync(locksDir()), containerPrefix);
 }
 
 export function getSessionLockClaimsForProjectFamily(projectId: string): string[] {
     ensureLocksDirectory();
-    return readdirSync(locksDir).filter((entry) =>
+    return readdirSync(locksDir()).filter((entry) =>
         entry.endsWith(".lock") && entry.startsWith(`${projectId}--`),
     );
 }
@@ -193,7 +192,7 @@ function filterLiveSessionLocks(locks: string[], currentLockFile?: string): stri
     if (currentLockName && locks.includes(currentLockName)) {
         try {
             const currentOwner = sessionLockOwner(
-                readFileSync(join(locksDir, currentLockName), "utf-8").trim(),
+                readFileSync(join(locksDir(), currentLockName), "utf-8").trim(),
             );
             if (currentOwner?.pid === process.pid) currentOwnerPid = currentOwner.pid;
         } catch {
@@ -207,7 +206,7 @@ function filterLiveSessionLocks(locks: string[], currentLockFile?: string): stri
     // save a process launch in any case.
     const claims = locks.map((name) => {
         try {
-            return { name, content: readFileSync(join(locksDir, name), "utf-8").trim() };
+            return { name, content: readFileSync(join(locksDir(), name), "utf-8").trim() };
         } catch {
             // Unreadable here is not a decision: the walk preserves such a lock, fail-closed.
             return { name, content: null as string | null };
@@ -225,7 +224,7 @@ function filterLiveSessionLocks(locks: string[], currentLockFile?: string): stri
         }),
     );
     return claims.filter(({ name: f, content }) => {
-        const lockPath = join(locksDir, f);
+        const lockPath = join(locksDir(), f);
         if (content === null) return true;
         try {
             const owner = sessionLockOwner(content);

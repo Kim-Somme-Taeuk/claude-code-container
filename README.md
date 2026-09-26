@@ -403,15 +403,28 @@ If neither runtime is installed, `ccc` exits with a clear error.
 
 ## Profiles
 
-Switch between different Claude accounts or credential sets. Each profile gets its own `~/.claude` directory and container, fully isolated.
+Switch between different Claude and Codex accounts. Each profile has its own Claude login, Codex login and container, fully isolated. The account used without `CCC_PROFILE` is the built-in profile `default`.
 
 ```bash
 ccc profile add work       # Create profile
-ccc profile list           # List profiles
-ccc profile rm work        # Remove profile
+ccc profile list           # List profiles (always includes default)
+ccc profile rm work        # Remove profile (default cannot be removed)
 
 CCC_PROFILE=work ccc       # Run with profile
 ```
+
+Everything ccc keeps on the host lives in `~/.ccc`:
+
+```
+~/.ccc/
+├── config.json            # settings, including `ccc remote` configs
+├── profiles/<name>/       # claude/, claude.json, codex/ — one folder per account
+├── run/                   # locks and clipboard files; safe to delete when no session runs
+├── devices/               # device lab state shared with containers (read-only)
+└── device-broker-private/ # host-only device broker state (keys, VM images)
+```
+
+An older `~/.ccc` (with `claude/`, `codex/`, `locks/`, `remote/` at the top) is moved into this layout on the first start while no ccc session is running; each existing container is recreated once. Named profiles created before this layout sign in to Codex once. Details: [REQ__ccc-home-layout](doc/common/REQ__ccc-home-layout.md).
 
 Profiles are for **credential directory isolation** only. For environment variables (API keys, backend URLs), use [mise environments](doc/mise-environments.md):
 

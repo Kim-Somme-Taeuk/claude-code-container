@@ -4,11 +4,6 @@ import {
     getProjectId,
     projectIdentityPath,
     DATA_DIR,
-    CLAUDE_DIR,
-    CLAUDE_JSON_FILE,
-    CODEX_DIR,
-    CODEX_CONFIG_FILE,
-    REMOTE_CONFIG_DIR,
     IMAGE_NAME,
     CONTAINER_PID_LIMIT,
     COMMON_IGNORE_DIRS,
@@ -25,7 +20,8 @@ import {
     getCodexDir,
     getCodexConfigFile,
 } from '../utils.js';
-import { homedir } from 'os';
+import { homedir, tmpdir } from 'os';
+import { mkdtempSync } from 'fs';
 import { join } from 'path';
 
 // readline mock (hoisted at module level)
@@ -52,14 +48,6 @@ describe('utils constants', () => {
         expect(DATA_DIR).toBe(join(homedir(), '.ccc'));
     });
 
-    it('CLAUDE_DIR should be ~/.ccc/claude', () => {
-        expect(CLAUDE_DIR).toBe(join(homedir(), '.ccc', 'claude'));
-    });
-
-    it('REMOTE_CONFIG_DIR should be ~/.ccc/remote', () => {
-        expect(REMOTE_CONFIG_DIR).toBe(join(homedir(), '.ccc', 'remote'));
-    });
-
     it('IMAGE_NAME should be ccc', () => {
         expect(IMAGE_NAME).toBe('ccc');
     });
@@ -79,12 +67,25 @@ describe('utils constants', () => {
         expect(COMMON_IGNORE_DIRS).toContain('build');
     });
 
-    it('uses ~/.ccc credential paths on the host', () => {
+    it('uses the default profile credential paths on the host', () => {
         delete process.env.container;
-        expect(getClaudeDir()).toBe(CLAUDE_DIR);
-        expect(getClaudeJsonFile()).toBe(CLAUDE_JSON_FILE);
-        expect(getCodexDir()).toBe(CODEX_DIR);
-        expect(getCodexConfigFile()).toBe(CODEX_CONFIG_FILE);
+        process.env.HOME = mkdtempSync(join(tmpdir(), 'ccc-utils-home-'));
+        const profileRoot = join(homedir(), '.ccc', 'profiles', 'default');
+        expect(getClaudeDir()).toBe(join(profileRoot, 'claude'));
+        expect(getClaudeJsonFile()).toBe(join(profileRoot, 'claude.json'));
+        expect(getCodexDir()).toBe(join(profileRoot, 'codex'));
+        expect(getCodexConfigFile()).toBe(join(profileRoot, 'codex', 'config.toml'));
+        expect(getClaudeDir('default')).toBe(join(profileRoot, 'claude'));
+    });
+
+    it('uses per-profile claude and codex paths for a named profile', () => {
+        delete process.env.container;
+        process.env.HOME = mkdtempSync(join(tmpdir(), 'ccc-utils-home-'));
+        const profileRoot = join(homedir(), '.ccc', 'profiles', 'work');
+        expect(getClaudeDir('work')).toBe(join(profileRoot, 'claude'));
+        expect(getClaudeJsonFile('work')).toBe(join(profileRoot, 'claude.json'));
+        expect(getCodexDir('work')).toBe(join(profileRoot, 'codex'));
+        expect(getCodexConfigFile('work')).toBe(join(profileRoot, 'codex', 'config.toml'));
     });
 
     it('uses mounted credential paths inside a real ccc container', () => {
@@ -103,11 +104,13 @@ describe('utils constants', () => {
     it('keeps host-style credential paths inside Vitest even when container env is set', () => {
         process.env.container = CONTAINER_ENV_VALUE;
         process.env.VITEST_POOL_ID = '1';
+        process.env.HOME = mkdtempSync(join(tmpdir(), 'ccc-utils-home-'));
+        const profileRoot = join(homedir(), '.ccc', 'profiles', 'default');
 
-        expect(getClaudeDir()).toBe(CLAUDE_DIR);
-        expect(getClaudeJsonFile()).toBe(CLAUDE_JSON_FILE);
-        expect(getCodexDir()).toBe(CODEX_DIR);
-        expect(getCodexConfigFile()).toBe(CODEX_CONFIG_FILE);
+        expect(getClaudeDir()).toBe(join(profileRoot, 'claude'));
+        expect(getClaudeJsonFile()).toBe(join(profileRoot, 'claude.json'));
+        expect(getCodexDir()).toBe(join(profileRoot, 'codex'));
+        expect(getCodexConfigFile()).toBe(join(profileRoot, 'codex', 'config.toml'));
     });
 });
 
@@ -331,15 +334,6 @@ describe('isValidEnvKey', () => {
 });
 
 describe('additional constants', () => {
-    it('CLAUDE_JSON_FILE should be ~/.ccc/claude.json', () => {
-        expect(CLAUDE_JSON_FILE).toBe(join(homedir(), '.ccc', 'claude.json'));
-    });
-
-    it('CODEX_CONFIG_FILE should be ~/.ccc/codex/config.toml', () => {
-        expect(CODEX_DIR).toBe(join(homedir(), '.ccc', 'codex'));
-        expect(CODEX_CONFIG_FILE).toBe(join(homedir(), '.ccc', 'codex', 'config.toml'));
-    });
-
     it('CONTAINER_ENV_KEY should be "container"', () => {
         expect(CONTAINER_ENV_KEY).toBe('container');
     });

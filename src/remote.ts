@@ -2,10 +2,11 @@
 
 import {spawn, spawnSync} from "child_process";
 import {randomBytes} from "crypto";
-import {existsSync, mkdirSync, readFileSync, writeFileSync} from "fs";
+import {existsSync, readFileSync} from "fs";
 import {join, resolve} from "path";
-import {hashPath, getProjectId, getClaudeDir, CONTAINER_ENV_KEY, CONTAINER_ENV_VALUE, prompt, REMOTE_CONFIG_DIR, IMAGE_NAME, CONTAINER_PID_LIMIT, COMMON_IGNORE_DIRS, MISE_VOLUME_NAME, collectForwardedEnv, isValidEnvKey} from "./utils.js";
+import {hashPath, getProjectId, CONTAINER_ENV_KEY, CONTAINER_ENV_VALUE, prompt, IMAGE_NAME, CONTAINER_PID_LIMIT, COMMON_IGNORE_DIRS, MISE_VOLUME_NAME, collectForwardedEnv, isValidEnvKey} from "./utils.js";
 import {getContainerName} from "./docker.js";
+import {DEFAULT_PROFILE_MARKER, DEFAULT_PROFILE_NAME, legacyRemoteConfigDir, normalizeProfile, readCccConfig, updateCccConfig} from "./home-layout.js";
 import {createSessionLock, removeSessionLock, withContainerLifecycleLock, withContainerLifecycleLockAsync} from "./session.js";
 
 // === Types ===
@@ -278,18 +279,36 @@ async function ensureRemoteImage(config: RemoteConfig): Promise<void> {
 }
 
 /**
+ * Shell that sets `_ccc_claude_dir` on the remote host with the same rule as
+ * home-layout.ts profileEntry: profiles/default is the no-profile account only
+ * when marked, or when no pre-layout entry exists (doc/common/REQ__ccc-home-layout.md).
+ */
+export function remoteClaudeDirScript(profile?: string): string {
+    const namedProfile = normalizeProfile(profile);
+    if (namedProfile) {
+        return `_ccc_claude_dir="$HOME/.ccc/profiles/"${shellEscapeArg(namedProfile)}"/claude"; mkdir -p "$_ccc_claude_dir"`;
+    }
+    return `_ccc_default="$HOME/.ccc/profiles/${DEFAULT_PROFILE_NAME}"; _ccc_legacy="$HOME/.ccc/claude"; `
+        + `if [ ! -e "$_ccc_default/${DEFAULT_PROFILE_MARKER}" ]; then `
+        + `if [ -e "$_ccc_legacy" ] || [ -e "$HOME/.ccc/claude.json" ] || [ -e "$HOME/.ccc/codex" ]; then _ccc_claude_dir="$_ccc_legacy"; `
+        + `else mkdir -p "$_ccc_default" && : > "$_ccc_default/${DEFAULT_PROFILE_MARKER}"; _ccc_claude_dir="$_ccc_default/claude"; fi; `
+        + `elif [ -e "$_ccc_legacy" ] && [ ! -e "$_ccc_default/claude" ]; then _ccc_claude_dir="$_ccc_legacy"; `
+        + `else _ccc_claude_dir="$_ccc_default/claude"; fi; mkdir -p "$_ccc_claude_dir"`;
+}
+
+/**
  * Start container on remote host without project volume mount.
  * Returns the stable container name and ID captured under the lifecycle lock.
  */
 async function startRemoteContainer(config: RemoteConfig, projectPath: string, reservationToken: string, reservationLeaseSeconds: number, profile?: string): Promise<{ name: string; id: string }> {
     const projectId = getProjectId(projectPath);
     const containerName = getContainerName(projectPath, profile);
-    const claudeDir = getClaudeDir(profile);
+    const resolveRemoteClaudeDir = remoteClaudeDirScript(profile);
 
     // Build docker run command (no project volume, just credentials and mise cache)
-    const dockerCmd = `_ccc_container_id=$(docker inspect --format ${shellEscapeArg("{{.Id}}")} ${shellEscapeArg(containerName)} 2>/dev/null || true); if [ -n "$_ccc_container_id" ]; then docker start "$_ccc_container_id" >/dev/null; else _ccc_container_id=$(docker run -d --name ${containerName} \
+    const dockerCmd = `${resolveRemoteClaudeDir}; _ccc_container_id=$(docker inspect --format ${shellEscapeArg("{{.Id}}")} ${shellEscapeArg(containerName)} 2>/dev/null || true); if [ -n "$_ccc_container_id" ]; then docker start "$_ccc_container_id" >/dev/null; else _ccc_container_id=$(docker run -d --name ${containerName} \
         --network host \
-        -v ${shellEscapeArg(`${claudeDir}:/home/ccc/.claude`)} \
+        -v "$_ccc_claude_dir:/home/ccc/.claude" \
         -v ${MISE_VOLUME_NAME}:/home/ccc/.local/share/mise \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -w /project/${projectId} \
@@ -338,28 +357,36 @@ function printStatus(label: string, ok: boolean, detail?: string): void {
 
 // === Config Storage ===
 
-function getConfigPath(projectPath: string): string {
-    const hash = getProjectHash(projectPath);
-    return join(REMOTE_CONFIG_DIR, `${hash}.json`);
-}
-
+// Remote configs live in ~/.ccc/config.json under "remote"; configs saved by
+// older versions in ~/.ccc/remote/<hash>.json are still read
+// (doc/common/REQ__ccc-home-layout.md).
 function loadRemoteConfig(projectPath: string): RemoteConfig | null {
-    const configPath = getConfigPath(projectPath);
-    if (!existsSync(configPath)) {
+    const hash = getProjectHash(projectPath);
+    const remote = readCccConfig().remote;
+    if (remote && typeof remote === "object" && !Array.isArray(remote)) {
+        const saved = (remote as Record<string, unknown>)[hash];
+        if (saved && typeof saved === "object") return saved as RemoteConfig;
+    }
+    const legacyPath = join(legacyRemoteConfigDir(), `${hash}.json`);
+    if (!existsSync(legacyPath)) {
         return null;
     }
     try {
-        const content = readFileSync(configPath, "utf-8");
-        return JSON.parse(content) as RemoteConfig;
+        return JSON.parse(readFileSync(legacyPath, "utf-8")) as RemoteConfig;
     } catch {
         return null;
     }
 }
 
 function saveRemoteConfig(projectPath: string, config: RemoteConfig): void {
-    mkdirSync(REMOTE_CONFIG_DIR, {recursive: true});
-    const configPath = getConfigPath(projectPath);
-    writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+    const hash = getProjectHash(projectPath);
+    updateCccConfig((settings) => {
+        const remote = settings.remote && typeof settings.remote === "object" && !Array.isArray(settings.remote)
+            ? settings.remote as Record<string, unknown>
+            : {};
+        remote[hash] = config;
+        settings.remote = remote;
+    });
 }
 
 // === Sync Functions ===
@@ -765,7 +792,7 @@ This avoids intermediate filesystem copies on the remote host.`);
 3. Docker running on remote host
 4. Network connectivity (Tailscale recommended for remote access)
 
-Config is stored per-project in ~/.ccc/remote/<project-hash>.json`);
+Config is stored per-project in ~/.ccc/config.json under "remote"`);
 }
 
 /**

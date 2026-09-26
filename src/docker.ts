@@ -24,11 +24,13 @@ import {
 import { homedir } from "os";
 import { dirname, join, normalize, posix, resolve } from "path";
 import { fileURLToPath } from "url";
+import { clipboardFilesDir } from "./home-layout.js";
 import {
     getProjectId,
     projectPathsEquivalent,
     getClaudeDir,
     getClaudeJsonFile,
+    getCodexDir,
     IMAGE_NAME,
     CONTAINER_PID_LIMIT,
     MISE_VOLUME_NAME,
@@ -36,7 +38,6 @@ import {
     CODEX_PACKAGES_CONTAINER_DIR,
     CLI_VERSION,
     DOCKER_REGISTRY_IMAGE,
-    CLIPBOARD_FILES_DIR,
     CLIPBOARD_FILES_CONTAINER_DIR,
     LAB_RUNNER_PROFILE_NAME,
     LAB_RUNNER_STATE_CONTAINER_DIR,
@@ -1091,9 +1092,8 @@ export function resolveCredentialHostPath(mount: CredentialMount, profile?: stri
     if (!profile && process.env.container === "docker" && !process.env.VITEST) {
         return mount.containerDir;
     }
-    if (profile && mount.containerDir === "/home/ccc/.claude") {
-        return getClaudeDir(profile);
-    }
+    if (mount.containerDir === "/home/ccc/.claude") return getClaudeDir(profile);
+    if (mount.containerDir === "/home/ccc/.codex") return getCodexDir(profile);
     return join(homedir(), mount.hostDir);
 }
 
@@ -1104,9 +1104,11 @@ export function resolveCredentialHostPath(mount: CredentialMount, profile?: stri
  */
 export function ensureCredentialHostDir(mount: CredentialMount, profile?: string): string {
     const hostPath = resolveCredentialHostPath(mount, profile);
-    mkdirSync(hostPath, { recursive: true });
+    // ccc's own profile credential folders are private; other tools' folders keep their defaults.
+    const cccOwned = mount.containerDir === "/home/ccc/.claude" || mount.containerDir === "/home/ccc/.codex";
+    mkdirSync(hostPath, cccOwned ? { recursive: true, mode: 0o700 } : { recursive: true });
     if (posix.dirname(CODEX_PACKAGES_CONTAINER_DIR) === mount.containerDir) {
-        mkdirSync(join(hostPath, posix.basename(CODEX_PACKAGES_CONTAINER_DIR)), { recursive: true });
+        mkdirSync(join(hostPath, posix.basename(CODEX_PACKAGES_CONTAINER_DIR)), { recursive: true, mode: 0o700 });
     }
     return hostPath;
 }
@@ -2412,7 +2414,7 @@ export function startProjectContainer(
     initiallyRunningContainerId?: string,
 ): string {
     ensureDirs();
-    mkdirSync(CLIPBOARD_FILES_DIR, { recursive: true });
+    mkdirSync(clipboardFilesDir(), { recursive: true, mode: 0o700 });
     ensureImage();
 
     const fullPath = resolve(projectPath);
@@ -2505,7 +2507,7 @@ export function startProjectContainer(
             type: "tmpfs",
             presence: "additive",
         },
-        filesystemBind(CLIPBOARD_FILES_DIR, CLIPBOARD_FILES_CONTAINER_DIR, false),
+        filesystemBind(clipboardFilesDir(), CLIPBOARD_FILES_CONTAINER_DIR, false),
         {
             hostPath: MISE_VOLUME_NAME,
             containerPath: "/home/ccc/.local/share/mise",
@@ -2838,7 +2840,7 @@ export function startProjectContainer(
             extraMounts: preparedExtraMounts,
             projectMountIdentity,
             clipboardPortFile,
-            clipboardFilesHostDir: CLIPBOARD_FILES_DIR,
+            clipboardFilesHostDir: clipboardFilesDir(),
             labRunner,
             deviceLabStateHostDir,
             deviceLabOwnerId: currentDeviceLabOwnerId,

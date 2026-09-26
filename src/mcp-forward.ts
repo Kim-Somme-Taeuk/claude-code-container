@@ -169,13 +169,13 @@ function isPermissionError(error: unknown): boolean {
 function codexConfigAccessError(action: "create" | "read" | "write", file: string, error: unknown): Error {
     const reason = error instanceof Error ? error.message : String(error);
     const hint = isPermissionError(error)
-        ? ` This usually means ${file} or one of its parent directories is owned by another user. Fix it with: sudo chown -R "$USER:$USER" ~/.ccc/codex`
+        ? ` This usually means ${file} or one of its parent directories is owned by another user. Fix it with: sudo chown -R "$USER:$USER" "${dirname(file)}"`
         : "";
     return new Error(`Unable to ${action} Codex config at ${file}: ${reason}.${hint}`);
 }
 
-function writeCodexMcpConfig(mcpServers: Record<string, McpServerConfig>): void {
-    const codexConfigFile = getCodexConfigFile();
+function writeCodexMcpConfig(mcpServers: Record<string, McpServerConfig>, profile?: string): void {
+    const codexConfigFile = getCodexConfigFile(profile);
     try {
         mkdirSync(dirname(codexConfigFile), { recursive: true });
     } catch (error) {
@@ -253,7 +253,7 @@ export function buildMcpConfig(profile?: string): string[] {
         forwarded.push(name);
     }
 
-    writeCodexMcpConfig(mcpServers);
+    writeCodexMcpConfig(mcpServers, profile);
 
     config.mcpServers = mcpServers;
     writeFileSync(claudeJsonFile, JSON.stringify(config, null, 2), { mode: 0o600 });

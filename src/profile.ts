@@ -1,10 +1,12 @@
 // src/profile.ts - Profile management for ccc
-// A profile is simply an alternate ~/.ccc/claude/ directory.
-// No env files, no templates — just credential directory isolation.
+// A profile is ~/.ccc/profiles/<name>/{claude/, claude.json, codex/}. The account
+// used without CCC_PROFILE is the reserved profile "default"
+// (doc/common/REQ__ccc-home-layout.md).
 
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
-import { LAB_RUNNER_PROFILE_NAME, PROFILES_DIR } from "./utils.js";
+import { LAB_RUNNER_PROFILE_NAME } from "./utils.js";
+import { DEFAULT_PROFILE_NAME, profilesDir } from "./home-layout.js";
 
 // === Types ===
 
@@ -48,20 +50,22 @@ export function validateProfileName(name: string): boolean {
 // === Queries ===
 
 /**
- * List all profile names (subdirectories of PROFILES_DIR).
+ * List all profile names: "default" first, then the named profile directories.
  */
 export function listProfiles(): string[] {
-    if (!existsSync(PROFILES_DIR)) return [];
-    return readdirSync(PROFILES_DIR, { withFileTypes: true })
-        .filter((d) => d.isDirectory())
-        .map((d) => d.name);
+    const named = existsSync(profilesDir())
+        ? readdirSync(profilesDir(), { withFileTypes: true })
+            .filter((d) => d.isDirectory() && d.name !== DEFAULT_PROFILE_NAME)
+            .map((d) => d.name)
+        : [];
+    return [DEFAULT_PROFILE_NAME, ...named];
 }
 
 /**
  * Check if a profile exists.
  */
 export function profileExists(name: string): boolean {
-    return existsSync(join(PROFILES_DIR, name));
+    return name === DEFAULT_PROFILE_NAME || existsSync(join(profilesDir(), name));
 }
 
 /**
@@ -74,14 +78,16 @@ export function isBuiltinProfile(name: string): boolean {
 // === Mutations ===
 
 /**
- * Create a new profile — just the claude/ directory and empty claude.json.
+ * Create a new profile — claude/, codex/ and an empty claude.json.
  * When settings are provided, also writes claude/settings.json.
  */
 export function createProfile(name: string, settings?: ProfileSettings): void {
-    const profileDir = join(PROFILES_DIR, name);
+    if (name === DEFAULT_PROFILE_NAME) throw new Error(`Profile "${DEFAULT_PROFILE_NAME}" is reserved.`);
+    const profileDir = join(profilesDir(), name);
     const claudeDir = join(profileDir, "claude");
 
-    mkdirSync(claudeDir, { recursive: true });
+    mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+    mkdirSync(join(profileDir, "codex"), { recursive: true, mode: 0o700 });
     writeFileSync(join(profileDir, "claude.json"), "{}", { mode: 0o600 });
 
     if (settings) {
@@ -111,6 +117,7 @@ export function ensureProfile(name: string): boolean {
  * Remove a profile directory recursively.
  */
 export function removeProfile(name: string): void {
-    const profileDir = join(PROFILES_DIR, name);
+    if (name === DEFAULT_PROFILE_NAME) throw new Error(`Profile "${DEFAULT_PROFILE_NAME}" cannot be removed.`);
+    const profileDir = join(profilesDir(), name);
     rmSync(profileDir, { recursive: true, force: true });
 }

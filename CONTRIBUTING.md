@@ -88,13 +88,13 @@ Container (ccc-<project>-<hash>--p--work):   # Profile "work"
 
 ### Profile System
 
-Profiles provide credential directory isolation. Each profile gets a separate `~/.ccc/profiles/<name>/claude/` directory mounted to its own container.
+Profiles provide credential directory isolation. Each profile gets separate `~/.ccc/profiles/<name>/{claude/,claude.json,codex/}` entries mounted into its own container.
 
 - `CCC_PROFILE` env var selects the profile at runtime
-- No profile → uses `~/.ccc/claude/` (backward compatible)
+- No profile → the `default` profile, `~/.ccc/profiles/default/` (older homes are migrated on first start; see doc/common/REQ__ccc-home-layout.md)
 - Container naming: `ccc-{projectId}--p--{profile}`
 - Session locks use `--` separator: `{projectId}--p--{profile}--{sessionId}.lock`
-- `getClaudeDir(profile?)` and `getClaudeJsonFile(profile?)` in `utils.ts` resolve paths
+- `getClaudeDir(profile?)`, `getClaudeJsonFile(profile?)` and `getCodexDir(profile?)` in `utils.ts` resolve paths through `home-layout.ts`
 - Environment variables (API keys, backends) are NOT managed by profiles — use `mise.toml` `[env]`
 
 ### Image Management
@@ -347,8 +347,8 @@ CCC_SELINUX_RELABEL=off ccc
 ### Stale Session Cleanup
 
 ```bash
-ls -la ~/.ccc/locks/
-rm ~/.ccc/locks/*.lock    # Manual cleanup if needed
+ls -la ~/.ccc/run/locks/
+rm ~/.ccc/run/locks/*.lock    # Manual cleanup if needed
 ```
 
 ## Code Style

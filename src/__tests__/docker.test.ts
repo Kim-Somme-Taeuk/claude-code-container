@@ -250,10 +250,10 @@ const {
     stopProjectContainer,
     removeProjectContainer,
 } = await import("../docker.js");
+const { clipboardFilesDir } = await import("../home-layout.js");
 
 const {
     CLI_VERSION,
-    CLIPBOARD_FILES_DIR,
     CLIPBOARD_FILES_CONTAINER_DIR,
     MISE_VOLUME_NAME,
     CODEX_PACKAGES_VOLUME_NAME,
@@ -333,7 +333,7 @@ function fullCredentialMountsJson(
         RW: true,
     };
     const clipboardMounts = [
-        { Source: CLIPBOARD_FILES_DIR, Destination: CLIPBOARD_FILES_CONTAINER_DIR, Type: "bind", RW: true },
+        { Source: clipboardFilesDir(), Destination: CLIPBOARD_FILES_CONTAINER_DIR, Type: "bind", RW: true },
     ];
     const hostSshPath = join(homedir(), ".ssh");
     const coreMounts = [
@@ -1332,7 +1332,7 @@ describe("docker.ts module exports", () => {
             const codexMount = { hostDir: ".ccc/codex", containerDir: "/home/ccc/.codex" };
 
             expect(resolveCredentialHostPath(claudeMount, "work")).toMatch(/\/\.ccc\/profiles\/work\/claude$/);
-            expect(resolveCredentialHostPath(codexMount, "work")).toMatch(/\/\.ccc\/codex$/);
+            expect(resolveCredentialHostPath(codexMount, "work")).toMatch(/\/\.ccc\/profiles\/work\/codex$/);
         });
 
         it("creates the codex packages mount point on the host but no extra dir for other tools", () => {

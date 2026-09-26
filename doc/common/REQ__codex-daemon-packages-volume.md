@@ -8,8 +8,8 @@ source: user bug report (`ccc codex` on a Windows host failing with "Permission 
 # Codex daemon packages live on a named volume
 
 `ccc codex` must start on every supported host, including hosts where the
-codex credential directory (`~/.ccc/codex`, mounted at `/home/ccc/.codex`) is
-backed by a Windows filesystem.
+codex credential directory (`~/.ccc/profiles/<profile>/codex`, formerly
+`~/.ccc/codex`, mounted at `/home/ccc/.codex`) is backed by a Windows filesystem.
 
 ## Intent
 

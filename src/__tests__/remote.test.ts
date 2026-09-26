@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { hashPath } from '../utils.js'
-import { getProjectHash, getMutagenSessionName, checkTailscale, checkMutagen, isHostReachable, getMutagenSyncStatus, isValidEnvKey, shellEscapeArg, isValidHostOrUser, remoteSetup, remoteCheck, remoteTerminate, remoteExec, remoteStopShell } from '../remote.js'
+import { getProjectHash, getMutagenSessionName, checkTailscale, checkMutagen, isHostReachable, getMutagenSyncStatus, isValidEnvKey, shellEscapeArg, isValidHostOrUser, remoteSetup, remoteCheck, remoteTerminate, remoteExec, remoteStopShell, remoteClaudeDirScript } from '../remote.js'
 import * as childProcess from 'child_process'
 import * as fs from 'fs'
 import * as utils from '../utils.js'
@@ -30,7 +30,8 @@ vi.mock('fs', async () => {
     existsSync: vi.fn(),
     readFileSync: vi.fn(),
     writeFileSync: vi.fn(),
-    mkdirSync: vi.fn()
+    mkdirSync: vi.fn(),
+    renameSync: vi.fn()
   }
 })
 
@@ -481,6 +482,35 @@ describe('loadRemoteConfig (via remoteCheck side effects)', () => {
 
     expect(logs.some(l => l.includes('my-desktop'))).toBe(true)
     expect(logs.some(l => l.includes('john'))).toBe(true)
+
+    vi.restoreAllMocks()
+  })
+
+  it('prefers the config.json entry and falls back to the pre-layout remote/<hash>.json', async () => {
+    const projectHash = getProjectHash('/home/user/project')
+    const byPath = (files: Record<string, string>) => {
+      mockExistsSync.mockImplementation((p) => Object.keys(files).some((suffix) => String(p).endsWith(suffix)))
+      mockReadFileSync.mockImplementation(((p: string) => {
+        const match = Object.keys(files).find((suffix) => String(p).endsWith(suffix))
+        if (!match) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+        return files[match]
+      }) as any)
+    }
+    const logs: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((...args) => { logs.push(args.join(' ')) })
+
+    byPath({
+      'config.json': JSON.stringify({ remote: { [projectHash]: { host: 'from-config', user: 'u', remotePath: '' } } }),
+      [`${projectHash}.json`]: JSON.stringify({ host: 'from-legacy', user: 'u', remotePath: '' }),
+    })
+    await remoteCheck('/home/user/project')
+    expect(logs.some(l => l.includes('from-config'))).toBe(true)
+    expect(logs.some(l => l.includes('from-legacy'))).toBe(false)
+
+    logs.length = 0
+    byPath({ [`${projectHash}.json`]: JSON.stringify({ host: 'from-legacy', user: 'u', remotePath: '' }) })
+    await remoteCheck('/home/user/project')
+    expect(logs.some(l => l.includes('from-legacy'))).toBe(true)
 
     vi.restoreAllMocks()
   })
@@ -1116,12 +1146,20 @@ describe('remoteExec', () => {
 
     await expect(remoteExec('/home/user/project', 'new-host')).rejects.toThrow('exit:0')
 
-    expect(mockWriteFileSync).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.stringContaining('new-host'),
-      expect.objectContaining({ mode: 0o600 })
-    )
+    // Saved under config.json "remote", written atomically (doc/common/REQ__ccc-home-layout.md).
+    const configWrite = mockWriteFileSync.mock.calls.find(([path]) => /config\.json\.\d+\.tmp$/.test(String(path)))
+    expect(configWrite).toBeDefined()
+    expect(configWrite![2]).toEqual({ mode: 0o600 })
+    const saved = JSON.parse(String(configWrite![1]))
+    expect(Object.values(saved.remote)).toEqual([expect.objectContaining({ host: 'new-host', user: 'testuser' })])
+    expect(vi.mocked(fs.renameSync)).toHaveBeenCalledWith(configWrite![0], expect.stringMatching(/\.ccc[\\/]config\.json$/))
     expect(mockMkdirSync).toHaveBeenCalled()
+
+    // The remote container mounts the claude folder the remote host resolves itself
+    // (behavior covered in home-layout.test.ts "remote claude folder script").
+    const runCommand = mockSpawnSync.mock.calls.map((call) => (call[1] as string[]).join(' ')).find((cmd) => cmd.includes('docker run'))
+    expect(runCommand).toContain(`${remoteClaudeDirScript()}; _ccc_container_id=`)
+    expect(runCommand).toContain(`-v "$_ccc_claude_dir:/home/ccc/.claude"`)
   })
 
   it('exits with code 1 when host is not reachable', async () => {

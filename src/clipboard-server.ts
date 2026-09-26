@@ -19,9 +19,10 @@ import {
     mkdirSync,
 } from "fs";
 import { join, dirname, basename } from "path";
-import { homedir, platform } from "os";
+import { platform } from "os";
 import { fileURLToPath } from "url";
-import { CLIPBOARD_FILES_CONTAINER_DIR, CLIPBOARD_FILES_DIR } from "./utils.js";
+import { CLIPBOARD_FILES_CONTAINER_DIR } from "./utils.js";
+import { clipboardFilesDir, clipboardPortFile, clipboardStartingLock, clipboardStateDir, helperBinDir, locksDir } from "./home-layout.js";
 import { sessionLockLiveness } from "./session-lock-liveness.js";
 import { canonicalWindowsPowerShellPath, hiddenWindowsPowerShellArgs } from "./windows-system-powershell.js";
 
@@ -37,10 +38,8 @@ function getServerHash(): string {
 const SERVER_VERSION = getServerHash();
 
 // === Constants ===
-const DATA_DIR = join(homedir(), ".ccc");
-const LOCKS_DIR = join(DATA_DIR, "locks");
-const PORT_FILE = join(DATA_DIR, "clipboard.port");
-const STARTING_LOCK = join(DATA_DIR, "clipboard.starting");
+// Paths resolve on every use: the ~/.ccc layout can migrate after this module loads
+// (doc/common/REQ__ccc-home-layout.md).
 export const CLIPBOARD_SERVER_ORPHAN_GRACE_MS = 15000;
 const CLIPBOARD_SERVER_ORPHAN_CHECK_INTERVAL_MS = 5000;
 const HEALTH_CHECK_TIMEOUT_MS = 2000;
@@ -145,8 +144,13 @@ export function parseAppleScriptImageData(buf: Buffer): Buffer | null {
 // Mirrors the Windows PowerShell pattern: one persistent process for fast clipboard reads.
 // Uses a compiled Objective-C binary that accesses NSPasteboard directly (~5ms per read).
 
-const DARWIN_HELPER_SOURCE_HASH_FILE = join(DATA_DIR, "bin", "clipboard-helper-darwin.hash");
-const DARWIN_HELPER_BINARY = join(DATA_DIR, "bin", "clipboard-helper-darwin");
+function darwinHelperSourceHashFile(): string {
+    return join(helperBinDir(), "clipboard-helper-darwin.hash");
+}
+
+function darwinHelperBinary(): string {
+    return join(helperBinDir(), "clipboard-helper-darwin");
+}
 const DARWIN_MARKER = PS_MARKER; // Same protocol as Windows
 
 let persistentDarwin: ChildProcess | null = null;
@@ -183,8 +187,8 @@ export function parseDarwinHelperOutput(output: string): Omit<ClipboardSnapshot,
  */
 function isDarwinHelperReady(): string | null {
     if (platform() !== "darwin") return null;
-    if (!existsSync(DARWIN_HELPER_BINARY)) return null;
-    return DARWIN_HELPER_BINARY;
+    if (!existsSync(darwinHelperBinary())) return null;
+    return darwinHelperBinary();
 }
 
 /**
@@ -202,24 +206,24 @@ function compileDarwinHelperAsync(): void {
         const sourceHash = createHash("sha256").update(sourceContent).digest("hex").slice(0, 16);
 
         // Already up-to-date?
-        if (existsSync(DARWIN_HELPER_BINARY)) {
+        if (existsSync(darwinHelperBinary())) {
             try {
-                const existingHash = readFileSync(DARWIN_HELPER_SOURCE_HASH_FILE, "utf-8").trim();
+                const existingHash = readFileSync(darwinHelperSourceHashFile(), "utf-8").trim();
                 if (existingHash === sourceHash) return;
             } catch { /* recompile */ }
         }
 
-        const binDir = join(DATA_DIR, "bin");
+        const binDir = helperBinDir();
         mkdirSync(binDir, { recursive: true });
 
         const child = spawn("cc", [
             "-framework", "AppKit", "-framework", "Foundation",
-            "-O2", "-o", DARWIN_HELPER_BINARY, sourcePath,
+            "-O2", "-o", darwinHelperBinary(), sourcePath,
         ], { stdio: "ignore" });
 
         child.on("close", (code) => {
             if (code === 0) {
-                try { writeFileSync(DARWIN_HELPER_SOURCE_HASH_FILE, sourceHash); } catch { /* ignore */ }
+                try { writeFileSync(darwinHelperSourceHashFile(), sourceHash); } catch { /* ignore */ }
             }
         });
     } catch { /* compilation unavailable — osascript fallback will be used */ }
@@ -548,9 +552,9 @@ function copiedClipboardFileContainerPath(destName: string): string {
 function copyImageFileToClipboardShare(filePath: string): Buffer | null {
     if (!isImageFilePath(filePath) || !existsSync(filePath)) return null;
     try {
-        mkdirSync(CLIPBOARD_FILES_DIR, { recursive: true });
+        mkdirSync(clipboardFilesDir(), { recursive: true });
         const destName = `${Date.now()}-${randomBytes(4).toString("hex")}-${basename(filePath)}`;
-        copyFileSync(filePath, join(CLIPBOARD_FILES_DIR, destName));
+        copyFileSync(filePath, join(clipboardFilesDir(), destName));
         return Buffer.from(copiedClipboardFileContainerPath(destName), "utf-8");
     } catch {
         return null;
@@ -675,7 +679,7 @@ export function buildWindowsClipboardChangeMarkerCommand(): string {
 }
 
 export function buildWindowsClipboardReadCommand(
-    sharedHostDir = CLIPBOARD_FILES_DIR,
+    sharedHostDir = clipboardFilesDir(),
     sharedContainerDir = CLIPBOARD_FILES_CONTAINER_DIR,
 ): string {
     const extensions = WINDOWS_IMAGE_FILE_EXTENSIONS.map(psSingleQuote).join(",");
@@ -871,7 +875,7 @@ async function readAllClipboardDarwin(): Promise<Omit<ClipboardSnapshot, "timest
 async function readAllClipboardWindows(): Promise<Omit<ClipboardSnapshot, "timestamp">> {
     // Single-line command: PS interactive stdin (-Command -) without a console
     // cannot handle multi-line continuation blocks (if { ... } across lines).
-    mkdirSync(CLIPBOARD_FILES_DIR, { recursive: true });
+    mkdirSync(clipboardFilesDir(), { recursive: true });
     const command = buildWindowsClipboardReadCommand();
 
     const output = await runPSCommand(command);
@@ -1245,16 +1249,16 @@ function createClipboardServer(token: string, plat: ClipboardPlatform): { server
 }
 
 function cleanupStateFiles(): void {
-    try { if (existsSync(PORT_FILE)) unlinkSync(PORT_FILE); } catch { /* ignore */ }
-    try { if (existsSync(STARTING_LOCK)) unlinkSync(STARTING_LOCK); } catch { /* ignore */ }
+    try { if (existsSync(clipboardPortFile())) unlinkSync(clipboardPortFile()); } catch { /* ignore */ }
+    try { if (existsSync(clipboardStartingLock())) unlinkSync(clipboardStartingLock()); } catch { /* ignore */ }
 }
 
 // === Port File Management ===
 
-function readPortFile(): { port: number; token: string } | null {
+function readPortFile(portFile = clipboardPortFile()): { port: number; token: string } | null {
     try {
-        if (!existsSync(PORT_FILE)) return null;
-        const content = readFileSync(PORT_FILE, "utf-8").trim();
+        if (!existsSync(portFile)) return null;
+        const content = readFileSync(portFile, "utf-8").trim();
         const colonIdx = content.indexOf(":");
         if (colonIdx === -1) return null;
         const portStr = content.substring(0, colonIdx);
@@ -1268,8 +1272,8 @@ function readPortFile(): { port: number; token: string } | null {
 }
 
 function writePortFile(port: number, token: string): void {
-    mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
-    writeFileSync(PORT_FILE, `${port}:${token}`, { mode: 0o600 });
+    mkdirSync(clipboardStateDir(), { recursive: true, mode: 0o700 });
+    writeFileSync(clipboardPortFile(), `${port}:${token}`, { mode: 0o600 });
 }
 
 // === Server Shutdown (used for version upgrade restart) ===
@@ -1345,8 +1349,8 @@ export async function ensureClipboardServer(): Promise<number> {
     // Atomic startup lock to prevent race condition
     let lockFd: number | null = null;
     try {
-        mkdirSync(DATA_DIR, { recursive: true });
-        lockFd = openSync(STARTING_LOCK, "wx");
+        mkdirSync(clipboardStateDir(), { recursive: true, mode: 0o700 });
+        lockFd = openSync(clipboardStartingLock(), "wx");
         closeSync(lockFd);
     } catch {
         // Another process is starting the server - wait for port file
@@ -1362,8 +1366,8 @@ export async function ensureClipboardServer(): Promise<number> {
         // Timeout - try to start ourselves (delete stale lock)
         cleanupStateFiles();
         try {
-            mkdirSync(DATA_DIR, { recursive: true });
-            lockFd = openSync(STARTING_LOCK, "wx");
+            mkdirSync(clipboardStateDir(), { recursive: true, mode: 0o700 });
+            lockFd = openSync(clipboardStartingLock(), "wx");
             closeSync(lockFd);
         } catch {
             throw new Error("Failed to acquire clipboard server startup lock");
@@ -1390,7 +1394,7 @@ export async function ensureClipboardServer(): Promise<number> {
             if (info) {
                 const health = await checkServerHealth(info.port, info.token, bindAddr);
                 if (health.alive) {
-                    try { unlinkSync(STARTING_LOCK); } catch { /* ignore */ }
+                    try { unlinkSync(clipboardStartingLock()); } catch { /* ignore */ }
                     return info.port;
                 }
             }
@@ -1398,7 +1402,7 @@ export async function ensureClipboardServer(): Promise<number> {
 
         throw new Error("Clipboard server failed to start within timeout");
     } catch (err) {
-        try { unlinkSync(STARTING_LOCK); } catch { /* ignore */ }
+        try { unlinkSync(clipboardStartingLock()); } catch { /* ignore */ }
         throw err;
     }
 }
@@ -1406,11 +1410,11 @@ export async function ensureClipboardServer(): Promise<number> {
 /**
  * Check if there are any active CCC sessions besides the given lock file.
  */
-export function hasAnyActiveSessionsExcept(currentLockFile: string | null): boolean {
+export function hasAnyActiveSessionsExcept(currentLockFile: string | null, directory: string = locksDir()): boolean {
     const currentLockName = currentLockFile ? basename(currentLockFile) : "";
     let locks: string[];
     try {
-        locks = readdirSync(LOCKS_DIR).filter((f) => f.endsWith(".lock"));
+        locks = readdirSync(directory).filter((f) => f.endsWith(".lock"));
     } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
         // Failure to enumerate locks is not proof that no sessions exist.
@@ -1419,7 +1423,7 @@ export function hasAnyActiveSessionsExcept(currentLockFile: string | null): bool
     return locks.some((f) => {
         if (f === currentLockName) return false;
         // Use the same conservative lock identity rules as container cleanup.
-        const lockPath = join(LOCKS_DIR, f);
+        const lockPath = join(directory, f);
         try {
             const content = readFileSync(lockPath, "utf-8").trim();
             const liveness = sessionLockLiveness(content);
@@ -1444,7 +1448,13 @@ export function stopClipboardServerIfLast(hasOtherActiveSessions: boolean): void
     shutdownServer(info.port, info.token);
 
     // Clean up port file
-    try { unlinkSync(PORT_FILE); } catch { /* ignore */ }
+    try { unlinkSync(clipboardPortFile()); } catch { /* ignore */ }
+}
+
+/** Ask the server recorded in a pre-layout port file to shut down. */
+export function retireClipboardServerFromPortFile(portFile: string): void {
+    const info = readPortFile(portFile);
+    if (info) shutdownServer(info.port, info.token);
 }
 
 // === Standalone Entry Point ===
@@ -1466,7 +1476,7 @@ if (isMainModule && process.argv.includes("--serve")) {
     start(bindAddr)
         .then((port) => {
             writePortFile(port, token);
-            try { unlinkSync(STARTING_LOCK); } catch { /* ignore */ }
+            try { unlinkSync(clipboardStartingLock()); } catch { /* ignore */ }
         })
         .catch((err) => {
             console.error("Failed to start clipboard server:", err);

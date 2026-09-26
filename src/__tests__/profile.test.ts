@@ -7,11 +7,11 @@ import { vi } from "vitest";
 // We need to mock PROFILES_DIR to use a temp dir
 const mockProfilesDir = mkdtempSync(join(tmpdir(), "ccc-test-profiles-"));
 
-vi.mock("../utils.js", async (importOriginal) => {
+vi.mock("../home-layout.js", async (importOriginal) => {
     const actual = (await importOriginal()) as Record<string, unknown>;
     return {
         ...actual,
-        PROFILES_DIR: mockProfilesDir,
+        profilesDir: () => mockProfilesDir,
     };
 });
 
@@ -93,8 +93,14 @@ describe("listProfiles / profileExists / createProfile / removeProfile", () => {
         }
     });
 
-    it("listProfiles returns empty array when no profiles exist", () => {
-        expect(listProfiles()).toEqual([]);
+    it("listProfiles returns only the default profile when no named profiles exist", () => {
+        expect(listProfiles()).toEqual(["default"]);
+    });
+
+    it("treats default as an existing, reserved profile", () => {
+        expect(profileExists("default")).toBe(true);
+        expect(() => createProfile("default")).toThrow(/reserved/);
+        expect(() => removeProfile("default")).toThrow(/cannot be removed/);
     });
 
     it("profileExists returns false for nonexistent profile", () => {
@@ -106,6 +112,7 @@ describe("listProfiles / profileExists / createProfile / removeProfile", () => {
         expect(existsSync(join(mockProfilesDir, "work"))).toBe(true);
         expect(existsSync(join(mockProfilesDir, "work", "claude"))).toBe(true);
         expect(existsSync(join(mockProfilesDir, "work", "claude.json"))).toBe(true);
+        expect(existsSync(join(mockProfilesDir, "work", "codex"))).toBe(true);
     });
 
     it("profileExists returns true after createProfile", () => {

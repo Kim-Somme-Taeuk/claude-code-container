@@ -141,7 +141,7 @@ describe("buildMcpConfig", () => {
     }
 
     function getWrittenCodexConfig(): string {
-        const call = writeFileSync.mock.calls.find(([path]) => String(path).endsWith(".ccc/codex/config.toml"));
+        const call = writeFileSync.mock.calls.find(([path]) => String(path).endsWith(".ccc/profiles/default/codex/config.toml"));
         expect(call).toBeDefined();
         return call![1] as string;
     }
@@ -245,22 +245,22 @@ describe("buildMcpConfig", () => {
         const existingCodexConfig = getWrittenCodexConfig();
 
         vi.clearAllMocks();
-        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/codex/config.toml"));
+        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/profiles/default/codex/config.toml"));
         readFileSync.mockImplementation((p: string) => {
-            if (p.endsWith(".ccc/codex/config.toml")) return existingCodexConfig;
+            if (p.endsWith(".ccc/profiles/default/codex/config.toml")) return existingCodexConfig;
             return "{}";
         });
 
         buildMcpConfig();
 
-        const codexWrites = writeFileSync.mock.calls.filter(([path]) => String(path).endsWith(".ccc/codex/config.toml"));
+        const codexWrites = writeFileSync.mock.calls.filter(([path]) => String(path).endsWith(".ccc/profiles/default/codex/config.toml"));
         expect(codexWrites).toHaveLength(0);
     });
 
     it("throws an actionable error when existing Codex config cannot be read", () => {
-        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/codex/config.toml"));
+        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/profiles/default/codex/config.toml"));
         readFileSync.mockImplementation((p: string) => {
-            if (p.endsWith(".ccc/codex/config.toml")) {
+            if (p.endsWith(".ccc/profiles/default/codex/config.toml")) {
                 const error = new Error("permission denied") as NodeJS.ErrnoException;
                 error.code = "EACCES";
                 throw error;
@@ -268,19 +268,19 @@ describe("buildMcpConfig", () => {
             return "{}";
         });
 
-        expect(() => buildMcpConfig()).toThrow(/sudo chown -R "\$USER:\$USER" ~\/\.ccc\/codex/);
+        expect(() => buildMcpConfig()).toThrow(/sudo chown -R "\$USER:\$USER" "\/home\/testuser\/\.ccc\/profiles\/default\/codex"/);
     });
 
     it("throws an actionable error when Codex config cannot be written", () => {
         writeFileSync.mockImplementation((p: string) => {
-            if (p.endsWith(".ccc/codex/config.toml")) {
+            if (p.endsWith(".ccc/profiles/default/codex/config.toml")) {
                 const error = new Error("permission denied") as NodeJS.ErrnoException;
                 error.code = "EACCES";
                 throw error;
             }
         });
 
-        expect(() => buildMcpConfig()).toThrow(/Unable to write Codex config.*sudo chown -R "\$USER:\$USER" ~\/\.ccc\/codex/);
+        expect(() => buildMcpConfig()).toThrow(/Unable to write Codex config.*sudo chown -R "\$USER:\$USER" "\/home\/testuser\/\.ccc\/profiles\/default\/codex"/);
     });
 
     it("writes Codex TOML arrays in the exact order needed for MCP startup", () => {
@@ -297,9 +297,9 @@ describe("buildMcpConfig", () => {
     });
 
     it("preserves user Codex config while replacing the prior ccc-managed block", () => {
-        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/codex/config.toml"));
+        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/profiles/default/codex/config.toml"));
         readFileSync.mockImplementation((p: string) => {
-            if (p.endsWith(".ccc/codex/config.toml")) {
+            if (p.endsWith(".ccc/profiles/default/codex/config.toml")) {
                 return [
                     'model = "gpt-5.2-codex"',
                     "",
@@ -326,9 +326,9 @@ describe("buildMcpConfig", () => {
     });
 
     it("removes legacy unmarked ccc-managed Codex MCP tables before writing", () => {
-        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/codex/config.toml"));
+        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/profiles/default/codex/config.toml"));
         readFileSync.mockImplementation((p: string) => {
-            if (p.endsWith(".ccc/codex/config.toml")) {
+            if (p.endsWith(".ccc/profiles/default/codex/config.toml")) {
                 return [
                     'model = "gpt-5.2-codex"',
                     "",
@@ -604,10 +604,9 @@ describe("buildMcpConfig", () => {
     it("buildMcpConfig() with no profile writes to default CLAUDE_JSON_FILE path", () => {
         existsSync.mockReturnValue(false);
         buildMcpConfig();
-        // Should write to ~/.ccc/claude.json (default path, not profiles dir)
+        // Should write to the default profile's claude.json
         const writePath = writeFileSync.mock.calls[writeFileSync.mock.calls.length - 1][0] as string;
-        expect(writePath).toContain(".ccc");
-        expect(writePath).not.toContain("profiles");
+        expect(writePath).toBe("/home/testuser/.ccc/profiles/default/claude.json");
         expect(writePath).toMatch(/claude\.json$/);
     });
 

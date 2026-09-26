@@ -2,7 +2,7 @@
 
 import { spawnSync } from "child_process";
 import { existsSync, readdirSync } from "fs";
-import { join, resolve } from "path";
+import { resolve } from "path";
 import {
     isDockerRunning,
     getContainerName,
@@ -11,7 +11,8 @@ import {
     isImageExists,
     getImageLabel,
 } from "./docker.js";
-import { getProjectId, DATA_DIR, MISE_VOLUME_NAME, CLI_VERSION } from "./utils.js";
+import { getProjectId, MISE_VOLUME_NAME, CLI_VERSION } from "./utils.js";
+import { locksDir as sessionLocksDir } from "./home-layout.js";
 import { getActiveSessionsForProject } from "./session.js";
 import { getRuntimeInfo, runtimeCli } from "./container-runtime.js";
 import { buildClaudeLauncherReportCommand, sanitizeForTerminal, CLAUDE_BIN_PATH } from "./container-setup.js";
@@ -167,7 +168,7 @@ export function runDoctor(projectPath: string): boolean {
     }
 
     // 6. Stale locks check (scoped to current project)
-    const locksDir = join(DATA_DIR, "locks");
+    const locksDir = sessionLocksDir();
     let totalProjectLocks = 0;
     if (existsSync(locksDir)) {
         totalProjectLocks = readdirSync(locksDir).filter((f) =>
