@@ -1361,3 +1361,21 @@ describe('CODEX_STATE_WIPE_COMMAND', () => {
     }
   })
 })
+
+describe('container-manager socket access call site', () => {
+  it('grants socket access on the final container for every start path, including reused and deferred ones', async () => {
+    const { readFileSync } = await vi.importActual<typeof import('fs')>('fs')
+    const { fileURLToPath } = await vi.importActual<typeof import('url')>('url')
+    const source = readFileSync(fileURLToPath(new URL('../index.ts', import.meta.url)), 'utf8')
+    const call = source.indexOf('ensureContainerManagerSocketAccess(readyContainerName);')
+    expect(call).toBeGreaterThan(-1)
+    // After the last step that can replace the container...
+    expect(call).toBeGreaterThan(source.indexOf('readyContainerName = ensureToolsForSetupContainer('))
+    // ...and immediately before the setup callback returns that final ID.
+    expect(source.slice(call)).toMatch(/^ensureContainerManagerSocketAccess\(readyContainerName\);\s*return readyContainerName;/)
+    // Not nested in the new-container-only branch.
+    const onlyNew = source.lastIndexOf('if (!wasAlreadyRunning) {', call)
+    const onlyNewEnd = source.indexOf('\n        }\n', onlyNew)
+    expect(onlyNewEnd).toBeLessThan(call)
+  })
+})

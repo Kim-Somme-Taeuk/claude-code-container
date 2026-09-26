@@ -728,6 +728,9 @@ function getComposeLabels(
     return labels;
 }
 
+export const CONTAINER_INIT_UNAVAILABLE_HINT = "[ccc] If the error above mentions docker-init, tini or catatonit, "
+    + "the container runtime has no init binary for --init: install docker-init/tini (Docker) or catatonit (Podman).";
+
 export function buildDockerRunArgs(opts: DockerRunArgsOptions): string[] {
     // Stable hostname: derived from container name, truncated to 63 chars (RFC 1123).
     // Ensures Claude Code's --resume can find conversations after container recreation,
@@ -747,6 +750,9 @@ export function buildDockerRunArgs(opts: DockerRunArgsOptions): string[] {
         "seccomp=unconfined",
         "--cap-add",
         "NET_ADMIN",
+        // Run the runtime's init (docker-init/tini, catatonit) as PID 1 so orphaned
+        // children are reaped instead of piling up as zombies under `tail`.
+        "--init",
     ];
 
     // Bind mounts (runtime-aware: adds :Z on SELinux podman)
@@ -1104,6 +1110,61 @@ export function ensureCredentialHostDir(mount: CredentialMount, profile?: string
 
 export function restoreCodexConfigHostOwnership(containerName: string): void {
     void containerName;
+}
+
+const SOCKET_ACCESS_TIMEOUT_MS = 10_000;
+const SOCKET_ACCESS_NEEDS_GROUP_EXIT = 10;
+const CONTAINER_MANAGER_SOCKET = "/var/run/docker.sock";
+
+/** Probe as the container's default exec user: exit 0 when usable or absent, else report user and gid. */
+export const CONTAINER_MANAGER_SOCKET_PROBE =
+    `s=${CONTAINER_MANAGER_SOCKET}; [ -S "$s" ] || exit 0; [ -r "$s" ] && [ -w "$s" ] && exit 0; `
+    + `id -un; stat -c %g "$s"; exit ${SOCKET_ACCESS_NEEDS_GROUP_EXIT}`;
+
+/**
+ * Root fix: add the user to the group owning the socket, creating or re-numbering
+ * ccc-host-socket when no group has that gid. The socket's mode and owner are left alone.
+ */
+export const CONTAINER_MANAGER_SOCKET_GRANT =
+    'u="$1"; g="$2"; n=$(getent group "$g" | cut -d: -f1); '
+    + 'if [ -z "$n" ]; then '
+    + 'if getent group ccc-host-socket >/dev/null; then groupmod -g "$g" ccc-host-socket; else groupadd -g "$g" ccc-host-socket; fi; '
+    + 'n=ccc-host-socket; fi; usermod -aG "$n" "$u"';
+
+let socketAccessWarned = false;
+
+/**
+ * Let the container's default exec user use the mounted container-manager socket. New execs pick
+ * up the group; processes already running keep theirs. Failures only warn: the session still works.
+ */
+export function ensureContainerManagerSocketAccess(containerName: string): void {
+    const warn = () => {
+        if (socketAccessWarned) return;
+        socketAccessWarned = true;
+        console.warn("[ccc] Could not grant the container user access to the container-manager socket; "
+            + "docker commands inside the container may need sudo.");
+    };
+    const probe = spawnSync(runtimeCli(), ["exec", containerName, "sh", "-c", CONTAINER_MANAGER_SOCKET_PROBE], {
+        encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: SOCKET_ACCESS_TIMEOUT_MS,
+    });
+    if (probe.status === 0) return;
+    const [user, gid] = String(probe.stdout ?? "").trim().split(/\s+/);
+    if (probe.status !== SOCKET_ACCESS_NEEDS_GROUP_EXIT
+        || !/^[a-z_][a-z0-9_-]{0,31}$/.test(user ?? "")
+        || !/^\d{1,10}$/.test(gid ?? "")) {
+        warn();
+        return;
+    }
+    const grant = spawnSync(runtimeCli(), [
+        "exec", "--user", "root", containerName,
+        "timeout", "-k", "2s", "8s", "sh", "-c", CONTAINER_MANAGER_SOCKET_GRANT, "ccc-socket-grant", user, gid,
+    ], { stdio: "ignore", timeout: SOCKET_ACCESS_TIMEOUT_MS });
+    if (grant.status !== 0) warn();
+}
+
+/** Test hook: forget that the one-time warning was printed. */
+export function resetContainerManagerSocketAccessWarningForTest(): void {
+    socketAccessWarned = false;
 }
 
 export function prepareCodexConfigForContainer(containerName: string): void {
@@ -1847,7 +1908,7 @@ function containerMatchesRunContract(
             Id?: unknown;
             Mounts?: InspectedContainerMount[];
             Config?: { Env?: string[]; Labels?: Record<string, string> };
-            HostConfig?: { Devices?: unknown; DeviceRequests?: unknown; GroupAdd?: unknown; Privileged?: boolean };
+            HostConfig?: { Devices?: unknown; DeviceRequests?: unknown; GroupAdd?: unknown; Privileged?: boolean; Init?: unknown };
         };
         const mounts = inspected.Mounts || [];
         const env = envMap(inspected.Config?.Env);
@@ -1900,6 +1961,8 @@ function containerMatchesRunContract(
             return failContract("stale isolated device broker auth file environment");
         }
         if (hostConfig.Privileged) return failContract("stale privileged container");
+        // Docker reports null and Podman omits the key when --init was not used.
+        if (inspected.HostConfig?.Init !== true) return failContract("missing init process");
         if (hasDeviceRequests(deviceRequests)) return failContract("unexpected host device requests");
         if (env.get("CCC_LAB_RUNNER") !== "1") return failContract("missing CCC_LAB_RUNNER=1");
         if (env.get("CCC_LAB_RUNNER_STATUS") !== labRunner.status) return failContract(`CCC_LAB_RUNNER_STATUS is ${env.get("CCC_LAB_RUNNER_STATUS") || "unset"}, expected ${labRunner.status}`);
@@ -2790,6 +2853,8 @@ export function startProjectContainer(
             stdio: ["inherit", "pipe", "inherit"],
         });
         if (result.status !== 0) {
+            // The runtime's own error is already on the terminal (stderr stays live for pulls).
+            console.error(CONTAINER_INIT_UNAVAILABLE_HINT);
             throw new Error("Failed to create container");
         }
         const createdContainerId = (result.stdout ?? "").trim().split(/\s+/)

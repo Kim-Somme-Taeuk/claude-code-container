@@ -89,6 +89,7 @@ import {
     getCurrentImageId,
     ensureCredentialHostDir,
     prepareCodexConfigForContainer,
+    ensureContainerManagerSocketAccess,
     restoreCodexConfigHostOwnership,
 } from "./docker.js";
 import {
@@ -817,6 +818,8 @@ async function exec(
         } else if (commandTool?.name === "codex") {
             prepareCodexConfigForContainer(readyContainerName);
         }
+        // Runs for new, restarted, reused and deferred containers alike, on the final ID.
+        ensureContainerManagerSocketAccess(readyContainerName);
         return readyContainerName;
     }).catch((error) => {
         const detail = error instanceof Error ? `: ${error.message}` : "";

@@ -149,3 +149,15 @@
     no powershell.exe/pwsh either. Hyper-V real proof must be operator-run on the Windows host.
     Real-test unit files (scripts/real-tests/*.test.ts) are included in `npm test`
     (vitest.config.ts include); run one with `node scripts/run-vitest.mjs run scripts/real-tests/<file>`.
+- discovered: 2026-09-26
+  topic: runtime-docker-from-ccc-container
+  note: >-
+    Inside a ccc container on Docker Desktop, /var/run/docker.sock is root:root 660 and ccc
+    cannot use it until ensureContainerManagerSocketAccess runs; use `sudo -n docker` for
+    host-side docker. Each sudo call costs ~5 s here (hostname not resolvable), so time
+    measurements through sudo are inflated. To drive dist/docker.js runtime helpers against
+    real Docker, put a PATH shim named `docker` that execs `sudo -n /usr/bin/docker "$@"`
+    and set CCC_RUNTIME=docker. Fake socket for gid branches: as root in a throwaway container,
+    `python3 -c 'import socket;s=socket.socket(socket.AF_UNIX);s.bind("/var/run/docker.sock")'`
+    then chown/chmod. Use throwaway names (ccc-qa-*) and strip --label ccc.managed to keep ccc
+    from treating them as project containers.

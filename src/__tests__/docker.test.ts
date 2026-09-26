@@ -234,6 +234,11 @@ const {
     resolveCredentialHostPath,
     ensureCredentialHostDir,
     prepareCodexConfigForContainer,
+    ensureContainerManagerSocketAccess,
+    resetContainerManagerSocketAccessWarningForTest,
+    CONTAINER_INIT_UNAVAILABLE_HINT,
+    CONTAINER_MANAGER_SOCKET_PROBE,
+    CONTAINER_MANAGER_SOCKET_GRANT,
     CODEX_CONFIG_PREPARE_TIMEOUT_MS,
     restoreCodexConfigHostOwnership,
     syncManagedMcpBundles,
@@ -399,6 +404,7 @@ function fullCredentialMountsJson(
             DeviceRequests: options.deviceRequests ?? [],
             GroupAdd: groupAdd,
             Privileged: options.privileged === true,
+            Init: true,
         },
     });
 }
@@ -1076,6 +1082,80 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:newimage\n")); // image inspect
             expect(isContainerImageOutdated("my-container")).toBe(false);
         });
+    });
+
+    describe("container-manager socket access", () => {
+        beforeEach(() => resetContainerManagerSocketAccessWarningForTest());
+
+        it("stops after the probe when the default user can already use the socket", () => {
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+
+            ensureContainerManagerSocketAccess("ccc-test");
+
+            expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+            const probeArgs = spawnSyncMock.mock.calls[0][1] as string[];
+            expect(probeArgs.slice(0, 2)).toEqual(["exec", "ccc-test"]);
+            expect(probeArgs).not.toContain("--user");
+            expect(probeArgs.at(-1)).toBe(CONTAINER_MANAGER_SOCKET_PROBE);
+        });
+
+        it("adds the reported default user to the socket group in one bounded root exec after the probe", () => {
+            spawnSyncMock
+                .mockReturnValueOnce(makeResult(10, "ccc\n0\n"))
+                .mockReturnValueOnce(makeResult(0));
+
+            ensureContainerManagerSocketAccess("ccc-test");
+
+            expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+            const grantArgs = spawnSyncMock.mock.calls[1][1] as string[];
+            expect(grantArgs.slice(0, 4)).toEqual(["exec", "--user", "root", "ccc-test"]);
+            expect(grantArgs).toContain("timeout");
+            expect(grantArgs).toContain(CONTAINER_MANAGER_SOCKET_GRANT);
+            expect(grantArgs.slice(-2)).toEqual(["ccc", "0"]);
+            expect(spawnSyncMock.mock.calls[1][2]).toEqual(expect.objectContaining({ timeout: expect.any(Number) }));
+        });
+
+        it("targets the user the probe reports, such as a Podman keep-id user", () => {
+            spawnSyncMock
+                .mockReturnValueOnce(makeResult(10, "ubuntu\n1000\n"))
+                .mockReturnValueOnce(makeResult(0));
+
+            ensureContainerManagerSocketAccess("ccc-test");
+
+            expect((spawnSyncMock.mock.calls[1][1] as string[]).slice(-2)).toEqual(["ubuntu", "1000"]);
+        });
+
+        it.each([
+            ["an unexpected probe status", makeResult(1, "")],
+            ["a malformed user", makeResult(10, "bad;user\n0\n")],
+            ["a malformed gid", makeResult(10, "ccc\n0x1\n")],
+        ])("warns once and skips the grant on %s", (_name, probe) => {
+            const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+            spawnSyncMock.mockReturnValueOnce(probe);
+
+            ensureContainerManagerSocketAccess("ccc-test");
+
+            expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+            expect(warn).toHaveBeenCalledTimes(1);
+        });
+
+        it("warns only once when the root grant keeps failing", () => {
+            const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+            spawnSyncMock.mockReturnValue(makeResult(10, "ccc\n0\n"));
+
+            ensureContainerManagerSocketAccess("ccc-test");
+            ensureContainerManagerSocketAccess("ccc-test");
+
+            expect(warn).toHaveBeenCalledTimes(1);
+        });
+
+        it("repairs a stale helper group and never changes the socket itself", () => {
+            expect(CONTAINER_MANAGER_SOCKET_GRANT).toContain('groupmod -g "$g" ccc-host-socket');
+            expect(CONTAINER_MANAGER_SOCKET_GRANT).toContain('groupadd -g "$g" ccc-host-socket');
+            expect(CONTAINER_MANAGER_SOCKET_GRANT).not.toMatch(/\bch(mod|own|grp)\b/);
+            expect(CONTAINER_MANAGER_SOCKET_PROBE).toContain('[ -S "$s" ] || exit 0');
+        });
+
     });
 
     describe("Codex config ownership helpers", () => {
@@ -2941,6 +3021,18 @@ describe("docker.ts module exports", () => {
         });
 
         it.each([
+            ["missing init process (Docker reports null)", (value: ReturnType<typeof JSON.parse>) => {
+                value.HostConfig.Init = null;
+            }],
+            ["missing init process (Podman omits the key)", (value: ReturnType<typeof JSON.parse>) => {
+                delete value.HostConfig.Init;
+            }],
+            ["disabled init process", (value: ReturnType<typeof JSON.parse>) => {
+                value.HostConfig.Init = false;
+            }],
+            ["non-boolean init process flag", (value: ReturnType<typeof JSON.parse>) => {
+                value.HostConfig.Init = "true";
+            }],
             ["missing credential mount", (value: ReturnType<typeof JSON.parse>) => {
                 value.Mounts = value.Mounts.filter((item: { Destination: string }) => item.Destination !== "/home/ccc/.claude");
             }],
@@ -3611,6 +3703,33 @@ describe("docker.ts module exports", () => {
                 .map((call: unknown[]) => call[1] as string[])
                 .filter((args) => args[0] === "stop" || args[0] === "rm"))
                 .toEqual([["stop", "abc123"], ["rm", "abc123"]]);
+        });
+
+        it("replaces an idle running container that was created without an init process", () => {
+            const driftContractJson = makeDriftedRunningContract((contract) => {
+                contract.HostConfig.Init = null;
+            });
+            mockReplacementRuntime(driftContractJson);
+
+            startProjectContainer(
+                projectPath,
+                ensureDirs,
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                (replace) => {
+                    replace();
+                    return true;
+                },
+                undefined,
+                TEST_CONTAINER_ID,
+            );
+
+            const calls = spawnSyncMock.mock.calls.map((call: unknown[]) => call[1] as string[]);
+            expect(calls.filter((args) => args[0] === "stop" || args[0] === "rm"))
+                .toEqual([["stop", "abc123"], ["rm", "abc123"]]);
+            expect(calls.find((args) => args[0] === "run")).toContain("--init");
         });
 
         it("fails closed without remove when an approved idle container cannot be stopped", () => {
@@ -5027,9 +5146,14 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
                 .mockReturnValue(makeResult(1));                     // docker run -> fail
 
+            const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
             expect(() => startProjectContainer(projectPath, ensureDirs))
                 .toThrow("Failed to create container");
             expect(lockReleased).toBe(true);
+            // The runtime's stderr stays live on the terminal; ccc adds the init hint after it.
+            expect(errorSpy).toHaveBeenCalledWith(CONTAINER_INIT_UNAVAILABLE_HINT);
+            const runCall = spawnSyncMock.mock.calls.find((c: unknown[]) => (c[1] as string[])[0] === "run");
+            expect(runCall![2]).toEqual(expect.objectContaining({ stdio: ["inherit", "pipe", "inherit"] }));
         });
 
         it("uses darwin SSH agent socket on darwin platform", () => {
@@ -5139,6 +5263,39 @@ describe("docker.ts module exports", () => {
                 (c: unknown[]) => c[0] === "docker" && (c[1] as string[])[0] === "stop"
             );
             expect(stopCall).toBeUndefined();
+        });
+
+        it("recreates a stopped container created without an init process", () => {
+            vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+            _setRuntimeInfoForTest({
+                runtime: "docker",
+                flavor: "docker-native",
+                remote: false,
+                rootless: false,
+            });
+            mockExistsSync.mockImplementation((p: string) => p === "/dev/kvm");
+            mockStatSync.mockReturnValue({ gid: 108 });
+            const inspected = JSON.parse(fullCredentialMountsJson());
+            inspected.HostConfig.Init = null;
+
+            spawnSyncMock
+                .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
+                .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected))) // inspect -> pre-init container
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
+                .mockReturnValueOnce(makeResult(0))                  // docker rm
+                .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
+                .mockReturnValueOnce(makeResult(0, ""))              // isContainerExists -> false
+                .mockReturnValueOnce(makeResult(0, "c0ffee123456\n")); // docker run
+
+            startWithApprovedReplacement();
+
+            const runCall = spawnSyncMock.mock.calls.find(
+                (c: unknown[]) => c[0] === "docker" && (c[1] as string[])[0] === "run"
+            );
+            expect(runCall).toBeDefined();
+            expect(runCall![1]).toContain("--init");
         });
 
         it("recreates a stopped container that predates the codex packages volume", () => {

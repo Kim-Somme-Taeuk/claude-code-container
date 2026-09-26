@@ -440,6 +440,13 @@ describe("buildDockerRunArgs — volume mounts", () => {
         );
     });
 
+    it("runs the runtime init as PID 1, before the image name", () => {
+        const args = buildDockerRunArgs(makeOpts());
+        expect(args).toContain("--init");
+        expect(args.indexOf("--init")).toBeLessThan(args.lastIndexOf("ccc"));
+        expect(args.at(-1)).toBe("ccc");
+    });
+
     it("mounts codex daemon packages as a named volume nested in the codex credential dir", () => {
         const args = buildDockerRunArgs(makeOpts());
         const mounts = extractVolumeMounts(args);
