@@ -112,6 +112,9 @@ export type HyperVDiskCloneRequest = {
     readonly deviceRoot: string;
     readonly diskPath: string;
     readonly deadlineAt?: number;
+    // The caller records the file-created effect at the only unambiguous point: after
+    // O_EXCL succeeds and before a copy, hash, or read-back can fail.
+    readonly onDestinationCreated?: (path: string) => void;
 };
 
 export type HyperVDiskCloneResult = {
@@ -233,6 +236,7 @@ export async function cloneHyperVBaseImage(request: HyperVDiskCloneRequest): Pro
             fsConstants.O_RDWR | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow,
             0o600,
         );
+        request.onDestinationCreated?.(request.diskPath);
         const openedTarget = await target.stat();
         const targetPathStat = await fsPromises.lstat(request.diskPath);
         if (!openedTarget.isFile() || openedTarget.nlink !== 1

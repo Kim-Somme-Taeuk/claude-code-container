@@ -15,7 +15,7 @@ const FIXTURE_PARENT_NAME = "ccc-hyper-v-windows-library-real";
 const VM_NAME_PREFIX = "ccc-hyper-v-library-real-";
 const NOTES_PREFIX = "ccc-hyper-v-windows-library-real:";
 const WINDOWS_SYSTEM_ROOT_ALIAS = "\\\\?\\GLOBALROOT\\SystemRoot";
-export const HYPER_V_WINDOWS_LIBRARY_FIXTURE_SHA256 = "9ca5140b9cd9498b8bb2de76b6edff6f954660ed790630cb12240421c2791813";
+export const HYPER_V_WINDOWS_LIBRARY_FIXTURE_SHA256 = "3329a9fc54a36463860a24cc19d5c7caa349871bb9ef0fae63190c1996c7e425";
 const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NATIVE_ERROR_CODE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 // A copy, because this lane must not import from src/ — it exists to exercise the compiled public

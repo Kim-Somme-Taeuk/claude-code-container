@@ -25,7 +25,8 @@
     "scripts/install.js",
     "scripts/clipboard-shims/",
     "scripts/clipboard-helper-darwin.m",
-    "README.md"
+    "README.md",
+    "doc/hyper-v-windows/GUIDE__typed-library-support.md"
   ],
   "scripts": {
     "build": "npm run test:hyper-v:static && tsc && npm run typecheck:hyper-v:windows:contracts && npm run typecheck:real-tests && npm run typecheck:tests && npm run bundle:hyper-v:windows:library-test && npm run bundle:hyper-v:windows:library-privileged-test && npm run bundle:hyper-v:windows:network-host-test && node -e \"const fs=require('fs');const v=require('./package.json').version;const f='dist/utils.js';fs.writeFileSync(f,fs.readFileSync(f,'utf8').replace('__CLI_VERSION__',v))\" && npm run build:x11-mcp && npm run build:device-lab-mcp",
@@ -47,7 +48,7 @@
     "test:level3:hyper-v:linux": "node scripts/real-tests/hyper-v.ts --target linux",
     "test:hyper-v:contracts": "node --import tsx scripts/validate-hyper-v-contracts.ts",
     "test:hyper-v:powershell": "node scripts/validate-hyper-v-powershell.mjs",
-    "test:hyper-v:pester": "node scripts/validate-hyper-v-powershell.mjs --require-parser --pester",
+    "test:hyper-v:pester": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/host-control/hyper-v/install-test-modules.ps1 && node scripts/validate-hyper-v-powershell.mjs --require-parser --pester",
     "test:hyper-v:package": "node scripts/test-hyper-v-package.mjs",
     "test:hyper-v:ubuntu-image": "node --import tsx scripts/verify-hyper-v-ubuntu-image.ts",
     "test:hyper-v:static": "npm run test:hyper-v:contracts && npm run test:hyper-v:powershell",

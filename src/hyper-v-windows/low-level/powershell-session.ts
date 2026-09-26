@@ -52,6 +52,9 @@ export const HYPER_V_WINDOWS_SESSION_READY_MARKER = "CCC_HYPER_V_SESSION_READY";
 export const HYPER_V_WINDOWS_SESSION_CLOSE_MARKER = "CCC_HYPER_V_SESSION_CLOSE";
 
 const MAX_FRAME_BYTES = 256 * 1024;
+// A 640x480 console PNG is Base64 inside JSON, then Base64 again in the session frame.
+// Keep the larger ceiling specific to replies; requests retain their 64 KiB bound.
+const MAX_CONSOLE_FRAME_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 64 * 1024;
 const DEFAULT_MAX_STARTS = 3;
 // How long a request may sit unanswered before the child is declared wedged, independent of what
@@ -183,6 +186,7 @@ export type HyperVWindowsSession = HyperVWindowsExecutor & {
 };
 
 type Pending = {
+    readonly operation: HyperVWindowsExecutionRequest["operation"];
     readonly resolve: (result: HyperVWindowsExecutionResult) => void;
     // Cancels both of this request's timers. A request outlives its caller — the caller's deadline
     // settles the call, but the entry stays until the child answers or the health floor declares the
@@ -289,7 +293,7 @@ export function createHyperVWindowsPowerShellSession(
         // before the child starts reading simply waits in the pipe, which is what pipes are for.
         if (!line.startsWith(HYPER_V_WINDOWS_SESSION_RESPONSE_PREFIX)) return;
         const frame = line.slice(HYPER_V_WINDOWS_SESSION_RESPONSE_PREFIX.length);
-        if (Buffer.byteLength(frame, "utf8") > MAX_FRAME_BYTES) {
+        if (Buffer.byteLength(frame, "utf8") > MAX_CONSOLE_FRAME_BYTES) {
             discard("hyper-v-windows-session-response-too-large");
             return;
         }
@@ -313,6 +317,10 @@ export function createHyperVWindowsPowerShellSession(
             // Pairing it with whatever happens to be pending would return one call's result to
             // another, so the session is torn down instead.
             discard("hyper-v-windows-session-response-uncorrelated");
+            return;
+        }
+        if (Buffer.byteLength(frame, "utf8") > MAX_FRAME_BYTES && entry.operation !== "Capture-VMConsole") {
+            discard("hyper-v-windows-session-response-too-large");
             return;
         }
         pending.delete(id);
@@ -466,7 +474,7 @@ export function createHyperVWindowsPowerShellSession(
                 for (const timer of [callerTimer, healthTimer]) {
                     if (typeof timer === "object" && timer && "unref" in timer) timer.unref();
                 }
-                const entry: Pending = { resolve: settle, clear, delivered: false };
+                const entry: Pending = { resolve: settle, clear, delivered: false, operation: request.operation };
                 pending.set(id, entry);
                 // From here a timer guarantees the entry is cleared, so the pipe is owned rather than
                 // leaked no matter what happens next.

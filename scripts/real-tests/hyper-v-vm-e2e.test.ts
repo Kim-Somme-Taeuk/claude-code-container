@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { assertHyperVLinuxCreateContract, HYPER_V_LINUX_PRE_REBOOT_COMMAND, hyperVLinuxBrokerArgs, hyperVLinuxToolPayload, hyperVLinuxVmE2ECapability, prepareHyperVLinuxDownloadDestination, writeHyperVLinuxFailureDiagnostic } from "./hyper-v-linux-vm-e2e.ts";
+import { assertHyperVLinuxCreateContract, HYPER_V_LINUX_E2E_DELETE_OPTIONS, HYPER_V_LINUX_PRE_REBOOT_COMMAND, hyperVLinuxBrokerArgs, hyperVLinuxToolPayload, hyperVLinuxVmE2ECapability, prepareHyperVLinuxDownloadDestination, writeHyperVLinuxFailureDiagnostic } from "./hyper-v-linux-vm-e2e.ts";
 import {
     createPackagedCccCandidate,
+    ensureHyperVWindowsDownloadDestination,
     HYPER_V_WINDOWS_CONSOLE_TIMELINE_DELAYS_MS,
+    HYPER_V_WINDOWS_E2E_DELETE_OPTIONS,
+    HYPER_V_WINDOWS_E2E_REBOOT_OPTIONS,
     hyperVWindowsFailureReason,
     hyperVWindowsVmE2ECapability,
     resolveNpmCliPath,
@@ -45,6 +48,58 @@ afterEach(() => {
 });
 
 describe("Hyper-V E2E zero-config image selection", () => {
+    it("uses an explicit forced reboot for the disposable Windows fixture", () => {
+        expect(HYPER_V_WINDOWS_E2E_REBOOT_OPTIONS).toEqual({
+            force: true,
+            waitForBoot: true,
+            bootTimeoutMs: 1200000,
+        });
+    });
+
+    it("releases fixture allocations while preserving the shared Hyper-V fabric", () => {
+        expect(HYPER_V_LINUX_E2E_DELETE_OPTIONS).toEqual(HYPER_V_WINDOWS_E2E_DELETE_OPTIONS);
+        expect(HYPER_V_WINDOWS_E2E_DELETE_OPTIONS).toEqual({
+            force: true,
+            confirmDestructive: true,
+            preserveNetwork: true,
+        });
+    });
+
+    it("precreates and resets exact nested Windows download destinations", () => {
+        const root = mkdtempSync(join(tmpdir(), "ccc-hyper-v-download-destination-"));
+        const nested = join(root, "nested");
+        const destination = join(nested, "download.txt");
+        mkdirSync(nested);
+        try {
+            ensureHyperVWindowsDownloadDestination(root, destination);
+            expect(readFileSync(destination, "utf8")).toBe("");
+            writeFileSync(destination, "existing-evidence");
+            ensureHyperVWindowsDownloadDestination(root, destination);
+            expect(readFileSync(destination, "utf8")).toBe("");
+            expect(() => ensureHyperVWindowsDownloadDestination(root, nested))
+                .toThrow("hyper-v-windows-e2e-download-destination-invalid");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it("rejects a linked Windows download parent without changing the external file", () => {
+        const root = mkdtempSync(join(tmpdir(), "ccc-hyper-v-download-root-"));
+        const outside = mkdtempSync(join(tmpdir(), "ccc-hyper-v-download-outside-"));
+        const linkedParent = join(root, "linked");
+        const external = join(outside, "download.txt");
+        writeFileSync(external, "prior-evidence");
+        try {
+            symlinkSync(outside, linkedParent, process.platform === "win32" ? "junction" : "dir");
+            expect(() => ensureHyperVWindowsDownloadDestination(root, join(linkedParent, "download.txt")))
+                .toThrow("hyper-v-windows-e2e-download-destination-invalid");
+            expect(readFileSync(external, "utf8")).toBe("prior-evidence");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+            rmSync(outside, { recursive: true, force: true });
+        }
+    });
+
     it("finds the npm CLI beside the active Windows Node installation during direct invocation", () => {
         const nodeRoot = mkdtempSync(join(tmpdir(), "ccc-hyper-v-node-install-"));
         const npmExecPath = join(nodeRoot, "node_modules", "npm", "bin", "npm-cli.js");
@@ -826,6 +881,8 @@ describe("Hyper-V E2E zero-config image selection", () => {
             const genericContent = readFileSync(generic.latestPath, "utf8");
             expect(genericContent).toContain("failure-message-redacted");
             expect(genericContent).not.toContain("token=secret");
+            const gui = writeHyperVLinuxFailureDiagnostic({ outputRoot, step: "prove Linux GUI screenshot and computer input", created: true, error: new Error("hyper-v-gui-device-scroll-failed") });
+            expect(JSON.parse(readFileSync(gui.latestPath, "utf8")).failure).toEqual({ message: "hyper-v-gui-device-scroll-failed" });
         } finally {
             rmSync(outputRoot, { recursive: true, force: true });
         }
@@ -835,6 +892,20 @@ describe("Hyper-V E2E zero-config image selection", () => {
         const source = readFileSync(new URL("hyper-v-windows-vm-e2e.ts", import.meta.url), "utf8");
         expect(source).toContain("hyper-v-image-contracts.ts");
         expect(source).not.toContain("hyper-v-images.ts");
+    });
+
+    it("records checkpoint inventory conflict counts without snapshot names or ids", () => {
+        const evidence = brokerToolFailureEvidence({
+            error: "hyper-v-snapshot-inventory-conflict",
+            body: {
+                error: "hyper-v-snapshot-inventory-conflict",
+                observedOwnerSnapshotCount: 0,
+                untracked: [{ id: "secret-id", providerName: "ccc-secret-owner-checkpoint" }],
+                missing: [{ id: "tracked-secret-id", name: "secret-checkpoint" }],
+            },
+        });
+        expect(evidence.snapshotInventory).toEqual({ untrackedCount: 1, missingCount: 1, observedOwnerSnapshotCount: 0 });
+        expect(JSON.stringify(evidence)).not.toContain("secret");
     });
 
     it("captures the Windows guest console before cleanup while preserving the original failure", async () => {
@@ -918,7 +989,7 @@ describe("Hyper-V E2E zero-config image selection", () => {
                     decodedPrograms.push(Buffer.from(args.at(-1) || "", "base64").toString("utf16le"));
                     calls += 1;
                     if (calls === 1) {
-                        return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx" }) };
+                        return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx", controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0 }) };
                     }
                     return {
                         status: 0,
@@ -946,6 +1017,7 @@ describe("Hyper-V E2E zero-config image selection", () => {
             expect(preflightProgram).toContain("Get-VM -Id $ExpectedId -ErrorAction Stop");
             expect(preflightProgram).toContain("$Drives.Count -ne 1");
             expect(preflightProgram).toContain("[string]::IsNullOrWhiteSpace([string]$Drives[0].Path)");
+            expect(preflightProgram).toContain("controllerType = $ControllerType; controllerNumber = $ControllerNumber; controllerLocation = $ControllerLocation");
             expect(preflightProgram).not.toContain("Where-Object");
             expect(preflightProgram).not.toContain("Stop-VM");
             expect(preflightProgram).not.toContain("Remove-VMHardDiskDrive");
@@ -954,6 +1026,7 @@ describe("Hyper-V E2E zero-config image selection", () => {
             expect(diagnosticProgram).toContain("[string]$Vm.Notes -cne $ExpectedMarker");
             expect(diagnosticProgram).toContain("ccc-device-lab:0123456789abcdef:windows-vm-real-e2e-123:0123456789abcdef0123456789abcdef");
             expect(diagnosticProgram).toContain("$ExpectedDisk = 'C:\\state\\root.vhdx'");
+            expect(diagnosticProgram).toContain("$ExpectedControllerType = 'SCSI'");
             expect(diagnosticProgram).toContain("$Drives.Count -ne 1");
             expect(diagnosticProgram).toContain("Stop-VM -VM $Vm -TurnOff -Force");
             expect(diagnosticProgram).toContain("Remove-VMHardDiskDrive -VMHardDiskDrive $Drives[0] -ErrorAction Stop");
@@ -1080,7 +1153,11 @@ describe("Hyper-V E2E zero-config image selection", () => {
             expect(diagnosticProgram.indexOf("$Mounted = $true")).toBeLessThan(diagnosticProgram.indexOf("Get-Disk -ErrorAction Stop"));
             expect(diagnosticProgram).toContain("Dismount-VHD -Path $DiskPath -ErrorAction Stop");
             expect(diagnosticProgram.indexOf("Dismount-VHD")).toBeLessThan(diagnosticProgram.indexOf("$Result | ConvertTo-Json"));
-            expect(diagnosticProgram).not.toContain("Add-VMHardDiskDrive");
+            expect(diagnosticProgram).toContain("Add-VMHardDiskDrive -VM $RestoreVm -ControllerType $ExpectedControllerType");
+            expect(diagnosticProgram).toContain("$RestoreDrives.Count -ne 1");
+            expect(diagnosticProgram).toContain("$RestoreVm.State -ne 'Off'");
+            expect(diagnosticProgram.indexOf("Dismount-VHD")).toBeLessThan(diagnosticProgram.indexOf("Add-VMHardDiskDrive"));
+            expect(diagnosticProgram.indexOf("Add-VMHardDiskDrive")).toBeLessThan(diagnosticProgram.indexOf("$Result | ConvertTo-Json"));
             expect(diagnosticProgram).not.toMatch(/Get-VMHardDiskDrive[^\n]*Where-Object/);
             // Pinned to the injected root, not merely readable. Dropping `outputRoot` from what
             // capture hands to publish left every assertion below green — because this test reads
@@ -1120,7 +1197,7 @@ describe("Hyper-V E2E zero-config image selection", () => {
                 ...base,
                 spawnSyncImpl: () => {
                     calls += 1;
-                    if (calls === 1) return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx" }) };
+                    if (calls === 1) return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx", controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0 }) };
                     if (calls === 2) return { status: 0, stdout: JSON.stringify(mainResult) };
                     return { status: 0, stdout: JSON.stringify({ ok: true, detached: true }) };
                 },
@@ -1384,7 +1461,7 @@ describe("Hyper-V E2E zero-config image selection", () => {
                 calls += 1;
                 if (calls === 1) {
                     expect(options.timeout).toBe(30000);
-                    return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx" }) };
+                    return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx", controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0 }) };
                 }
                 if (calls === 2) {
                     // Raised from 120 s: the mount retry budget alone is 60 s, and the rest of the
@@ -1410,7 +1487,8 @@ describe("Hyper-V E2E zero-config image selection", () => {
         expect(programs[2]).toContain("$VerifiedImages.Count -ne 1 -or [bool]$VerifiedImages[0].Attached");
         expect(programs[2]).not.toContain("Get-DiskImage -ImagePath $ExpectedDisk -ErrorAction SilentlyContinue");
         expect(programs[2]).not.toContain("Stop-VM");
-        expect(programs[2]).not.toContain("Add-VMHardDiskDrive");
+        expect(programs[2]).toContain("Add-VMHardDiskDrive -VM $Vm -ControllerType $ExpectedControllerType");
+        expect(programs[2]).toContain("$RestoredDrives.Count -ne 1");
         expect(programs[2]).not.toMatch(/Get-VMHardDiskDrive[^\n]*Where-Object/);
     });
 
@@ -1425,7 +1503,7 @@ describe("Hyper-V E2E zero-config image selection", () => {
             platform: "win32",
             spawnSyncImpl: () => {
                 calls += 1;
-                if (calls === 1) return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx" }) };
+                if (calls === 1) return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx", controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0 }) };
                 return calls === 2
                     ? { status: null, error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }) }
                     : { status: 1, stderr: "private failure detail" };
@@ -1445,7 +1523,7 @@ describe("Hyper-V E2E zero-config image selection", () => {
             platform: "win32",
             spawnSyncImpl: () => {
                 calls += 1;
-                if (calls === 1) return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx" }) };
+                if (calls === 1) return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx", controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0 }) };
                 return calls === 2
                     ? { status: 0, stdout: JSON.stringify({ ok: false, code: "hyper-v-setup-diagnostics-dismount-failed" }) }
                     : { status: 0, stdout: JSON.stringify({ ok: true, detached: true }) };
@@ -1466,7 +1544,7 @@ describe("Hyper-V E2E zero-config image selection", () => {
             platform: "win32",
             spawnSyncImpl: () => {
                 calls += 1;
-                if (calls === 1) return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx" }) };
+                if (calls === 1) return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx", controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0 }) };
                 return calls === 2
                     ? { status: 0, stdout: JSON.stringify({ ok: false, code: "hyper-v-setup-diagnostics-dismount-failed" }) }
                     : { status: 0, stdout: JSON.stringify({ ok: false, code: "hyper-v-setup-diagnostics-cleanup-failed" }) };

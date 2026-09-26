@@ -66,6 +66,8 @@ const FORWARDED_EXECUTOR_ERROR_CODES: ReadonlySet<string> = new Set([
     ...HYPER_V_WINDOWS_SESSION_ERROR_CODES,
     "hyper-v-network-elevation-cancelled",
     "hyper-v-network-elevation-launch-failed",
+    "hyper-v-network-elevation-executable-rejected",
+    "hyper-v-network-elevation-relay-spawn-failed",
     "hyper-v-network-elevation-handshake-timeout",
     "hyper-v-network-elevation-authentication-failed",
     "hyper-v-network-elevation-administrator-required",
@@ -569,7 +571,7 @@ export function createHyperVWindowsNetworkClient(executor: HyperVWindowsExecutor
         async removeVMNetworkAdapter(request: HyperVRemoveVMNetworkAdapterRequest, options?: HyperVWindowsCallOptions) {
             const operation = "Remove-VMNetworkAdapter";
             const candidate = record(request);
-            if (!candidate || !hasExactKeys(candidate, ["selector", "adapterName", "macAddress"])) {
+            if (!candidate || !hasExactKeys(candidate, ["selector", "adapterName", "macAddress", "expectedNotes"])) {
                 throw error("validation", operation, "request-invalid");
             }
             const rawAdapterName = candidate.adapterName;
@@ -580,13 +582,17 @@ export function createHyperVWindowsNetworkClient(executor: HyperVWindowsExecutor
             const macAddress = typeof rawMacAddress === "string"
                 ? parsed(() => parseHyperVMacAddress(rawMacAddress))
                 : null;
-            if (!adapterName || !macAddress) throw error("validation", operation, "request-invalid");
+            if (!adapterName || !macAddress || !boundedString(candidate.expectedNotes, false)
+                || candidate.expectedNotes.length > 4096 || /[\u0000-\u001f]/.test(candidate.expectedNotes)) {
+                throw error("validation", operation, "request-invalid");
+            }
             const envelope = await execute(executor, {
                 schemaVersion: 1,
                 operation,
                 selector: normalizeSelector(operation, candidate.selector as HyperVVirtualMachineSelector),
                 adapterName,
                 macAddress,
+                expectedNotes: candidate.expectedNotes,
             }, options);
             expectNoItems(operation, envelope);
         },

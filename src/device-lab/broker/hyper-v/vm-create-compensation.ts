@@ -9,22 +9,26 @@ import {
 import { assertNoSymlinkPathComponents } from "./image-store.js";
 
 /**
- * Undoes the part of creation that Node did, from what Node recorded doing.
+ * Undoes recorded creation effects. Windows path cleanup is supplied by the caller
+ * through a PowerShell command that checks every reparse tag before removal.
  *
  * The plan comes from slice 3A: effects in, compensations out, reversed. Nothing here
  * re-derives an undo from the request, which is the property that keeps creation from
  * deleting a device root it found rather than made.
  *
- * Only two of the three compensation kinds are reachable from here. `remove-vm` requires a
- * `vm-created` effect, and no VM exists yet at this point in creation -- that is 3B-2's half.
- * A `remove-vm` arriving here means an effect was recorded by something that had no business
- * recording it, so it is refused rather than ignored.
+ * The VM remover is supplied by the caller that owns the typed client and the operation's
+ * remaining deadline. Early copy failures have no VM effect and need no remover.
  */
 
 export type HyperVCompensationAttempt = {
     readonly compensation: HyperVCreateCompensation;
     readonly ok: boolean;
     readonly error?: string;
+};
+
+export type HyperVCreateCompensationOptions = {
+    readonly removeVM?: (vmId: string) => Promise<void>;
+    readonly removePath?: (compensation: Extract<HyperVCreateCompensation, { kind: "delete-file" | "delete-directory" }>) => Promise<void>;
 };
 
 /**
@@ -76,9 +80,9 @@ async function removeFile(path: string): Promise<void> {
 /**
  * Runs every compensation the effects call for, and reports rather than throws.
  *
- * Best-effort and independent, as slice 3A's contract states and as the legacy `catch` was: a
- * failure to remove the disk still lets the device root be removed. A caller that stopped at
- * the first error would leave exactly the residue the rest of the sequence exists to clear.
+ * Best-effort within the dependency order. If VM removal fails, its attached disk must stay
+ * until guarded orphan recovery proves it can remove the VM. Other failures still allow later
+ * independent attempts; nonempty directories cannot be removed recursively here.
  *
  * It never throws, because it runs on a path where something has already failed. The failure
  * that triggered compensation is the one worth reporting; what happened during cleanup belongs
@@ -86,18 +90,22 @@ async function removeFile(path: string): Promise<void> {
  */
 export async function runHyperVCreateCompensation(
     effects: readonly HyperVCreateEffect[],
+    options: HyperVCreateCompensationOptions = {},
 ): Promise<readonly HyperVCompensationAttempt[]> {
     const attempts: HyperVCompensationAttempt[] = [];
     for (const compensation of planHyperVVirtualMachineCreationCompensation(effects)) {
         try {
             if (compensation.kind === "delete-file") {
-                await removeFile(compensation.path);
+                if (options.removePath) await options.removePath(compensation);
+                else if (process.platform !== "win32") await removeFile(compensation.path);
+                else throw new Error("hyper-v-create-compensation-native-cleanup-required");
             } else if (compensation.kind === "delete-directory") {
-                await removeDirectoryIfEmpty(compensation.path);
+                if (options.removePath) await options.removePath(compensation);
+                else if (process.platform !== "win32") await removeDirectoryIfEmpty(compensation.path);
+                else throw new Error("hyper-v-create-compensation-native-cleanup-required");
             } else {
-                // A VM cannot exist yet on this path, so an effect that asks for one to be
-                // removed is a bug in whatever recorded it, not a host state to act on.
-                throw new Error("hyper-v-create-compensation-unsupported");
+                if (!options.removeVM) throw new Error("hyper-v-create-compensation-unsupported");
+                await options.removeVM(compensation.vmId);
             }
             attempts.push({ compensation, ok: true });
         } catch (error) {
@@ -106,6 +114,7 @@ export async function runHyperVCreateCompensation(
                 ok: false,
                 error: error instanceof Error ? error.message : String(error),
             });
+            if (compensation.kind === "remove-vm") break;
         }
     }
     return attempts;

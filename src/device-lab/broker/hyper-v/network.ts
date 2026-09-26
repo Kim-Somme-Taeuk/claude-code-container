@@ -164,7 +164,17 @@ export type HyperVNetworkRelease = {
     marker?: string;
     natInstanceId?: string;
     stateRevision?: string;
+    preservedManagedFabric?: boolean;
     error?: string;
+};
+
+export type HyperVNetworkReleaseOptions = {
+    /**
+     * Release the exact allocation but retain a verified CCC-managed switch,
+     * gateway and NAT for a subsequent device. The default remains destructive
+     * cleanup when the final allocation disappears.
+     */
+    readonly preserveManagedFabric?: boolean;
 };
 
 function hyperVNetworkStateRevision(state: HyperVNetworkState): string {
@@ -881,6 +891,7 @@ async function ensureTypedHyperVHostNetwork(
     runtime: HyperVNetworkRuntime,
     current: HyperVNetworkState | null,
     intent: HyperVNetworkIntent | null,
+    deadlineAt: number,
 ): Promise<{
     observation: HyperVNetworkObservation;
     current: HyperVNetworkState | null;
@@ -897,6 +908,7 @@ async function ensureTypedHyperVHostNetwork(
         network: request.network,
         provenance: request.provenance,
         withAdministratorClient: typed.withAdministratorClient,
+        deadlineAt,
         onConfirmedAction: (action, observation) => {
             const evidence = typedOwnershipEvidenceFromConfirmedAction(
                 action,
@@ -1221,7 +1233,7 @@ async function ensureHyperVNetwork(
     let typedFreshIntentOwnershipEligible = false;
     if (typedHostFabric(runtime)) {
         try {
-            const typedResult = await ensureTypedHyperVHostNetwork(runtime, current, intent);
+            const typedResult = await ensureTypedHyperVHostNetwork(runtime, current, intent, deadlineAt);
             observation = typedResult.observation;
             current = typedResult.current;
             intent = typedResult.intent;
@@ -1482,6 +1494,7 @@ export function releaseHyperVNetworkAllocation(
     ownerId: string,
     deviceId: string,
     incarnationId?: string | null,
+    options: HyperVNetworkReleaseOptions = {},
 ): HyperVNetworkRelease {
     try {
         const current = readState(runtime);
@@ -1513,6 +1526,28 @@ export function releaseHyperVNetworkAllocation(
             return { ok: true, released: false, statePresent: true, remaining: allocations.length, ...identity };
         }
         if (allocations.length === 0 && (current.managedSwitch || current.managedGateway || current.managedNat)) {
+            if (options.preserveManagedFabric === true) {
+                if (!validHyperVIncarnationId(incarnationId) || matched?.incarnationId !== incarnationId) {
+                    return {
+                        ok: false,
+                        released: false,
+                        statePresent: true,
+                        remaining: current.allocations.length,
+                        ...identity,
+                        error: "hyper-v-network-allocation-incarnation-conflict",
+                    };
+                }
+                ensureStateRoot(runtime);
+                writeJsonFileAtomically(stateFile(runtime), { ...current, allocations });
+                return {
+                    ok: true,
+                    released: true,
+                    statePresent: true,
+                    remaining: 0,
+                    ...identity,
+                    preservedManagedFabric: true,
+                };
+            }
             return { ok: true, released: true, statePresent: true, remaining: 0, ...identity };
         }
         ensureStateRoot(runtime);
@@ -1590,10 +1625,17 @@ export async function releaseHyperVNetworkAllocationAndCleanup(
     deviceId: string,
     incarnationId: string | null | undefined,
     deadlineAt = Number.POSITIVE_INFINITY,
+    options: HyperVNetworkReleaseOptions = {},
 ) {
-    const release = releaseHyperVNetworkAllocation(runtime, ownerId, deviceId, incarnationId);
+    const release = releaseHyperVNetworkAllocation(runtime, ownerId, deviceId, incarnationId, options);
     if (!release.ok || !release.statePresent || !release.released || release.remaining !== 0) {
         return { ...release, networkCleanup: null };
+    }
+    if (release.preservedManagedFabric === true) {
+        return {
+            ...release,
+            networkCleanup: { skipped: true, reason: "hyper-v-network-retained-by-request" },
+        };
     }
     if (release.managedSwitch !== true && release.managedGateway !== true && release.managedNat !== true) {
         return { ...release, networkCleanup: { skipped: true, reason: "hyper-v-network-ownership-unproven" } };

@@ -8,8 +8,10 @@ export { reconcileHyperVVirtualMachine } from "./reconcile.js";
 export {
     confirmHyperVBootstrapContainment,
     discoverHyperVBootstrapAddresses,
+    MAXIMUM_BOOTSTRAP_HOST_INTERFACES,
     planHyperVBootstrapTeardown,
     selectHyperVBootstrapAddresses,
+    selectHyperVBootstrapHostAddresses,
 } from "./vm-network-reconcile.js";
 export { retryHyperVLifecycle } from "./retry.js";
 export type {

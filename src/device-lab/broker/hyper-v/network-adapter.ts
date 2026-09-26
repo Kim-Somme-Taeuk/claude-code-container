@@ -21,10 +21,13 @@ import {
 
 const MAXIMUM_ENSURE_MUTATIONS = 4;
 const MAXIMUM_CLEANUP_MUTATIONS = 3;
-const MAXIMUM_TRANSIENT_OBSERVATIONS = 3;
+const MAXIMUM_TRANSIENT_OBSERVATIONS = 12;
+const TRANSIENT_OBSERVATION_INTERVAL_MILLISECONDS = 250;
 const ELEVATED_MUTATION_PROVEN_NOT_STARTED = new Set([
     "hyper-v-network-elevation-cancelled",
     "hyper-v-network-elevation-launch-failed",
+    "hyper-v-network-elevation-executable-rejected",
+    "hyper-v-network-elevation-relay-spawn-failed",
     "hyper-v-network-elevation-handshake-timeout",
     "hyper-v-network-elevation-authentication-failed",
     "hyper-v-network-elevation-administrator-required",
@@ -61,11 +64,29 @@ export type DeviceLabHyperVHostNetworkEnsureOptions = {
     readonly network: HyperVHostNetworkSpec;
     readonly provenance: HyperVHostNetworkEnsureProvenance;
     readonly withAdministratorClient: WithAdministratorHyperVWindowsNetworkClient;
+    readonly deadlineAt?: number;
+    readonly now?: () => number;
+    readonly sleep?: (milliseconds: number) => Promise<void>;
     readonly onConfirmedAction?: (
         action: DeviceLabHyperVHostNetworkEnsureCompletedAction,
         observation: HyperVHostNetworkObservation,
     ) => void | Promise<void>;
 };
+
+async function waitForNextTransientObservation(
+    options: Pick<DeviceLabHyperVHostNetworkEnsureOptions, "deadlineAt" | "now" | "sleep">,
+): Promise<boolean> {
+    const now = options.now ?? Date.now;
+    const deadlineAt = options.deadlineAt ?? Number.POSITIVE_INFINITY;
+    if (Number.isFinite(deadlineAt)
+        && deadlineAt - now() <= TRANSIENT_OBSERVATION_INTERVAL_MILLISECONDS) {
+        return false;
+    }
+    const sleep = options.sleep
+        ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+    await sleep(TRANSIENT_OBSERVATION_INTERVAL_MILLISECONDS);
+    return !Number.isFinite(deadlineAt) || now() < deadlineAt;
+}
 
 export type DeviceLabHyperVHostNetworkCleanupOptions = {
     readonly client: HyperVWindowsNetworkClient;
@@ -276,7 +297,10 @@ function isRetryableEnsureObservation(outcome: HyperVHostNetworkReconciliationOu
 
 async function reconcileEnsureWithoutMutation(
     client: HyperVWindowsNetworkClient,
-    options: Pick<DeviceLabHyperVHostNetworkEnsureOptions, "network" | "provenance">,
+    options: Pick<
+        DeviceLabHyperVHostNetworkEnsureOptions,
+        "network" | "provenance" | "deadlineAt" | "now" | "sleep"
+    >,
 ): Promise<DeviceLabHyperVHostNetworkEnsureOutcome> {
     for (let observationCount = 1; observationCount <= MAXIMUM_TRANSIENT_OBSERVATIONS; observationCount += 1) {
         const observation = await inspectDeviceLabHyperVHostNetwork(client, {
@@ -285,7 +309,9 @@ async function reconcileEnsureWithoutMutation(
             privilege: "standard",
         });
         const outcome = assertStandardDecision(reconcileHyperVHostNetwork(observation, options.network));
-        if (!isRetryableEnsureObservation(outcome) || observationCount === MAXIMUM_TRANSIENT_OBSERVATIONS) {
+        if (!isRetryableEnsureObservation(outcome)
+            || observationCount === MAXIMUM_TRANSIENT_OBSERVATIONS
+            || !await waitForNextTransientObservation(options)) {
             return outcome;
         }
     }
@@ -353,7 +379,7 @@ async function reconcileEnsureAsAdministrator(
     client: HyperVWindowsNetworkClient,
     options: Pick<
         DeviceLabHyperVHostNetworkEnsureOptions,
-        "network" | "provenance" | "onConfirmedAction"
+        "network" | "provenance" | "onConfirmedAction" | "deadlineAt" | "now" | "sleep"
     >,
 ): Promise<DeviceLabHyperVHostNetworkEnsureTransactionResult> {
     let mutations = 0;
@@ -390,7 +416,8 @@ async function reconcileEnsureAsAdministrator(
                 return { outcome, completedActions: [...completedActions] };
             case "indeterminate":
                 if (isRetryableEnsureObservation(outcome)
-                    && transientObservations + 1 < MAXIMUM_TRANSIENT_OBSERVATIONS) {
+                    && transientObservations + 1 < MAXIMUM_TRANSIENT_OBSERVATIONS
+                    && await waitForNextTransientObservation(options)) {
                     transientObservations += 1;
                     break;
                 }

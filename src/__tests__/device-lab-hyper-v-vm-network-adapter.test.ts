@@ -17,7 +17,6 @@ import {
     parseIPv4Address,
     parseIPv4PrefixLength,
     type HyperVVMNetworkAdapter,
-    type HyperVWindowsNetworkClient,
 } from "../hyper-v-windows/low-level/index.js";
 
 const VM_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
@@ -44,10 +43,11 @@ function adapter(overrides: Partial<HyperVVMNetworkAdapter> = {}): HyperVVMNetwo
     };
 }
 
-type ClientOverrides = Partial<HyperVWindowsNetworkClient>;
+type AdapterClient = Parameters<typeof discoverDeviceLabHyperVBootstrapNetwork>[0];
+type ClientOverrides = Partial<AdapterClient>;
 
-function client(overrides: ClientOverrides = {}): HyperVWindowsNetworkClient {
-    const base = {
+function client(overrides: ClientOverrides = {}): AdapterClient {
+    const base: AdapterClient = {
         getVMsByExactNames: async () => [{
             id: parseHyperVVirtualMachineId(VM_ID),
             name: parseHyperVVirtualMachineName(OWNED_VM.vmName),
@@ -71,7 +71,7 @@ function client(overrides: ClientOverrides = {}): HyperVWindowsNetworkClient {
         getAllVMNetworkAdapters: async () => [],
         removeVMNetworkAdapter: async () => undefined,
     };
-    return { ...base, ...overrides } as unknown as HyperVWindowsNetworkClient;
+    return { ...base, ...overrides };
 }
 
 describe("Device Lab bootstrap MAC derivation", () => {
@@ -93,6 +93,24 @@ describe("Device Lab bootstrap MAC derivation", () => {
 });
 
 describe("Device Lab bootstrap discovery", () => {
+    it("keeps an empty neighbor table retryable while the guest has no address", async () => {
+        await expect(discoverDeviceLabHyperVBootstrapNetwork(
+            client({ getVMNetworkAdapters: async () => [adapter()] } as ClientOverrides),
+            OWNED_VM,
+        )).resolves.toEqual({ ok: true, addresses: [] });
+    });
+
+    it("reports a failed neighbor read with the existing public diagnostic", async () => {
+        await expect(discoverDeviceLabHyperVBootstrapNetwork(
+            client({
+                getNetNeighbors: async () => {
+                    throw new Error("native transport failed");
+                },
+            } as ClientOverrides),
+            OWNED_VM,
+        )).rejects.toThrow("hyper-v-bootstrap-neighbor-inspection-failed");
+    });
+
     it("reports the guest's address in the legacy observation shape", async () => {
         // No diagnostic key at all when nothing went wrong, matching the legacy shape the
         // broker consumes: it tests for presence, not for a null.
@@ -135,6 +153,46 @@ describe("Device Lab bootstrap discovery", () => {
 
         expect(getNetNeighbors.mock.calls).toEqual([[{ interfaceIndex: 12 }]]);
     });
+
+    it("applies the supported prefix floor before reading neighbours", async () => {
+        const getNetNeighbors = vi.fn(async () => []);
+        await discoverDeviceLabHyperVBootstrapNetwork(
+            client({
+                getNetIPAddresses: async () => [{
+                    interfaceIndex: parseHyperVInterfaceIndex(12),
+                    address: parseIPv4Address("10.0.0.1"),
+                    prefixLength: parseIPv4PrefixLength(8),
+                    prefixOrigin: "Dhcp",
+                    suffixOrigin: "Dhcp",
+                    addressState: "Preferred",
+                    interfaceAlias: "vEthernet (Default Switch)",
+                }],
+                getNetNeighbors,
+            }),
+            OWNED_VM,
+        );
+        expect(getNetNeighbors).not.toHaveBeenCalled();
+    });
+
+    it("fails closed before reading an unbounded set of host interfaces", async () => {
+        const getNetNeighbors = vi.fn(async () => []);
+        await expect(discoverDeviceLabHyperVBootstrapNetwork(
+            client({
+                getNetIPAddresses: async () => Array.from({ length: 17 }, (_, index) => ({
+                    interfaceIndex: parseHyperVInterfaceIndex(index + 1),
+                    address: parseIPv4Address(`172.20.${index}.1`),
+                    prefixLength: parseIPv4PrefixLength(24),
+                    prefixOrigin: "Dhcp",
+                    suffixOrigin: "Dhcp",
+                    addressState: "Preferred",
+                    interfaceAlias: "vEthernet (Default Switch)",
+                })),
+                getNetNeighbors,
+            }),
+            OWNED_VM,
+        )).rejects.toThrow("hyper-v-bootstrap-neighbor-inspection-failed");
+        expect(getNetNeighbors).not.toHaveBeenCalled();
+    });
 });
 
 // The generated PowerShell opened with an ownership prelude, and everything behind it reads
@@ -142,7 +200,6 @@ describe("Device Lab bootstrap discovery", () => {
 // later incarnation be treated as this device's.
 describe("Device Lab bootstrap VM ownership", () => {
     it.each([
-        ["no VM answers to the name", async () => []],
         ["two VMs answer to the name", async () => [
             { id: parseHyperVVirtualMachineId(VM_ID), name: parseHyperVVirtualMachineName(OWNED_VM.vmName), notes: OWNED_VM.ownershipMarker },
             { id: parseHyperVVirtualMachineId("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"), name: parseHyperVVirtualMachineName(OWNED_VM.vmName), notes: OWNED_VM.ownershipMarker },
@@ -163,13 +220,20 @@ describe("Device Lab bootstrap VM ownership", () => {
         )).rejects.toThrow("hyper-v-vm-ownership-mismatch");
     });
 
+    it("distinguishes a missing VM from an ownership mismatch", async () => {
+        await expect(discoverDeviceLabHyperVBootstrapNetwork(
+            client({ getVMsByExactNames: async () => [] }),
+            OWNED_VM,
+        )).rejects.toThrow("hyper-v-vm-not-found");
+    });
+
     it("removes nothing when the VM fails the ownership check", async () => {
         const removeVMNetworkAdapter = vi.fn(async () => undefined);
         await expect(teardownDeviceLabHyperVBootstrapNetwork(
             client({ getVMsByExactNames: async () => [], removeVMNetworkAdapter } as ClientOverrides),
             OWNED_VM,
             MANAGED_MAC,
-        )).rejects.toThrow("hyper-v-vm-ownership-mismatch");
+        )).rejects.toThrow("hyper-v-vm-not-found");
         expect(removeVMNetworkAdapter).not.toHaveBeenCalled();
     });
 });
@@ -187,6 +251,7 @@ describe("Device Lab bootstrap teardown", () => {
             selector: { kind: "id", id: VM_ID },
             adapterName: "CCC Bootstrap DHCP",
             macAddress: BOOTSTRAP_MAC,
+            expectedNotes: OWNED_VM.ownershipMarker,
         }]]);
     });
 
@@ -274,6 +339,24 @@ describe("Device Lab bootstrap teardown", () => {
         )).rejects.toThrow("hyper-v-bootstrap-network-adapter-identity-mismatch");
         expect(removeVMNetworkAdapter).not.toHaveBeenCalled();
     });
+
+    it.each([parseHyperVMacAddress("06:15:5d:01:1a:2d"), null])(
+        "refuses a named bootstrap adapter with a wrong or missing MAC (%s)", async (macAddress) => {
+            const removeVMNetworkAdapter = vi.fn(async () => undefined);
+            const getAllVMNetworkAdapters = vi.fn(async () => []);
+            await expect(teardownDeviceLabHyperVBootstrapNetwork(
+                client({
+                    getVMNetworkAdapters: async () => [adapter({ macAddress })],
+                    getAllVMNetworkAdapters,
+                    removeVMNetworkAdapter,
+                } as ClientOverrides),
+                OWNED_VM,
+                MANAGED_MAC,
+            )).rejects.toThrow("hyper-v-bootstrap-network-adapter-identity-mismatch");
+            expect(removeVMNetworkAdapter).not.toHaveBeenCalled();
+            expect(getAllVMNetworkAdapters).not.toHaveBeenCalled();
+        },
+    );
 });
 
 // Slice 2B must never grow a UAC prompt: the VM already exists and its adapters belong to it,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { hyperVCreatePrologueCommand } from "../host-control/hyper-v/vm-create-prologue.js";
+import { hyperVCreateCompensationCommand, hyperVCreatePrologueCommand, parseHyperVCreatePrologueFailure } from "../host-control/hyper-v/vm-create-prologue.js";
 import { parseHyperVCreatePrologueObservation } from "../host-control/hyper-v/observations.js";
 
 // POSIX spellings, as every other host-control test uses: the path validators resolve with
@@ -90,6 +90,24 @@ describe("the create prologue", () => {
         expect(created).toBeGreaterThan(readDisk);
     });
 
+    it("cleans only newly created empty directories on a failure before the result", () => {
+        const script = scriptOf();
+        const catchStart = script.indexOf("} catch {\n  $PrimaryError = $_");
+        const resultStart = script.indexOf("$Result = [ordered]@");
+        expect(catchStart).toBeGreaterThan(script.indexOf("New-Item -ItemType Directory -Path $DiskDirectory"));
+        expect(resultStart).toBeGreaterThan(catchStart);
+        const cleanup = script.slice(catchStart, resultStart);
+        expect(cleanup).toContain("if (-not $DiskDirectoryExisted)");
+        expect(cleanup).toContain("if (-not $DeviceRootExisted)");
+        expect(cleanup).toContain("Assert-NoReparsePath $DiskDirectory");
+        expect(cleanup).toContain("Assert-NoReparsePath $DeviceRoot");
+        expect(cleanup).not.toContain("-Recurse");
+        expect(cleanup).toContain("deviceRootRemaining = $DeviceRootRemaining");
+        expect(cleanup).toContain("diskDirectoryRemaining = $DiskDirectoryRemaining");
+        expect(cleanup).toContain("$Partial | ConvertTo-Json -Compress -Depth 3");
+        expect(cleanup).toContain("throw $PrimaryError");
+    });
+
     // No Hyper-V cmdlet runs here. Importing the module anyway would make a host with a broken
     // Hyper-V installation fail during directory creation, naming the wrong cause.
     it("does not import Hyper-V, because it issues no Hyper-V cmdlet", () => {
@@ -109,6 +127,30 @@ describe("the create prologue", () => {
         ["a disk that is not a VHDX", { diskPath: "/state/owners/0123456789abcdef/windows-vm/device-1/disks/root.vhd" }],
     ])("refuses %s", (_label, override) => {
         expect(() => scriptOf(override)).toThrow(/format-unsupported/);
+    });
+});
+
+describe("native create compensation", () => {
+    it.each(["delete-file", "delete-directory"] as const)("checks every reparse tag before %s removal", (kind) => {
+        const target = kind === "delete-file" ? OPTIONS.diskPath : `${OPTIONS.deviceRoot}/disks`;
+        const command = hyperVCreateCompensationCommand({
+            executable: OPTIONS.executable, deviceRoot: OPTIONS.deviceRoot,
+            diskPath: OPTIONS.diskPath, kind, path: target,
+        });
+        const encoded = command.args?.find((argument) => /^[A-Za-z0-9+/=]{40,}$/.test(argument));
+        const script = encoded ? Buffer.from(encoded, "base64").toString("utf16le") : (command.input ?? "");
+        expect(script).toContain("Assert-NoReparsePath $DeviceRoot");
+        expect(script).toContain("Assert-NoReparsePath $Target");
+        expect(script.indexOf("Remove-Item -LiteralPath $Target")).toBeGreaterThan(script.indexOf("Assert-NoReparsePath $Target"));
+        expect(script).not.toContain("Remove-Item -LiteralPath $Target -Recurse");
+        if (kind === "delete-directory") expect(script).toContain("Get-ChildItem -LiteralPath $Target -Force");
+    });
+
+    it("rejects a path outside the new device root", () => {
+        expect(() => hyperVCreateCompensationCommand({
+            executable: OPTIONS.executable, deviceRoot: OPTIONS.deviceRoot,
+            diskPath: OPTIONS.diskPath, kind: "delete-file", path: "/state/foreign.vhdx",
+        })).toThrow("hyper-v-create-compensation-path-invalid");
     });
 });
 
@@ -146,5 +188,13 @@ describe("reading what the prologue created", () => {
 
     it("refuses output that is not JSON at all", () => {
         expect(parseHyperVCreatePrologueObservation("not json")).toBe(null);
+    });
+});
+
+describe("reading incomplete prologue cleanup", () => {
+    it("identifies only the directory still needing compensation", () => {
+        const partial = JSON.stringify({ ok: false, deviceRoot: OPTIONS.deviceRoot, diskDirectory: "/state/owners/0123456789abcdef/windows-vm/device-1/disks", deviceRootRemaining: true, diskDirectoryRemaining: false });
+        expect(parseHyperVCreatePrologueFailure(`CCC_HYPER_V_STAGE:hyper-v-vm-path-inspection-failed\n${partial}`)).toEqual(JSON.parse(partial));
+        expect(parseHyperVCreatePrologueFailure('{"ok":false,"deviceRootRemaining":true}')).toBeNull();
     });
 });

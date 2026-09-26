@@ -22,6 +22,7 @@ export type HyperVSnapshotJournal = {
     snapshotName: string;
     providerName: string;
     snapshotId?: string;
+    confirmationRequired?: boolean;
     expectedCheckpointPolicy?: "Production" | "ProductionOnly";
     startedAt: string;
 };
@@ -121,6 +122,9 @@ export function readHyperVSnapshotJournal(
                 || (value.tool !== "device_snapshot_create"
                     && (typeof value.snapshotId !== "string"
                         || !isGuid(value.snapshotId)))
+                || (value.snapshotId !== undefined && !isGuid(value.snapshotId))
+                || (value.confirmationRequired !== undefined
+                    && (value.tool !== "device_snapshot_create" || value.confirmationRequired !== true))
                 || (value.expectedCheckpointPolicy !== undefined
                     && value.expectedCheckpointPolicy !== "Production"
                     && value.expectedCheckpointPolicy !== "ProductionOnly")
@@ -164,10 +168,34 @@ export function writeHyperVSnapshotJournal(
             snapshotName,
             providerName,
             ...(snapshotId ? { snapshotId: snapshotId.toLowerCase() } : {}),
+            ...(tool === "device_snapshot_create" ? { confirmationRequired: true } : {}),
             ...(expectedCheckpointPolicy ? { expectedCheckpointPolicy } : {}),
             startedAt: new Date().toISOString(),
         } satisfies HyperVSnapshotJournal,
     );
+}
+
+export function recordHyperVSnapshotCreatedId(
+    runtime: HyperVJournalPersistenceRuntime,
+    ownerId: string,
+    backend: string,
+    deviceId: string,
+    incarnationId: string,
+    providerName: string,
+    snapshotId: string,
+): void {
+    if (!isGuid(snapshotId)) throw new Error("hyper-v-snapshot-created-id-invalid");
+    const journal = readHyperVSnapshotJournal(runtime, ownerId, backend, deviceId);
+    if (!journal || journal.tool !== "device_snapshot_create" || journal.confirmationRequired !== true
+        || journal.incarnationId !== incarnationId || journal.providerName !== providerName
+        || (journal.snapshotId && journal.snapshotId.toLowerCase() !== snapshotId.toLowerCase())) {
+        throw new Error("hyper-v-snapshot-created-id-journal-mismatch");
+    }
+    if (journal.snapshotId) return;
+    writeJsonFileAtomically(hyperVSnapshotJournalPath(runtime, ownerId, backend, deviceId), {
+        ...journal,
+        snapshotId: snapshotId.toLowerCase(),
+    } satisfies HyperVSnapshotJournal);
 }
 
 export function clearHyperVSnapshotJournal(

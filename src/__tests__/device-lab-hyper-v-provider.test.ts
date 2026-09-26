@@ -1,6 +1,6 @@
 import { spawnSync } from "child_process";
 import { createHash } from "crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, expectTypeOf, it } from "vitest";
@@ -8,7 +8,10 @@ import {
     HYPER_V_FIRST_LOGON_COMMAND_LINE_LIMIT,
     HYPER_V_FIRST_LOGON_LAUNCHER,
     HYPER_V_FIRST_LOGON_SCRIPT_NAME,
+    HYPER_V_UBUNTU_VIRTUAL_SIZE_BYTES,
     hyperVAcquireBaseImageCommand,
+    hyperVAcquireBaseImagePrepareCommand,
+    hyperVAcquireBaseImageFinalizeCommand,
     hyperVBootstrapNetworkCleanupCommand,
     hyperVBootstrapNetworkCommand,
     hyperVCleanupNetworkCommand,
@@ -41,6 +44,7 @@ import {
     parseHyperVReadiness,
     parseHyperVRecoveryObservation,
     parseHyperVBaseImageObservation,
+    parseHyperVAcquireBaseImagePrepareObservation,
     parseHyperVBootstrapNetworkCleanupObservation,
     parseHyperVBootstrapNetworkObservation,
     parseHyperVDeleteObservation,
@@ -89,6 +93,9 @@ function loaderOf(command: { args: string[] }): string {
     return Buffer.from(encoded, "base64").toString("utf16le");
 }
 
+
+// Windows PowerShell 5.1 lacks these accelerators; use [UInt64]/[UInt32]/[UInt16] instead.
+const WINDOWS_POWERSHELL_UNSUPPORTED_ACCELERATOR = /\[(?:ulong|uint|ushort|sbyte|semver)\]/i;
 describe("Hyper-V provider adapter", () => {
     it("restricts provisioning media filesystem masks at compile time", () => {
         expectTypeOf<Parameters<typeof isoWriterLines>[0]>().toEqualTypeOf<3 | 7 | undefined>();
@@ -281,6 +288,63 @@ describe("Hyper-V provider adapter", () => {
         expect(acquire.args.join(" ").length).toBeLessThan(2048);
         expect(acquireScript).toContain("ubuntu-24.04-server-cloudimg-amd64.img");
         expect(acquireScript).not.toContain("-azure.vhd.tar.gz");
+    });
+
+    it("keeps generated Hyper-V PowerShell free of PowerShell 7-only type accelerators", () => {
+        const root = join(__dirname, "..", "host-control", "hyper-v");
+        const offenders = readdirSync(root)
+            .filter((file) => file.endsWith(".ts"))
+            .filter((file) => WINDOWS_POWERSHELL_UNSUPPORTED_ACCELERATOR.test(readFileSync(join(root, file), "utf-8")));
+        expect(offenders).toEqual([]);
+    });
+
+    it("builds automatic image phase commands without inline VHD operations", () => {
+        for (const profile of ["windows-server", "ubuntu-lts"] as const) {
+            const options = { executable: "powershell.exe", profile, imageRoot: "/cache", expectedGeneration: 2 } as const;
+            const prepare = scriptOf(hyperVAcquireBaseImagePrepareCommand(options));
+            const finalize = scriptOf(hyperVAcquireBaseImageFinalizeCommand({
+                ...options,
+                expectedPartialSha256: "a".repeat(64),
+                expectedPartialFileId: "123",
+                expectedVirtualSizeBytes: profile === "ubuntu-lts" ? HYPER_V_UBUNTU_VIRTUAL_SIZE_BYTES : 64 * 1024 * 1024 * 1024,
+                expectedVhdType: "Dynamic",
+                ...(profile === "ubuntu-lts" ? {
+                    expectedSourceVhdSha256: "b".repeat(64), expectedSourceFileId: "456", expectedQemuSha256: "c".repeat(64),
+                } : {}),
+            }));
+            expect(prepare).toContain("$CccAcquirePhase = 'prepare'");
+            expect(prepare.indexOf("if (Test-Path -LiteralPath $ImagePath) { throw 'hyper-v-base-image-unmanaged-existing' }"))
+                .toBeLessThan(prepare.indexOf("Protect-CccImageDirectory $ProfileRoot"));
+            expect(finalize).toContain("$CccAcquirePhase = 'finalize'");
+            // The broker runs these through Windows PowerShell 5.1, which has no [ulong]/[uint]/[ushort]
+            // accelerators; a PowerShell 7 spelling fails the finalizer before it reads the partial image.
+            expect(prepare).not.toMatch(WINDOWS_POWERSHELL_UNSUPPORTED_ACCELERATOR);
+            expect(finalize).not.toMatch(WINDOWS_POWERSHELL_UNSUPPORTED_ACCELERATOR);
+            expect(prepare).not.toMatch(/\b(?:Get|Convert|Resize)-VHD\b/);
+            expect(finalize).not.toMatch(/\b(?:Get|Convert|Resize)-VHD\b/);
+            expect(finalize).toContain("$PartialHashBefore -ne $ExpectedPartialHash");
+            expect(finalize).toContain("$PartialGuard = [IO.File]::Open($PartialPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)");
+            expect(finalize.indexOf("$PartialGuard.Dispose(); $PartialGuard = $null"))
+                .toBeLessThan(finalize.indexOf("[IO.File]::Move($PartialPath, $ImagePath)"));
+            expect(finalize.indexOf("$PartialHashBefore -ne $ExpectedPartialHash"))
+                .toBeLessThan(finalize.indexOf("[IO.File]::Move($PartialPath, $ImagePath)"));
+            if (profile === "ubuntu-lts") {
+                expect(prepare).toContain("$NormalizedVhdPath");
+                expect(finalize).toContain("& $QemuImg compare -f vpc -F vhdx $NormalizedVhdPath $PartialPath");
+            }
+        }
+    });
+
+    it("parses bounded automatic preparation observations and rejects extra fields", () => {
+        const observation = {
+            ok: true, profile: "windows-server", imagePath: "/cache/windows-server/base.vhdx",
+            partialPath: "/cache/windows-server/base.partial.vhdx", partialSha256: "a".repeat(64), partialSizeBytes: 1024,
+        };
+        const marked = (value: unknown) => `CCC_HYPER_V_RESULT_B64:${Buffer.from(JSON.stringify(value)).toString("base64")}`;
+        expect(parseHyperVAcquireBaseImagePrepareObservation(marked(observation))).toEqual(observation);
+        expect(parseHyperVAcquireBaseImagePrepareObservation(marked({ ...observation, extra: true }))).toBeNull();
+        expect(parseHyperVAcquireBaseImagePrepareObservation(marked({ ...observation, partialPath: "relative.vhdx" }))).toBeNull();
+        expect(parseHyperVAcquireBaseImagePrepareObservation("garbage")).toBeNull();
     });
 
     it.skipIf(process.platform !== "win32")("classifies bounded-loader validation, parse, and execution failures on Windows PowerShell 5.1", () => {
@@ -661,7 +725,7 @@ describe("Hyper-V provider adapter", () => {
         expect(script).toContain("hyper-v-base-image-unmanaged-existing");
         expect(script).not.toContain("Write-BaseObservation $ExistingVhd $true");
         expect(script).toContain("Move-Item -LiteralPath $PartialPath -Destination $ImagePath");
-        expect(script).toContain("Remove-Item -LiteralPath $PartialPath -Force -ErrorAction SilentlyContinue");
+        expect(script).not.toContain("Remove-Item -LiteralPath $PartialPath -Force -ErrorAction SilentlyContinue");
         expect(script).toContain("function Assert-NoReparsePath");
         expect(script).toContain("hyper-v-path-reparse-point-rejected");
         expect(script).not.toContain("$SourceUrl =");
@@ -815,8 +879,7 @@ describe("Hyper-V provider adapter", () => {
         expect(script).toContain("Write-BaseObservation $Vhd $Generation $false");
         expect(script).not.toContain("Mount-VHD -Path $ImagePath");
         expect(script).toContain("if (Test-Path -LiteralPath $WorkPath) { throw 'hyper-v-base-image-work-path-not-clean' }");
-        expect(script).toContain("Remove-Item -LiteralPath $WorkPath -Recurse -Force -ErrorAction Stop");
-        expect(script).toContain("hyper-v-base-image-work-cleanup-failed");
+        expect(script).not.toContain("Remove-Item -LiteralPath $WorkPath -Recurse -Force -ErrorAction Stop");
         expect(script).toContain("if ($FailureMessage -match '^hyper-v-[a-z0-9-]{3,128}$') { throw $FailureMessage }");
         expect(script).toContain("[Console]::Out.WriteLine(('CCC_HYPER_V_STAGE:' + $script:CccAcquireStage))");
         expect(script).toContain("throw $script:CccAcquireStage");
@@ -1376,9 +1439,8 @@ describe("Hyper-V provider adapter", () => {
         const seedScript = scriptOf(seed);
         expect(seedScript).toContain("IMAPI2FS.MsftFileSystemImage");
         expect(seedScript).toContain("Write-CccIso $IsoFiles $SeedDisk 'cidata' $MediaSourceRoot");
-        expect(seedScript).toContain("Set-VMFirmware -VM $Vm -FirstBootDevice $OsDisks[0]");
-        expect(seedScript).toContain("hyper-v-linux-disk-boot-order-mismatch");
-        expect(seedScript).toContain("Set-VMBios -VM $Vm -StartupOrder @('IDE','CD','LegacyNetworkAdapter','Floppy')");
+        expect(seedScript).not.toContain("Set-VMFirmware");
+        expect(seedScript).not.toContain("Set-VMBios");
         expect(seedScript).toContain("$NormalizedVolumeName = ([string]$VolumeName).ToUpperInvariant()");
         expect(seedScript).toContain("$Image.FileSystemsToCreate = 3");
         expect(seedScript).not.toContain("$Image.FileSystemsToCreate = 7");
@@ -1415,13 +1477,10 @@ describe("Hyper-V provider adapter", () => {
         expect(seedScript).not.toContain("$ImageRoot.AddFile(");
         expect(seedScript).not.toContain("input.Read(");
         expect(seedScript).toContain("network-config");
-        expect(seedScript).toContain("$_.Name -eq 'CCC Bootstrap DHCP' -and $_.SwitchName -eq 'Default Switch'");
-        expect(seedScript).toContain("hyper-v-linux-bootstrap-adapter-invalid");
-        expect(seedScript).toContain("hyper-v-linux-bootstrap-mac-invalid");
-        expect(seedScript).toContain("$BootstrapMacHex = ([string]$BootstrapAdapters[0].MacAddress)");
-        expect(seedScript).toContain("$ExpectedBootstrapMac = '061122334466'");
-        expect(seedScript).toContain("hyper-v-linux-bootstrap-mac-identity-mismatch");
-        expect(seedScript).toContain("$HostBootstrapMacMatches = @(Get-VMNetworkAdapter -All");
+        expect(seedScript).toContain("$BootstrapMac = '06:11:22:33:44:66'");
+        expect(seedScript).not.toContain("Get-VMNetworkAdapter");
+        expect(seedScript).not.toContain("Get-VMDvdDrive");
+        expect(seedScript).not.toContain("Get-VMHardDiskDrive");
         expect(seedScript).toContain("'  bootstrap0:'");
         expect(seedScript).toContain("'    set-name: bootstrap0'");
         expect(seedScript).toContain("'    dhcp4: true'");
@@ -1463,13 +1522,13 @@ describe("Hyper-V provider adapter", () => {
         expect(seedScript).toContain("[Diagnostics.Process]::Start($StartInfo)");
         expect(seedScript).not.toContain("& $SshKeygen.Source");
         expect(seedScript).toContain("function Set-CccProvisionStage");
-        expect(seedScript).toContain("Set-CccProvisionStage 'vm-lookup'");
+        expect(seedScript).not.toContain("Set-CccProvisionStage 'vm-lookup'");
         expect(seedScript).toContain("Set-CccProvisionStage 'user-keygen'");
         expect(seedScript).toContain("Set-CccProvisionStage 'host-keygen'");
         expect(seedScript).toContain("Set-CccProvisionStage 'known-hosts'");
-        expect(seedScript).toContain("Set-CccProvisionStage 'media-check'");
+        expect(seedScript).not.toContain("Set-CccProvisionStage 'media-check'");
         expect(seedScript).toContain("Set-CccProvisionStage 'media-build'");
-        expect(seedScript).toContain("Set-CccProvisionStage 'media-attach'");
+        expect(seedScript).not.toContain("Set-CccProvisionStage 'media-attach'");
         expect(seedScript).toContain("[Console]::Out.WriteLine(('CCC_HYPER_V_STAGE:hyper-v-linux-seed-' + $Stage + '-command-failed'))");
         expect(seedScript).toContain("hyper-v-linux-seed-' + $CccProvisionStage + '-command-failed");
         expect(seedScript).toContain("ssh_host_ed25519_key");
@@ -1478,11 +1537,11 @@ describe("Hyper-V provider adapter", () => {
         expect(seedScript).not.toContain("$HostPrivateKeyYaml");
         expect(seedScript).not.toContain("'  - path: /etc/ssh/ssh_host_ed25519_key'");
         expect(seedScript).toContain("sshHostKeyFingerprint");
-        expect(seedScript).toContain("Add-VMDvdDrive -VM $Vm -Path $SeedDisk");
+        expect(seedScript).not.toContain("Add-VMDvdDrive");
         expect(seedScript).not.toContain("$SeedSource");
         expect(seedScript).not.toContain("Mount-VHD");
         expect(seedScript).not.toContain("Initialize-Disk");
-        expect(seedScript).toContain("Get-VM -Id $ExpectedId");
+        expect(seedScript).not.toContain("Get-VM -Id $ExpectedId");
         expect(seedScript).not.toContain("cloud-init status --wait");
 
         const ssh = { executable: "ssh.exe", deviceRoot, privateRoot, sshPrivateKeyPath, knownHostsPath, guestUsername: "ccc01234567", networkAddress: "172.29.0.10" };
@@ -2716,6 +2775,7 @@ describe("Hyper-V provider adapter", () => {
         expect(script).not.toContain("<settings pass=\"specialize\">");
         expect(script).not.toContain("Microsoft-Windows-Deployment");
         expect(script).not.toContain("Create CCC PowerShell Direct account");
+        expect(script).toContain("<component name=\"Microsoft-Windows-International-Core\" processorArchitecture=\"amd64\" publicKeyToken=\"31bf3856ad364e35\" language=\"neutral\" versionScope=\"nonSxS\"><InputLocale>0409:00000409</InputLocale><SystemLocale>en-US</SystemLocale><UILanguage>en-US</UILanguage><UserLocale>en-US</UserLocale></component>");
         expect(script).toContain("<UserAccounts><LocalAccounts><LocalAccount wcm:action=\"add\">");
         expect(script).toContain("<Group>Administrators</Group>");
         expect(script).toContain("<HideLocalAccountScreen>true</HideLocalAccountScreen>");

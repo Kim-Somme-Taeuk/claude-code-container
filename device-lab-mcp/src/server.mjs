@@ -70,12 +70,12 @@ const DEVICE_FLOW_ALLOWED_MOBILE_TOOLS = new Set([
     "mobile_screenshot",
 ]);
 const BROKER_LIFECYCLE_COMMANDS = new Set(["device_create", "device_status", "device_start", "device_stop", "device_reboot", "device_delete"]);
+const HYPER_V_LIFECYCLE_BACKENDS = new Set(["windows-vm", "linux-vm"]);
 const BROKER_READONLY_DEVICE_TOOLS = new Set([
     "device_inventory",
     "device_snapshot_list",
     "device_record_video_status",
     "device_screenshot",
-    "device_cursor_position",
     "device_window_list",
     "device_accessibility_snapshot",
 ]);
@@ -94,6 +94,7 @@ const BROKER_MUTATING_DEVICE_TOOLS = new Set([
     "device_key",
     "device_type",
     "device_scroll",
+    "device_cursor_position",
     "device_snapshot_create",
     "device_snapshot_restore",
     "device_snapshot_delete",
@@ -103,6 +104,7 @@ const BROKER_PHYSICAL_BACKENDS = new Set(["android-device", "ios-device"]);
 const BROKER_FAST_DEVICE_TOOLS = new Set(["device_record_video_status"]);
 const BROKER_RECORDING_DEVICE_TOOLS = new Set(["device_record_video_start", "device_record_video_stop", "device_record_video_status"]);
 const DEFAULT_BROKER_DEVICE_TOOL_TIMEOUT_MS = 30000;
+export const HYPER_V_LINUX_GUI_TIMEOUT_MS = 17 * 60 * 1000;
 const DEFAULT_BROKER_LIFECYCLE_RPC_TIMEOUT_MS = 120000;
 // Image acquisition may consume the full four-hour provider budget. Reserve
 // another 30 minutes for hashing, VM creation, and guest provisioning.
@@ -128,6 +130,12 @@ const DIRECT_DEVICE_BACKEND_HINT_TOOLS = new Set([
     ...BROKER_LIFECYCLE_COMMANDS,
     "device_exec",
     "device_screenshot",
+    "device_click",
+    "device_double_click",
+    "device_key",
+    "device_type",
+    "device_scroll",
+    "device_cursor_position",
     "device_upload",
     "device_download",
     "device_reset",
@@ -355,6 +363,7 @@ export function brokerLifecycleExecutionTimeout(args) {
         const automaticRpcTimeoutMs = HYPER_V_HOST_LOCK_WAIT_MS
             + HYPER_V_PROVIDER_LIFECYCLE_TIMEOUT_MS
             + bootTimeoutMs
+            + (waitsForBoot && args?.backend === "linux-vm" ? HYPER_V_LINUX_GUI_TIMEOUT_MS : 0)
             + containmentReserveMs
             + HYPER_V_LIFECYCLE_RPC_BUFFER_MS;
         return { rpcTimeoutMs: automaticRpcTimeoutMs };
@@ -858,6 +867,7 @@ async function handleBrokerLifecycleTool(name, args) {
         command: name,
         deviceId,
         incarnationId: args?.incarnationId,
+        preserveNetwork: args?.preserveNetwork,
         dryRun: args?.dryRun === true,
     });
     return jsonResult(brokerLifecyclePublicResult(result, "device-lifecycle-broker"));
@@ -912,36 +922,42 @@ async function maybeHandleImplicitBrokerLifecycleTool(name, args) {
     if (!probe) return implicitBrokerUnavailableResult("device-lifecycle-broker-implicit");
     const inventory = await brokerRpc({ ...probe, method: "broker.inventory" });
     if (!inventory.ok) return jsonResult({ ...inventory, routedBy: "device-lifecycle-broker-implicit" });
+    const requestedBackend = typeof args?.backend === "string" && args.backend ? args.backend : "";
     const inventoryBackend = inferBrokerInventoryLifecycleBackend(inventory, deviceId);
+    const explicitHyperVDeleteMiss = name === "device_delete"
+        && inventoryBackend.error === "device-backend-not-found"
+        && HYPER_V_LIFECYCLE_BACKENDS.has(requestedBackend);
     if (!inventoryBackend.ok) {
-        if (inventoryBackend.error === "device-backend-not-found") {
+        if (inventoryBackend.error === "device-backend-not-found" && !explicitHyperVDeleteMiss) {
             return jsonResult({ ok: false, error: "device-not-found", deviceId, routedBy: "device-lifecycle-broker-implicit" });
         }
-        return jsonResult({
-            ok: false,
-            error: inventoryBackend.error,
-            deviceId,
-            matches: inventoryBackend.matches || [],
-            routedBy: "device-lifecycle-broker-implicit",
-        });
+        if (!explicitHyperVDeleteMiss) {
+            return jsonResult({
+                ok: false,
+                error: inventoryBackend.error,
+                deviceId,
+                matches: inventoryBackend.matches || [],
+                routedBy: "device-lifecycle-broker-implicit",
+            });
+        }
     }
-    const requestedBackend = typeof args?.backend === "string" && args.backend ? args.backend : "";
-    if (requestedBackend && requestedBackend !== inventoryBackend.backend) {
+    const resolvedBackend = explicitHyperVDeleteMiss ? requestedBackend : inventoryBackend.backend;
+    if (requestedBackend && requestedBackend !== resolvedBackend) {
         return jsonResult({
             ok: false,
             error: "device-backend-mismatch",
             deviceId,
             requestedBackend,
-            actualBackend: inventoryBackend.backend,
+            actualBackend: resolvedBackend,
             routedBy: "device-lifecycle-broker-implicit",
         });
     }
     const result = await brokerCommand({
         ...args,
         ...selectedBrokerProbeOptions(probe, inventory),
-        ...brokerLifecycleExecutionTimeout({ ...args, backend: inventoryBackend.backend, command: name }),
+        ...brokerLifecycleExecutionTimeout({ ...args, backend: resolvedBackend, command: name }),
         action: "invoke",
-        backend: inventoryBackend.backend,
+        backend: resolvedBackend,
         command: name,
         deviceId,
         dryRun: args?.dryRun === true,
@@ -1110,6 +1126,9 @@ async function maybeHandleImplicitBrokerDeviceTool(name, args) {
             });
         }
         brokerBackend = inventoryBackend.backend;
+    }
+    if (isCursorMove(name, args) && !HYPER_V_LIFECYCLE_BACKENDS.has(brokerBackend)) {
+        return cursorMoveBackendUnsupportedResult();
     }
     const result = await brokerDeviceTool({
         ...routedArgs,
@@ -1324,6 +1343,13 @@ const HYPER_V_LINUX_TOOLS = new Set([
     "device_exec",
     "device_upload",
     "device_download",
+    "device_screenshot",
+    "device_click",
+    "device_double_click",
+    "device_key",
+    "device_type",
+    "device_scroll",
+    "device_cursor_position",
     "device_snapshot_list",
     "device_snapshot_create",
     "device_snapshot_restore",
@@ -1399,8 +1425,29 @@ async function handleDeviceList(args = {}) {
     return jsonResult({ ownerId: ownerId(), devices: directDeviceList(), routedBy: "device-list-direct" });
 }
 
+function isCursorMove(name, args = {}) {
+    return name === "device_cursor_position" && (args.x !== undefined || args.y !== undefined);
+}
+
+function cursorMoveBackendUnsupportedResult() {
+    return jsonResult({ ok: false, error: "device-cursor-move-backend-unsupported", detail: "Cursor movement requires backend windows-vm or linux-vm with provider hyper-v." });
+}
+
 async function dispatchTool(name, rawArgs) {
     const args = normalizeToolArgs(rawArgs);
+    if (isCursorMove(name, args)) {
+        if (!Number.isInteger(args.x) || args.x < 0 || !Number.isInteger(args.y) || args.y < 0) {
+            return jsonResult({ ok: false, error: "device-cursor-coordinates-invalid", detail: "Provide both x and y as nonnegative screenshot pixels." });
+        }
+        // An omitted backend is resolved from the owner inventory below; only a named
+        // non-Hyper-V backend, or no device to resolve, can be refused here.
+        // Opting out of the implicit broker skips that resolution, and direct handlers only read.
+        const unresolvable = optsOutOfImplicitBroker(args)
+            || typeof args.deviceId !== "string" || !args.deviceId || args.deviceId === CURRENT_DISPLAY_DEVICE_ID;
+        if (args.backend !== undefined ? !HYPER_V_LIFECYCLE_BACKENDS.has(args.backend) : unresolvable) {
+            return cursorMoveBackendUnsupportedResult();
+        }
+    }
     if (args.deviceId !== undefined
         && (typeof args.deviceId !== "string" || !OWNER_DEVICE_ID_PATTERN.test(args.deviceId))) {
         return textResult(false, JSON.stringify({

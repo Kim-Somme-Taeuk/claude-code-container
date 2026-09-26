@@ -8,6 +8,9 @@ const root = new URL("../", import.meta.url);
 const temporaryRoot = mkdtempSync(join(tmpdir(), "ccc-hyper-v-package-"));
 
 function run(executable, args, cwd = root) {
+    if (process.platform === "win32" && args.some((arg) => arg.startsWith("test:level3:hyper-v"))) {
+        throw new Error("package verification refuses a destructive Hyper-V host test on Windows");
+    }
     const result = spawnSync(executable, args, {
         cwd,
         encoding: "utf8",
@@ -38,10 +41,26 @@ try {
     const consumerSource = join(temporaryRoot, "hyper-v-network-consumer.mts");
     const consumerConfig = join(temporaryRoot, "hyper-v-network-consumer.json");
     writeFileSync(consumerSource, [
-        'import { createHyperVHostNetworkSpec, parseHyperVNatName, parseHyperVVirtualSwitchName, type HyperVHostNetworkReconciliationOutcome } from "./package/dist/hyper-v-windows/index.js";',
+        'import { createHyperVGuestDirectClient, createHyperVHostNetworkSpec, parseHyperVNatName, parseHyperVVirtualSwitchName, planHyperVVirtualMachineCreation, type HyperVConvertVHDRequest, type HyperVCreateVirtualMachineRequest, type HyperVGetVMDiagnosticRequest, type HyperVGuestDirectRequest, type HyperVGuestDirectResult, type HyperVHostNetworkReconciliationOutcome, type HyperVMountVHDRequest, type HyperVRemoveHostFilesRequest, type HyperVRemoveHostFilesResult, type HyperVRemoveVMGuard, type HyperVResizeVHDRequest, type HyperVVhdMutationCallOptions, type HyperVVirtualHardDisk, type HyperVWindowsClient } from "./package/dist/hyper-v-windows/index.js";',
         'const network = createHyperVHostNetworkSpec({ switchName: parseHyperVVirtualSwitchName("consumer-switch"), natName: parseHyperVNatName("consumer-nat"), cidr: "172.29.0.0/24", gateway: "172.29.0.1" });',
         'function outcomeKind(outcome: HyperVHostNetworkReconciliationOutcome): string { switch (outcome.kind) { case "settled": case "conflict": case "needs-administrator": case "execute": case "indeterminate": return outcome.kind; } }',
-        'void network; void outcomeKind;',
+        'function createVm(client: HyperVWindowsClient, request: HyperVCreateVirtualMachineRequest) {',
+        '  const step = planHyperVVirtualMachineCreation(request).find((candidate) => candidate.kind === "create-vm");',
+        '  if (!step || step.kind !== "create-vm") throw new Error("creation plan has no create-vm step");',
+        '  return client.newVM({ name: step.vmName, generation: step.generation, memoryStartupBytes: step.memoryStartupBytes, vhdPath: step.vhdPath, ...(step.switchName === null ? {} : { switchName: step.switchName }) });',
+        '}',
+        'function inspectVhd(client: HyperVWindowsClient, path: string): Promise<HyperVVirtualHardDisk> { return client.getVHD(path); }',
+        'function mountVhd(client: HyperVWindowsClient, request: HyperVMountVHDRequest): Promise<void> { return client.mountVHD(request); }',
+        'function dismountVhd(client: HyperVWindowsClient, path: string): Promise<void> { return client.dismountVHD(path); }',
+        'function convertVhd(client: HyperVWindowsClient, request: HyperVConvertVHDRequest, options: HyperVVhdMutationCallOptions): Promise<void> { return client.convertVHD(request, options); }',
+        'function resizeVhd(client: HyperVWindowsClient, request: HyperVResizeVHDRequest, options: HyperVVhdMutationCallOptions): Promise<void> { return client.resizeVHD(request, options); }',
+        'function vmStatus(client: HyperVWindowsClient, id: string) { return client.getVM({ kind: "id", id }); }',
+        'function vmDiagnostic(client: HyperVWindowsClient, request: HyperVGetVMDiagnosticRequest) { return client.getVMDiagnostic(request); }',
+        'function vmPower(client: HyperVWindowsClient, id: string, name: string, notes: string) { return client.restartVM({ selector: { kind: "id", id }, expectedName: name, expectedNotes: notes }); }',
+        'function guardedRemove(client: HyperVWindowsClient, id: string, guard: HyperVRemoveVMGuard) { return client.removeVM({ selector: { kind: "id", id }, force: true, guard }); }',
+        'function hostCleanup(client: HyperVWindowsClient, request: HyperVRemoveHostFilesRequest): Promise<HyperVRemoveHostFilesResult> { return client.removeHostFiles(request); }',
+        'function guestDirect(client: ReturnType<typeof createHyperVGuestDirectClient>, request: HyperVGuestDirectRequest): Promise<HyperVGuestDirectResult> { return client.invoke(request, 1000); }',
+        'void network; void outcomeKind; void createVm; void inspectVhd; void mountVhd; void dismountVhd; void convertVhd; void resizeVhd; void vmStatus; void vmDiagnostic; void vmPower; void guardedRemove; void hostCleanup; void guestDirect;',
     ].join("\n"), "utf8");
     writeFileSync(consumerConfig, JSON.stringify({
         compilerOptions: {
@@ -74,6 +93,7 @@ try {
         join("scripts", "real-tests", "hyper-v-windows-library-real.ts"),
         join("scripts", "real-tests", "hyper-v-windows-library-host.test.ts"),
         join("scripts", "real-tests", "hyper-v-windows-library-fixture.ps1"),
+        join("doc", "hyper-v-windows", "GUIDE__typed-library-support.md"),
     ]) {
         if (!existsSync(join(packageRoot, relativePath))) throw new Error(`packaged Hyper-V library real-test asset missing: ${relativePath}`);
     }
@@ -127,6 +147,11 @@ try {
     writeFileSync(packagedFixturePath, packagedFixtureOriginal);
 
     const packagedLibrary = await import(pathToFileURL(join(packageRoot, "dist", "hyper-v-windows", "index.js")).href);
+    if (typeof packagedLibrary.createHyperVGuestDirectClient !== "function"
+        || !["Get-VMDiagnostic", "Restart-VM", "Remove-VM", "Remove-HostFiles", "Invoke-Guest"]
+            .every((operation) => packagedLibrary.HYPER_V_WINDOWS_OPERATIONS.includes(operation))) {
+        throw new Error("packaged Hyper-V typed operations are incomplete");
+    }
     const operationAsset = join(packageRoot, "scripts", "host-control", "hyper-v", "Invoke-HyperVWindowsOperation.ps1");
     const operationOriginal = readFileSync(operationAsset);
     const operationExecutor = packagedLibrary.createHyperVWindowsPowerShellExecutor({
@@ -152,16 +177,18 @@ try {
     }
     if (!operationReplacementRejected) throw new Error("replaced packaged Hyper-V operation asset was accepted");
     writeFileSync(operationAsset, operationOriginal);
-    const packagedStandalone = run(process.execPath, [
-        npmCli,
-        "run",
-        "test:level3:hyper-v:windows:library",
-        "--ignore-scripts",
-    ], packageRoot);
-    if (!packagedStandalone.includes("SKIP level 3 Hyper-V Windows library real-host test: Windows host required")) {
-        throw new Error("packaged Hyper-V library real-test entrypoint did not reach the host gate");
-    }
     if (process.platform !== "win32") {
+        // On Windows this entrypoint requests UAC and mutates a disposable Hyper-V host.
+        // Package verification must remain non-destructive on every platform.
+        const packagedStandalone = run(process.execPath, [
+            npmCli,
+            "run",
+            "test:level3:hyper-v:windows:library",
+            "--ignore-scripts",
+        ], packageRoot);
+        if (!packagedStandalone.includes("SKIP level 3 Hyper-V Windows library real-host test: Windows host required")) {
+            throw new Error("packaged Hyper-V library real-test entrypoint did not reach the host gate");
+        }
         const packagedNetwork = run(process.execPath, [
             npmCli,
             "run",

@@ -25,6 +25,71 @@ export type DeviceLabHyperVSnapshotTarget = {
     readonly snapshotId?: string | null;
 };
 
+export type DeviceLabHyperVSnapshotRepairTarget = {
+    readonly vmId: string;
+    readonly vmName: string;
+    readonly expectedNotes: string;
+    readonly providerName: string;
+    readonly expectedCheckpointPolicy: "Production" | "ProductionOnly";
+};
+
+type InventoryTrackedSnapshot = { readonly id: string; readonly name: string; readonly providerName: string };
+type InventoryLiveSnapshot = { readonly snapshotId: string; readonly snapshotName: string };
+
+export function hyperVSnapshotInventoryConflict(
+    ownerId: string,
+    tracked: readonly InventoryTrackedSnapshot[],
+    live: readonly InventoryLiveSnapshot[],
+) {
+    const liveById = new Map(live.map((snapshot) => [snapshot.snapshotId.toLowerCase(), snapshot]));
+    const trackedIds = new Set(tracked.map((snapshot) => snapshot.id.toLowerCase()));
+    const ownerPrefix = `ccc-${ownerId}-`;
+    return {
+        untracked: live.filter((snapshot) => snapshot.snapshotName.toLowerCase().startsWith(ownerPrefix)
+            && !trackedIds.has(snapshot.snapshotId.toLowerCase()))
+            .map((snapshot) => ({ id: snapshot.snapshotId, providerName: snapshot.snapshotName })),
+        missing: tracked.filter((snapshot) => {
+            const candidate = liveById.get(snapshot.id.toLowerCase());
+            return !candidate || candidate.snapshotName !== snapshot.providerName;
+        }).map((snapshot) => ({ id: snapshot.id, name: snapshot.name })),
+    };
+}
+
+// Re-observe a conflicting inventory twice without changing tracked checkpoint state.
+// A read error stays an error; a stable mismatch stays a conflict.
+export async function settleHyperVSnapshotInventory<T>(
+    ownerId: string,
+    tracked: readonly InventoryTrackedSnapshot[],
+    first: readonly InventoryLiveSnapshot[],
+    readAgain: () => Promise<{ readonly ok: true; readonly snapshots: readonly InventoryLiveSnapshot[] } | { readonly ok: false; readonly error: T }>,
+    limits: { readonly deadlineAt: number; readonly timeoutError: T; readonly delayMilliseconds?: number },
+): Promise<{ readonly ok: true; readonly conflict: ReturnType<typeof hyperVSnapshotInventoryConflict> } | { readonly ok: false; readonly error: T }> {
+    let conflict = hyperVSnapshotInventoryConflict(ownerId, tracked, first);
+    for (let attempt = 0; attempt < 2 && (conflict.untracked.length > 0 || conflict.missing.length > 0); attempt += 1) {
+        const delayMilliseconds = limits.delayMilliseconds ?? 300;
+        if (Date.now() + delayMilliseconds >= limits.deadlineAt) return { ok: false, error: limits.timeoutError };
+        await new Promise((resolve) => setTimeout(resolve, delayMilliseconds));
+        if (Date.now() >= limits.deadlineAt) return { ok: false, error: limits.timeoutError };
+        const observed = await readAgain();
+        if (!observed.ok) return observed;
+        conflict = hyperVSnapshotInventoryConflict(ownerId, tracked, observed.snapshots);
+    }
+    return { ok: true, conflict };
+}
+
+export async function repairDeviceLabHyperVSnapshotState(
+    client: HyperVWindowsClient,
+    target: DeviceLabHyperVSnapshotRepairTarget,
+): Promise<{ readonly checkpointPolicy: "Production" | "ProductionOnly"; readonly candidateCount: 0 | 1 }> {
+    return client.repairVMSnapshotState({
+        selector: { kind: "id", id: target.vmId },
+        expectedName: target.vmName,
+        expectedNotes: target.expectedNotes,
+        snapshotName: target.providerName,
+        expectedCheckpointPolicy: target.expectedCheckpointPolicy,
+    });
+}
+
 function observation(snapshot: HyperVVirtualMachineSnapshot, state?: string): DeviceLabHyperVSnapshotObservation {
     return {
         ok: true,
@@ -69,19 +134,54 @@ async function requireVirtualMachineState(
 export async function createDeviceLabHyperVSnapshot(
     client: HyperVWindowsClient,
     target: DeviceLabHyperVSnapshotTarget,
-    options?: { readonly signal?: AbortSignal },
+    options?: { readonly signal?: AbortSignal; readonly operationDeadlineAt?: number; readonly confirmationTimeoutMilliseconds?: number; readonly confirmationDelayMilliseconds?: number; readonly onCreatedId?: (id: string) => void | Promise<void>; readonly onConfirmationDeadline?: (deadlineAt: number) => void },
 ): Promise<DeviceLabHyperVSnapshotObservation> {
     const created = await client.checkpointVM({
         selector: { kind: "id", id: target.vmId },
         snapshotName: target.providerName,
     }, options);
-    // Checkpoint-VM -Passthru already returns the created checkpoint, so no name re-read is needed.
-    //
-    // Distinct from the ownership fence above: the mutation already succeeded and the provider's
-    // own report is what cannot be trusted. That was the legacy post-success observation check, and
-    // it answered without reconciliation — there is no drift to repair, only a bad result.
-    if (created.name !== target.providerName) throw new Error("hyper-v-snapshot-result-mismatch");
-    return observation(created);
+    await options?.onCreatedId?.(created.id);
+    // -Passthru identifies the checkpoint requested by the mutation, but the VM inventory is
+    // read separately. Do not publish its ID as tracked state until the exact object is visible.
+    if (created.name !== target.providerName || created.vmId.toLowerCase() !== target.vmId.toLowerCase()) {
+        throw new Error("hyper-v-snapshot-result-mismatch");
+    }
+    const timeoutMilliseconds = options?.confirmationTimeoutMilliseconds ?? 10000;
+    const delayMilliseconds = options?.confirmationDelayMilliseconds ?? 500;
+    const deadlineAt = Math.min(Date.now() + timeoutMilliseconds, options?.operationDeadlineAt ?? Number.POSITIVE_INFINITY);
+    options?.onConfirmationDeadline?.(deadlineAt);
+    for (;;) {
+        if (Date.now() >= deadlineAt) throw new Error("hyper-v-snapshot-create-unconfirmed");
+        const controller = new AbortController();
+        const relayAbort = () => controller.abort();
+        options?.signal?.addEventListener("abort", relayAbort, { once: true });
+        if (options?.signal?.aborted) controller.abort();
+        const readTimer = setTimeout(() => controller.abort(), Math.max(1, deadlineAt - Date.now()));
+        let live: readonly HyperVVirtualMachineSnapshot[];
+        try {
+            live = await client.getVMSnapshots({ kind: "id", id: target.vmId }, { signal: controller.signal });
+        } catch (error) {
+            if (!options?.signal?.aborted && controller.signal.aborted && Date.now() >= deadlineAt) {
+                throw new Error("hyper-v-snapshot-create-unconfirmed");
+            }
+            throw error;
+        } finally {
+            clearTimeout(readTimer);
+            options?.signal?.removeEventListener("abort", relayAbort);
+        }
+        const sameId = live.filter((candidate) => candidate.id.toLowerCase() === created.id.toLowerCase());
+        if (live.some((candidate) => candidate.name.toLowerCase() === target.providerName.toLowerCase()
+            && candidate.id.toLowerCase() !== created.id.toLowerCase())) {
+            throw new Error("hyper-v-snapshot-create-identity-conflict");
+        }
+        if (sameId.length > 1 || sameId.some((candidate) => candidate.name !== target.providerName
+            || candidate.vmId.toLowerCase() !== target.vmId.toLowerCase())) {
+            throw new Error("hyper-v-snapshot-create-identity-conflict");
+        }
+        if (sameId.length === 1) return observation(sameId[0] as HyperVVirtualMachineSnapshot);
+        if (Date.now() + delayMilliseconds >= deadlineAt) throw new Error("hyper-v-snapshot-create-unconfirmed");
+        await new Promise((resolve) => setTimeout(resolve, delayMilliseconds));
+    }
 }
 
 export async function deleteDeviceLabHyperVSnapshot(

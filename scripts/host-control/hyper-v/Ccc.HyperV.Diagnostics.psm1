@@ -80,7 +80,7 @@ function ConvertTo-CccDiagnosticBool {
     param(
         [AllowNull()] [object] $Value,
         [AllowNull()] [object] $Default,
-        [Parameter(Mandatory = $true)] [System.Collections.Generic.List[string]] $DiagnosticErrors,
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [System.Collections.Generic.List[string]] $DiagnosticErrors,
         [Parameter(Mandatory = $true)] [string] $ErrorCode
     )
     if ($Value -is [bool]) { return [bool]$Value }

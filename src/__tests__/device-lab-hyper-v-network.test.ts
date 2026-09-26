@@ -2490,6 +2490,52 @@ describe("Hyper-V network module", () => {
         });
     });
 
+    it("releases the final exact allocation without elevation when managed fabric preservation is requested", async () => {
+        const root = privateRoot();
+        writeNetworkState(root, {
+            managedSwitch: true,
+            managedGateway: true,
+            managedNat: true,
+            allocations: [{
+                ownerId: OWNER_ID,
+                deviceId: DEVICE_ID,
+                incarnationId: INCARNATION_ID,
+                address: "172.29.0.10",
+                macAddress: "02:11:22:33:44:55",
+                allocatedAt: "2026-09-23T00:00:00.000Z",
+            }],
+        });
+        const run = vi.fn(async () => {
+            throw new Error("host-network-cleanup-must-not-run");
+        });
+
+        const released = await releaseHyperVNetworkAllocationAndCleanup(
+            runtime(root, run),
+            OWNER_ID,
+            DEVICE_ID,
+            INCARNATION_ID,
+            Number.POSITIVE_INFINITY,
+            { preserveManagedFabric: true },
+        );
+
+        expect(released).toMatchObject({
+            ok: true,
+            released: true,
+            remaining: 0,
+            preservedManagedFabric: true,
+            networkCleanup: { skipped: true, reason: "hyper-v-network-retained-by-request" },
+        });
+        expect(run).not.toHaveBeenCalled();
+        expect(JSON.parse(readFileSync(join(root, "network", "hyper-v.json"), "utf8"))).toMatchObject({
+            switchId: SWITCH_ID,
+            natInstanceId: NAT_INSTANCE_ID,
+            managedSwitch: true,
+            managedGateway: true,
+            managedNat: true,
+            allocations: [],
+        });
+    });
+
     it("refuses a deferred release when the persisted allocation has no incarnation", async () => {
         const root = privateRoot();
         const run = vi.fn()

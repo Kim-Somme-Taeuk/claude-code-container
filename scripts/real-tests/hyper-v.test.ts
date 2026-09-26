@@ -13,6 +13,7 @@ import {
     HYPER_V_LEVEL3_NETWORK_OWNERSHIP_CONTRACT,
     HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
     HYPER_V_LEVEL3_GUEST_DIAGNOSTICS_CONTRACT,
+    HYPER_V_LEVEL3_LINUX_X11_TYPE_CONTRACT,
     HYPER_V_LEVEL3_PROVIDER_CONTRACT,
     HYPER_V_LEVEL3_POWERSHELL_DIRECT_BOUNDED_PROBE_CONTRACT,
     HYPER_V_LEVEL3_WINDOWS_UNATTEND_OOBE_SCHEMA_CONTRACT,
@@ -42,6 +43,30 @@ describe("Hyper-V Level 3 launcher", () => {
         expect(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES).toContain(HYPER_V_LEVEL3_WINDOWS_LIBRARY_CONTRACT);
         expect(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES).toContain(HYPER_V_LEVEL3_PROVIDER_CONTRACT);
         expect(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES).toContain(HYPER_V_LEVEL3_NETWORK_DIAGNOSTICS_CONTRACT);
+        expect(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES).toContain(HYPER_V_LEVEL3_LINUX_X11_TYPE_CONTRACT);
+    });
+
+    it("rejects a running broker that predates Linux X11 text input", async () => {
+        let diagnostic = "";
+        const originalWrite = process.stderr.write;
+        process.stderr.write = ((chunk: any) => {
+            diagnostic += String(chunk);
+            return true;
+        }) as typeof process.stderr.write;
+        try {
+            const status = await ensureHostBrokerReady("/repo", {
+                spawn: () => ({
+                    status: 0,
+                    stdout: brokerStatusOutput(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
+                        .filter((capability) => capability !== HYPER_V_LEVEL3_LINUX_X11_TYPE_CONTRACT)),
+                    stderr: "",
+                }),
+            });
+            expect(status).toBe(1);
+            expect(diagnostic).toContain(HYPER_V_LEVEL3_LINUX_X11_TYPE_CONTRACT);
+        } finally {
+            process.stderr.write = originalWrite;
+        }
     });
 
     it("rejects a build whose compiled Hyper-V provider lacks the current contract", () => {
@@ -150,6 +175,24 @@ describe("Hyper-V Level 3 launcher", () => {
         expect(calls).toEqual([]);
     });
 
+    it("runs the default Linux Level 3 provider without a separate GUI flag", async () => {
+        let forwarded: NodeJS.ProcessEnv | undefined;
+        const status = await runHyperVLevel3(["--target", "linux"], {
+            env: {},
+            withExclusiveRealProviderRunImpl: async (_name: string, run: () => Promise<number>) => run(),
+            warnSetupDiagnosticsPrivilegeImpl: () => false,
+            buildLevel3ArtifactsImpl: () => 0,
+            ensureWindowsEvaluationLicenseImpl: async () => ({ ok: true }),
+            ensureHostBrokerReadyImpl: async () => 0,
+            runSupervisedProcessImpl: async (_command: string, _args: string[], options: { env: NodeJS.ProcessEnv }) => {
+                forwarded = options.env;
+                return { status: 0 };
+            },
+        });
+        expect(status).toBe(0);
+        expect(forwarded).toEqual({});
+    });
+
     it("builds artifacts and prepares the broker before running the selected provider", async () => {
         const calls: string[] = [];
         let runnerArgs: string[] = [];
@@ -241,21 +284,25 @@ describe("Hyper-V Level 3 launcher", () => {
     });
 
     it("attests the repaired broker Hyper-V capability generation", async () => {
+        const spawn = vi.fn(() => ({
+            status: 0,
+            stdout: brokerStatusOutput(),
+            stderr: "",
+        }));
+        const probe = vi.fn(async () => ({
+            ok: true,
+            capabilities: HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
+            pid: verifiedBrokerPid,
+            startedAt: verifiedBrokerStartedAt,
+        }));
         const status = await ensureHostBrokerReady("/repo", {
-            spawn: () => ({
-                status: 0,
-                stdout: brokerStatusOutput(),
-                stderr: "",
-            }),
-            probeHostBrokerCapabilitiesImpl: async () => ({
-                ok: true,
-                capabilities: HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
-                pid: verifiedBrokerPid,
-                startedAt: verifiedBrokerStartedAt,
-            }),
+            spawn,
+            probeHostBrokerCapabilitiesImpl: probe,
         });
 
         expect(status).toBe(0);
+        expect(spawn).toHaveBeenCalledTimes(1);
+        expect(probe).toHaveBeenCalledTimes(2);
     });
 
     it("bounds the complete Windows broker repair and preserves spawn failures after partial output", async () => {
@@ -296,7 +343,7 @@ describe("Hyper-V Level 3 launcher", () => {
 
     it("shares one repair deadline across initial status, remote attestation, and confirmation", async () => {
         const observedStatusTimeouts: number[] = [];
-        let observedProbeTimeout = 0;
+        const observedProbeTimeouts: number[] = [];
         const now = vi.spyOn(Date, "now")
             .mockReturnValueOnce(1000)
             .mockReturnValueOnce(1000)
@@ -315,7 +362,7 @@ describe("Hyper-V Level 3 launcher", () => {
                     };
                 },
                 probeHostBrokerCapabilitiesImpl: async (_port: number, options: { timeoutMs?: number }) => {
-                    observedProbeTimeout = Number(options.timeoutMs);
+                    observedProbeTimeouts.push(Number(options.timeoutMs));
                     return {
                         ok: true,
                         capabilities: HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
@@ -326,8 +373,8 @@ describe("Hyper-V Level 3 launcher", () => {
             });
 
             expect(status).toBe(0);
-            expect(observedStatusTimeouts).toEqual([100, 40]);
-            expect(observedProbeTimeout).toBe(60);
+            expect(observedStatusTimeouts).toEqual([100]);
+            expect(observedProbeTimeouts).toEqual([60, 40]);
         } finally {
             now.mockRestore();
         }
@@ -397,7 +444,8 @@ describe("Hyper-V Level 3 launcher", () => {
                 spawn: () => ({
                     status: 0,
                     stdout: brokerStatusOutput(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
-                        .filter((capability) => capability !== HYPER_V_LEVEL3_WINDOWS_UNATTEND_OOBE_SCHEMA_CONTRACT)),
+                        .filter((capability) => capability !== HYPER_V_LEVEL3_WINDOWS_UNATTEND_OOBE_SCHEMA_CONTRACT)
+                        .concat("hyper-v-windows-unattend-oobe-schema-v2")),
                     stderr: "",
                 }),
             });
@@ -444,8 +492,11 @@ describe("Hyper-V Level 3 launcher", () => {
             const status = await ensureHostBrokerReady("/repo", {
                 spawn: () => ({
                     status: 0,
-                    stdout: brokerStatusOutput(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
-                        .filter((capability) => capability !== HYPER_V_LEVEL3_WINDOWS_LIBRARY_CONTRACT)),
+                    stdout: brokerStatusOutput([
+                        ...HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
+                            .filter((capability) => capability !== HYPER_V_LEVEL3_WINDOWS_LIBRARY_CONTRACT),
+                        "hyper-v-windows-library-v10",
+                    ]),
                     stderr: "",
                 }),
             });
@@ -474,8 +525,9 @@ describe("Hyper-V Level 3 launcher", () => {
                 probeHostBrokerCapabilitiesImpl: async () => ({
                     ok: true,
                     capabilities: [
-                        "hyper-v-vm-managed-auto-images-v18",
-                        "hyper-v-windows-boot-contract-v1",
+                        ...HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
+                            .filter((capability) => capability !== HYPER_V_LEVEL3_WINDOWS_LIBRARY_CONTRACT),
+                        "hyper-v-windows-library-v10",
                     ],
                     pid: verifiedBrokerPid,
                     startedAt: verifiedBrokerStartedAt,
@@ -484,8 +536,8 @@ describe("Hyper-V Level 3 launcher", () => {
 
             expect(status).toBe(1);
             expect(diagnostic).toContain("remote capability attestation failed");
-            expect(diagnostic).toContain("hyper-v-vm-managed-auto-images-v20");
-            expect(diagnostic).toContain("hyper-v-vm-managed-auto-images-v18");
+            expect(diagnostic).toContain(HYPER_V_LEVEL3_WINDOWS_LIBRARY_CONTRACT);
+            expect(diagnostic).toContain("hyper-v-windows-library-v10");
         } finally {
             process.stderr.write = originalWrite;
         }
@@ -560,32 +612,88 @@ describe("Hyper-V Level 3 launcher", () => {
         expect(cancelled).toBe(true);
     });
 
-    it("rejects a broker process identity change between repair and confirmation", async () => {
+    it("re-attests a broker that is replaced between observation and confirmation", async () => {
+        const successorPid = verifiedBrokerPid + 1;
+        const successorStartedAt = "2026-07-28T00:00:01.000Z";
+        const successorStatus = brokerStatusOutput()
+            .replace(`brokerVerifiedPid: ${verifiedBrokerPid}`, `brokerVerifiedPid: ${successorPid}`)
+            .replace(`brokerVerifiedStartedAt: ${verifiedBrokerStartedAt}`, `brokerVerifiedStartedAt: ${successorStartedAt}`);
         let statusCalls = 0;
+        let probeCalls = 0;
         const status = await ensureHostBrokerReady("/repo", {
             spawn: () => {
                 statusCalls += 1;
                 return {
                     status: 0,
-                    stdout: statusCalls === 1
-                        ? brokerStatusOutput()
-                        : brokerStatusOutput().replace(
-                            `brokerVerifiedPid: ${verifiedBrokerPid}`,
-                            `brokerVerifiedPid: ${verifiedBrokerPid + 1}`,
-                        ),
+                    stdout: statusCalls === 1 ? brokerStatusOutput() : successorStatus,
                     stderr: "",
                 };
             },
-            probeHostBrokerCapabilitiesImpl: async () => ({
-                ok: true,
-                capabilities: HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
-                pid: verifiedBrokerPid,
-                startedAt: verifiedBrokerStartedAt,
-            }),
+            probeHostBrokerCapabilitiesImpl: async () => {
+                probeCalls += 1;
+                return {
+                    ok: true,
+                    capabilities: HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
+                    pid: probeCalls === 1 ? verifiedBrokerPid : successorPid,
+                    startedAt: probeCalls === 1 ? verifiedBrokerStartedAt : successorStartedAt,
+                };
+            },
+        });
+
+        expect(status).toBe(0);
+        expect(statusCalls).toBe(2);
+        expect(probeCalls).toBe(4);
+    });
+
+    it("rejects persistent broker process identity churn after three complete attempts", async () => {
+        let statusCalls = 0;
+        let probeCalls = 0;
+        const status = await ensureHostBrokerReady("/repo", {
+            spawn: () => {
+                statusCalls += 1;
+                return {
+                    status: 0,
+                    stdout: brokerStatusOutput(),
+                    stderr: "",
+                };
+            },
+            probeHostBrokerCapabilitiesImpl: async () => {
+                probeCalls += 1;
+                return {
+                    ok: true,
+                    capabilities: HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
+                    pid: probeCalls % 2 === 1 ? verifiedBrokerPid : verifiedBrokerPid + 1,
+                    startedAt: verifiedBrokerStartedAt,
+                };
+            },
         });
 
         expect(status).toBe(1);
-        expect(statusCalls).toBe(2);
+        expect(statusCalls).toBe(3);
+        expect(probeCalls).toBe(6);
+    });
+
+    it("rejects missing capabilities from the read-only confirmation without another repair command", async () => {
+        let probeCalls = 0;
+        const spawn = vi.fn(() => ({ status: 0, stdout: brokerStatusOutput(), stderr: "" }));
+        const status = await ensureHostBrokerReady("/repo", {
+            spawn,
+            probeHostBrokerCapabilitiesImpl: async () => {
+                probeCalls += 1;
+                return {
+                    ok: true,
+                    capabilities: probeCalls === 1
+                        ? HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
+                        : HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES.slice(1),
+                    pid: verifiedBrokerPid,
+                    startedAt: verifiedBrokerStartedAt,
+                };
+            },
+        });
+
+        expect(status).toBe(1);
+        expect(spawn).toHaveBeenCalledTimes(1);
+        expect(probeCalls).toBe(2);
     });
 
     it("fails when the broker status command exits zero without readiness", async () => {
@@ -690,31 +798,34 @@ describe("Windows Server evaluation license prompt", () => {
             platform: "win32",
             resolveTrustedWindowsPowerShellImpl: () => trustedPowerShell,
             isAdministratorImpl,
+            env: {},
             writeImpl: (line: string) => { lines.push(line); },
         });
         expect(warned).toBe(true);
         expect(isAdministratorImpl, "the probe must get the resolved trusted path, not a PATH lookup").toHaveBeenCalledWith({ powerShellPath: trustedPowerShell });
         const output = lines.join("");
         expect(output, "must name the code the operator will actually see").toContain("hyper-v-setup-diagnostics-mount-privilege-required");
-        // The action changed when the diagnostic started requesting elevation itself. It used to be
-        // "re-run from an elevated terminal", which cost the operator a build and a two-minute boot
-        // to arrive at the same failure with one more right. The note now tells them what will be
-        // asked of them and when, so the assertion follows the action rather than the old wording.
-        expect(output, "must say what will be asked of the operator").toContain("approve elevation");
-        expect(output, "and must not send them back to re-run the whole thing").not.toContain("Re-run from an elevated terminal");
-        // `approve elevation` alone was satisfied by the earlier wording too, so reverting the
-        // description survived. What the approval actually permits is the thing consent is given
-        // on: a forced power-off, a detach, the mount, a re-attach — not "that single mount".
-        for (const scope of ["force-stop", "detach", "read-only", "re-attach"]) {
-            expect(output, `the operator is consenting to this and must be told: ${scope}`).toContain(scope);
-        }
-        // And the expiry, with its number taken from the library rather than typed as prose. A
-        // number in a NOTE tied to nothing is how `elevation-declined` got shipped.
-        const elevationSource = readFileSync(join(repoRoot, "scripts", "real-tests", "hyper-v-windows-library-elevation.mjs"), "utf8");
-        const timeout = elevationSource.match(/ELEVATION_TIMEOUT_MILLISECONDS = ([^;\n]+)/)?.[1] ?? "";
-        expect(timeout.trim(), "if this changes, the NOTE below is a lie").toBe("10 * 60 * 1000");
-        expect(output, "an unattended run must know the request ends rather than hangs").toContain("expires after ten minutes");
+        expect(output).toContain("Automatic UAC is disabled");
+        expect(output).toContain("will not open an Administrator prompt");
+        expect(output).toContain("CCC_HYPER_V_SETUP_DIAGNOSTICS_ELEVATE=1");
+        expect(output).not.toContain("approve elevation");
         expect(output, "must not imply the VM lifecycle is broken").toContain("lifecycle itself is unaffected");
+    });
+
+    it("describes the bounded UAC request only when diagnostic elevation is explicitly enabled", () => {
+        const lines: string[] = [];
+        const warned = warnIfSetupDiagnosticsWillLackPrivilege("windows", {
+            platform: "win32",
+            resolveTrustedWindowsPowerShellImpl: () => "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            isAdministratorImpl: () => false,
+            env: { CCC_HYPER_V_SETUP_DIAGNOSTICS_ELEVATE: "1" },
+            writeImpl: (line: string) => { lines.push(line); },
+        });
+        expect(warned).toBe(true);
+        const output = lines.join("");
+        expect(output).toContain("approve elevation");
+        for (const scope of ["force-stop", "detach", "read-only", "re-attach"]) expect(output).toContain(scope);
+        expect(output).toContain("expires after ten minutes");
     });
 
     // The other half of the same mutation, and the half the call-site assertion above does NOT
@@ -770,10 +881,16 @@ describe("Windows Server evaluation license prompt", () => {
         const warned = warnIfSetupDiagnosticsWillLackPrivilege("windows", {
             platform: "win32",
             resolveTrustedWindowsPowerShellImpl: () => { throw new Error("hyper-v-library-elevation-system-root-invalid"); },
+            env: {},
             writeImpl: (line: string) => { lines.push(line); },
         });
         expect(warned).toBe(false);
-        expect(lines.join("")).toContain("Could not determine whether this run is elevated");
+        expect(lines.join(""))
+            .toContain("Could not determine whether this run is elevated");
+        expect(lines.join(""))
+            .toContain("will not open an Administrator prompt");
+        expect(lines.join(""))
+            .not.toContain("may ask you to approve elevation");
     });
     // D3: the diagnostic is Windows-only. captureHyperVWindowsSetupDiagnostics is reached solely
     // through level2-hyper-v-windows-vm.ts, so a linux target never captures it — warning there

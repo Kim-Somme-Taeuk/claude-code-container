@@ -1,0 +1,35 @@
+# Device Lab MCP computer use
+
+Use the same seven `device_*` tools for a supported desktop display. Start by asking `device_backends` which provider is available on this host, then use `device_inventory` to find the device and its current `incarnationId`. `windows-vm` and `linux-vm` mean Hyper-V only when `provider` is `hyper-v`; the container QEMU `linux-vm` provider has a different capability set.
+
+## Screenshot → input → screenshot
+
+1. Create and start the VM with `device_create` and `device_start`. Find its `deviceId` and `incarnationId` with `device_inventory` or `device_status`. On the first start of a default Hyper-V `linux-vm` guest, `device_start` installs Xfce and starts a graphical desktop automatically. This can add about 15 minutes; the response reports GUI readiness or the failed stage. The persistent console auto-login uses a dedicated unprivileged `ccc-desktop` guest account, separate from the sudo SSH account. Later starts and reboots check readiness and repair the desktop if needed.
+2. Call `device_screenshot` with `{ "backend": "windows-vm", "deviceId": "dev-windows", "incarnationId": "<current incarnationId>" }` (or use `linux-vm`). The result is a PNG plus its width and height. The top-left pixel is `(0,0)`; the bottom-right pixel is `(width-1,height-1)`.
+3. Call `device_click` with that device, incarnation, and `x,y` measured on the returned image. `button` defaults to `left`; `right` is available. Use `device_double_click` for two clicks.
+4. Use `device_key` for one key or combination, such as `Enter`, `Ctrl+A`, or `Alt+Tab`. Hyper-V key names are case insensitive. `device_type` sends text to the focused control; on Hyper-V `windows-vm` only ASCII text is verified. Use `device_scroll` with `direction: "up"` or `"down"`, `x,y`, and optional `amount`. On Hyper-V, `device_cursor_position` reads the current cursor when `x,y` are omitted, or moves it when both screenshot pixel coordinates are supplied.
+5. Capture another screenshot and inspect the visible result before the next input. Keep the same `incarnationId`; if the VM was recreated, discover the new incarnation and capture again.
+
+Hyper-V mouse coordinates are pixels of the latest returned PNG and expire after two minutes. Capture again after a VM reboot, restore, or display-size change. Hyper-V horizontal scrolling is unavailable; `left` and `right` are accepted by the generic tool schema for other providers. The Hyper-V key set includes letters, digits, F1–F12, navigation/editing keys, and Ctrl/Alt/Shift/Win combinations. Unsupported keys and missing console devices return errors.
+
+## Capability map
+
+| Provider | Screenshot | Mouse and keyboard | Guest command, files, builds |
+| --- | --- | --- | --- |
+| Hyper-V `windows-vm` | Real host screenshot proof passed on 2026-09-24 and 2026-09-25 | Real host keyboard, pointer and visible scroll proof passed on 2026-09-24 and 2026-09-25; only ASCII typing is verified | Windows Level 3 host test passed |
+| Hyper-V `linux-vm` | Real host screenshot proof passed on 2026-09-26 | Real host keyboard, pointer and visible scroll proof passed on 2026-09-26; text and wheel go through the guest X11 session; `device_start` prepares the default image automatically | Linux Level 3 host test passed |
+| Container QEMU `linux-vm` | Check `device_backends`; GUI tools are not advertised | Check `device_backends`; GUI tools are not advertised | Provider-specific guest tools |
+| `windows-sandbox`, `macos-vm`, `x11-current-display` | Existing desktop tools, when available | Existing desktop tools, when available | Varies by provider |
+| Android/iOS | Screenshot and mobile interaction tools vary by backend | Use `mobile_*` tools for touch and mobile keys | Varies by provider |
+
+The latest Windows (2026-09-25) and Linux (2026-09-26) Level 3 GUI runs have passed on the Windows Hyper-V host. A successful screenshot or native input call by itself does not prove that a guest UI changed. Capture a second screenshot to check the result.
+
+To check both guests on a Windows Hyper-V host, run `npm run test:level3:hyper-v`. For one guest, use `npm run test:level3:hyper-v:windows` or `npm run test:level3:hyper-v:linux`. These default tests verify screenshot, pointer, keyboard and visible scroll through packaged MCP, and check a nonce file created inside the guest by GUI typing (the console on Windows, the X11 session on Linux). The Linux run prepares Xfce automatically during `device_start`. These host runs cannot be executed from inside a development container; run them on the Windows host.
+
+## When the display is unavailable
+
+- `hyper-v-display-unavailable`: start the VM and wait for its graphical session. For the default `ubuntu-lts` server image, wait for `device_start` to finish; its first run can take about 15 extra minutes and reports the failed setup stage if the desktop cannot be prepared. SSH readiness alone does not mean the desktop is ready.
+- Windows evaluation VM at the sign-in screen: the unattended bootstrap uses a one-time auto-login; after reboot, interactive sign-in may be needed before GUI automation can reach the desktop. The default Windows Level 3 GUI proof runs during that first desktop session.
+- Identity conflict or stale incarnation: call `device_inventory` or `device_status`, use the current `incarnationId`, then capture a new screenshot before input.
+- `device-cursor-move-backend-unsupported`: only Hyper-V `windows-vm` and `linux-vm` move the cursor. Other providers only read it, so omit `x,y` there, or move the pointer with `device_click` where that is acceptable.
+- Native console device or permission error: check Hyper-V host support and permissions for the exact VM. These tools do not redirect input to the host desktop or another VM.

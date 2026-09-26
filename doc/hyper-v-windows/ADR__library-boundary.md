@@ -67,9 +67,15 @@ this is resolution inside the single attempt, not retry or lifecycle policy, and
 the count that matters is one *target* invocation. The earlier wording allowed
 only the `Get-VM` read and was already stale when `Remove-VMNetworkAdapter`
 landed in 2B; it is the rule that was wrong, not the four operations.
-Selector resolution enumerates with `Get-VM -ErrorAction Stop` and filters exact
-ID/name matches. Only a successful zero-match enumeration means absence; a
-missing cmdlet/module or any host/native error fails closed.
+Selector resolution queries a single ID or name with `Get-VM -Id` or
+`Get-VM -Name` and filters exact matches. An empty successful scoped result
+means absence. The Hyper-V `GetVM` cmdlet's exact `ObjectNotFound` error requires
+one successful full `Get-VM` inventory read before absence can be concluded:
+the same error can report an inaccessible existing VM. Other native errors,
+including inventory, module and host failures, fail closed.
+Some Hyper-V versions report a missing valid name as `InvalidParameter` with
+category `InvalidArgument`; only that exact name-query pair enters the same
+confirming inventory path. It is not accepted for ID selectors.
 
 Native collections remain collections, including exact empty arrays. Unknown
 native state/status/controller strings remain observable. Low-level does not
@@ -115,6 +121,60 @@ The adapter executes the library's digest-verified source through the exported
 fixed `-Command` bootstrap and bounded stdin-envelope helper. It never reopens
 that source with `-File`, so the production consumer and standalone proof share
 the same check/use-safe transport contract.
+
+The broker capability `hyper-v-windows-library-v15` is the current compatibility
+fence. Version 8 introduced the exact `Get-VM` no-match confirmation semantics
+above. Version 7 was already advertised when those
+asset bytes and their digest changed, so a same-package-version v7 broker could
+pass startup attestation, retain the previous digest in memory, and reject the
+current on-disk asset as an executor failure. Version 9 adds the bounded host
+adapter and Tentative gateway stabilization loop described below. A v8 broker
+already running on the host retains the old three-observation loop in memory,
+so the v9 fence replaces it before another Level 3 attempt. Version 10 adds the
+five-minute no-progress bound for
+valid, unchanged Windows guest-readiness observations. A v9 broker retains the
+full caller timeout in memory, so the v10 fence replaces it before the next
+Level 3 guest boot. Version 11 applies the same five-minute bound to an unchanged
+bounded PowerShell Direct transport reason. A v10 process would still wait the
+full 20 minutes when OOBE never opens a guest session, so the v11 fence replaces
+it before another host run. Version 12 adds explicit allocation-only
+`preserveNetwork` delete recovery. A v11 broker would ignore the forwarded
+option and enter destructive elevated host-fabric cleanup, so the v12 fence
+replaces it before residue recovery. Version 13 adds the required ownership
+Notes field to `Remove-VMNetworkAdapter` and rechecks it immediately before the
+native mutation. A v12 broker holds the earlier three-field removal contract in
+memory, so the v13 fence replaces it before bootstrap teardown. Version 14 adds
+bounded read-only re-observation for a checkpoint inventory mismatch. The Linux
+Level 3 host run on 2026-09-23 reused a broker started before that change; its
+same-version v13 capability passed attestation and the listing still reported
+one missing tracked checkpoint. Requiring v14 makes the existing broker repair
+replace that process before the next Level 3 attempt. The host outcome of the
+new retry remained unverified until the next host run. Version 15 waits for the
+exact `Checkpoint-VM -Passthru` ID, owner-scoped name, and VM ID to appear in
+`Get-VMSnapshot` before Device Lab records a successful create. The v14 host run
+still observed one missing tracked checkpoint after three list reads; the v15
+fence replaces any v14 process before testing the stronger create contract. New
+create journals mark exact-ID confirmation as required before mutation, then
+store the returned ID before observation. Reconciliation preserves unknown or
+absent outcomes and cannot adopt a different same-name checkpoint.
+
+Any later behavior-affecting change to the pinned asset or its production adapter after
+the current capability is advertised must advance the library capability in
+the broker advertisement, CLI requirement, Level 3 requirement, and packaged
+MCP requirement together. The existing
+identity-fenced broker repair then replaces the stale process before provider
+execution; age-based or unconditional restart is not part of this contract.
+
+Level 3 invokes the repair-capable CLI status once per attestation attempt, then
+confirms its OS-verified broker identity with two independent read-only loopback
+status requests. It never uses another repair-capable status invocation as an
+observation because that command may replace the process it is meant to check.
+When only PID or start time changes, Level 3 repeats the complete attestation up
+to three times inside the existing repair deadline. It accepts only an attempt
+where all three identities agree. Missing capabilities, malformed status,
+invalid ports, failed loopback probes, and persistent process churn remain
+fail-closed.
+
 For a stable start/stop mismatch, broker orchestration performs the one typed
 pending action and re-inspects; it mutates state and clears the journal only
 after the fresh outcome is settled.
@@ -122,9 +182,12 @@ after the fresh outcome is settled.
 The first production migration was deliberately narrow: operation
 reconciliation, including delete reconciliation and the zero-attached-disk
 residue case, moved through the new boundary. Later roadmap slices move one
-coherent production path at a time. Create, image, unmigrated networking,
+coherent production path at a time. Image, unmigrated networking,
 guest setup/transport, and ordinary lifecycle call sites may remain on legacy
-host-control helpers until their named slice is complete.
+host-control helpers until their named slice is complete. Actual Windows and
+Linux VM creation now uses the typed creation plan and native VM operations;
+the legacy generated create command remains only for validation and dry-run
+projection.
 
 ## Migration roadmap
 
@@ -140,10 +203,38 @@ are not Hyper-V operations and would contradict this boundary.
 | 2B. VM networking (done) | `hyperVBootstrapNetworkCommand`, `hyperVBootstrapNetworkCleanupCommand` | VM-scoped and management-OS `Get-VMNetworkAdapter`, `Get-NetNeighbor`, `Remove-VMNetworkAdapter` |
 | 2C. Setup-network retirement (done) | private network ensure logic embedded in the Windows setup command | reuses the typed 2A adapter; no second host-fabric implementation |
 | 3A. Creation primitives and compensation (done) | none yet — nothing is routed | `New-VM`, `Set-VM`, `Set-VMMemory`, `Set-VMProcessor`, `Get-VMFirmware`, `Set-VMFirmware`, `Set-VMBios`, `Add-VMNetworkAdapter`, `Rename-VMNetworkAdapter`, `Set-VMNetworkAdapter` |
-| 3B. The create transaction moves | `hyperVCreateCommand` | none new — routes 3A's primitives and moves host capacity, ACL, hashing and the disk copy into Node |
-| 3C. VHD | the VHD portion of `hyperVPrepareBaseImageCommand` | `Get-VHD`, `New-VHD`, `Convert-VHD`, `Optimize-VHD`, `Resize-VHD`, `Mount-VHD`, `Dismount-VHD` |
+| 3B. The create transaction moves (done in source; Windows host proof pending) | `hyperVCreateCommand` in actual creation | `Get-VMBios` for generation 1 boot readback; routes 3A's primitives and moves host capacity, hashing and the disk copy into Node; a narrow host prologue retains Windows reparse and ACL checks |
+| 3C. VHD (phased; 3C-1 Get-VHD create inspection in source) | the temporary create inspection bridge first; the VHD portion of `hyperVPrepareBaseImageCommand` in a later transaction | `Get-VHD` first; `Mount-VHD`, `Dismount-VHD`, `Convert-VHD`, `Resize-VHD` with their production transactions; `New-VHD` and `Optimize-VHD` when a production caller exists |
 | 4. Guest PowerShell Direct | `hyperVGuestExecCommand`, `hyperVGuestUploadCommand`, `hyperVGuestDownloadCommand`, `hyperVGuestReadyCommand`, `hyperVGuestBootDiagnosticCommand`, `hyperVGuestProvisionCommand` | PowerShell Direct session primitives |
-| 5. Lifecycle residue | `hyperVStatusCommand`, `hyperVRebootCommand`, `hyperVDeleteCommand`, `hyperVRecoverOrphanCommand` | `Restart-VM`, plus adapter migration onto the existing operations |
+| 5. Lifecycle residue | `hyperVStatusCommand`, `hyperVRebootCommand`, `hyperVDeleteCommand`, `hyperVRecoverOrphanCommand` | typed status composition first, then `Restart-VM` and adapter migration onto the existing operations |
+
+The 3C-1 production seam is the base/clone inspection in actual VM creation.
+Typed `Get-VHD` reports native metadata; Device Lab checks owner-root containment,
+VHDX format, parent/type and exact cloned virtual size. Imported and automatic
+image preparation are separate production transactions.
+
+The 3C-2 imported-image seam uses the newly staged owner-private source as the
+only mount target. Typed `Get-VHD`, `Mount-VHD`, and `Dismount-VHD` remain native
+operations; Device Lab owns the Storage partition-style read, hashes, file
+publication, manifest, and the bounded dismount recovery after an uncertain
+mount response. Mounting a unique staged file permits path-based cleanup
+without dismounting a pre-existing base.
+
+The 3C-3 automatic-image seam spans both catalog profiles. The low-level layer
+maps `Get-VHD`, `Convert-VHD`, and `Resize-VHD` to one native target each and
+accepts a bounded longer timeout for conversion and resize within the existing
+acquisition deadline. Device Lab orchestrates the preparation, typed VHD calls,
+and finalization. Download, QEMU, hashes, ACLs, path ownership, content
+comparison, publication, manifests, and public diagnostics stay outside the
+low-level library. Because typed calls run in separate PowerShell processes,
+phase boundaries reopen and revalidate files rather than depending on the
+monolithic acquisition script's long-lived file handles. An uncertain VHD
+mutation cannot authorize image or manifest publication. A lost finalization
+response or later validation failure retains the unmanifested base for guarded
+recovery, at the original path or a unique retained path when a validated prior
+pair must be restored. A hash or post-hoc path stat alone cannot prove that
+this transaction created it. An interrupted prior-pair retirement is recovered
+before a new acquisition attempt.
 
 ### Networking slice boundary
 
@@ -293,17 +384,16 @@ on one owned VM, so it needs no crash-recovery intent journal either. What it
 does keep is the host-wide containment re-check after removal: that is the
 property proving the address is free for the next device that derives it.
 
-**Slice 2B's compatibility branch is reachable in production, and 2A's is not.**
-For 2A the legacy host-fabric helpers run only through the explicit injected
-seam, as stated above. 2B's seam resolves the PowerShell executable itself and
-takes the `legacy-compatibility` branch when it can resolve none — which is a
-production path, not only a test one. That is deliberate: the legacy generator
-builds its command from the executable the caller supplied, so it still works
-where the typed client, which must name a binary to run against, cannot be
-built at all. Failing instead would turn a host that previously worked into one
-that does not. The difference is recorded because it changes what has to be true
-before the legacy generators can be deleted: for 2A, that no test injects them;
-for 2B, that as well as executable resolution never failing on a supported host.
+**Slice 2B's original compatibility rationale is superseded.** For 2A the
+legacy host-fabric helpers run only through the explicit injected seam, as
+stated above. Slice 2B originally retained a second PowerShell lookup and a
+`legacy-compatibility` branch if that lookup failed. A later caller audit found
+that Hyper-V lifecycle command construction already rejects a missing executable
+and passes the selected path to bootstrap discovery and teardown. The second
+lookup did not establish a supported additional runtime; it could only change
+the route after the lifecycle command was built. The live VM bootstrap branch
+was therefore retired while the exported legacy generators stayed available
+for compatibility consumers and direct tests.
 
 **A decision reads only what it decides from.** Bootstrap teardown originally
 took the same host observation discovery takes, though it consults only the VM's
@@ -510,9 +600,13 @@ identities. The final cleanup removal deletes the state file as its terminal
 checkpoint, so a crash before the caller returns resumes as already complete
 rather than as an unmanaged stale identity.
 
-`hyperVSnapshotRepairCommand` deliberately stays a host-control PowerShell asset:
-it reconciles checkpoint state across several cmdlets rather than issuing one
-native primitive, so it does not fit the low-level contract.
+Snapshot journal repair now uses a typed native `Repair-VMSnapshotState`
+transaction. It keeps policy restoration, readback, and failed-restore
+quarantine inside one owner-fenced native execution. Splitting those steps
+across typed calls would leave a gap between the ownership read and `Set-VM`.
+Device Lab still owns the journal, checkpoint name, expected policy, and
+post-repair status confirmation. The older host-control repair asset remains
+packaged for compatibility, with no live broker caller.
 
 Each slice moves consumer policy into the Device Lab adapter rather than into the
 library. Slice 1 moved ownership fencing, delete confirmation by observation, and
@@ -747,6 +841,16 @@ now sets `AutoFlush` on the `StreamWriter` before handing it to `SetOut`. The
 relay could only have reported this as a protocol failure or a timeout; the
 probe reported it as the PowerShell error it was.
 
+The shared library-test elevation launcher had the same outer-exception bug.
+It also collapsed every other `Start-Process` exception to
+`elevation-launch-failed`, which made a Windows Setup diagnostic rerun unable
+to distinguish input decoding, RunAs, and exit-result failures. It now walks at
+most eight inner exceptions, preserves 1223 as `elevation-cancelled`, and emits
+only the stage plus signed Int32 native-error and HRESULT fields. Raw localized
+messages and paths never cross the launcher frame. The parent validates the
+exact frame grammar and Int32 ranges before appending that fingerprint to the
+Level 3 diagnostic reason.
+
 The run after that reached the first Hyper-V mutation and failed as
 `hyper-v-network-real-ensure-mutation-unconfirmed`, with the library's bounded
 cause discarded by the proof's own assertion. The proof now reports
@@ -788,6 +892,15 @@ uncovered were all invisible to the suite, and seven of the eight were in the
 elevated child, the generated PowerShell, or a fake that did not model the
 host. That is the boundary's real lesson: everything below the typed contract
 needs a host, and the child probe is how a host answers in one run.
+
+The Device Lab production adapter uses the same stabilization rule exposed by
+that proof. A newly created Internal switch can take several observations to
+publish its management adapter, and a newly assigned gateway can remain
+`Tentative` while Windows performs address checks. Those two outcomes are
+read-only retries: the adapter waits 250 ms, re-observes at most 12 times, and
+never repeats the preceding mutation. The caller's operation deadline is also
+threaded into the loop, so it declines another wait when that interval no
+longer fits. Conflict, ambiguous mutation, and cleanup outcomes are not retried.
 
 For the same reason the caller's deadline starts in `execute`, before the queue
 wait, not inside the write. Timing it from the write gave a queued caller no
@@ -1347,7 +1460,154 @@ before UAC launches the child, the peer's identity comes from
 trusted, and the pipe allows a single server instance so its name cannot be
 squatted.
 
+## Slice 4A: Windows guest execution and transfer
+
+`Invoke-Guest` is a typed, single target action with `exec`, `mkdir`, `upload`,
+and `download` variants. Its request carries an exact VM ID plus generic name
+and Notes preconditions. Device Lab computes those preconditions from its owned
+device and verifies the credential's owner-private path before calling the
+library. The low-level layer does not know CCC ownership or broker paths.
+
+Every credential-bearing action uses the one-shot PowerShell transport. The
+shared cross-owner session pool is never passed to the guest adapter. Native
+resolves the exact VM and Running state, checks the path-bound CLIXML value is a
+PSCredential, and creates and removes one PowerShell Direct session for the
+action. An uncertain response is an error and never triggers an automatic
+replay. Guest exec reports the guest exit code as a completed typed result;
+the broker maps a nonzero code to its existing HTTP 422 response.
+
+Upload creates the remote parent in one typed call, then copies the staged
+source in another. Download reads at most 16 MiB inside the guest session and
+writes directly to the broker's private staging path. Only byte counts cross
+the response envelope; Device Lab reads and verifies the staged bytes before
+publishing to the requested local file. Diagnostic and provisioning builders
+remain separate follow-up slices because their observation and rollback
+transactions remain coupled.
+
+### Windows guest readiness and media containment (slice 4B)
+
+The library exposes a one-shot `Invoke-Guest` job action and an exact
+`Remove-VMDvdDrive` operation. The job action starts PowerShell Direct with
+`-AsJob`, waits at most 15 seconds, receives one bounded string, and removes
+the job. Device Lab supplies the fixed first-logon probe and applies its own
+marker, secret, media and network policy. The one-shot process is limited by
+the remaining readiness budget, including credential loading and job startup.
+
+DVD removal requires VM ID, name, Notes and literal ISO path, rejects multiple
+matching attachments and reads back absence. If the response is uncertain,
+Device Lab makes read-only VM/DVD observations within the deadline and does not
+repeat the removal. Only confirmed scrub and detachment permit guarded host ISO
+deletion. The broker computes the ISO path from owner/device identity for
+containment; symlinks, unreadable paths and invalid ancestors count as retained.
+It captures a boot diagnostic before any required force stop, including when
+readiness did not start. The two proof latches remain separate in failure
+observations, and only both together veto retained-media containment.
+
+### Windows guest provisioning (slice 4D)
+
+Device Lab keeps the private DPAPI credential, three-file `CCC_UNATTEND` ISO,
+first-logon program, network policy and owner artifact layout. The media
+builder receives the new guest password through process input and emits only
+the expected VM identity and staged artifact paths. Device Lab checks that
+result before it asks the typed library to change the VM. Before writing the
+ISO, it reads the exact VM's DVD drives and rejects an already attached copy
+of that ISO; native configuration checks attachment absence again.
+
+`Configure-VMGuestBoot` receives an exact VM ID plus expected name and Notes,
+the OS disk and staged ISO paths, and an explicit generation-specific boot
+policy. Native code confirms identity, Off state, generation, sole OS disk and
+absence of the ISO attachment before adding one DVD. It then configures Gen 2
+firmware or Gen 1 BIOS, enables integration services and reads back the VM,
+media, boot and service state. A failed transaction removes only its newly
+attached DVD after rechecking exact identity and Off state, and the broker
+rolls back the owned VM and artifacts. An
+uncertain result is not replayed. The operation emits fixed error codes rather
+than PowerShell exception text or host paths. Device Lab retains the existing
+public response redaction and rollback behavior.
+
 ## Follow-up
+
+### Boot diagnostic snapshot (slice 4C)
+
+`Get-VMDiagnostic` is one typed, read-only native operation. It verifies VM ID,
+exact name and opaque Notes before reading optional host evidence. The trusted
+PowerShell asset catches integration-service, firmware or BIOS, disk, VHD and
+DVD failures independently, preserving verified VM state and unaffected
+sections. The typed decoder bounds every public member and rejects unknown
+fields, paths and malformed responses. Device Lab supplies the owner marker,
+cleanup deadline and `lastBootCheck` persistence policy. Both Linux and Windows
+VM readiness failures use the same operation before any containment stop.
+
+The older diagnostic module remains as a compatibility reference until the
+remaining host-control operations migrate. This Linux build checks static
+source and TypeScript behavior; native parser and live VM evidence remain a
+parent Goal gate.
+
+### Typed status composition (slice 5A)
+
+The four production status reads share one Device Lab adapter over typed
+`Get-VM`, `Get-VMHardDiskDrive`, `Get-VHD` and `Get-VMSnapshot` operations. The
+low-level library remains independent of CCC ownership and snapshot naming;
+Device Lab checks exact VM ID, name and opaque Notes, then verifies later disk
+and snapshot records belong to that VM. The native ID selector uses
+`Get-VM -Id` so these reads do not enumerate the host VM inventory. The first disk's VHD parent chain is
+walked to its base with a bounded visited set, retaining the legacy active
+path fallback on a native VHD read error. Protocol and transport errors fail
+closed. The existing owner-root checks in snapshot
+flows still reject an unmatched base path. All reads consume one transaction
+deadline, and no partial status is published after a failed read. The legacy
+status builder remains for dry-run command projection.
+
+### Typed VM power lifecycle (slice 5B)
+
+Production `device_start`, `device_stop`, and `device_reboot` use a Device Lab
+power adapter over typed `Get-VM`, `Start-VM`, `Stop-VM`, and `Restart-VM` operations.
+Linux and Windows boot-failure containment use the same typed stop transaction.
+The adapter reads the stored VM GUID with exact owner-scoped name and Notes before
+and after mutation; native PowerShell repeats the name and Notes check on the
+selected GUID immediately before changing power state. Normal stop requests guest
+shutdown, while force stop turns the VM off. Running reboot invokes Restart-VM
+once; an Off VM starts only when `startIfStopped` is requested. Start admission
+uses current free host memory with the existing reserve and CPU limits. All calls
+share the broker deadline and return fixed, redacted error codes. Legacy power
+builders remain only for dry-run command projection. The Linux integration and
+static checks exercise the routing and contract; live Windows Hyper-V validation
+remains a parent Goal gate.
+
+### Typed VM deletion and orphan recovery (slice 5C)
+
+Production `device_delete`, pending delete reconciliation, create residue
+recovery, ID-conflict rollback, and creation compensation use guarded typed
+`Remove-VM`. Device Lab translates its owner/device/incarnation identity into
+the generic guard. Before mutation, native PowerShell re-resolves the VM GUID
+and checks its exact name, Notes, hard disks, and mounted DVD paths. Marked
+VMs may use expected disks or checkpoint differencing disks inside their owned
+disk directory. An unmarked partial-create VM must have only the expected root
+disk and may retain only the expected provisioning media. The guarded native call turns a live VM off,
+rechecks the same facts, and then removes it. A lost response is settled only
+by fresh reads proving both GUID and name absent.
+
+The separate `Remove-HostFiles` low-level primitive accepts explicit paths and
+an optional checkpoint disk directory, all contained by one caller-supplied
+root. Its native implementation checks every path component for reparse points,
+rejects non-files, and bounds retries. It carries no CCC naming or owner policy:
+Device Lab supplies the canonical root and expected files and invokes it only
+after VM absence is proved. Network allocation, private-root cleanup, and
+journal/state completion remain Device Lab responsibilities. Legacy generated
+delete and orphan commands remain solely for dry-run projection. Linux tests
+exercise the dispatch and guards; native PowerShell and live Hyper-V proof
+remain a parent Goal gate.
+
+Hyper-V delete is idempotent across the MCP boundary as well as inside the host
+broker. The implicit lifecycle router normally uses broker inventory to infer
+the backend before mutation. If an explicit `windows-vm` or `linux-vm` delete
+no longer appears in that inventory, the router still sends the exact delete to
+the broker, whose missing-device branch performs no provider operation and
+returns `alreadyMissing: true`. This closes the inventory/delete race during
+residue recovery. The exception is limited to explicit Hyper-V delete: missing
+status, start, stop, or reboot requests and ambiguous or mismatched backends
+remain fail-closed.
+
 
 After the first reconciliation slice passes focused Linux checks and Windows
 hardware validation, migrate additional Hyper-V operations behind the same
@@ -1367,3 +1627,52 @@ envelope — who, per the section above, has won regardless — and it is a chan
 to generated elevated PowerShell in the exact code that produced eight
 real-host defects here, so the risk outweighs the gain until it can be carried
 on a real host.
+
+### Residual route and package audit
+
+The current broker's default VM create, status, power, delete and orphan routes
+are typed. Linux seed-media attachment and boot setup also use the typed
+configuration transaction. Snapshot journal repair also uses one typed
+transaction. The VM bootstrap network seam now uses the typed client with the
+executable already selected for the lifecycle command. Its earlier legacy
+compatibility branch was retired; command builders remain exported but have no
+live broker caller. The setup/admin, Storage,
+filesystem, media-building and SSH commands have different ownership boundaries;
+their presence as PowerShell or provider commands alone is not evidence that a
+VM primitive is missing from the library. The detailed dispatch inventory is
+in `GUIDE__typed-library-support.md`.
+
+The typed teardown now refuses a named bootstrap adapter with a wrong or absent
+MAC, rather than calling it already absent. An adapter with a different name
+still counts as absence. This keeps a VM on the bootstrap switch from being
+reported contained when its named bootstrap adapter has drifted.
+
+Package verification now treats host-mutating Level 3 launchers as opt-in.
+The tarball consumer probe may compile and import current typed APIs, inspect
+packaged assets, and exercise fake transport integrity checks on Windows, but
+must not request UAC or start a VM. Only non-Windows hosts invoke the packaged
+Level 3 entrypoint to verify its explicit Windows-required SKIP. Windows CI
+can therefore run the package probe alongside parser/Pester checks. Neither
+CI job proves live Hyper-V behavior; a disposable Windows host remains the
+parent Goal's hardware gate, including guarded removal and file cleanup.
+
+### Typed Linux NoCloud seed attachment
+
+Device Lab now generates SSH keys, known hosts, cloud-init and the `cidata.iso`
+without direct VM cmdlets. Before writing those files, its typed reads check
+the exact VM ID/name/Notes/Off/generation and the unique bootstrap MAC both on
+the VM and across the host. It validates the media output and SSH host identity
+before the VM is changed.
+
+The existing typed `Configure-VMGuestBoot` transaction gained an explicit Linux
+policy. Its Windows default and integration-service behavior are unchanged.
+Linux rechecks the bootstrap MAC and VM identity immediately before DVD attach,
+keeps Secure Boot Off for generation 2 or IDE-first BIOS order for generation 1,
+and leaves integration-service state alone. Native readback stays in the shared
+transaction. Linux failure leaves an attachment untouched when its identity is
+uncertain, since a matching path or controller slot can belong to another
+attachment by cleanup time. Device Lab performs owner-scoped create rollback;
+an uncertain result is never replayed. Windows retains its prior cleanup path.
+The observable behavior and failure checks are in
+`doc/device-lab/REQ__hyper-v-typed-linux-seed.md`. Native Windows parser and
+disposable-host proof remain pending for the parent Goal.

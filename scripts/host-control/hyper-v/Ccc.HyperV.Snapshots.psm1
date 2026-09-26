@@ -95,26 +95,29 @@ function Repair-CccVmSnapshotState {
     param(
         [Parameter(Mandatory = $true)] [object] $Vm,
         [Parameter(Mandatory = $true)] [string] $SnapshotName,
-        [Parameter(Mandatory = $true)] [ValidateSet('Production', 'ProductionOnly')] [string] $ExpectedPolicy
+        [Parameter(Mandatory = $true)] [ValidateSet('Production', 'ProductionOnly')] [string] $ExpectedPolicy,
+        [scriptblock] $PolicyWriter = { param($TargetVm, $Policy) Set-VM -VM $TargetVm -CheckpointType $Policy -ErrorAction Stop },
+        [scriptblock] $VmReader = { param($VmId) Get-VM -Id $VmId -ErrorAction Stop },
+        [scriptblock] $SnapshotReader = { param($TargetVm) @(Get-VMSnapshot -VM $TargetVm -ErrorAction Stop) }
     )
 
     if ([string]$Vm.CheckpointType -eq 'Disabled') { throw 'hyper-v-snapshot-policy-quarantined' }
     if ([string]$Vm.CheckpointType -ne $ExpectedPolicy) {
         try {
-            Set-VM -VM $Vm -CheckpointType $ExpectedPolicy -ErrorAction Stop
-            $Vm = Get-VM -Id $Vm.Id -ErrorAction Stop
+            $null = & $PolicyWriter $Vm $ExpectedPolicy
+            $Vm = & $VmReader $Vm.Id
             if ([string]$Vm.CheckpointType -ne $ExpectedPolicy) { throw 'restore-unconfirmed' }
         } catch {
             try {
-                Set-VM -VM $Vm -CheckpointType Disabled -ErrorAction Stop
-                $Vm = Get-VM -Id $Vm.Id -ErrorAction Stop
+                $null = & $PolicyWriter $Vm 'Disabled'
+                $Vm = & $VmReader $Vm.Id
                 if ([string]$Vm.CheckpointType -ne 'Disabled') { throw 'quarantine-unconfirmed' }
             } catch { throw 'hyper-v-snapshot-policy-quarantine-failed' }
             throw 'hyper-v-snapshot-policy-restore-failed'
         }
     }
 
-    $Candidates = @(Get-VMSnapshot -VM $Vm -ErrorAction Stop | Where-Object { $_.Name -eq $SnapshotName })
+    $Candidates = @(& $SnapshotReader $Vm | Where-Object { $_.Name -eq $SnapshotName })
     if ($Candidates.Count -gt 1) { throw 'hyper-v-snapshot-reconciliation-ambiguous' }
     return [ordered]@{ ok = $true; checkpointPolicy = [string]$Vm.CheckpointType; candidateCount = $Candidates.Count }
 }

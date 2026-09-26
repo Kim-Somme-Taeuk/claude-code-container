@@ -71,6 +71,16 @@ export function hyperVGuestExecCommand(options: HyperVGuestExecOptions): HyperVP
 }
 
 export function hyperVGuestProvisionCommand(options: HyperVGuestProvisionOptions): HyperVProviderCommand {
+    return buildHyperVGuestProvisionCommand(options, false);
+}
+
+// Device Lab owns the secret-bearing credential and OOBE ISO. VM mutations are performed
+// afterward by the typed Hyper-V library, which rechecks the exact owner identity.
+export function hyperVGuestProvisionMediaCommand(options: HyperVGuestProvisionOptions): HyperVProviderCommand {
+    return buildHyperVGuestProvisionCommand(options, true);
+}
+
+function buildHyperVGuestProvisionCommand(options: HyperVGuestProvisionOptions, mediaOnly: boolean): HyperVProviderCommand {
     assertIdentity(options);
     if (!options.vmId) throw new Error("hyper-v-vm-id-missing");
     if (!options.diskPath) throw new Error("hyper-v-disk-path-missing");
@@ -155,9 +165,9 @@ export function hyperVGuestProvisionCommand(options: HyperVGuestProvisionOptions
         "  $script:CccProvisionStage = $Stage",
         "  [Console]::Out.WriteLine(('CCC_HYPER_V_STAGE:hyper-v-guest-provision-' + $Stage + '-command-failed'))",
         "}",
-        "Set-CccProvisionStage 'vm-lookup'",
+        mediaOnly ? "Set-CccProvisionStage 'input-validation'" : "Set-CccProvisionStage 'vm-lookup'",
         "try {",
-        ...ownedVmPrelude(options),
+        ...(mediaOnly ? [] : ownedVmPrelude(options)),
         `$DiskPath = ${psQuote(diskPath)}`,
         `$CredentialPath = ${psQuote(credentialPath)}`,
         `$ProvisioningMedia = ${psQuote(provisioningMediaPath)}`,
@@ -165,8 +175,10 @@ export function hyperVGuestProvisionCommand(options: HyperVGuestProvisionOptions
         `$ExpectedUsername = ${psQuote(options.guestUsername)}`,
         `$FirstLogonLauncher = ${psQuote(HYPER_V_FIRST_LOGON_LAUNCHER)}`,
         `$FirstLogonScriptBase64 = ${psQuote(firstLogonScriptBase64)}`,
-        "Set-CccProvisionStage 'vm-state'",
-        "if ($Vm.State -ne 'Off') { throw 'hyper-v-guest-provision-requires-stopped-vm' }",
+        ...(mediaOnly ? [] : [
+            "Set-CccProvisionStage 'vm-state'",
+            "if ($Vm.State -ne 'Off') { throw 'hyper-v-guest-provision-requires-stopped-vm' }",
+        ]),
         "Set-CccProvisionStage 'input-validation'",
         "Assert-NoReparsePath $MediaSourceRoot",
         "$RawInput = $CccCommandInput",
@@ -180,9 +192,11 @@ export function hyperVGuestProvisionCommand(options: HyperVGuestProvisionOptions
         "$SecurePassword = ConvertTo-SecureString -String $PlainPassword -AsPlainText -Force",
         "$Credential = [System.Management.Automation.PSCredential]::new($ExpectedUsername, $SecurePassword)",
         "$Credential | Export-Clixml -LiteralPath $CredentialPath -Force",
-        "Set-CccProvisionStage 'media-check'",
-        "$ExistingAttachment = @(Get-VMDvdDrive -VM $Vm -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $ProvisioningMedia })",
-        "if ($ExistingAttachment.Count -ne 0) { throw 'hyper-v-guest-provisioning-media-already-attached' }",
+        ...(mediaOnly ? [] : [
+            "Set-CccProvisionStage 'media-check'",
+            "$ExistingAttachment = @(Get-VMDvdDrive -VM $Vm -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $ProvisioningMedia })",
+            "if ($ExistingAttachment.Count -ne 0) { throw 'hyper-v-guest-provisioning-media-already-attached' }",
+        ]),
         "try {",
         "  Set-CccProvisionStage 'media-content'",
         "  $PasswordXml = [Security.SecurityElement]::Escape($PlainPassword)",
@@ -197,6 +211,7 @@ export function hyperVGuestProvisionCommand(options: HyperVGuestProvisionOptions
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
         "<unattend xmlns=\"urn:schemas-microsoft-com:unattend\">",
         "  <settings pass=\"oobeSystem\">",
+        "    <component name=\"Microsoft-Windows-International-Core\" processorArchitecture=\"amd64\" publicKeyToken=\"31bf3856ad364e35\" language=\"neutral\" versionScope=\"nonSxS\"><InputLocale>0409:00000409</InputLocale><SystemLocale>en-US</SystemLocale><UILanguage>en-US</UILanguage><UserLocale>en-US</UserLocale></component>",
         "    <component name=\"Microsoft-Windows-Shell-Setup\" processorArchitecture=\"amd64\" publicKeyToken=\"31bf3856ad364e35\" language=\"neutral\" versionScope=\"nonSxS\" xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\">",
         "      <AutoLogon><Password><Value>$PasswordXml</Value><PlainText>true</PlainText></Password><Enabled>true</Enabled><LogonCount>1</LogonCount><Username>$UsernameXml</Username></AutoLogon>",
         "      <FirstLogonCommands><SynchronousCommand wcm:action=\"add\"><CommandLine>$LauncherXml</CommandLine><Description>Remove CCC bootstrap secrets</Description><Order>1</Order></SynchronousCommand></FirstLogonCommands>",
@@ -215,20 +230,22 @@ export function hyperVGuestProvisionCommand(options: HyperVGuestProvisionOptions
         "  $IsoFiles = $null",
         "  $UnattendBytes = $null",
         "  $FirstLogonBytes = $null",
-        "  Set-CccProvisionStage 'media-attach'",
-        "  try { Add-VMDvdDrive -VM $Vm -Path $ProvisioningMedia -ErrorAction Stop | Out-Null } catch { throw 'hyper-v-guest-provisioning-media-attach-failed' }",
-        "  $OsDisks = @(Get-VMHardDiskDrive -VM $Vm -ErrorAction Stop | Where-Object { [string]$_.Path -eq $DiskPath })",
-        "  if ($OsDisks.Count -ne 1) { throw 'hyper-v-guest-disk-attachment-mismatch' }",
-        "  if ([int]$Vm.Generation -eq 2) {",
-        "    Set-VMFirmware -VM $Vm -EnableSecureBoot On -SecureBootTemplate 'MicrosoftWindows' -FirstBootDevice $OsDisks[0] -ErrorAction Stop",
-        "    $Firmware = Get-VMFirmware -VM $Vm -ErrorAction Stop",
-        "    if ([string]$Firmware.SecureBoot -ne 'On') { throw 'hyper-v-guest-secure-boot-not-enabled' }",
-        "  }",
-        "  else { Set-VMBios -VM $Vm -StartupOrder @('IDE','CD','LegacyNetworkAdapter','Floppy') -ErrorAction Stop }",
-        "  $IntegrationServices = @(Get-VMIntegrationService -VM $Vm -ErrorAction Stop)",
-        "  $IntegrationServices | Where-Object { -not $_.Enabled } | Enable-VMIntegrationService -ErrorAction Stop",
-        "  $DisabledIntegrationServices = @(Get-VMIntegrationService -VM $Vm -ErrorAction Stop | Where-Object { -not $_.Enabled })",
-        "  if ($DisabledIntegrationServices.Count -ne 0) { throw 'hyper-v-guest-integration-services-not-enabled' }",
+        ...(mediaOnly ? [] : [
+            "  Set-CccProvisionStage 'media-attach'",
+            "  try { Add-VMDvdDrive -VM $Vm -Path $ProvisioningMedia -ErrorAction Stop | Out-Null } catch { throw 'hyper-v-guest-provisioning-media-attach-failed' }",
+            "  $OsDisks = @(Get-VMHardDiskDrive -VM $Vm -ErrorAction Stop | Where-Object { [string]$_.Path -eq $DiskPath })",
+            "  if ($OsDisks.Count -ne 1) { throw 'hyper-v-guest-disk-attachment-mismatch' }",
+            "  if ([int]$Vm.Generation -eq 2) {",
+            "    Set-VMFirmware -VM $Vm -EnableSecureBoot On -SecureBootTemplate 'MicrosoftWindows' -FirstBootDevice $OsDisks[0] -ErrorAction Stop",
+            "    $Firmware = Get-VMFirmware -VM $Vm -ErrorAction Stop",
+            "    if ([string]$Firmware.SecureBoot -ne 'On') { throw 'hyper-v-guest-secure-boot-not-enabled' }",
+            "  }",
+            "  else { Set-VMBios -VM $Vm -StartupOrder @('IDE','CD','LegacyNetworkAdapter','Floppy') -ErrorAction Stop }",
+            "  $IntegrationServices = @(Get-VMIntegrationService -VM $Vm -ErrorAction Stop)",
+            "  $IntegrationServices | Where-Object { -not $_.Enabled } | Enable-VMIntegrationService -ErrorAction Stop",
+            "  $DisabledIntegrationServices = @(Get-VMIntegrationService -VM $Vm -ErrorAction Stop | Where-Object { -not $_.Enabled })",
+            "  if ($DisabledIntegrationServices.Count -ne 0) { throw 'hyper-v-guest-integration-services-not-enabled' }",
+        ]),
         "} catch {",
         "  Remove-Item -LiteralPath $CredentialPath -Force -ErrorAction SilentlyContinue",
         "  Assert-NoReparsePath $ProvisioningMedia",
@@ -239,7 +256,9 @@ export function hyperVGuestProvisionCommand(options: HyperVGuestProvisionOptions
         "  $Provisioning = $null",
         "  $RawInput = $null",
         "}",
-        "$Result = [ordered]@{ ok = $true; vmId = [string]$Vm.Id; vmName = $Vm.Name; guestUsername = $ExpectedUsername; credentialPath = $CredentialPath; unattendPath = $ProvisioningMedia }",
+        mediaOnly
+            ? `$Result = [ordered]@{ ok = $true; vmId = ${psQuote(options.vmId)}; vmName = ${psQuote(options.vmName)}; guestUsername = $ExpectedUsername; credentialPath = $CredentialPath; unattendPath = $ProvisioningMedia }`
+            : "$Result = [ordered]@{ ok = $true; vmId = [string]$Vm.Id; vmName = $Vm.Name; guestUsername = $ExpectedUsername; credentialPath = $CredentialPath; unattendPath = $ProvisioningMedia }",
         "$Result | ConvertTo-Json -Compress -Depth 5",
         "} catch {",
         "  $CccFailure = [string]$_.Exception.Message",

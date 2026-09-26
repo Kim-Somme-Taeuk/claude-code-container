@@ -13,6 +13,7 @@ import {
     HYPER_V_CLEANUP_RESERVE_MS,
     HYPER_V_MAX_BOOT_TIMEOUT_MS,
     HYPER_V_PROVIDER_LIFECYCLE_TIMEOUT_MS,
+    HYPER_V_LINUX_GUI_TIMEOUT_MS,
     brokerDeviceToolExecutionTimeout,
     brokerLifecycleExecutionTimeout,
 } from "../../device-lab-mcp/src/server.mjs";
@@ -23,6 +24,7 @@ import {
     DEVICE_BROKER_HYPER_V_CREATE_POST_ACQUIRE_BUDGET_MS,
     DEVICE_BROKER_HYPER_V_CLEANUP_RESERVE_MS,
     DEVICE_BROKER_HYPER_V_PROVIDER_LIFECYCLE_TIMEOUT_MS,
+    DEVICE_BROKER_HYPER_V_LINUX_GUI_TIMEOUT_MS,
     hyperVLifecycleCleanupTimeoutMs,
     DEVICE_BROKER_HYPER_V_CREATE_RPC_TIMEOUT_MS,
     DEVICE_BROKER_HYPER_V_HOST_LOCK_WAIT_MS,
@@ -107,6 +109,7 @@ describe("device-lab public timeout bounds", () => {
         // reply carrying scrubContainmentFailed — the one signal that a guest may still be up with
         // a live autologon. A silent divergence here loses that signal with nothing failing.
         expect(HYPER_V_CLEANUP_RESERVE_MS).toBe(DEVICE_BROKER_HYPER_V_CLEANUP_RESERVE_MS);
+        expect(HYPER_V_LINUX_GUI_TIMEOUT_MS).toBe(DEVICE_BROKER_HYPER_V_LINUX_GUI_TIMEOUT_MS);
 
         // The equality above is not the invariant that matters — it only holds today because both
         // sides independently spell out the same four-term sum. What must be true is that the
@@ -116,7 +119,8 @@ describe("device-lab public timeout bounds", () => {
         for (const backend of ["windows-vm", "linux-vm"] as const) {
             for (const command of ["device_start", "device_reboot"] as const) {
                 // Default boot budget, matching what the broker assumes when bootTimeoutMs is absent.
-                const operationTimeoutMs = DEVICE_BROKER_HYPER_V_PROVIDER_LIFECYCLE_TIMEOUT_MS + (5 * 60 * 1000);
+                const operationTimeoutMs = DEVICE_BROKER_HYPER_V_PROVIDER_LIFECYCLE_TIMEOUT_MS + (5 * 60 * 1000)
+                    + (backend === "linux-vm" ? DEVICE_BROKER_HYPER_V_LINUX_GUI_TIMEOUT_MS : 0);
                 const client = brokerLifecycleExecutionTimeout({ backend, command }).rpcTimeoutMs;
                 const brokerOuterWindow = DEVICE_BROKER_HYPER_V_HOST_LOCK_WAIT_MS
                     + hyperVLifecycleCleanupTimeoutMs(backend, command, operationTimeoutMs);
@@ -158,7 +162,7 @@ describe("device-lab public timeout bounds", () => {
             rpcTimeoutMs: HYPER_V_HOST_LOCK_WAIT_MS + HYPER_V_PROVIDER_LIFECYCLE_TIMEOUT_MS + (5 * 60 * 1000) + HYPER_V_CLEANUP_RESERVE_MS + HYPER_V_LIFECYCLE_RPC_BUFFER_MS,
         });
         expect(brokerLifecycleExecutionTimeout({ backend: "linux-vm", command: "device_reboot", bootTimeoutMs: HYPER_V_MAX_BOOT_TIMEOUT_MS })).toEqual({
-            rpcTimeoutMs: HYPER_V_HOST_LOCK_WAIT_MS + HYPER_V_PROVIDER_LIFECYCLE_TIMEOUT_MS + HYPER_V_MAX_BOOT_TIMEOUT_MS + HYPER_V_CLEANUP_RESERVE_MS + HYPER_V_LIFECYCLE_RPC_BUFFER_MS,
+            rpcTimeoutMs: HYPER_V_HOST_LOCK_WAIT_MS + HYPER_V_PROVIDER_LIFECYCLE_TIMEOUT_MS + HYPER_V_MAX_BOOT_TIMEOUT_MS + HYPER_V_LINUX_GUI_TIMEOUT_MS + HYPER_V_CLEANUP_RESERVE_MS + HYPER_V_LIFECYCLE_RPC_BUFFER_MS,
         });
         expect(brokerLifecycleExecutionTimeout({
             backend: "linux-vm",
@@ -166,7 +170,7 @@ describe("device-lab public timeout bounds", () => {
             bootTimeoutMs: HYPER_V_MAX_BOOT_TIMEOUT_MS,
             rpcTimeoutMs: 30000,
         })).toEqual({
-            rpcTimeoutMs: HYPER_V_HOST_LOCK_WAIT_MS + HYPER_V_PROVIDER_LIFECYCLE_TIMEOUT_MS + HYPER_V_MAX_BOOT_TIMEOUT_MS + HYPER_V_CLEANUP_RESERVE_MS + HYPER_V_LIFECYCLE_RPC_BUFFER_MS,
+            rpcTimeoutMs: HYPER_V_HOST_LOCK_WAIT_MS + HYPER_V_PROVIDER_LIFECYCLE_TIMEOUT_MS + HYPER_V_MAX_BOOT_TIMEOUT_MS + HYPER_V_LINUX_GUI_TIMEOUT_MS + HYPER_V_CLEANUP_RESERVE_MS + HYPER_V_LIFECYCLE_RPC_BUFFER_MS,
         });
         expect(brokerLifecycleExecutionTimeout({
             backend: "windows-vm",
@@ -180,7 +184,7 @@ describe("device-lab public timeout bounds", () => {
             command: "device_reboot",
             rpcTimeoutMs: Number.MAX_SAFE_INTEGER,
         })).toEqual({
-            rpcTimeoutMs: HYPER_V_HOST_LOCK_WAIT_MS + HYPER_V_PROVIDER_LIFECYCLE_TIMEOUT_MS + (5 * 60 * 1000) + HYPER_V_CLEANUP_RESERVE_MS + HYPER_V_LIFECYCLE_RPC_BUFFER_MS,
+            rpcTimeoutMs: HYPER_V_HOST_LOCK_WAIT_MS + HYPER_V_PROVIDER_LIFECYCLE_TIMEOUT_MS + (5 * 60 * 1000) + HYPER_V_LINUX_GUI_TIMEOUT_MS + HYPER_V_CLEANUP_RESERVE_MS + HYPER_V_LIFECYCLE_RPC_BUFFER_MS,
         });
         // The client still computes a no-boot timeout for this shape, but the broker refuses the
         // request at validation, so the path is unreachable end to end. Kept as a pin on the

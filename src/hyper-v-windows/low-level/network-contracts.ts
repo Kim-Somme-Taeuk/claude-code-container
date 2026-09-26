@@ -366,14 +366,15 @@ export type HyperVGetNetNeighborsRequest = {
     readonly interfaceIndex: HyperVInterfaceIndex;
 };
 
-// The one destructive primitive in this slice. It names the VM, the adapter, and the address
-// the adapter must already carry, and the native side removes only when all three identify
-// exactly one adapter. Hyper-V permits two adapters on one VM to share a name, so a name
-// alone cannot be an identity here.
+// The one destructive primitive in this slice. It names the VM, its expected ownership
+// marker, the adapter, and the address the adapter must already carry. The native side
+// removes only after the current VM marker and exact adapter identity agree. Hyper-V permits
+// two adapters on one VM to share a name, so a name alone cannot be an identity here.
 export type HyperVRemoveVMNetworkAdapterRequest = {
     readonly selector: HyperVVirtualMachineSelector;
     readonly adapterName: HyperVVMNetworkAdapterName;
     readonly macAddress: HyperVMacAddress;
+    readonly expectedNotes: string;
 };
 
 export type HyperVCreateVMSwitchRequest = {

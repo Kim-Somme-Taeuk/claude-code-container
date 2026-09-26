@@ -1,4 +1,5 @@
 import { type HyperVProviderCommand } from "./contracts.js";
+import { dirname, resolve } from "path";
 import { psQuote, assertPlainPath, assertPathInside, jsonScript, command } from "./core.js";
 
 export type HyperVCreatePrologueOptions = {
@@ -86,14 +87,27 @@ export function hyperVCreatePrologueCommand(options: HyperVCreatePrologueOptions
         // basis of compensation.
         "$DeviceRootExisted = [bool](Test-Path -LiteralPath $DeviceRoot)",
         "$DiskDirectoryExisted = [bool](Test-Path -LiteralPath $DiskDirectory)",
-        "$env:CCC_HYPER_V_STAGE = 'hyper-v-device-root-acl-failed'",
-        "New-Item -ItemType Directory -Path $DeviceRoot -Force | Out-Null",
-        "Set-CccPrivateDirectoryAcl $DeviceRoot",
+        // No result can reach Node if an ACL or path check below fails. The command itself
+        // must remove only the directories it made; Node cannot infer effects from silence.
+        "try {",
+        "  $env:CCC_HYPER_V_STAGE = 'hyper-v-device-root-acl-failed'",
+        "  New-Item -ItemType Directory -Path $DeviceRoot -Force | Out-Null",
+        "  Set-CccPrivateDirectoryAcl $DeviceRoot",
         // Re-checked after the device root exists: creating it may have followed a component
         // that was fine a moment ago, and the disk directory is created next.
-        "Assert-NoReparsePath $DiskDirectory",
-        "New-Item -ItemType Directory -Path $DiskDirectory -Force | Out-Null",
-        "Set-CccPrivateDirectoryAcl $DiskDirectory",
+        "  Assert-NoReparsePath $DiskDirectory",
+        "  New-Item -ItemType Directory -Path $DiskDirectory -Force | Out-Null",
+        "  Set-CccPrivateDirectoryAcl $DiskDirectory",
+        "} catch {",
+        "  $PrimaryError = $_",
+        "  $DiskDirectoryRemaining = $false",
+        "  $DeviceRootRemaining = $false",
+        "  try { if (-not $DiskDirectoryExisted) { Assert-NoReparsePath $DiskDirectory; if (Test-Path -LiteralPath $DiskDirectory) { Remove-Item -LiteralPath $DiskDirectory -Force -ErrorAction Stop } } } catch { $DiskDirectoryRemaining = $true }",
+        "  try { if (-not $DeviceRootExisted) { Assert-NoReparsePath $DeviceRoot; if (Test-Path -LiteralPath $DeviceRoot) { Remove-Item -LiteralPath $DeviceRoot -Force -ErrorAction Stop } } } catch { $DeviceRootRemaining = $true }",
+        "  $Partial = [ordered]@{ ok = $false; deviceRoot = $DeviceRoot; diskDirectory = $DiskDirectory; deviceRootRemaining = $DeviceRootRemaining; diskDirectoryRemaining = $DiskDirectoryRemaining }",
+        "  $Partial | ConvertTo-Json -Compress -Depth 3",
+        "  throw $PrimaryError",
+        "}",
         "$Result = [ordered]@{ ok = $true; deviceRootExisted = $DeviceRootExisted; diskDirectoryExisted = $DiskDirectoryExisted; deviceRoot = $DeviceRoot; diskDirectory = $DiskDirectory }",
         "$Result | ConvertTo-Json -Compress -Depth 3",
     ];
@@ -101,4 +115,62 @@ export function hyperVCreatePrologueCommand(options: HyperVCreatePrologueOptions
     // whose Hyper-V module is broken still fails on the operation that needs it rather than on
     // directory creation, which would name the wrong cause.
     return command(options.executable, jsonScript(lines, "hyper-v-vm-path-inspection-failed", true));
+}
+
+export type HyperVCreatePrologueFailure = {
+    readonly ok: false;
+    readonly deviceRoot: string;
+    readonly diskDirectory: string;
+    readonly deviceRootRemaining: boolean;
+    readonly diskDirectoryRemaining: boolean;
+};
+
+/** Reports only directories whose self-cleanup failed after a prologue error. */
+export function parseHyperVCreatePrologueFailure(stdout: string): HyperVCreatePrologueFailure | null {
+    const last = stdout.trim().split(/\r?\n/).at(-1);
+    if (!last) return null;
+    let value: unknown;
+    try { value = JSON.parse(last); } catch { return null; }
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const result = value as Record<string, unknown>;
+    if (result.ok !== false || typeof result.deviceRoot !== "string" || !result.deviceRoot
+        || typeof result.diskDirectory !== "string" || !result.diskDirectory
+        || typeof result.deviceRootRemaining !== "boolean"
+        || typeof result.diskDirectoryRemaining !== "boolean") return null;
+    return result as HyperVCreatePrologueFailure;
+}
+
+/** Removes one creation effect only after a native all-tag reparse check. */
+export function hyperVCreateCompensationCommand(options: {
+    readonly executable: string;
+    readonly deviceRoot: string;
+    readonly diskPath: string;
+    readonly kind: "delete-file" | "delete-directory";
+    readonly path: string;
+}): HyperVProviderCommand {
+    const deviceRoot = assertPlainPath(options.deviceRoot, "device-root");
+    const diskPath = assertPathInside(deviceRoot, options.diskPath, "disk-path");
+    const target = assertPlainPath(options.path, "compensation-path");
+    const expected = options.kind === "delete-file"
+        ? [diskPath]
+        : [dirname(diskPath), deviceRoot];
+    if (!expected.some((path) => resolve(path) === resolve(target))) {
+        throw new Error("hyper-v-create-compensation-path-invalid");
+    }
+    const lines = [
+        `$DeviceRoot = ${psQuote(deviceRoot)}`,
+        `$Target = ${psQuote(target)}`,
+        "Assert-NoReparsePath $DeviceRoot",
+        "Assert-NoReparsePath $Target",
+        "$Item = Get-Item -LiteralPath $Target -Force -ErrorAction Stop",
+        ...(options.kind === "delete-file"
+            ? ["if ($Item.PSIsContainer) { throw 'hyper-v-create-compensation-path-invalid' }"]
+            : [
+                "if (-not $Item.PSIsContainer) { throw 'hyper-v-create-compensation-path-invalid' }",
+                "if (@(Get-ChildItem -LiteralPath $Target -Force -ErrorAction Stop | Select-Object -First 1).Count -ne 0) { throw 'hyper-v-create-compensation-directory-not-empty' }",
+            ]),
+        "Remove-Item -LiteralPath $Target -Force -ErrorAction Stop",
+        "@{ ok = $true } | ConvertTo-Json -Compress",
+    ];
+    return command(options.executable, jsonScript(lines, "hyper-v-create-compensation-failed", true));
 }

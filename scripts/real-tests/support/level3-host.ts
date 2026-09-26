@@ -2,17 +2,18 @@ import { spawnSync } from "child_process";
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 
-export const HYPER_V_LEVEL3_WINDOWS_UNATTEND_OOBE_SCHEMA_CONTRACT = "hyper-v-windows-unattend-oobe-schema-v2";
+export const HYPER_V_LEVEL3_WINDOWS_UNATTEND_OOBE_SCHEMA_CONTRACT = "hyper-v-windows-unattend-oobe-schema-v3";
 export const HYPER_V_LEVEL3_POWERSHELL_DIRECT_BOUNDED_PROBE_CONTRACT = "hyper-v-powershell-direct-bounded-probe-v1";
-export const HYPER_V_LEVEL3_WINDOWS_LIBRARY_CONTRACT = "hyper-v-windows-library-v6";
+export const HYPER_V_LEVEL3_WINDOWS_LIBRARY_CONTRACT = "hyper-v-windows-library-v16";
 // Every contract that is also exported standalone is declared above the required list and then
 // referenced by it, never re-spelled inside it. Two reasons: the array is evaluated at module load,
 // so a forward reference hits the temporal dead zone; and a duplicated literal is free to drift, so
 // the exported contract and the entry attestation actually checks can silently disagree.
 export const HYPER_V_LEVEL3_GUEST_DIAGNOSTICS_CONTRACT = "hyper-v-guest-readiness-diagnostics-v24";
-export const HYPER_V_LEVEL3_PROVIDER_CONTRACT = "hyper-v-provider-image-finalization-v39";
+export const HYPER_V_LEVEL3_PROVIDER_CONTRACT = "hyper-v-provider-image-finalization-v40";
+export const HYPER_V_LEVEL3_LINUX_X11_TYPE_CONTRACT = "hyper-v-linux-x11-type-v2";
 export const HYPER_V_LEVEL3_NETWORK_OWNERSHIP_CONTRACT = "hyper-v-setup-network-v10";
-export const HYPER_V_LEVEL3_NETWORK_DIAGNOSTICS_CONTRACT = "hyper-v-network-failure-diagnostics-v9";
+export const HYPER_V_LEVEL3_NETWORK_DIAGNOSTICS_CONTRACT = "hyper-v-network-failure-diagnostics-v10";
 export const HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES = [
     "hyper-v-vm-managed-auto-images-v20",
     HYPER_V_LEVEL3_NETWORK_OWNERSHIP_CONTRACT,
@@ -25,11 +26,13 @@ export const HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES = [
     "hyper-v-image-acquisition-stage-cache-v1",
     "hyper-v-powershell-stage-propagation-v1",
     HYPER_V_LEVEL3_PROVIDER_CONTRACT,
+    HYPER_V_LEVEL3_LINUX_X11_TYPE_CONTRACT,
     HYPER_V_LEVEL3_NETWORK_DIAGNOSTICS_CONTRACT,
 ];
 const HOST_BROKER_STATUS_MAX_BYTES = 256 * 1024;
 const HOST_BROKER_STATUS_TIMEOUT_MS = 5000;
 const HOST_BROKER_REPAIR_TIMEOUT_MS = 180000;
+const HOST_BROKER_ATTESTATION_MAX_ATTEMPTS = 3;
 
 export function buildLevel3Artifacts(repoRoot, options: any = {}) {
     const spawn = options.spawn || spawnSync;
@@ -162,21 +165,40 @@ export async function ensureHostBrokerReady(repoRoot, options: any = {}) {
             windowsHide: true,
         },
     );
-    const result = runStatus();
-    const stdout = String(result.stdout || "");
-    const verifiedCapabilities = /^brokerVerifiedCapabilities:\s*(.*)$/m.exec(stdout)?.[1]
-        ?.split(",")
-        .map((capability) => capability.trim())
-        .filter(Boolean) || [];
-    const missingCapabilities = HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
-        .filter((capability) => !verifiedCapabilities.includes(capability));
-    const verifiedPid = Number(/^brokerVerifiedPid:\s*(\d+)$/m.exec(stdout)?.[1] || "");
-    const verifiedStartedAt = /^brokerVerifiedStartedAt:\s*(\S+)$/m.exec(stdout)?.[1] || "";
-    if (result.status === 0 && missingCapabilities.length > 0) {
-        process.stderr.write(`CCC host broker capability attestation failed; missing: ${missingCapabilities.join(", ")}\n`);
-        return 1;
-    }
-    if (result.status === 0 && /brokerReady:\s*true/.test(stdout)) {
+    for (let attempt = 1; attempt <= HOST_BROKER_ATTESTATION_MAX_ATTEMPTS; attempt += 1) {
+        const result = runStatus();
+        const stdout = String(result.stdout || "");
+        const verifiedCapabilities = /^brokerVerifiedCapabilities:\s*(.*)$/m.exec(stdout)?.[1]
+            ?.split(",")
+            .map((capability) => capability.trim())
+            .filter(Boolean) || [];
+        const missingCapabilities = HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
+            .filter((capability) => !verifiedCapabilities.includes(capability));
+        const verifiedPid = Number(/^brokerVerifiedPid:\s*(\d+)$/m.exec(stdout)?.[1] || "");
+        const verifiedStartedAt = /^brokerVerifiedStartedAt:\s*(\S+)$/m.exec(stdout)?.[1] || "";
+        if (result.status === 0 && missingCapabilities.length > 0) {
+            process.stderr.write(`CCC host broker capability attestation failed; missing: ${missingCapabilities.join(", ")}\n`);
+            return 1;
+        }
+        if (result.status !== 0 || !/brokerReady:\s*true/.test(stdout)) {
+            const processError = result.error instanceof Error
+                ? `${result.error.name}: ${result.error.message}`
+                : result.error ? String(result.error) : "";
+            const childOutput = String(result.stderr || result.stdout || "").trimEnd();
+            const processDiagnostic = [
+                "CCC host broker repair preflight failed",
+                `status=${result.status ?? "missing"}`,
+                `signal=${result.signal || "none"}`,
+                `error=${processError || "no-output"}`,
+                `timeoutMs=${repairTimeoutMs}`,
+            ].join("; ");
+            process.stderr.write(`${childOutput ? `${childOutput}\n` : ""}${processDiagnostic}\n`);
+            return 1;
+        }
+        if (!Number.isInteger(verifiedPid) || verifiedPid < 1 || !verifiedStartedAt) {
+            process.stderr.write("CCC host broker capability attestation failed; status did not report a valid process identity\n");
+            return 1;
+        }
         const port = Number(/^port:\s*(\d+)$/m.exec(stdout)?.[1] || "");
         if (!Number.isInteger(port) || port < 1 || port > 65535) {
             process.stderr.write("CCC host broker capability attestation failed; status did not report a valid port\n");
@@ -207,46 +229,56 @@ export async function ensureHostBrokerReady(repoRoot, options: any = {}) {
             ].join("; ") + "\n");
             return 1;
         }
-        const confirmed = runStatus();
-        const confirmedStdout = String(confirmed.stdout || "");
-        const confirmedCapabilities = /^brokerVerifiedCapabilities:\s*(.*)$/m.exec(confirmedStdout)?.[1]
-            ?.split(",")
-            .map((capability) => capability.trim())
-            .filter(Boolean) || [];
-        const confirmedPid = Number(/^brokerVerifiedPid:\s*(\d+)$/m.exec(confirmedStdout)?.[1] || "");
-        const confirmedStartedAt = /^brokerVerifiedStartedAt:\s*(\S+)$/m.exec(confirmedStdout)?.[1] || "";
+        if (!Number.isInteger(observed.pid) || observed.pid < 1 || !observed.startedAt) {
+            process.stderr.write("CCC host broker remote capability attestation failed; invalid process identity\n");
+            return 1;
+        }
+        const confirmed = await probe(port, {
+            ...options,
+            timeoutMs: Math.min(
+                remainingMs(),
+                Number.isFinite(options.timeoutMs)
+                    ? Math.max(1, Number(options.timeoutMs))
+                    : HOST_BROKER_STATUS_TIMEOUT_MS,
+            ),
+        });
+        const confirmedCapabilities = Array.isArray(confirmed?.capabilities)
+            ? confirmed.capabilities.map(String)
+            : [];
         const missingConfirmedCapabilities = HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
             .filter((capability) => !confirmedCapabilities.includes(capability));
-        if (confirmed.status === 0
-            && /brokerReady:\s*true/.test(confirmedStdout)
-            && missingConfirmedCapabilities.length === 0
-            && verifiedPid === observed.pid
-            && confirmedPid === observed.pid
+        if (confirmed?.ok !== true || missingConfirmedCapabilities.length > 0) {
+            process.stderr.write([
+                "CCC host broker remote confirmation attestation failed",
+                `port=${port}`,
+                `error=${String(confirmed?.error || "missing-required-capabilities")}`,
+                `missing=${missingConfirmedCapabilities.join(", ") || "unknown"}`,
+                `observed=${confirmedCapabilities.filter((capability) => capability.startsWith("hyper-v-")).join(", ") || "none"}`,
+            ].join("; ") + "\n");
+            return 1;
+        }
+        if (!Number.isInteger(confirmed.pid) || confirmed.pid < 1 || !confirmed.startedAt) {
+            process.stderr.write("CCC host broker remote confirmation attestation failed; invalid process identity\n");
+            return 1;
+        }
+        if (verifiedPid === observed.pid
+            && confirmed.pid === observed.pid
             && verifiedStartedAt === observed.startedAt
-            && confirmedStartedAt === observed.startedAt) {
+            && confirmed.startedAt === observed.startedAt) {
             process.stdout.write(`ATTEST Hyper-V broker pid=${observed.pid} startedAt=${observed.startedAt}\n`);
             return 0;
         }
+        const canRetry = attempt < HOST_BROKER_ATTESTATION_MAX_ATTEMPTS && Date.now() < deadlineAt;
+        if (canRetry) continue;
         process.stderr.write([
             "CCC host broker process identity changed during capability attestation",
+            `attempts=${attempt}`,
             `port=${port}`,
-            `initialPid=${Number.isInteger(verifiedPid) ? verifiedPid : "missing"}`,
-            `observedPid=${Number.isInteger(observed.pid) ? observed.pid : "missing"}`,
-            `confirmedPid=${Number.isInteger(confirmedPid) ? confirmedPid : "missing"}`,
+            `initialPid=${verifiedPid}`,
+            `observedPid=${observed.pid}`,
+            `confirmedPid=${confirmed.pid}`,
         ].join("; ") + "\n");
         return 1;
     }
-    const processError = result.error instanceof Error
-        ? `${result.error.name}: ${result.error.message}`
-        : result.error ? String(result.error) : "";
-    const childOutput = String(result.stderr || result.stdout || "").trimEnd();
-    const processDiagnostic = [
-        "CCC host broker repair preflight failed",
-        `status=${result.status ?? "missing"}`,
-        `signal=${result.signal || "none"}`,
-        `error=${processError || "no-output"}`,
-        `timeoutMs=${repairTimeoutMs}`,
-    ].join("; ");
-    process.stderr.write(`${childOutput ? `${childOutput}\n` : ""}${processDiagnostic}\n`);
     return 1;
 }

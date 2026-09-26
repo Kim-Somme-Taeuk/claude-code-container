@@ -61,9 +61,10 @@ export function hyperVLinuxSeedCommand(options: HyperVLinuxSeedOptions): HyperVP
         "  $script:CccProvisionStage = $Stage",
         "  [Console]::Out.WriteLine(('CCC_HYPER_V_STAGE:hyper-v-linux-seed-' + $Stage + '-command-failed'))",
         "}",
-        "Set-CccProvisionStage 'vm-lookup'",
+        "Set-CccProvisionStage 'path-validation'",
         "try {",
-        ...ownedVmPrelude(options),
+        `$ExpectedId = [Guid]${psQuote(options.vmId)}`,
+        `$ExpectedName = ${psQuote(options.vmName)}`,
         `$DeviceRoot = ${psQuote(deviceRoot)}`,
         `$DiskPath = ${psQuote(diskPath)}`,
         `$SeedDisk = ${psQuote(seedDiskPath)}`,
@@ -72,13 +73,10 @@ export function hyperVLinuxSeedCommand(options: HyperVLinuxSeedOptions): HyperVP
         `$HostPrivateKey = ${psQuote(hostPrivateKeyPath)}`,
         `$HostPublicKey = ${psQuote(hostPublicKeyPath)}`,
         `$KnownHosts = ${psQuote(knownHostsPath)}`,
-        `$ExpectedBootstrapMac = ${psQuote(bootstrapMacAddress.replaceAll(":", "").toUpperCase())}`,
+        `$BootstrapMac = ${psQuote(bootstrapMacAddress)}`,
         `$MediaSourceRoot = ${psQuote(mediaSourceRoot)}`,
         `$MetadataBase64 = ${psQuote(Buffer.from(metadata, "utf8").toString("base64"))}`,
         `$GuestUsername = ${psQuote(username)}`,
-        "Set-CccProvisionStage 'vm-state'",
-        "if ($Vm.State -ne 'Off') { throw 'hyper-v-linux-seed-requires-stopped-vm' }",
-        "Set-CccProvisionStage 'path-validation'",
         "Assert-NoReparsePath $DeviceRoot",
         "Assert-NoReparsePath $SeedDisk",
         "Assert-NoReparsePath $PrivateKey",
@@ -127,14 +125,6 @@ export function hyperVLinuxSeedCommand(options: HyperVLinuxSeedOptions): HyperVP
         "$HostPublicKeyBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($HostPublicKeyText + [char]10))",
         "Set-Content -LiteralPath $KnownHosts -Value (" + psQuote(address) + " + ' ' + $HostPublicKeyText) -Encoding ASCII -Force",
         "Set-CccProvisionStage 'bootstrap-network'",
-        "$BootstrapAdapters = @(Get-VMNetworkAdapter -VM $Vm -ErrorAction Stop | Where-Object { $_.Name -eq 'CCC Bootstrap DHCP' -and $_.SwitchName -eq 'Default Switch' })",
-        "if ($BootstrapAdapters.Count -ne 1) { throw 'hyper-v-linux-bootstrap-adapter-invalid' }",
-        "$BootstrapMacHex = ([string]$BootstrapAdapters[0].MacAddress).ToUpperInvariant()",
-        "if ($BootstrapMacHex -notmatch '^[0-9A-F]{12}$') { throw 'hyper-v-linux-bootstrap-mac-invalid' }",
-        "if ($BootstrapMacHex -ne $ExpectedBootstrapMac) { throw 'hyper-v-linux-bootstrap-mac-identity-mismatch' }",
-        "$HostBootstrapMacMatches = @(Get-VMNetworkAdapter -All -ErrorAction Stop | Where-Object { ([string]$_.MacAddress).ToUpperInvariant() -eq $ExpectedBootstrapMac })",
-        "if ($HostBootstrapMacMatches.Count -ne 1 -or [string]$HostBootstrapMacMatches[0].VMId -ne [string]$Vm.Id -or [string]$HostBootstrapMacMatches[0].Name -cne 'CCC Bootstrap DHCP') { throw 'hyper-v-linux-bootstrap-mac-identity-mismatch' }",
-        "$BootstrapMac = (($BootstrapMacHex -replace '(..)(?!$)', '$1:')).ToLowerInvariant()",
         "$NetworkConfig = @('version: 2', 'ethernets:', '  bootstrap0:', '    match:', (\"      macaddress: '\" + $BootstrapMac + \"'\"), '    set-name: bootstrap0', '    dhcp4: true', '    dhcp6: false', '') -join [Environment]::NewLine",
         "$NetworkBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($NetworkConfig))",
         "$UserConfig = [ordered]@{",
@@ -154,10 +144,6 @@ export function hyperVLinuxSeedCommand(options: HyperVLinuxSeedOptions): HyperVP
         "}",
         "$UserData = '#cloud-config' + [Environment]::NewLine + ($UserConfig | ConvertTo-Json -Compress -Depth 8)",
         "$UserDataBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($UserData))",
-        "Set-CccProvisionStage 'media-check'",
-        "$ExistingAttachment = @(Get-VMDvdDrive -VM $Vm -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $SeedDisk })",
-        "if ($ExistingAttachment.Count -ne 0) { throw 'hyper-v-linux-seed-media-already-attached' }",
-        "if ($ExistingAttachment.Count -eq 0) {",
         "  Set-CccProvisionStage 'media-build'",
         "  $IsoFiles = [ordered]@{",
         "    'meta-data' = [Convert]::FromBase64String($MetadataBase64)",
@@ -169,18 +155,7 @@ export function hyperVLinuxSeedCommand(options: HyperVLinuxSeedOptions): HyperVP
         ...isoWriterLines(3),
         "  Write-CccIso $IsoFiles $SeedDisk 'cidata' $MediaSourceRoot",
         "  $IsoFiles = $null",
-        "  Set-CccProvisionStage 'media-attach'",
-        "  try { Add-VMDvdDrive -VM $Vm -Path $SeedDisk -ErrorAction Stop | Out-Null } catch { throw 'hyper-v-linux-seed-media-attach-failed' }",
-        "  $OsDisks = @(Get-VMHardDiskDrive -VM $Vm -ErrorAction Stop | Where-Object { [string]$_.Path -eq $DiskPath })",
-        "  if ($OsDisks.Count -ne 1) { throw 'hyper-v-linux-disk-attachment-mismatch' }",
-        "  if ([int]$Vm.Generation -eq 2) {",
-        "    Set-VMFirmware -VM $Vm -FirstBootDevice $OsDisks[0] -ErrorAction Stop",
-        "    $Firmware = Get-VMFirmware -VM $Vm -ErrorAction Stop",
-        "    $FirstBootDevice = @($Firmware.BootOrder)[0].Device",
-        "    if (-not $FirstBootDevice -or [string]$FirstBootDevice.Path -ne $DiskPath) { throw 'hyper-v-linux-disk-boot-order-mismatch' }",
-        "  } else { Set-VMBios -VM $Vm -StartupOrder @('IDE','CD','LegacyNetworkAdapter','Floppy') -ErrorAction Stop }",
-        "}",
-        "$Result = [ordered]@{ ok = $true; vmId = [string]$Vm.Id; vmName = $Vm.Name; seedDiskPath = $SeedDisk; sshPrivateKeyPath = $PrivateKey; sshPublicKeyPath = $PublicKey; sshHostPublicKeyPath = $HostPublicKey; sshHostKeyFingerprint = $HostFingerprint; knownHostsPath = $KnownHosts; guestUsername = $GuestUsername; networkAddress = " + psQuote(address) + " }",
+        "$Result = [ordered]@{ ok = $true; vmId = [string]$ExpectedId; vmName = $ExpectedName; seedDiskPath = $SeedDisk; sshPrivateKeyPath = $PrivateKey; sshPublicKeyPath = $PublicKey; sshHostPublicKeyPath = $HostPublicKey; sshHostKeyFingerprint = $HostFingerprint; knownHostsPath = $KnownHosts; guestUsername = $GuestUsername; networkAddress = " + psQuote(address) + " }",
         "$Result | ConvertTo-Json -Compress -Depth 5",
         "} catch {",
         "  $CccFailure = [string]$_.Exception.Message",
@@ -197,6 +172,54 @@ export function hyperVLinuxSshReadyCommand(options: HyperVLinuxSshOptions): Hype
         executable: options.executable,
         args: [...sshBaseArgs(options), "printf 'ccc-hyper-v-linux-ready\\n'"],
     };
+}
+
+// Ubuntu's cloud image has no graphical session. The first verified device_start
+// provisions it automatically; subsequent starts and reboots use the ready probe.
+export function hyperVLinuxGuiPrepareCommand(options: HyperVLinuxSshOptions): HyperVProviderCommand {
+    assertLinuxUsername(options.guestUsername);
+    const guiUsername = "ccc-desktop";
+    const guestCommand = [
+        "set -euo pipefail",
+        `if systemctl is-active --quiet lightdm && pgrep -x Xorg >/dev/null && pgrep -u ${guiUsername} -x xfce4-session >/dev/null && command -v xdotool >/dev/null; then printf 'CCC_HYPER_V_GUI_READY\\n'; exit 0; fi`,
+        "stage=privilege",
+        "trap 'printf \"hyper-v-linux-gui-%s-failed\\n\" \"$stage\" >&2' ERR",
+        "sudo -n true",
+        "stage=apt-update",
+        "sudo -n timeout --signal=TERM --kill-after=10s 120s env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=25 -o Acquire::https::Timeout=25 update -qq >/dev/null",
+        "stage=apt-install",
+        "sudo -n timeout --signal=TERM --kill-after=10s 720s env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=2 -o Acquire::http::Timeout=25 -o Acquire::https::Timeout=25 install -y -qq --no-install-recommends xorg xserver-xorg-video-fbdev lightdm lightdm-gtk-greeter xfce4 xfce4-terminal dbus-x11 xdotool >/dev/null",
+        "stage=configure",
+        `getent passwd ${guiUsername} >/dev/null || sudo -n useradd -m -s /bin/bash -U ${guiUsername}`,
+        `if id -nG ${guiUsername} | tr ' ' '\\n' | grep -Eq '^(sudo|admin|wheel)$'; then false; fi`,
+        "getent group autologin >/dev/null || sudo -n groupadd -r autologin",
+        `sudo -n usermod -aG autologin ${guiUsername}`,
+        "sudo -n install -d -m 755 /etc/lightdm/lightdm.conf.d",
+        `printf '[Seat:*]\\nautologin-user=${guiUsername}\\nautologin-user-timeout=0\\nuser-session=xfce\\n' | sudo -n tee /etc/lightdm/lightdm.conf.d/90-ccc-device-lab.conf >/dev/null`,
+        "sudo -n systemctl set-default graphical.target",
+        "sudo -n systemctl enable lightdm",
+        "stage=start",
+        "sudo -n timeout --signal=TERM --kill-after=10s 30s systemctl restart lightdm",
+        "stage=ready",
+        `for attempt in $(seq 1 60); do if systemctl is-active --quiet lightdm && pgrep -x Xorg >/dev/null && pgrep -u ${guiUsername} -x xfce4-session >/dev/null && command -v xdotool >/dev/null; then printf 'CCC_HYPER_V_GUI_READY\\n'; exit 0; fi; sleep 1; done`,
+        "printf 'hyper-v-linux-gui-ready-failed\\n' >&2",
+        "exit 1",
+    ].join("\n");
+    return hyperVLinuxSshExecCommand({ ...options, guestCommand });
+}
+
+export function hyperVLinuxGuiReadyCommand(options: HyperVLinuxSshOptions): HyperVProviderCommand {
+    assertLinuxUsername(options.guestUsername);
+    const guiUsername = "ccc-desktop";
+    const guestCommand = [
+        `if systemctl is-active --quiet lightdm && pgrep -x Xorg >/dev/null && pgrep -u ${guiUsername} -x xfce4-session >/dev/null && command -v xdotool >/dev/null; then`,
+        "  printf 'CCC_HYPER_V_GUI_READY\\n'",
+        "else",
+        "  printf 'hyper-v-linux-gui-ready-failed\\n' >&2",
+        "  exit 1",
+        "fi",
+    ].join("\n");
+    return hyperVLinuxSshExecCommand({ ...options, guestCommand });
 }
 
 export function hyperVBootstrapNetworkCommand(options: HyperVBootstrapNetworkOptions): HyperVProviderCommand {
@@ -269,6 +292,29 @@ export function hyperVLinuxSshExecCommand(options: HyperVLinuxSshOptions & { gue
         executable: options.executable,
         args: [...sshBaseArgs(options), `printf %s ${encoded} | base64 -d | bash`],
     };
+}
+
+export function hyperVLinuxGuiTypeGuestCommand(text: string): string {
+    if (!text || text.length > 2048 || text.includes("\0")) throw new Error("hyper-v-console-text-invalid");
+    const encoded = Buffer.from(text, "utf8").toString("base64");
+    return [
+        "set -euo pipefail",
+        "command -v xdotool >/dev/null || { printf 'hyper-v-linux-gui-input-unavailable\\n' >&2; exit 1; }",
+        `printf %s ${encoded} | base64 -d | sudo -n -u ccc-desktop env DISPLAY=:0 XAUTHORITY=/home/ccc-desktop/.Xauthority xdotool type --clearmodifiers --delay 10 --file -`,
+    ].join("\n");
+}
+
+// Hyper-V's synthetic mouse wheel (SetScrollPosition) reports success but does not reach an
+// X11 session in the Linux guest. The broker positions the pointer through the console first,
+// so this only presses the X11 wheel buttons (4 = up, 5 = down) where the pointer already is.
+export function hyperVLinuxGuiScrollGuestCommand(direction: "up" | "down", amount: number): string {
+    if (direction !== "up" && direction !== "down") throw new Error("hyper-v-console-scroll-direction-invalid");
+    if (!Number.isInteger(amount) || amount < 1 || amount > 10) throw new Error("hyper-v-console-scroll-amount-invalid");
+    return [
+        "set -euo pipefail",
+        "command -v xdotool >/dev/null || { printf 'hyper-v-linux-gui-input-unavailable\\n' >&2; exit 1; }",
+        `sudo -n -u ccc-desktop env DISPLAY=:0 XAUTHORITY=/home/ccc-desktop/.Xauthority xdotool click --repeat ${amount} --delay 40 ${direction === "up" ? 4 : 5}`,
+    ].join("\n");
 }
 
 export function hyperVLinuxScpUploadCommand(options: HyperVLinuxSshOptions & { localPath: string; remotePath: string }): HyperVProviderCommand {

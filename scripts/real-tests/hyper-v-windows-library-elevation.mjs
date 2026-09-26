@@ -462,18 +462,30 @@ export function elevationPowerShellScripts({ powerShellPath, nodePath, nodeDiges
     const launcherScript = [
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
+        "$Stage = 'input'",
         "try {",
         "  $LaunchLine = [Console]::In.ReadLine()",
         "  if ([string]::IsNullOrWhiteSpace($LaunchLine)) { throw 'elevation-launch-input-missing' }",
         "  $LaunchJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($LaunchLine))",
         "  $Launch = $LaunchJson | ConvertFrom-Json -ErrorAction Stop",
+        "  $Stage = 'runas'",
         "  $Process = Start-Process -FilePath ([string]$Launch.powerShellPath) -Verb RunAs -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',[string]$Launch.elevatedCommand) -Wait -PassThru -ErrorAction Stop",
+        "  $Stage = 'result'",
         `  [Console]::Out.WriteLine('${ELEVATION_RESULT_MARKER}EXIT:' + [string]$Process.ExitCode)`,
         "} catch {",
-        "  if ($_.Exception -is [ComponentModel.Win32Exception] -and $_.Exception.NativeErrorCode -eq 1223) {",
+        "  $RootException = $_.Exception",
+        "  $Win32Exception = $null",
+        "  $CurrentException = $RootException",
+        "  for ($Depth = 0; $CurrentException -and $Depth -lt 8; $Depth++) {",
+        "    if ($CurrentException -is [ComponentModel.Win32Exception]) { $Win32Exception = $CurrentException; break }",
+        "    $CurrentException = $CurrentException.InnerException",
+        "  }",
+        "  if ($Win32Exception -and $Win32Exception.NativeErrorCode -eq 1223) {",
         `    [Console]::Out.WriteLine('${ELEVATION_RESULT_MARKER}CANCELLED')`,
         "  } else {",
-        `    [Console]::Out.WriteLine('${ELEVATION_RESULT_MARKER}FAILED')`,
+        "    $NativeError = if ($Win32Exception) { ([int]$Win32Exception.NativeErrorCode).ToString([Globalization.CultureInfo]::InvariantCulture) } else { 'none' }",
+        "    $HResult = ([int]$RootException.HResult).ToString([Globalization.CultureInfo]::InvariantCulture)",
+        `    [Console]::Out.WriteLine('${ELEVATION_RESULT_MARKER}FAILED:' + $Stage + ':' + $NativeError + ':' + $HResult)`,
         "  }",
         "}",
     ].join("\n");
@@ -481,10 +493,21 @@ export function elevationPowerShellScripts({ powerShellPath, nodePath, nodeDiges
 }
 
 function parseLauncherResult(stdout) {
-    const frames = [...stdout.matchAll(new RegExp(`${ELEVATION_RESULT_MARKER}(EXIT:(\\d+)|CANCELLED|FAILED)`, "g"))];
+    const frames = [...stdout.matchAll(new RegExp(`^${ELEVATION_RESULT_MARKER}(EXIT:(\\d+)|CANCELLED|FAILED:(input|runas|result):(none|-?\\d{1,10}):(-?\\d{1,10}))\\r?$`, "gm"))];
     if (frames.length !== 1) return { errorCode: "elevation-result-missing" };
     if (frames[0][1] === "CANCELLED") return { errorCode: "elevation-cancelled" };
-    if (frames[0][1] === "FAILED") return { errorCode: "elevation-launch-failed" };
+    if (frames[0][1].startsWith("FAILED:")) {
+        const stage = frames[0][3];
+        const nativeError = frames[0][4];
+        const hresult = frames[0][5];
+        const nativeValue = nativeError === "none" ? null : Number(nativeError);
+        const hresultValue = Number(hresult);
+        const int32 = (value) => Number.isSafeInteger(value) && value >= -2147483648 && value <= 2147483647;
+        if ((nativeValue !== null && !int32(nativeValue)) || !int32(hresultValue)) {
+            return { errorCode: "elevation-result-invalid" };
+        }
+        return { errorCode: `elevation-launch-failed[stage=${stage},native=${nativeValue ?? "none"},hresult=${hresultValue}]` };
+    }
     const status = Number(frames[0][2]);
     return Number.isSafeInteger(status) && status >= 0 ? { status } : { errorCode: "elevation-result-invalid" };
 }

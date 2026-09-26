@@ -90,12 +90,14 @@ export const REQUIRED_CCC_HOST_BROKER_CAPABILITIES = [
     "hyper-v-windows-specialize-seed-v1",
     "hyper-v-windows-specialize-account-v1",
     "hyper-v-windows-boot-contract-v1",
+    "hyper-v-windows-unattend-oobe-schema-v3",
     "hyper-v-boot-disk-generation-v1",
     "hyper-v-linux-create-response-v1",
+    "hyper-v-linux-x11-type-v2",
     "hyper-v-image-acquisition-stage-cache-v1",
     "hyper-v-powershell-stage-propagation-v1",
-    "hyper-v-provider-image-finalization-v39",
-    "hyper-v-network-failure-diagnostics-v9",
+    "hyper-v-provider-image-finalization-v40",
+    "hyper-v-network-failure-diagnostics-v10",
     // Added late, and deliberately: this list had never carried the Hyper-V Windows library
     // capability at any version, so the MCP gate admitted a broker whose session re-issued a
     // privileged mutation on a false never-ran — a duplicate Remove-VMSnapshot, reachable from the
@@ -108,13 +110,14 @@ export const REQUIRED_CCC_HOST_BROKER_CAPABILITIES = [
     // capability string at any version nor the session pool at all, so no shipped broker advertises
     // it. Adding it before the branch ships costs nothing; adding it after costs the fleet migration
     // the old comment described.
-    "hyper-v-windows-library-v6",
+    "hyper-v-windows-library-v16",
 ];
 const DEFAULT_LIFECYCLE_RPC_TIMEOUT_MS = 120000;
 const MAX_RPC_TIMEOUT_MS = 21615000;
 const MAX_RPC_BODY_BYTES = 64 * 1024;
 export const BROKER_CONTROL_RESPONSE_LIMIT_BYTES = 1024 * 1024;
 export const BROKER_RPC_RESPONSE_LIMIT_BYTES = 64 * 1024 * 1024;
+export const BROKER_RPC_SCREENSHOT_RESPONSE_LIMIT_BYTES = 8 * 1024 * 1024;
 const BROKER_INVALID_RESPONSE_RAW_LIMIT_BYTES = 32 * 1024;
 const BROKER_AUTH_FILE_LIMIT_BYTES = 4096;
 const BROKER_RUNTIME_FILE_LIMIT_BYTES = 64 * 1024;
@@ -2294,7 +2297,12 @@ async function brokerRpcRequest(options = {}) {
                 port: probeOptions.port,
                 path: rpcPath,
                 timeoutMs: rpcTimeoutMs,
-                maxBytes: BROKER_RPC_RESPONSE_LIMIT_BYTES,
+                // Only Hyper-V console frames are bounded this tightly; other desktop providers keep
+                // the general RPC limit their larger native screenshots already fit under.
+                maxBytes: method === "broker.device.tool.invoke" && options.params?.tool === "device_screenshot"
+                    && (options.params?.backend === "windows-vm" || options.params?.backend === "linux-vm")
+                    ? BROKER_RPC_SCREENSHOT_RESPONSE_LIMIT_BYTES
+                    : BROKER_RPC_RESPONSE_LIMIT_BYTES,
                 headers: {
                     "content-type": "application/json",
                     ...authenticatedBrokerHeaders(token, owner, verifiedRuntime, requestBody),
@@ -2552,6 +2560,7 @@ export async function brokerCommand(options = {}) {
             waitForBoot: options.waitForBoot,
             bootTimeoutMs: options.bootTimeoutMs,
             force: options.force,
+            preserveNetwork: options.preserveNetwork,
             deleteAvd: options.deleteAvd,
             deleteSimulator: options.deleteSimulator,
             dryRun: options.dryRun,

@@ -1,4 +1,4 @@
-import { resolve } from "path";
+import { isAbsolute, resolve } from "path";
 
 import {
     type HyperVProviderCommand,
@@ -15,6 +15,100 @@ import {
 } from "./core.js";
 import { HYPER_V_UBUNTU_IMAGE_SHA256, HYPER_V_UBUNTU_IMAGE_URL, HYPER_V_UBUNTU_VIRTUAL_SIZE_BYTES } from "./ubuntu-image.js";
 import { hyperVUbuntuQcow2ImageAcquisitionLines } from "./ubuntu-image-acquisition.js";
+
+export type HyperVAcquireBaseImagePrepareObservation =
+    | { ok: true; profile: "windows-server"; imagePath: string; partialPath: string; partialSha256: string; partialSizeBytes: number }
+    | { ok: true; profile: "ubuntu-lts"; imagePath: string; partialPath: string; sourceVhdPath: string; sourceVhdSha256: string; sourceVirtualSizeBytes: number; qemuSha256: string };
+
+export type HyperVAcquireBaseImageFinalizeOptions = {
+    executable: string;
+    imageRoot: string;
+    expectedGeneration: 2;
+    expectedPartialSha256: string;
+    expectedPartialFileId: string;
+    expectedVirtualSizeBytes: number;
+    expectedVhdType: "Dynamic" | "Fixed";
+} & (
+    | { profile: "windows-server" }
+    | { profile: "ubuntu-lts"; expectedSourceVhdSha256: string; expectedSourceFileId: string; expectedQemuSha256: string }
+);
+
+export function parseHyperVAcquireBaseImagePrepareObservation(stdout: string): HyperVAcquireBaseImagePrepareObservation | null {
+    const encoded = [...String(stdout).matchAll(/CCC_HYPER_V_RESULT_B64:([A-Za-z0-9+/=]+)/g)].at(-1)?.[1];
+    if (!encoded || encoded.length > 8192) return null;
+    try {
+        const bytes = Buffer.from(encoded, "base64");
+        if (bytes.length === 0 || bytes.length > 4096 || bytes.toString("base64") !== encoded) return null;
+        const value: unknown = JSON.parse(bytes.toString("utf8"));
+        if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+        const item = value as Record<string, unknown>;
+        const path = (candidate: unknown) => typeof candidate === "string" && isAbsolute(candidate) && !/[\u0000-\u001f]/.test(candidate);
+        const sha = (candidate: unknown) => typeof candidate === "string" && /^[a-f0-9]{64}$/.test(candidate);
+        if (item.ok !== true || !path(item.imagePath) || !path(item.partialPath)) return null;
+        if (item.profile === "windows-server" && sha(item.partialSha256)
+            && typeof item.partialSizeBytes === "number" && Number.isSafeInteger(item.partialSizeBytes) && item.partialSizeBytes > 0
+            && Object.keys(item).sort().join() === "imagePath,ok,partialPath,partialSha256,partialSizeBytes,profile") {
+            return item as HyperVAcquireBaseImagePrepareObservation;
+        }
+        if (item.profile === "ubuntu-lts" && path(item.sourceVhdPath) && sha(item.sourceVhdSha256) && sha(item.qemuSha256)
+            && typeof item.sourceVirtualSizeBytes === "number" && Number.isSafeInteger(item.sourceVirtualSizeBytes) && item.sourceVirtualSizeBytes > 0
+            && Object.keys(item).sort().join() === "imagePath,ok,partialPath,profile,qemuSha256,sourceVhdPath,sourceVhdSha256,sourceVirtualSizeBytes") {
+            return item as HyperVAcquireBaseImagePrepareObservation;
+        }
+        return null;
+    } catch { return null; }
+}
+
+function hyperVImageAclLines(): string[] {
+    return [
+        "function Protect-CccImageDirectory([string]$Path) {",
+        "  try {",
+        "    $CurrentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User",
+        "    $SystemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')",
+        "    $AdministratorsSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')",
+        "    $AllowedSids = @($CurrentSid.Value, $SystemSid.Value, $AdministratorsSid.Value)",
+        "    $DirectoryInheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit",
+        "    $NoInheritance = [Security.AccessControl.InheritanceFlags]::None",
+        "    $NoPropagation = [Security.AccessControl.PropagationFlags]::None",
+        "    $FullControl = [Security.AccessControl.FileSystemRights]::FullControl",
+        "    function Set-CccExactAcl([string]$Target, [bool]$Directory) {",
+        "      $Security = if ($Directory) { [Security.AccessControl.DirectorySecurity]::new() } else { [Security.AccessControl.FileSecurity]::new() }",
+        "      $Security.SetOwner($CurrentSid)",
+        "      $Security.SetAccessRuleProtection($true, $false)",
+        "      $ExpectedInheritance = if ($Directory) { $DirectoryInheritance } else { $NoInheritance }",
+        "      foreach ($Sid in @($CurrentSid, $SystemSid, $AdministratorsSid)) {",
+        "        $Rule = [Security.AccessControl.FileSystemAccessRule]::new($Sid, $FullControl, $ExpectedInheritance, $NoPropagation, [Security.AccessControl.AccessControlType]::Allow)",
+        "        [void]$Security.AddAccessRule($Rule)",
+        "      }",
+        "      if ($Directory) { [IO.Directory]::SetAccessControl($Target, $Security) } else { [IO.File]::SetAccessControl($Target, $Security) }",
+        "      $Sections = [Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access",
+        "      $Observed = if ($Directory) { [IO.Directory]::GetAccessControl($Target, $Sections) } else { [IO.File]::GetAccessControl($Target, $Sections) }",
+        "      if (-not $Observed.AreAccessRulesProtected -or $Observed.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $CurrentSid.Value) { throw 'hyper-v-base-image-acl-failed' }",
+        "      $ObservedRules = @($Observed.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))",
+        "      if ($ObservedRules.Count -ne $AllowedSids.Count) { throw 'hyper-v-base-image-acl-failed' }",
+        "      foreach ($AllowedSid in $AllowedSids) {",
+        "        $Matching = @($ObservedRules | Where-Object { $_.IdentityReference.Value -eq $AllowedSid })",
+        "        if ($Matching.Count -ne 1 -or $Matching[0].AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or $Matching[0].FileSystemRights -ne $FullControl -or $Matching[0].InheritanceFlags -ne $ExpectedInheritance -or $Matching[0].PropagationFlags -ne $NoPropagation -or $Matching[0].IsInherited) { throw 'hyper-v-base-image-acl-failed' }",
+        "      }",
+        "    }",
+        "    Set-CccExactAcl $Path $true",
+        "    $Pending = [Collections.Generic.Stack[string]]::new()",
+        "    $Pending.Push($Path)",
+        "    while ($Pending.Count -gt 0) {",
+        "      $Parent = $Pending.Pop()",
+        "      foreach ($Entry in @(Get-ChildItem -LiteralPath $Parent -Force -ErrorAction Stop)) {",
+        "        if (($Entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'hyper-v-base-image-acl-failed' }",
+        "        Set-CccExactAcl $Entry.FullName $Entry.PSIsContainer",
+        "        if ($Entry.PSIsContainer) { $Pending.Push($Entry.FullName) }",
+        "      }",
+        "    }",
+        "  } catch {",
+        "    if ([string]$_.Exception.Message -eq 'hyper-v-base-image-acl-failed') { throw }",
+        "    throw 'hyper-v-base-image-acl-failed'",
+        "  }",
+        "}",
+    ];
+}
 
 export function hyperVPrepareBaseImageCommand(options: HyperVBaseImageOptions): HyperVProviderCommand {
     const sourceImagePath = assertPathInside(options.sourceRoot, options.sourceImagePath, "base-image-source");
@@ -81,6 +175,14 @@ export function hyperVPrepareBaseImageCommand(options: HyperVBaseImageOptions): 
 }
 
 export function hyperVAcquireBaseImageCommand(options: HyperVAcquireBaseImageOptions): HyperVProviderCommand {
+    return buildHyperVAcquireBaseImageCommand(options, "legacy");
+}
+
+export function hyperVAcquireBaseImagePrepareCommand(options: HyperVAcquireBaseImageOptions): HyperVProviderCommand {
+    return buildHyperVAcquireBaseImageCommand(options, "prepare");
+}
+
+function buildHyperVAcquireBaseImageCommand(options: HyperVAcquireBaseImageOptions, phase: "legacy" | "prepare"): HyperVProviderCommand {
     const imageRoot = assertPlainPath(options.imageRoot, "base-image-root");
     if (options.expectedGeneration !== 1 && options.expectedGeneration !== 2) {
         throw new Error("hyper-v-base-image-generation-invalid");
@@ -98,6 +200,7 @@ export function hyperVAcquireBaseImageCommand(options: HyperVAcquireBaseImageOpt
     const workPath = resolve(profileRoot, ".acquire-work");
     const sourceImagePath = resolve(profileRoot, "source.qcow2");
     const script = jsonScript([
+        ...(phase === "prepare" ? ["$CccAcquirePhase = 'prepare'"] : []),
         `$Profile = ${psQuote(options.profile)}`,
         `$ImageRoot = ${psQuote(imageRoot)}`,
         `$ProfileRoot = ${psQuote(profileRoot)}`,
@@ -176,6 +279,7 @@ export function hyperVAcquireBaseImageCommand(options: HyperVAcquireBaseImageOpt
         "$FinalGuard = $null",
         "$NormalizedOutput = $null",
         "$PartialGuard = $null",
+        ...(phase === "prepare" ? ["$CccPhaseReady = $false"] : []),
         "try {",
         "Assert-NoReparsePath $ImageRoot",
         "Assert-NoReparsePath $ProfileRoot",
@@ -183,8 +287,9 @@ export function hyperVAcquireBaseImageCommand(options: HyperVAcquireBaseImageOpt
         "Assert-NoReparsePath $PartialPath",
         "Assert-NoReparsePath $WorkPath",
         "Assert-NoReparsePath $SourceImagePath",
-        "Import-Module Hyper-V -ErrorAction Stop",
+        ...(phase === "legacy" ? ["Import-Module Hyper-V -ErrorAction Stop"] : []),
         "Add-Type -AssemblyName System.Net.Http -ErrorAction Stop",
+        ...(phase === "legacy" ? [
         "function Assert-BaseVhd([string]$Path) {",
         "  $Vhd = Get-VHD -Path $Path -ErrorAction Stop",
         "  if ([string]$Vhd.VhdFormat -ne 'VHDX' -or [string]$Vhd.VhdType -eq 'Differencing' -or $Vhd.ParentPath) { throw 'hyper-v-base-image-invalid-parent' }",
@@ -197,6 +302,7 @@ export function hyperVAcquireBaseImageCommand(options: HyperVAcquireBaseImageOpt
         "  $Json = $Result | ConvertTo-Json -Compress -Depth 5",
         `  [Console]::Out.WriteLine('${HYPER_V_RESULT_MARKER}' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Json)))`,
         "}",
+        ] : []),
         "function Save-BoundedDownload([string]$Uri, [string]$Destination, [long]$MaximumBytes, [scriptblock]$ValidateHopUri, [scriptblock]$ValidateFinalUri) {",
         "  $Handler = [System.Net.Http.HttpClientHandler]::new()",
         "  $Handler.AllowAutoRedirect = $false",
@@ -242,20 +348,38 @@ export function hyperVAcquireBaseImageCommand(options: HyperVAcquireBaseImageOpt
         "  }",
         "}",
         "New-Item -ItemType Directory -Path $ProfileRoot -Force | Out-Null",
+        "if (Test-Path -LiteralPath $ImagePath) { throw 'hyper-v-base-image-unmanaged-existing' }",
         "Protect-CccImageDirectory $ProfileRoot",
         "Assert-NoReparsePath $PartialPath",
-        "Remove-Item -LiteralPath $PartialPath -Force -ErrorAction SilentlyContinue",
+        "if (Test-Path -LiteralPath $PartialPath) { throw 'hyper-v-base-image-artifact-owner-unknown' }",
         "Assert-NoReparsePath $WorkPath",
         "if (Test-Path -LiteralPath $WorkPath) { throw 'hyper-v-base-image-work-path-not-clean' }",
-        "if (Test-Path -LiteralPath $ImagePath) { throw 'hyper-v-base-image-unmanaged-existing' }",
         "  if ($Profile -eq 'windows-server') {",
         "    Set-CccAcquireStage 'hyper-v-base-image-download-failed'",
         "    $ValidateMicrosoftHop = { param([Uri]$CandidateUri) $HostName = $CandidateUri.DnsSafeHost.ToLowerInvariant(); return ($CandidateUri.Scheme -eq 'https' -and ($HostName -eq 'go.microsoft.com' -or $HostName -eq 'aka.ms' -or $HostName -eq 'download.microsoft.com' -or $HostName.EndsWith('.download.microsoft.com') -or $HostName -eq 'software-static.download.prss.microsoft.com')) }",
         "    $ValidateMicrosoftVhdx = { param([Uri]$FinalUri) $HostName = $FinalUri.DnsSafeHost.ToLowerInvariant(); return ($FinalUri.Scheme -eq 'https' -and $FinalUri.AbsolutePath.EndsWith('.vhdx', [StringComparison]::OrdinalIgnoreCase) -and ($HostName -eq 'download.microsoft.com' -or $HostName.EndsWith('.download.microsoft.com') -or $HostName -eq 'software-static.download.prss.microsoft.com')) }",
         "    Save-BoundedDownload $WindowsUrl $PartialPath $WindowsMaxBytes $ValidateMicrosoftHop $ValidateMicrosoftVhdx",
         "  } else {",
-        ...hyperVUbuntuQcow2ImageAcquisitionLines(),
+        ...hyperVUbuntuQcow2ImageAcquisitionLines(phase),
         "  }",
+        ...(phase === "prepare" ? [
+        "  Protect-CccImageDirectory $ProfileRoot",
+        "  if ($Profile -eq 'windows-server') {",
+        "    Set-CccAcquireStage 'hyper-v-base-image-partial-hash-failed'",
+        "    Assert-NoReparsePath $PartialPath",
+        "    $PartialItem = Get-Item -LiteralPath $PartialPath -Force -ErrorAction Stop",
+        "    if ($PartialItem.PSIsContainer -or [long]$PartialItem.Length -le 0) { throw 'hyper-v-base-image-partial-inspection-failed' }",
+        "    $PartialHash = (Get-FileHash -LiteralPath $PartialPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()",
+        "    $Result = [ordered]@{ ok = $true; profile = $Profile; imagePath = $ImagePath; partialPath = $PartialPath; partialSha256 = $PartialHash; partialSizeBytes = [long]$PartialItem.Length }",
+        "  } else {",
+        "    Set-CccAcquireStage 'hyper-v-base-image-source-hash-failed'",
+        "    if ((Get-CccGuardedSha256 $NormalizedVhdGuard) -ne $GuardedNormalizedHash -or (Get-CccGuardedSha256 $QemuGuard) -ne $QemuHashBefore) { throw 'hyper-v-base-image-source-mutated' }",
+        "    $Result = [ordered]@{ ok = $true; profile = $Profile; imagePath = $ImagePath; partialPath = $PartialPath; sourceVhdPath = $NormalizedVhdPath; sourceVhdSha256 = $GuardedNormalizedHash; sourceVirtualSizeBytes = $SourceVirtualSize; qemuSha256 = $QemuHashBefore }",
+        "  }",
+        "  $Json = $Result | ConvertTo-Json -Compress -Depth 5",
+        `  [Console]::Out.WriteLine('${HYPER_V_RESULT_MARKER}' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Json)))`,
+        "  $CccPhaseReady = $true",
+        ] : [
         "  Protect-CccImageDirectory $ProfileRoot",
         "  Set-CccAcquireStage 'hyper-v-base-image-partial-open-failed'",
         "  if (-not $CompareTargetGuard) { $PartialGuard = [IO.File]::Open($PartialPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)) }",
@@ -301,6 +425,7 @@ export function hyperVAcquireBaseImageCommand(options: HyperVAcquireBaseImageOpt
         "  $Vhd = Assert-BaseVhd $ImagePath",
         "  Set-CccAcquireStage 'hyper-v-base-image-final-observation-failed'",
         "  Write-BaseObservation $Vhd $Generation $false $ValidatedPartialHash",
+        ]),
         "} catch {",
         "  $FailureMessage = [string]$_.Exception.Message",
         "  if ($FailureMessage -match '^hyper-v-[a-z0-9-]{3,128}$') { throw $FailureMessage }",
@@ -316,14 +441,168 @@ export function hyperVAcquireBaseImageCommand(options: HyperVAcquireBaseImageOpt
         "  if ($FinalGuard) { $FinalGuard.Dispose(); $FinalGuard = $null }",
         "  if ($SourceGuard) { $SourceGuard.Dispose(); $SourceGuard = $null }",
         "  if ($QemuGuard) { $QemuGuard.Dispose(); $QemuGuard = $null }",
+        "}",
+    ], undefined, true);
+    return command(options.executable, script);
+}
+
+export function hyperVAcquireBaseImageFinalizeCommand(options: HyperVAcquireBaseImageFinalizeOptions): HyperVProviderCommand {
+    const imageRoot = assertPlainPath(options.imageRoot, "base-image-root");
+    if (options.profile !== "windows-server" && options.profile !== "ubuntu-lts") {
+        throw new Error("hyper-v-base-image-profile-not-automatic");
+    }
+    if (options.expectedGeneration !== 2) throw new Error("hyper-v-base-image-generation-mismatch");
+    if (!/^[a-f0-9]{64}$/.test(options.expectedPartialSha256)) throw new Error("hyper-v-base-image-partial-hash-invalid");
+    if (!/^\d{1,20}$/.test(options.expectedPartialFileId)) throw new Error("hyper-v-base-image-partial-identity-invalid");
+    if (!Number.isSafeInteger(options.expectedVirtualSizeBytes) || options.expectedVirtualSizeBytes <= 0) {
+        throw new Error("hyper-v-base-image-virtual-size-invalid");
+    }
+    if (options.expectedVhdType !== "Dynamic" && options.expectedVhdType !== "Fixed") {
+        throw new Error("hyper-v-base-image-type-invalid");
+    }
+    if (options.profile === "ubuntu-lts"
+        && (!/^[a-f0-9]{64}$/.test(options.expectedSourceVhdSha256)
+            || !/^\d{1,20}$/.test(options.expectedSourceFileId)
+            || !/^[a-f0-9]{64}$/.test(options.expectedQemuSha256)
+            || options.expectedVirtualSizeBytes !== HYPER_V_UBUNTU_VIRTUAL_SIZE_BYTES
+            || options.expectedVhdType !== "Dynamic")) {
+        throw new Error("hyper-v-base-image-source-invalid");
+    }
+    const profileRoot = resolve(imageRoot, options.profile);
+    const imagePath = resolve(profileRoot, "base.vhdx");
+    const partialPath = resolve(profileRoot, "base.partial.vhdx");
+    const workPath = resolve(profileRoot, ".acquire-work");
+    const normalizedVhdPath = resolve(workPath, "converted.normalized.fixed.vhd");
+    const script = jsonScript([
+        "$CccAcquirePhase = 'finalize'",
+        `$Profile = ${psQuote(options.profile)}`,
+        `$ImageRoot = ${psQuote(imageRoot)}`,
+        `$ProfileRoot = ${psQuote(profileRoot)}`,
+        `$ImagePath = ${psQuote(imagePath)}`,
+        `$PartialPath = ${psQuote(partialPath)}`,
+        `$WorkPath = ${psQuote(workPath)}`,
+        `$NormalizedVhdPath = ${psQuote(normalizedVhdPath)}`,
+        `$ExpectedPartialHash = ${psQuote(options.expectedPartialSha256)}`,
+        `$ExpectedPartialFileId = ${psQuote(options.expectedPartialFileId)}`,
+        `$ExpectedVirtualSizeBytes = [long]${options.expectedVirtualSizeBytes}`,
+        `$ExpectedVhdType = ${psQuote(options.expectedVhdType)}`,
+        `$ExpectedGeneration = ${options.expectedGeneration}`,
+        ...(options.profile === "ubuntu-lts" ? [
+            `$ExpectedSourceHash = ${psQuote(options.expectedSourceVhdSha256)}`,
+            `$ExpectedSourceFileId = ${psQuote(options.expectedSourceFileId)}`,
+            `$ExpectedQemuHash = ${psQuote(options.expectedQemuSha256)}`,
+        ] : []),
+        "$script:CccAcquireStage = 'hyper-v-base-image-partial-open-failed'",
+        "$env:CCC_HYPER_V_STAGE = $script:CccAcquireStage",
+        "function Set-CccAcquireStage([string]$Stage) {",
+        "  if ($Stage -notmatch '^hyper-v-base-image-(source-open|source-hash|content-verify|partial-open|partial-hash|final-move|final-inspection|final-observation|work-cleanup)-failed$') { throw 'hyper-v-diagnostic-stage-invalid' }",
+        "  $script:CccAcquireStage = $Stage",
+        "  $env:CCC_HYPER_V_STAGE = $Stage",
+        "  [Console]::Out.WriteLine(('CCC_HYPER_V_STAGE:' + $Stage))",
+        "}",
+        ...hyperVImageAclLines(),
+        "function Get-CccGuardedSha256([IO.Stream]$Stream) {",
+        "  $Stream.Position = 0",
+        "  $Hasher = [Security.Cryptography.SHA256]::Create()",
+        "  try { return ([BitConverter]::ToString($Hasher.ComputeHash($Stream))).Replace('-', '').ToLowerInvariant() } finally { $Hasher.Dispose(); $Stream.Position = 0 }",
+        "}",
+        "Add-Type -TypeDefinition @'",
+        "using System;",
+        "using System.Runtime.InteropServices;",
+        "using Microsoft.Win32.SafeHandles;",
+        "[StructLayout(LayoutKind.Sequential, Pack = 4)] public struct CccImageHandleInfo {",
+        "  public uint Attributes, CreationLow, CreationHigh, AccessLow, AccessHigh, WriteLow, WriteHigh;",
+        "  public uint VolumeSerial, SizeHigh, SizeLow, LinkCount, FileIndexHigh, FileIndexLow;",
+        "}",
+        "public static class CccImageFileIdentity {",
+        "  [DllImport(\"kernel32.dll\", SetLastError = true)]",
+        "  [return: MarshalAs(UnmanagedType.Bool)]",
+        "  public static extern bool GetFileInformationByHandle(SafeFileHandle handle, out CccImageHandleInfo info);",
+        "}",
+        "'@ -ErrorAction Stop",
+        "function Get-CccGuardedFileId([IO.FileStream]$Stream) {",
+        "  $Info = New-Object CccImageHandleInfo",
+        "  if (-not [CccImageFileIdentity]::GetFileInformationByHandle($Stream.SafeFileHandle, [ref]$Info)) { throw 'hyper-v-base-image-file-identity-unavailable' }",
+        "  $Index = ([UInt64]$Info.FileIndexHigh * [UInt64]4294967296) + [UInt64]$Info.FileIndexLow",
+        "  return $Index.ToString([Globalization.CultureInfo]::InvariantCulture)",
+        "}",
+        "$PartialGuard = $null",
+        "$SourceGuard = $null",
+        "$QemuGuard = $null",
+        "$FinalGuard = $null",
+        "try {",
+        "  Assert-NoReparsePath $ImageRoot",
+        "  Assert-NoReparsePath $ProfileRoot",
+        "  Assert-NoReparsePath $ImagePath",
         "  Assert-NoReparsePath $PartialPath",
-        "  Remove-Item -LiteralPath $PartialPath -Force -ErrorAction SilentlyContinue",
         "  Assert-NoReparsePath $WorkPath",
-        "  if (Test-Path -LiteralPath $WorkPath) {",
-        "    $UnsafeWorkEntries = @(Get-ChildItem -LiteralPath $WorkPath -Recurse -Force -ErrorAction Stop | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 })",
-        "    if ($UnsafeWorkEntries.Count -ne 0) { throw 'hyper-v-base-image-work-cleanup-failed' }",
-        "    Remove-Item -LiteralPath $WorkPath -Recurse -Force -ErrorAction Stop",
+        "  if (Test-Path -LiteralPath $ImagePath) { throw 'hyper-v-base-image-unmanaged-existing' }",
+        "  Set-CccAcquireStage 'hyper-v-base-image-partial-open-failed'",
+        "  $PartialGuard = [IO.File]::Open($PartialPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)",
+        "  if ((Get-CccGuardedFileId $PartialGuard) -cne $ExpectedPartialFileId) { throw 'hyper-v-base-image-partial-identity-changed' }",
+        "  Set-CccAcquireStage 'hyper-v-base-image-partial-hash-failed'",
+        "  $PartialHashBefore = Get-CccGuardedSha256 $PartialGuard",
+        "  if ($PartialHashBefore -ne $ExpectedPartialHash) { throw 'hyper-v-base-image-partial-mutated' }",
+        "  if ($Profile -eq 'ubuntu-lts') {",
+        "    Set-CccAcquireStage 'hyper-v-base-image-source-open-failed'",
+        "    Assert-NoReparsePath $NormalizedVhdPath",
+        "    $SourceGuard = [IO.File]::Open($NormalizedVhdPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)",
+        "    if ((Get-CccGuardedFileId $SourceGuard) -cne $ExpectedSourceFileId) { throw 'hyper-v-base-image-source-identity-changed' }",
+        "    Set-CccAcquireStage 'hyper-v-base-image-source-hash-failed'",
+        "    $SourceHashBefore = Get-CccGuardedSha256 $SourceGuard",
+        "    if ($SourceHashBefore -ne $ExpectedSourceHash) { throw 'hyper-v-base-image-source-mutated' }",
+        "    $LocalAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)",
+        "    if (-not $LocalAppData) { throw 'hyper-v-qemu-img-unavailable' }",
+        "    $QemuImg = Join-Path $LocalAppData 'Android\\Sdk\\emulator\\qemu-img.exe'",
+        "    Assert-NoReparsePath $QemuImg",
+        "    if (-not (Test-Path -LiteralPath $QemuImg -PathType Leaf)) { throw 'hyper-v-qemu-img-unavailable' }",
+        "    $QemuItem = Get-Item -LiteralPath $QemuImg -Force -ErrorAction Stop",
+        "    if ($QemuItem.PSIsContainer -or ($QemuItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or [long]$QemuItem.Length -le 0) { throw 'hyper-v-qemu-img-unavailable' }",
+        "    $QemuGuard = [IO.File]::Open($QemuImg, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)",
+        "    $QemuSignature = Get-AuthenticodeSignature -LiteralPath $QemuImg -ErrorAction Stop",
+        "    if ([string]$QemuSignature.Status -ne 'Valid' -or -not $QemuSignature.SignerCertificate -or [string]$QemuSignature.SignerCertificate.Subject -notmatch '(^|, )O=Google LLC(,|$)') { throw 'hyper-v-qemu-img-untrusted' }",
+        "    if ((Get-CccGuardedSha256 $QemuGuard) -ne $ExpectedQemuHash) { throw 'hyper-v-qemu-img-mutated' }",
+        "    Set-CccAcquireStage 'hyper-v-base-image-content-verify-failed'",
+        "    & $QemuImg compare -f vpc -F vhdx $NormalizedVhdPath $PartialPath",
+        "    $CompareExitCode = $LASTEXITCODE",
+        "    if ((Get-CccGuardedSha256 $SourceGuard) -ne $SourceHashBefore) { throw 'hyper-v-base-image-source-mutated' }",
+        "    if ((Get-CccGuardedSha256 $PartialGuard) -ne $PartialHashBefore) { throw 'hyper-v-base-image-partial-mutated' }",
+        "    if ((Get-CccGuardedSha256 $QemuGuard) -ne $ExpectedQemuHash) { throw 'hyper-v-qemu-img-mutated' }",
+        "    if ($CompareExitCode -ne 0) { throw 'hyper-v-base-image-content-verify-failed' }",
         "  }",
+        "  Set-CccAcquireStage 'hyper-v-base-image-final-move-failed'",
+        "  Assert-NoReparsePath $ImagePath",
+        "  if ($Profile -eq 'ubuntu-lts') {",
+        "    $FinalGuard = [IO.File]::Open($ImagePath, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)",
+        "    $PartialGuard.Position = 0",
+        "    $PartialGuard.CopyTo($FinalGuard, 8388608)",
+        "    $FinalGuard.Flush($true)",
+        "    if ((Get-CccGuardedSha256 $FinalGuard) -ne $ExpectedPartialHash) { throw 'hyper-v-base-image-final-hash-mismatch' }",
+        "    $FinalGuard.Dispose(); $FinalGuard = $null",
+        "  } else {",
+        "    $PartialGuard.Dispose(); $PartialGuard = $null",
+        "    [IO.File]::Move($PartialPath, $ImagePath)",
+        "  }",
+        "  Protect-CccImageDirectory $ProfileRoot",
+        "  Set-CccAcquireStage 'hyper-v-base-image-final-inspection-failed'",
+        "  Assert-NoReparsePath $ImagePath",
+        "  $FinalGuard = [IO.File]::Open($ImagePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)",
+        "  $FinalHash = Get-CccGuardedSha256 $FinalGuard",
+        "  if ($FinalHash -ne $ExpectedPartialHash) { throw 'hyper-v-base-image-final-hash-mismatch' }",
+        "  Set-CccAcquireStage 'hyper-v-base-image-final-observation-failed'",
+        "  $Result = [ordered]@{ ok = $true; profile = $Profile; imagePath = $ImagePath; sha256 = $FinalHash; sizeBytes = [long]$FinalGuard.Length; virtualSizeBytes = $ExpectedVirtualSizeBytes; vhdType = $ExpectedVhdType; generation = $ExpectedGeneration; reused = $false }",
+        "  $Json = $Result | ConvertTo-Json -Compress -Depth 5",
+        `  [Console]::Out.WriteLine('${HYPER_V_RESULT_MARKER}' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Json)))`,
+        "} catch {",
+        "  $FailureMessage = [string]$_.Exception.Message",
+        "  if ($FailureMessage -match '^hyper-v-[a-z0-9-]{3,128}$') { throw $FailureMessage }",
+        "  [Console]::Out.WriteLine(('CCC_HYPER_V_STAGE:' + $script:CccAcquireStage))",
+        "  throw $script:CccAcquireStage",
+        "} finally {",
+        "  if ($FinalGuard) { $FinalGuard.Dispose(); $FinalGuard = $null }",
+        "  if ($PartialGuard) { $PartialGuard.Dispose(); $PartialGuard = $null }",
+        "  if ($SourceGuard) { $SourceGuard.Dispose(); $SourceGuard = $null }",
+        "  if ($QemuGuard) { $QemuGuard.Dispose(); $QemuGuard = $null }",
         "}",
     ], undefined, true);
     return command(options.executable, script);

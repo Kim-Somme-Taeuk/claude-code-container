@@ -84,18 +84,27 @@ identifier.
 
 Each low-level call MUST validate one typed request, make exactly one transport
 attempt, strictly decode its bounded response, and then return or throw. The
-PowerShell transport resolves an ID/name selector with one `Get-VM` read and,
+PowerShell transport resolves an ID/name selector with a scoped `Get-VM` read and,
 for operations other than `Get-VM`, invokes exactly one requested target
 primitive. It MUST NOT
 silently retry, poll for a desired state, translate
 an owner identity, reconcile a journal, delete a disk or ISO, release a network,
 or mutate Device Lab state.
 
-Selector absence is valid only when a successful `Get-VM -ErrorAction Stop`
-enumeration followed by exact ID/name filtering returns zero records. Missing
-cmdlets/modules, host-service failures, permission errors, and other
-`ObjectNotFound` errors MUST propagate as native failure; they MUST NOT be
-converted to VM absence.
+Selector resolution MUST query the requested ID or name with `Get-VM -Id`
+or `Get-VM -Name`, then filter the result to that exact selector. Selector
+absence is valid when the scoped query succeeds with no matching record. If it
+emits `ObjectNotFound,Microsoft.HyperV.PowerShell.Commands.GetVM` with the
+`ObjectNotFound` category, the transport MUST make one confirming host-wide
+`Get-VM -ErrorAction Stop` read and exact-filter its result. A valid name query
+MAY report the same no-match as `InvalidParameter,Microsoft.HyperV.PowerShell.Commands.GetVM`
+with the `InvalidArgument` category; that exact pair MUST use the same confirmation
+read and MUST NOT be accepted for ID selectors. Only a successful confirmation
+read can establish absence; an error from that read MUST propagate.
+The native error ID and target text alone are not proof of absence, because an
+existing VM may be inaccessible. Missing cmdlets/modules, host-service
+failures, permission errors, and all other native errors MUST propagate as
+failure; they MUST NOT be converted to VM absence.
 
 The trusted Hyper-V module manifest MAY be installed directly at the protected
 System32 `Modules\Hyper-V` root or beneath a numeric version directory such as

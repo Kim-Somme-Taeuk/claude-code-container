@@ -14,7 +14,7 @@ import {
     type DeviceLabMcpTestContext,
 } from "./helpers/device-lab-mcp-fixture.js";
 import { freePort, installFakeCccBroker, installIgnoringCccBroker, pidAlive, waitForHealthUnavailable } from "./helpers/fake-broker-mcp-fixture.js";
-import { BROKER_CONTROL_RESPONSE_LIMIT_BYTES, BROKER_RPC_RESPONSE_LIMIT_BYTES, REQUIRED_CCC_HOST_BROKER_CAPABILITIES, authenticatedBrokerHeadersForTest, brokerCommand, brokerLaunchInvocation, brokerLogTail, brokerRpc, brokerStatus, implicitBrokerProbeOptions, launchedBrokerProcessVerificationForTest, parseWindowsNetstatListenerForTest, reusableBrokerProcessVerificationForTest, terminateVerifiedBrokerRuntimeForTest, verifiedBrokerProcessForTest, waitForBrokerOwnerResolve } from "../../device-lab-mcp/src/broker.mjs";
+import { BROKER_CONTROL_RESPONSE_LIMIT_BYTES, BROKER_RPC_RESPONSE_LIMIT_BYTES, BROKER_RPC_SCREENSHOT_RESPONSE_LIMIT_BYTES, REQUIRED_CCC_HOST_BROKER_CAPABILITIES, authenticatedBrokerHeadersForTest, brokerCommand, brokerDeviceTool, brokerLaunchInvocation, brokerLogTail, brokerRpc, brokerStatus, implicitBrokerProbeOptions, launchedBrokerProcessVerificationForTest, parseWindowsNetstatListenerForTest, reusableBrokerProcessVerificationForTest, terminateVerifiedBrokerRuntimeForTest, verifiedBrokerProcessForTest, waitForBrokerOwnerResolve } from "../../device-lab-mcp/src/broker.mjs";
 import { projectMountPath } from "../../device-lab-mcp/src/context.mjs";
 
 const TEST_BROKER_OWNER_ID = "1111111111111111";
@@ -45,6 +45,13 @@ function sendCurrentBrokerStatus(req: { url?: string }, res: { setHeader(name: s
 }
 
 describe("device-lab MCP", () => {
+    it("requires the current Hyper-V computer-use broker capability and caps screenshot responses separately", () => {
+        expect(REQUIRED_CCC_HOST_BROKER_CAPABILITIES).toContain("hyper-v-windows-library-v16");
+        expect(REQUIRED_CCC_HOST_BROKER_CAPABILITIES).toContain("hyper-v-linux-x11-type-v2");
+        expect(BROKER_RPC_SCREENSHOT_RESPONSE_LIMIT_BYTES).toBe(8 * 1024 * 1024);
+        expect(BROKER_RPC_SCREENSHOT_RESPONSE_LIMIT_BYTES).toBeLessThan(BROKER_RPC_RESPONSE_LIMIT_BYTES);
+    });
+
     it("requires the current hidden Windows provider child contract", () => {
         expect(REQUIRED_CCC_HOST_BROKER_CAPABILITIES).toContain("windows-hidden-provider-children-v7");
     });
@@ -742,6 +749,50 @@ describe("device-lab MCP", () => {
         }
     });
 
+    it("rejects a screenshot RPC above its image-specific response limit", async () => {
+        const ownerId = "bcbcbcbcbcbcbcbc";
+        provisionTestOwnerSecret(ownerId);
+        const server = createServer((req, res) => {
+            if (req.method === "POST" && req.url === "/v1/owner/resolve") {
+                res.setHeader("content-type", "application/json");
+                res.end(JSON.stringify({ ok: true, result: { ownerId } }));
+                return;
+            }
+            res.writeHead(200, {
+                "content-type": "application/json",
+                "content-length": String(BROKER_RPC_SCREENSHOT_RESPONSE_LIMIT_BYTES + 1),
+            });
+            res.end("{}");
+        });
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const port = (server.address() as AddressInfo).port;
+        try {
+            const result = await brokerDeviceTool({
+                backend: "windows-vm", deviceId: "test-screenshot", tool: "device_screenshot",
+                hostCandidates: ["127.0.0.1"],
+                port,
+                timeoutMs: 3000,
+                autolaunch: false,
+            });
+            expect(result).toEqual(expect.objectContaining({
+                ok: false,
+                error: "broker-response-too-large",
+                selected: expect.objectContaining({ maxBytes: BROKER_RPC_SCREENSHOT_RESPONSE_LIMIT_BYTES }),
+            }));
+            // Other desktop providers keep the general RPC limit for their screenshots.
+            const sandbox = await brokerDeviceTool({
+                backend: "windows-sandbox", deviceId: "test-screenshot", tool: "device_screenshot",
+                hostCandidates: ["127.0.0.1"],
+                port,
+                timeoutMs: 3000,
+                autolaunch: false,
+            });
+            expect(sandbox).not.toEqual(expect.objectContaining({ error: "broker-response-too-large" }));
+        } finally {
+            await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+        }
+    });
+
     it("uses the bounded Node HTTP transport for authenticated RPC instead of fetch", async () => {
         const ownerId = "acacacacacacacac";
         provisionTestOwnerSecret(ownerId);
@@ -1290,8 +1341,8 @@ describe("device-lab MCP", () => {
         ["Hyper-V Linux create response contract", "hyper-v-linux-create-response-v1"],
         ["Hyper-V image acquisition stage/cache contract", "hyper-v-image-acquisition-stage-cache-v1"],
         ["Hyper-V PowerShell stage propagation contract", "hyper-v-powershell-stage-propagation-v1"],
-        ["Hyper-V provider-bound automatic image finalization contract", "hyper-v-provider-image-finalization-v39"],
-        ["Hyper-V redacted network failure diagnostics", "hyper-v-network-failure-diagnostics-v9"],
+        ["Hyper-V provider-bound automatic image finalization contract", "hyper-v-provider-image-finalization-v40"],
+        ["Hyper-V redacted network failure diagnostics", "hyper-v-network-failure-diagnostics-v10"],
     ])("rejects a same-version broker without %s", async (_label, missingCapability) => {
         const server = createServer((req, res) => {
             res.setHeader("content-type", "application/json");

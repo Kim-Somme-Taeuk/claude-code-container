@@ -111,6 +111,11 @@ describe("Hyper-V Windows library command elevation", () => {
         expect(launcherScript).toContain("Start-Process");
         expect(launcherScript).toContain("-Verb RunAs");
         expect(launcherScript).toContain("-Wait -PassThru");
+        expect(launcherScript).toContain("FAILED:' + $Stage + ':' + $NativeError + ':' + $HResult");
+        expect(launcherScript).not.toContain("$_.Exception.Message");
+        expect(launcherScript).toContain("$CurrentException = $CurrentException.InnerException");
+        expect(launcherScript).toContain("$Depth -lt 8");
+        expect(launcherScript).toContain("$Win32Exception.NativeErrorCode -eq 1223");
         expect(launcherScript).not.toContain("C:\\Program Files");
         expect(launcherScript).toContain("[Console]::In.ReadLine()");
         const payload = JSON.parse(Buffer.from(launcherInput, "base64").toString("utf8"));
@@ -310,6 +315,65 @@ describe("Hyper-V Windows library command elevation", () => {
         })).resolves.toEqual({ status: 1, stdout: "", stderr: "", errorCode: "elevation-cancelled" });
         expect(removeBootstrapImpl, "declining UAC still removes the unelevated bootstrap staging directory")
             .toHaveBeenCalledWith(expect.stringContaining("bootstrap.ps1"), stagedDirectory);
+    });
+
+    it("returns a bounded numeric fingerprint for a RunAs exception", async () => {
+        for (const [frame, errorCode] of [
+            [
+                "CCC_HYPER_V_WINDOWS_LIBRARY_ELEVATION_RESULT:FAILED:runas:740:-2147467259\r\n",
+                "elevation-launch-failed[stage=runas,native=740,hresult=-2147467259]",
+            ],
+            [
+                "CCC_HYPER_V_WINDOWS_LIBRARY_ELEVATION_RESULT:FAILED:runas:none:-2146233088\r\n",
+                "elevation-launch-failed[stage=runas,native=none,hresult=-2146233088]",
+            ],
+        ]) {
+            await expect(requestAdministrator({
+                powerShellPath: "trusted-powershell.exe",
+                nodePath: "node.exe",
+                nodeDigest,
+                programBytes,
+                programDigest,
+                spawnImpl: fakeLauncher({ launcherStdout: frame }),
+                randomBytesImpl,
+            })).resolves.toEqual({ status: 1, stdout: "", stderr: "", errorCode });
+        }
+    });
+
+    it("rejects unbounded or malformed launcher failure frames", async () => {
+        for (const launcherStdout of [
+            "CCC_HYPER_V_WINDOWS_LIBRARY_ELEVATION_RESULT:FAILED:runas:none:C:\\Users\\operator\\secret\r\n",
+            "CCC_HYPER_V_WINDOWS_LIBRARY_ELEVATION_RESULT:FAILED:other:none:-1\r\n",
+            "CCC_HYPER_V_WINDOWS_LIBRARY_ELEVATION_RESULT:FAILED\r\n",
+            "unexpected-prefixCCC_HYPER_V_WINDOWS_LIBRARY_ELEVATION_RESULT:FAILED:runas:none:-1\r\n",
+        ]) {
+            await expect(requestAdministrator({
+                powerShellPath: "trusted-powershell.exe",
+                nodePath: "node.exe",
+                nodeDigest,
+                programBytes,
+                programDigest,
+                spawnImpl: fakeLauncher({ launcherStdout }),
+                randomBytesImpl,
+            })).resolves.toEqual({
+                status: 1,
+                stdout: "",
+                stderr: "",
+                errorCode: "elevation-result-missing",
+            });
+        }
+
+        await expect(requestAdministrator({
+            powerShellPath: "trusted-powershell.exe",
+            nodePath: "node.exe",
+            nodeDigest,
+            programBytes,
+            programDigest,
+            spawnImpl: fakeLauncher({
+                launcherStdout: "CCC_HYPER_V_WINDOWS_LIBRARY_ELEVATION_RESULT:FAILED:runas:2147483648:-1\r\n",
+            }),
+            randomBytesImpl,
+        })).resolves.toMatchObject({ errorCode: "elevation-result-invalid" });
     });
 
     it("removes the staged bootstrap when the UAC launcher fails to start", async () => {

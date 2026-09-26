@@ -19,6 +19,7 @@ import type {
 // replaces used, and it is part of the behaviour, not an implementation detail: a caller
 // probing for readiness must not be handed an unbounded list to work through.
 const MAXIMUM_BOOTSTRAP_ADDRESSES = 8;
+export const MAXIMUM_BOOTSTRAP_HOST_INTERFACES = 16;
 // Addresses that can never be the answer: unspecified, loopback, and link-local. A guest
 // that has not yet taken a DHCP lease reports its link-local address, so admitting
 // 169.254.0.0/16 would report a booting guest as ready at an address nothing can reach.
@@ -101,11 +102,11 @@ export function selectHyperVBootstrapAddresses(
     return Object.freeze(selected);
 }
 
-function hostPrefixesFrom(
+export function selectHyperVBootstrapHostAddresses(
     managementAdapters: readonly HyperVVMNetworkAdapter[],
     hostIPv4Addresses: readonly HyperVNetIPAddress[],
     managementInterfaceAlias: string,
-): readonly HostPrefix[] {
+): readonly HyperVNetIPAddress[] {
     const managementAddresses = new Set(managementAdapters.flatMap((adapter) => [...adapter.ipAddresses]));
     return hostIPv4Addresses
         // Either route to the host's own addresses on the bootstrap network is accepted. The
@@ -113,7 +114,15 @@ function hostPrefixesFrom(
         // that read returns nothing, which it does when the management adapter is not
         // enumerable. Requiring both would turn a recoverable gap into a failed discovery.
         .filter((entry) => (managementAddresses.has(entry.address) || entry.interfaceAlias === managementInterfaceAlias)
-            && entry.prefixLength >= 8 && entry.prefixLength <= 30)
+            && entry.prefixLength >= 16 && entry.prefixLength <= 30);
+}
+
+function hostPrefixesFrom(
+    managementAdapters: readonly HyperVVMNetworkAdapter[],
+    hostIPv4Addresses: readonly HyperVNetIPAddress[],
+    managementInterfaceAlias: string,
+): readonly HostPrefix[] {
+    return selectHyperVBootstrapHostAddresses(managementAdapters, hostIPv4Addresses, managementInterfaceAlias)
         .flatMap((entry) => {
             const octets = ipv4Octets(entry.address);
             return octets
@@ -166,7 +175,9 @@ export function discoverHyperVBootstrapAddresses(
     if (hostPrefixes.length === 0) {
         // Without a host address on this network nothing can be judged reachable, and
         // answering with unfiltered guest claims would be worse than answering with nothing.
-        return { addresses: [], diagnosticCode: "hyper-v-bootstrap-host-prefix-inspection-failed" };
+        // The reads succeeded, so this is an unavailable address rather than an inspection
+        // failure; the caller can keep retrying and apply its ordinary availability timeout.
+        return { addresses: [], diagnosticCode: null };
     }
 
     const hostInterfaceIndexes = new Set(hostPrefixes.map((hostPrefix) => hostPrefix.interfaceIndex));
@@ -209,8 +220,7 @@ export function planHyperVBootstrapTeardown(
     expectation: HyperVBootstrapAdapterExpectation,
     expectedMacAddress: HyperVMacAddress,
 ): HyperVBootstrapTeardownDecision {
-    const adapters = bootstrapAdaptersOf(vmAdapters, expectation)
-        .filter((adapter) => adapter.macAddress === expectedMacAddress);
+    const adapters = bootstrapAdaptersOf(vmAdapters, expectation);
     if (adapters.length > 1) {
         return { kind: "refuse", diagnosticCode: "hyper-v-bootstrap-network-adapter-ambiguous" };
     }
@@ -218,7 +228,7 @@ export function planHyperVBootstrapTeardown(
     // Already gone is success, not an error: teardown has to be safe to repeat after a crash
     // between the removal and the record of it.
     if (!adapter) return { kind: "already-absent" };
-    if (adapter.switchName !== expectation.switchName) {
+    if (adapter.switchName !== expectation.switchName || adapter.macAddress !== expectedMacAddress) {
         return { kind: "refuse", diagnosticCode: "hyper-v-bootstrap-network-adapter-identity-mismatch" };
     }
     return { kind: "remove", adapterName: adapter.name, macAddress: expectedMacAddress };

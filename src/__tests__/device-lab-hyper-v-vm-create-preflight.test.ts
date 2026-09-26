@@ -120,6 +120,7 @@ describe("cloning the base image", () => {
     it("refuses a base image whose bytes do not match the manifest", async () => {
         const { imageRoot, imagePath } = writeBaseImage(Buffer.alloc(4096, 1));
         const { deviceRoot, diskPath } = devicePaths();
+        const created: string[] = [];
 
         await expect(cloneHyperVBaseImage({
             baseImageRoot: imageRoot,
@@ -127,7 +128,9 @@ describe("cloning the base image", () => {
             expectedSha256: "b".repeat(64),
             deviceRoot,
             diskPath,
+            onDestinationCreated: (path) => { created.push(path); },
         })).rejects.toThrow(/hyper-v-base-image-hash-mismatch/);
+        expect(created).toEqual([diskPath]);
     });
 
     it("refuses a missing base image before creating anything", async () => {
@@ -153,10 +156,13 @@ describe("cloning the base image", () => {
         const { imageRoot, imagePath, sha256 } = writeBaseImage(bytes);
         const { deviceRoot, diskPath } = devicePaths();
         writeFileSync(diskPath, "occupied");
+        const created: string[] = [];
 
         await expect(cloneHyperVBaseImage({
             baseImageRoot: imageRoot, baseImagePath: imagePath, expectedSha256: sha256, deviceRoot, diskPath,
+            onDestinationCreated: (path) => { created.push(path); },
         })).rejects.toThrow(/EEXIST/);
+        expect(created).toEqual([]);
         expect(readFileSync(diskPath, "utf8")).toBe("occupied");
     });
 

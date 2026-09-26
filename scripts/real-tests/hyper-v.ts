@@ -115,10 +115,8 @@ export async function ensureWindowsServerEvaluationLicense(target: string, deps:
 // for it, fails, and only then reports the setup diagnostic as unavailable — with a host-locale
 // message this pipeline mangles. The diagnostic is what would have explained the failure.
 //
-// A warning rather than a prompt. The launcher owns the terminal stdin the evaluation-licence
-// question runs through, and re-launching it under UAC detaches that; a diagnostic is not worth
-// trading the interactive flow for. Elevation stays the operator's call, made before the wait
-// rather than discovered after it.
+// A warning rather than a prompt. The default run never opens UAC for optional failure diagnostics.
+// Operators can explicitly enable one failure-time elevated collection with the documented env flag.
 // The two production defaults, exported as values so a test can assert the BINDING rather than the
 // spelling. Pinning the `|| resolveTrustedWindowsPowerShell` expression as source text closed the
 // mutation it named and missed the same deletion one line up: repoint the import at a weakened
@@ -137,6 +135,8 @@ export function warnIfSetupDiagnosticsWillLackPrivilege(target: string, dependen
     // operator to redo a Level 3 run for something that target does not capture.
     if (target !== "all" && target !== "windows") return false;
     const write = dependencies.writeImpl || ((line: string) => process.stderr.write(line));
+    const env = dependencies.env || process.env;
+    const automaticElevationEnabled = env.CCC_HYPER_V_SETUP_DIAGNOSTICS_ELEVATE === "1";
     let elevated: boolean;
     try {
         const resolvePowerShell = dependencies.resolveTrustedWindowsPowerShellImpl || PRIVILEGE_PROBE_DEFAULTS.resolveTrustedWindowsPowerShell;
@@ -145,6 +145,16 @@ export function warnIfSetupDiagnosticsWillLackPrivilege(target: string, dependen
     } catch {
         // The probe itself failing is not a reason to block or to claim elevation is missing. Say
         // only what is true: it could not be determined.
+        if (!automaticElevationEnabled) {
+            write(
+                "NOTE Could not determine whether this run is elevated. Automatic UAC is disabled,\n"
+                + "     so this command will not open an Administrator prompt. If a failed guest's\n"
+                + "     VHDX cannot be mounted, its Panther diagnostics will be reported unavailable.\n"
+                + "     To explicitly collect fresh Panther logs on a failed run, set\n"
+                + "     CCC_HYPER_V_SETUP_DIAGNOSTICS_ELEVATE=1 before running this command.\n",
+            );
+            return false;
+        }
         write(
             "NOTE Could not determine whether this run is elevated. If a guest fails to boot, the\n"
             + "     Windows Setup diagnostic may ask you to approve elevation, which lets it\n"
@@ -163,6 +173,17 @@ export function warnIfSetupDiagnosticsWillLackPrivilege(target: string, dependen
         return false;
     }
     if (elevated) return false;
+    if (!automaticElevationEnabled) {
+        write(
+            "NOTE This run is not elevated. Failed-guest Panther diagnostics need local Administrator\n"
+            + "     permission to mount the guest VHDX. Automatic UAC is disabled, so this command\n"
+            + "     will not open an Administrator prompt. The VM lifecycle itself is unaffected.\n"
+            + "     A failed mount reports hyper-v-setup-diagnostics-mount-privilege-required.\n"
+            + "     To explicitly collect fresh Panther logs on a failed run, set\n"
+            + "     CCC_HYPER_V_SETUP_DIAGNOSTICS_ELEVATE=1 before running this command.\n",
+        );
+        return true;
+    }
     write(
         "NOTE This run is not elevated. Windows Setup diagnostics mount the guest VHDX to read Panther\n"
         + "     logs, which needs a privilege Hyper-V VM management does not grant.\n"

@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
-import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import { describe, expect, it } from "vitest";
 import {
     cleanupIncompleteHyperVImageArtifacts,
@@ -11,8 +11,76 @@ import {
     hyperVOwnerImageProfileRoot,
     readHyperVImageManifestMetadata,
     resolveHyperVImageForCreate,
+    type HyperVImageCommandResult,
+    type HyperVImageStoreRuntime,
 } from "../device-lab/broker/hyper-v/image-store.js";
 import { HYPER_V_IMAGE_CATALOG } from "../device-lab/hyper-v-images.js";
+import { HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP, type HyperVWindowsExecutionRequest } from "../hyper-v-windows/index.js";
+
+function automaticUbuntuStep(
+    command: Parameters<HyperVImageStoreRuntime["run"]>[0],
+    profileRoot: string,
+    image: Buffer,
+    onPrepare?: () => void,
+    finalizeOverrides: Record<string, unknown> = {},
+): HyperVImageCommandResult {
+    const imagePath = join(profileRoot, "base.vhdx");
+    const partialPath = join(profileRoot, "base.partial.vhdx");
+    const sourceVhdPath = join(profileRoot, ".acquire-work", "converted.normalized.fixed.vhd");
+    const success = (operation: HyperVWindowsExecutionRequest["operation"], items: readonly unknown[] = []) => ({
+        ...command, status: 0, stderr: "",
+        stdout: JSON.stringify({ schemaVersion: 1, operation, ok: true, items }),
+    });
+    if (command.args.at(-1) === HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP) {
+        const envelope = JSON.parse(Buffer.from(command.input || "", "base64").toString("utf8")) as { input: string };
+        const request = JSON.parse(envelope.input) as HyperVWindowsExecutionRequest;
+        if (request.operation === "Convert-VHD") {
+            expect(request).toMatchObject({ sourcePath: sourceVhdPath, destinationPath: partialPath, vhdType: "Dynamic" });
+            writeFileSync(partialPath, image);
+            return success(request.operation);
+        }
+        if (request.operation === "Resize-VHD") return success(request.operation);
+        if (request.operation === "Get-VHD") {
+            const file = readFileSync(request.path);
+            return success(request.operation, [{
+                path: request.path,
+                vhdFormat: request.path === sourceVhdPath ? "VHD" : "VHDX",
+                vhdType: request.path === sourceVhdPath ? "Fixed" : "Dynamic",
+                parentPath: null,
+                virtualSizeBytes: HYPER_V_IMAGE_CATALOG["ubuntu-lts"].virtualSizeBytes,
+                fileSizeBytes: file.length,
+            }]);
+        }
+        throw new Error(`unexpected typed image operation: ${request.operation}`);
+    }
+    const script = Buffer.from(command.input || "", "base64").toString("utf8");
+    const marker = (observation: unknown) => `CCC_HYPER_V_RESULT_B64:${Buffer.from(JSON.stringify(observation)).toString("base64")}`;
+    if (script.includes("function Save-BoundedDownload")) {
+        onPrepare?.();
+        mkdirSync(dirname(sourceVhdPath), { recursive: true });
+        writeFileSync(sourceVhdPath, image);
+        writeFileSync(join(profileRoot, "source.qcow2"), "verified-source");
+        return {
+            ...command, status: 0, stderr: "",
+            stdout: marker({ ok: true, profile: "ubuntu-lts", imagePath, partialPath, sourceVhdPath,
+                sourceVhdSha256: createHash("sha256").update(image).digest("hex"),
+                sourceVirtualSizeBytes: HYPER_V_IMAGE_CATALOG["ubuntu-lts"].virtualSizeBytes,
+                qemuSha256: "a".repeat(64) }),
+        };
+    }
+    if (script.includes("$ExpectedPartialHash =")) {
+        writeFileSync(imagePath, readFileSync(partialPath));
+        return {
+            ...command, status: 0, stderr: "",
+            stdout: marker({ ok: true, profile: "ubuntu-lts", imagePath,
+                sha256: createHash("sha256").update(image).digest("hex"), sizeBytes: image.length,
+                virtualSizeBytes: HYPER_V_IMAGE_CATALOG["ubuntu-lts"].virtualSizeBytes,
+                vhdType: "Dynamic", generation: HYPER_V_IMAGE_CATALOG["ubuntu-lts"].generation, reused: false,
+                ...finalizeOverrides }),
+        };
+    }
+    throw new Error("unexpected automatic image command");
+}
 
 describe("Hyper-V image store module", () => {
     it("uses Canonical's generic bootable QCOW2 source instead of its Azure-only VHD", () => {
@@ -132,7 +200,7 @@ describe("Hyper-V image store module", () => {
         },
     );
 
-    it("retains the bounded cloud image and removes transient work after committing an automatic image manifest", async () => {
+    it("retains the bounded cloud image and removes owned work after committing an automatic image manifest", async () => {
         const privateRoot = join(tmpdir(), `ccc-hyper-v-image-success-${process.pid}-${Date.now()}`);
         const profileRoot = hyperVImageProfileRoot(privateRoot, "ubuntu-lts");
         const imagePath = join(profileRoot, "base.vhdx");
@@ -140,8 +208,6 @@ describe("Hyper-V image store module", () => {
         const image = Buffer.from("automatic-hyper-v-image");
         const sha256 = createHash("sha256").update(image).digest("hex");
         mkdirSync(profileRoot, { recursive: true });
-        mkdirSync(join(profileRoot, ".acquire-work"), { recursive: true });
-        writeFileSync(join(profileRoot, ".acquire-work", "stale-partial.vhd"), "stale");
 
         try {
             const result = await resolveHyperVImageForCreate(
@@ -152,30 +218,7 @@ describe("Hyper-V image store module", () => {
                     cwd: privateRoot,
                     privateRoot,
                     resolveExecutable: () => "powershell.exe",
-                    run: async () => {
-                        expect(existsSync(join(profileRoot, ".acquire-work"))).toBe(false);
-                        mkdirSync(join(profileRoot, ".acquire-work"), { recursive: true });
-                        writeFileSync(join(profileRoot, ".acquire-work", "extracted.vhdx"), "temporary");
-                        writeFileSync(imagePath, image);
-                        writeFileSync(sourceArchivePath, "verified-source");
-                        return {
-                            mode: "exec",
-                            provider: "hyper-v",
-                            status: 0,
-                            stdout: JSON.stringify({
-                                ok: true,
-                                profile: "ubuntu-lts",
-                                imagePath,
-                                sha256,
-                                sizeBytes: image.length,
-                                virtualSizeBytes: 32 * 1024 * 1024 * 1024,
-                                vhdType: "Dynamic",
-                                generation: HYPER_V_IMAGE_CATALOG["ubuntu-lts"].generation,
-                                reused: false,
-                            }),
-                            stderr: "",
-                        };
-                    },
+                    run: async (command) => automaticUbuntuStep(command, profileRoot, image),
                     limits: {
                         acquireTimeoutMs: 60_000,
                         prepareTimeoutMs: 60_000,
@@ -240,6 +283,7 @@ describe("Hyper-V image store module", () => {
             expect(commands).toHaveLength(1);
             expect(commands[0].executable).toBe("provider-powershell.exe");
             expect(existsSync(join(profileRoot, ".acquire-work"))).toBe(false);
+            expect(readdirSync(profileRoot).some((name) => name.startsWith(".work-uncertain-"))).toBe(true);
             expect(readFileSync(sourceArchivePath, "utf8")).toBe("verified-source");
         } finally {
             rmSync(privateRoot, { recursive: true, force: true });
@@ -355,29 +399,11 @@ describe("Hyper-V image store module", () => {
                     cwd: privateRoot,
                     privateRoot,
                     resolveExecutable: () => "powershell.exe",
-                    run: async () => {
+                    run: async (command) => automaticUbuntuStep(command, profileRoot, replacement, () => {
                         acquisitions += 1;
                         expect(existsSync(imagePath)).toBe(false);
                         expect(existsSync(join(profileRoot, "manifest.json"))).toBe(false);
-                        writeFileSync(imagePath, replacement);
-                        return {
-                            mode: "exec",
-                            provider: "hyper-v",
-                            status: 0,
-                            stdout: JSON.stringify({
-                                ok: true,
-                                profile: "ubuntu-lts",
-                                imagePath,
-                                sha256: replacementSha256,
-                                sizeBytes: replacement.length,
-                                virtualSizeBytes: catalog.virtualSizeBytes,
-                                vhdType: "Dynamic",
-                                generation: catalog.generation,
-                                reused: false,
-                            }),
-                            stderr: "",
-                        };
-                    },
+                    }),
                     limits: {
                         acquireTimeoutMs: 60_000,
                         prepareTimeoutMs: 60_000,
@@ -392,6 +418,8 @@ describe("Hyper-V image store module", () => {
                 catalogId: catalog.catalogId,
                 sha256: replacementSha256,
             }));
+            expect(existsSync(join(profileRoot, ".base-prior-recovery.vhdx"))).toBe(false);
+            expect(existsSync(join(profileRoot, ".manifest-prior-recovery.json"))).toBe(false);
         } finally {
             rmSync(privateRoot, { recursive: true, force: true });
         }
@@ -402,7 +430,6 @@ describe("Hyper-V image store module", () => {
         const profileRoot = hyperVImageProfileRoot(privateRoot, "ubuntu-lts");
         const imagePath = join(profileRoot, "base.vhdx");
         const image = Buffer.from("automatic-hyper-v-image");
-        const sha256 = createHash("sha256").update(image).digest("hex");
 
         try {
             const result = await resolveHyperVImageForCreate(
@@ -413,27 +440,7 @@ describe("Hyper-V image store module", () => {
                     cwd: privateRoot,
                     privateRoot,
                     resolveExecutable: () => "powershell.exe",
-                    run: async () => {
-                        mkdirSync(profileRoot, { recursive: true });
-                        writeFileSync(imagePath, image);
-                        return {
-                            mode: "exec",
-                            provider: "hyper-v",
-                            status: 0,
-                            stdout: JSON.stringify({
-                                ok: true,
-                                profile: "ubuntu-lts",
-                                imagePath,
-                                sha256,
-                                sizeBytes: image.length,
-                                virtualSizeBytes: 32 * 1024 * 1024 * 1024,
-                                vhdType: "Dynamic",
-                                generation: 1,
-                                reused: false,
-                            }),
-                            stderr: "",
-                        };
-                    },
+                    run: async (command) => automaticUbuntuStep(command, profileRoot, image, undefined, { generation: 1 }),
                     limits: {
                         acquireTimeoutMs: 60_000,
                         prepareTimeoutMs: 60_000,
@@ -448,7 +455,8 @@ describe("Hyper-V image store module", () => {
                 error: "hyper-v-base-image-prepare-failed",
                 detail: "hyper-v-base-image-acquire-invalid-result",
             }));
-            expect(existsSync(imagePath)).toBe(false);
+            expect(readFileSync(imagePath)).toEqual(image);
+            expect(existsSync(join(profileRoot, "manifest.json"))).toBe(false);
         } finally {
             rmSync(privateRoot, { recursive: true, force: true });
         }

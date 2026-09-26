@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { createServer } from "http";
 import { AddressInfo } from "net";
 import { homedir } from "os";
@@ -107,6 +107,17 @@ describe("device-lab MCP broker routing", () => {
                 const parsed = JSON.parse(body || "{}");
                 receivedParams = parsed.params || {};
                 res.setHeader("content-type", "application/json");
+                if (parsed.method === "broker.backends") {
+                    res.end(JSON.stringify({ ok: true, result: { backends: [{ name: "linux-vm", provider: "hyper-v" }] } }));
+                    return;
+                }
+                if (parsed.method === "broker.device.tool.invoke" && parsed.params?.tool === "device_screenshot") {
+                    res.end(JSON.stringify({ ok: true, result: { mcpResult: { content: [
+                        { type: "text", text: JSON.stringify({ width: 1, height: 1, incarnationId: "4".repeat(32) }) },
+                        { type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/RuoAAAAASUVORK5CYII=" },
+                    ] } } }));
+                    return;
+                }
                 res.end(JSON.stringify({ ok: true, result: { deviceId: parsed.params?.deviceId } }));
             });
         });
@@ -220,6 +231,68 @@ describe("device-lab MCP broker routing", () => {
                 deviceId: "hyper-v-create-routing",
                 incarnationId: "33333333333333333333333333333333",
             }));
+
+            const guiCases = [
+                ["device_screenshot", {}],
+                ["device_click", { x: 0, y: 0 }],
+                ["device_double_click", { x: 0, y: 0, button: "right" }],
+                ["device_key", { key: "Ctrl+C" }],
+                ["device_type", { text: "hello" }],
+                ["device_scroll", { x: 0, y: 0, direction: "down" }],
+                ["device_cursor_position", {}],
+                ["device_cursor_position", { x: 0, y: 0 }],
+            ] as const;
+            for (const backend of ["windows-vm", "linux-vm"] as const) {
+                for (const [name, extra] of guiCases) {
+                    const guiResult = await client.callTool({
+                        name,
+                        arguments: {
+                            backend,
+                            deviceId: "hyper-v-create-routing",
+                            incarnationId: "4".repeat(32),
+                            viaBroker: true,
+                            hostCandidates: ["127.0.0.1"],
+                            port: address.port,
+                            ...extra,
+                        },
+                    });
+                    expect(guiResult.isError, `${backend} ${name}: ${JSON.stringify(guiResult.content)}`).not.toBe(true);
+                    expect(receivedParams).toEqual(expect.objectContaining({
+                        backend, tool: name, deviceId: "hyper-v-create-routing", incarnationId: "4".repeat(32), ...extra,
+                    }));
+                    if (name === "device_screenshot") {
+                        expect(guiResult.content).toEqual(expect.arrayContaining([
+                            expect.objectContaining({ type: "image", mimeType: "image/png" }),
+                        ]));
+                    }
+                }
+            }
+            const implicitLinux = await client.callTool({
+                name: "device_key",
+                arguments: {
+                    backend: "linux-vm",
+                    deviceId: "hyper-v-create-routing",
+                    incarnationId: "4".repeat(32),
+                    key: "Enter",
+                    hostCandidates: ["127.0.0.1"],
+                    port: address.port,
+                },
+            });
+            expect(implicitLinux.isError, JSON.stringify(implicitLinux.content)).not.toBe(true);
+            expect(receivedParams).toEqual(expect.objectContaining({
+                backend: "linux-vm", tool: "device_key", deviceId: "hyper-v-create-routing", key: "Enter",
+            }));
+            for (const invalid of [
+                { backend: "linux-vm", x: 0 },
+                { backend: "windows-vm", x: 0, y: -1 },
+                { backend: "windows-sandbox", x: 0, y: 0 },
+            ]) {
+                const rejected = await client.callTool({
+                    name: "device_cursor_position",
+                    arguments: { deviceId: "hyper-v-create-routing", incarnationId: "4".repeat(32), ...invalid },
+                });
+                expect(JSON.parse(((rejected.content as Array<{ text?: string }>)[0].text || "{}"))).toEqual(expect.objectContaining({ ok: false }));
+            }
         } finally {
             rmSync(authFile, { force: true });
             await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -1297,6 +1370,66 @@ describe("device-lab MCP broker routing", () => {
             }), expect.objectContaining({ backend: "android-emulator", stateKey: "android" }), expect.any(Object));
         } finally {
             cleanupOwner(owner);
+            await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+        }
+    });
+
+    it("routes an implicit Hyper-V cursor move and refuses moves that cannot reach Hyper-V", { timeout: TIMEOUT }, async () => {
+        const authRoot = join(homeDir, ".ccc", "devices", "broker", "auth");
+        const authFile = join(authRoot, `${brokerOwnerId()}.json`);
+        mkdirSync(authRoot, { recursive: true });
+        // Later tests in this file reuse an existing owner secret, so leave one that was already there.
+        const authExisted = existsSync(authFile);
+        if (!authExisted) writeFileSync(authFile, JSON.stringify({ ownerId: brokerOwnerId(), secret: "b".repeat(64), version: 1 }), { mode: 0o600 });
+        const invoked: Array<Record<string, unknown>> = [];
+        const server = createServer(async (req, res) => {
+            if (sendOwnerResolve(req, res)) return;
+            let rawBody = "";
+            for await (const chunk of req) rawBody += chunk;
+            const body = JSON.parse(rawBody || "{}") as { method?: string; params?: Record<string, unknown> };
+            res.setHeader("content-type", "application/json");
+            if (body.method === "broker.inventory") {
+                res.end(JSON.stringify({ ok: true, result: { backends: [
+                    { stateKey: "windows-vm", devices: [{ id: "hv-cursor", backend: "windows-vm", status: "running" }] },
+                    { stateKey: "windows", devices: [{ id: "sandbox-cursor", backend: "windows-sandbox", status: "running" }] },
+                ] } }));
+                return;
+            }
+            if (body.method === "broker.device.tool.invoke") {
+                invoked.push(body.params || {});
+                res.end(JSON.stringify({ ok: true, result: { tool: "device_cursor_position", applied: true } }));
+                return;
+            }
+            res.statusCode = 500;
+            res.end(JSON.stringify({ ok: false, error: "unexpected-cursor-rpc" }));
+        });
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const address = server.address() as AddressInfo;
+        const call = async (args: Record<string, unknown>) => {
+            const result = await client.callTool({
+                name: "device_cursor_position",
+                arguments: { hostCandidates: ["127.0.0.1"], port: address.port, timeoutMs: 500, ...args },
+            });
+            return JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"));
+        };
+        try {
+            const incarnationId = "1".repeat(32);
+            const moved = await call({ deviceId: "hv-cursor", incarnationId, x: 10, y: 20 });
+            expect(moved, JSON.stringify(moved)).toEqual(expect.objectContaining({ routedBy: "device-mutating-broker-implicit" }));
+            expect(invoked, JSON.stringify(moved)).toEqual([expect.objectContaining({ tool: "device_cursor_position", backend: "windows-vm", deviceId: "hv-cursor", x: 10, y: 20 })]);
+
+            for (const args of [
+                { deviceId: "sandbox-cursor", x: 10, y: 20 },
+                { backend: "windows-sandbox", deviceId: "sandbox-cursor", x: 10, y: 20 },
+                { x: 10, y: 20 },
+                { deviceId: "sandbox-cursor", x: 10, y: 20, broker: false },
+                { deviceId: "hv-cursor", incarnationId, x: 10, y: 20, implicitBroker: false },
+            ]) {
+                expect(await call(args)).toEqual(expect.objectContaining({ ok: false, error: "device-cursor-move-backend-unsupported" }));
+            }
+            expect(invoked).toHaveLength(1);
+        } finally {
+            if (!authExisted) rmSync(authFile, { force: true });
             await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
         }
     });
@@ -2683,17 +2816,48 @@ describe("device-lab MCP broker routing", () => {
         }
     });
 
-    it("reports device-not-found when a reachable broker does not own the device", { timeout: TIMEOUT }, async () => {
+    it("keeps missing lifecycle operations fail-closed while routing explicit Hyper-V delete to its idempotent broker contract", { timeout: TIMEOUT }, async () => {
         const methods: string[] = [];
+        const invokeParams: Array<Record<string, unknown>> = [];
         const server = createServer(async (req, res) => {
+            if (req.url === "/health") {
+                res.setHeader("content-type", "application/json");
+                res.end(JSON.stringify({ ok: true, name: "ccc-device-broker", mode: "host-broker-daemon" }));
+                return;
+            }
+            if (req.url === "/status") {
+                res.setHeader("content-type", "application/json");
+                res.end(JSON.stringify({
+                    ok: true,
+                    name: "ccc-device-broker",
+                    mode: "host-broker-daemon",
+                    broker: { implemented: REQUIRED_CCC_HOST_BROKER_CAPABILITIES },
+                }));
+                return;
+            }
             if (sendOwnerResolve(req, res)) return;
             let rawBody = "";
             for await (const chunk of req) rawBody += chunk;
-            const body = JSON.parse(rawBody || "{}") as { method?: string };
+            const body = JSON.parse(rawBody || "{}") as { method?: string; params?: Record<string, unknown> };
             methods.push(String(body.method || ""));
             res.setHeader("content-type", "application/json");
             if (body.method === "broker.inventory") {
                 res.end(JSON.stringify({ ok: true, result: { backends: [] } }));
+                return;
+            }
+            if (body.method === "broker.command.invoke") {
+                invokeParams.push(body.params || {});
+                res.end(JSON.stringify({
+                    ok: true,
+                    result: {
+                        backend: "windows-vm",
+                        command: "device_delete",
+                        deviceId: "windows-vm-real-e2e-stale",
+                        idempotent: true,
+                        alreadyMissing: true,
+                        invoked: false,
+                    },
+                }));
                 return;
             }
             res.statusCode = 500;
@@ -2701,7 +2865,11 @@ describe("device-lab MCP broker routing", () => {
         });
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
-        const ownerRoot = join(homedir(), ".ccc/devices/owners", brokerOwnerId());
+        const authRoot = join(homeDir, ".ccc/devices/broker/auth");
+        const authFile = join(authRoot, `${brokerOwnerId()}.json`);
+        mkdirSync(authRoot, { recursive: true });
+        writeFileSync(authFile, JSON.stringify({ ownerId: brokerOwnerId(), secret: "b".repeat(64), version: 1 }), { mode: 0o600 });
+        const ownerRoot = join(homeDir, ".ccc/devices/owners", brokerOwnerId());
         mkdirSync(join(ownerRoot, "windows"), { recursive: true });
         writeFileSync(join(ownerRoot, "windows", "devices.json"), JSON.stringify({
             devices: [{ id: "win-direct-only", backend: "windows-sandbox", status: "stopped", configPath: "C:/ccc/direct-only.wsb" }],
@@ -2724,9 +2892,101 @@ describe("device-lab MCP broker routing", () => {
                 routedBy: "device-lifecycle-broker-implicit",
             }));
             expect(methods.filter(Boolean)).toEqual(["broker.inventory"]);
+
+            for (const arguments_ of [
+                { deviceId: "missing-delete-without-backend" },
+                { backend: "windows-sandbox", deviceId: "missing-non-hyper-v-delete" },
+            ]) {
+                const missingDeletion = await client.callTool({
+                    name: "device_delete",
+                    arguments: {
+                        ...arguments_,
+                        confirmDestructive: true,
+                        hostCandidates: ["127.0.0.1"],
+                        port: address.port,
+                        timeoutMs: 500,
+                    },
+                });
+                expect(missingDeletion.isError).not.toBe(true);
+                expect(JSON.parse(((missingDeletion.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
+                    ok: false,
+                    error: "device-not-found",
+                    deviceId: arguments_.deviceId,
+                    routedBy: "device-lifecycle-broker-implicit",
+                }));
+            }
+
+            const deletion = await client.callTool({
+                name: "device_delete",
+                arguments: {
+                    backend: "windows-vm",
+                    deviceId: "windows-vm-real-e2e-stale",
+                    incarnationId: "1".repeat(32),
+                    force: true,
+                    preserveNetwork: true,
+                    confirmDestructive: true,
+                    hostCandidates: ["127.0.0.1"],
+                    port: address.port,
+                    timeoutMs: 500,
+                },
+            });
+            expect(deletion.isError).not.toBe(true);
+            expect(JSON.parse(((deletion.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
+                backend: "windows-vm",
+                command: "device_delete",
+                deviceId: "windows-vm-real-e2e-stale",
+                idempotent: true,
+                alreadyMissing: true,
+                invoked: false,
+                routedBy: "device-lifecycle-broker-implicit",
+            }));
+            const explicitDeletion = await client.callTool({
+                name: "device_delete",
+                arguments: {
+                    backend: "windows-vm",
+                    deviceId: "windows-vm-real-e2e-stale",
+                    incarnationId: "1".repeat(32),
+                    force: true,
+                    preserveNetwork: true,
+                    confirmDestructive: true,
+                    viaBroker: true,
+                    hostCandidates: ["127.0.0.1"],
+                    port: address.port,
+                    timeoutMs: 500,
+                },
+            });
+            expect(explicitDeletion.isError).not.toBe(true);
+            expect(JSON.parse(((explicitDeletion.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(
+                expect.objectContaining({ ok: true, routedBy: "device-lifecycle-broker" }),
+            );
+            expect(methods.filter(Boolean)).toEqual([
+                "broker.inventory",
+                "broker.inventory",
+                "broker.inventory",
+                "broker.inventory",
+                "broker.command.invoke",
+                "broker.command.invoke",
+            ]);
+            expect(invokeParams).toEqual([
+                expect.objectContaining({
+                    backend: "windows-vm",
+                    command: "device_delete",
+                    deviceId: "windows-vm-real-e2e-stale",
+                    incarnationId: "1".repeat(32),
+                    preserveNetwork: true,
+                }),
+                expect.objectContaining({
+                    backend: "windows-vm",
+                    command: "device_delete",
+                    deviceId: "windows-vm-real-e2e-stale",
+                    incarnationId: "1".repeat(32),
+                    preserveNetwork: true,
+                }),
+            ]);
         } finally {
             await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
             rmSync(join(ownerRoot, "windows"), { recursive: true, force: true });
+            rmSync(authFile, { force: true });
         }
     });
 

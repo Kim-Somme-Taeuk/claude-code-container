@@ -21,6 +21,7 @@ function validateNetworkOperationAsset() {
         '$ModuleName -notin @("Hyper-V", "NetAdapter", "NetTCPIP", "NetNat")',
         '$InvalidCode = if ($ModuleName -eq "Hyper-V")',
         'Microsoft.PowerShell.Core\\Import-Module -Name $ModulePath',
+        '[string]$CurrentVirtualMachines[0].Notes -cne [string]$Request.expectedNotes',
     ];
     for (const fragment of requiredTrustFragments) {
         if (!source.includes(fragment)) throw new Error(`Hyper-V operation asset is missing trust fence: ${fragment}`);
@@ -32,9 +33,19 @@ function validateNetworkOperationAsset() {
         "Set-VMMemory": "Hyper-V",
         "Set-VMProcessor": "Hyper-V",
         "Get-VMHardDiskDrive": "Hyper-V",
+        "Get-VMIntegrationService": "Hyper-V",
+        "Enable-VMIntegrationService": "Hyper-V",
+        "Add-VMDvdDrive": "Hyper-V",
+        "Remove-VMDvdDrive": "Hyper-V",
+        "Get-VHD": "Hyper-V",
+        "Mount-VHD": "Hyper-V",
+        "Dismount-VHD": "Hyper-V",
+        "Convert-VHD": "Hyper-V",
+        "Resize-VHD": "Hyper-V",
         "Get-VMFirmware": "Hyper-V",
         "Set-VMFirmware": "Hyper-V",
         "Set-VMBios": "Hyper-V",
+        "Get-VMBios": "Hyper-V",
         "Get-VMSwitch": "Hyper-V",
         "New-VMSwitch": "Hyper-V",
         "Set-VMSwitch": "Hyper-V",
@@ -64,6 +75,65 @@ function validateNetworkOperationAsset() {
 }
 
 validateNetworkOperationAsset();
+
+function validatePinnedTestModuleSetup() {
+    const installer = readFileSync(join(assetRoot, "install-test-modules.ps1"), "utf8");
+    for (const fragment of [
+        "https://www.powershellgallery.com/api/v2/package/$($Requirement.Name)/$($Requirement.Version)",
+        "Name = 'Pester'",
+        "Version = '5.7.1'",
+        "Sha256 = '4a27904c6814a5fbe4758f8e49861f6a1994aee77b71165a5c43c0371ba6c580'",
+        "Name = 'PSScriptAnalyzer'",
+        "Version = '1.24.0'",
+        "Sha256 = 'e86c97d44bb1bc8a1de35e753b85ea1d938f6f9f881639a181507e079bca4556'",
+        "[Environment+SpecialFolder]::MyDocuments",
+        "[Security.Cryptography.SHA256]::Create()",
+        "[IO.File]::OpenRead($Path)",
+        "Test-ModuleManifest -Path $StagedManifest",
+        "Assert-SafeDirectoryBoundary -Path $CurrentUserModuleRoot",
+        "Assert-SafeDirectoryBoundary -Path $ModuleParent",
+        "Assert-SafeDirectoryTree -Path $Destination",
+        "Move-Item -LiteralPath $Destination -Destination $Backup",
+        "Move-Item -LiteralPath $Staging -Destination $Destination",
+        "'.ccc-package.sha256'",
+        "$Committed = $true",
+    ]) {
+        if (!installer.includes(fragment)) throw new Error(`Hyper-V PowerShell module installer is missing: ${fragment}`);
+    }
+    if (/Get-PSRepository|Set-PSRepository|Install-Module|Save-Module|Get-FileHash/.test(installer)) {
+        throw new Error("Hyper-V PowerShell module installer must not depend on PowerShellGet or Get-FileHash");
+    }
+    if (/Remove-Item -LiteralPath \$Destination\s+-Recurse/.test(installer)) {
+        throw new Error("Hyper-V PowerShell module installer must not recursively remove the live target path");
+    }
+    const testRunner = readFileSync(join(assetRoot, "run-pester.ps1"), "utf8");
+    if (/Install-Module|Set-PSRepository/.test(testRunner)) {
+        throw new Error("Hyper-V Pester verification must not install or configure modules");
+    }
+    for (const fragment of [
+        "[Environment+SpecialFolder]::MyDocuments",
+        "'WindowsPowerShell\\Modules'",
+        "'PSScriptAnalyzer\\1.24.0\\PSScriptAnalyzer.psd1'",
+        "'Pester\\5.7.1\\Pester.psd1'",
+        "Import-Module -Name $AnalyzerManifest",
+        "Import-Module -Name $PesterManifest",
+    ]) {
+        if (!testRunner.includes(fragment)) throw new Error(`Hyper-V Pester runner is missing exact manifest import: ${fragment}`);
+    }
+    if (/Import-Module\s+(?:PSScriptAnalyzer|Pester)\b/.test(testRunner)) {
+        throw new Error("Hyper-V Pester runner must not rely on PSModulePath name discovery");
+    }
+    const packageScripts = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")).scripts;
+    const pesterCommand = packageScripts["test:hyper-v:pester"];
+    const installCall = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/host-control/hyper-v/install-test-modules.ps1";
+    const testCall = "node scripts/validate-hyper-v-powershell.mjs --require-parser --pester";
+    if (pesterCommand !== `${installCall} && ${testCall}` || "setup:hyper-v:pester" in packageScripts) {
+        throw new Error("Hyper-V Pester must install pinned dependencies and verify through one public test command");
+    }
+    console.log("PASS Hyper-V pinned PowerShell test module setup");
+}
+
+validatePinnedTestModuleSetup();
 
 function validationPowerShellArgs(args) {
     return process.platform === "win32" ? hiddenWindowsPowerShellArgs(args) : [...args];

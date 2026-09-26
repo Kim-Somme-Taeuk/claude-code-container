@@ -16,9 +16,20 @@ const MARKER = HYPER_V_WINDOWS_SESSION_READY_MARKER;
 // skipped on Windows, where a `#!/bin/sh` file is unspawnable and yields spawn-failed — which fails
 // every assertion here, positive and negative alike. That would break `npm test` on the platform
 // this subsystem targets, which is where someone is most likely to run it.
-async function runStub(script: string, timeoutMilliseconds: number) {
+async function runStub(script: string, timeoutMilliseconds: number, drainInput = true) {
     const stub = join(mkdtempSync(join(tmpdir(), "ccc-session-stub-")), "stub.sh");
-    writeFileSync(stub, script, { mode: 0o755 });
+    // These tests exercise the readiness latch, not a child refusing the large pinned
+    // operation frame. Keep the pipe drained so EPIPE cannot win before the latch result.
+    // The one stdin-failure case below opts out to exercise that race deliberately.
+    const readyScript = drainInput ? script.replace("#!/bin/sh\n", [
+        "#!/bin/sh",
+        "exec 3<&0",
+        "cat <&3 >/dev/null 2>&1 &",
+        "ccc_drain_pid=$!",
+        "trap 'kill \"$ccc_drain_pid\" 2>/dev/null || :' EXIT",
+        "",
+    ].join("\n")) : script;
+    writeFileSync(stub, readyScript, { mode: 0o755 });
     const release = retainBrokerHyperVWindowsSessions();
     try {
         return await brokerHyperVWindowsSession(stub).execute(
@@ -336,7 +347,7 @@ describe("broker Hyper-V session pool", () => {
         // outright, so that revert is safe and this test stays green — the route is closed by
         // construction rather than by a probabilistic test, which is the better arrangement, but it
         // means the coverage this comment used to claim has moved into the classifier's own table.
-        const result = await runStub(`#!/bin/sh\nexec 0<&-\nsleep 0.1\necho ${MARKER}\nsleep 0.2\n`, 4000);
+        const result = await runStub(`#!/bin/sh\nexec 0<&-\nsleep 0.1\necho ${MARKER}\nsleep 0.2\n`, 4000, false);
         expect([
             "hyper-v-windows-session-spawn-failed",
             "hyper-v-windows-session-start-failed",

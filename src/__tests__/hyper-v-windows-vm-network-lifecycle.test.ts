@@ -246,7 +246,7 @@ describe("bootstrap address discovery", () => {
         [
             "the host has no address on the bootstrap network",
             { managementAdapters: [], hostIPv4Addresses: [] },
-            "hyper-v-bootstrap-host-prefix-inspection-failed",
+            null,
         ],
     ])("declines when %s", (_label, overrides, diagnosticCode) => {
         expect(discoverHyperVBootstrapAddresses(observation(overrides), EXPECTATION))
@@ -281,8 +281,6 @@ describe("bootstrap teardown planning", () => {
     // a crash between the removal and the record of it.
     it.each([
         ["the adapter is already gone", []],
-        ["only an adapter with a different address remains", [adapter({ macAddress: OTHER_MAC })]],
-        ["the remaining adapter has no address at all", [adapter({ macAddress: null })]],
         ["only an adapter with a different name remains", [adapter({ name: "CCC Device Network" })]],
     ])("removes nothing when %s", (_label, vmAdapters) => {
         expect(planHyperVBootstrapTeardown(vmAdapters, EXPECTATION, BOOTSTRAP_MAC))
@@ -298,6 +296,16 @@ describe("bootstrap teardown planning", () => {
         [
             "the adapter sits on an unexpected switch",
             [adapter({ switchName: "ccc-internal" })],
+            "hyper-v-bootstrap-network-adapter-identity-mismatch",
+        ],
+        [
+            "the named adapter has a different MAC",
+            [adapter({ macAddress: OTHER_MAC })],
+            "hyper-v-bootstrap-network-adapter-identity-mismatch",
+        ],
+        [
+            "the named adapter has no MAC",
+            [adapter({ macAddress: null })],
             "hyper-v-bootstrap-network-adapter-identity-mismatch",
         ],
     ])("refuses rather than guessing when %s", (_label, vmAdapters, diagnosticCode) => {

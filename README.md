@@ -98,6 +98,14 @@ npm run test:level3:hyper-v:windows  # Runs only the Hyper-V Windows VM E2E test
 npm run test:level3:hyper-v:linux    # Runs only the Hyper-V Linux VM E2E test
 ```
 
+For MCP screen capture, mouse, keyboard, and the screenshot → input → screenshot
+workflow, see [Device Lab computer use](doc/device-lab/GUIDE__computer-use-quick-start.md).
+The Hyper-V Level 3 tests also verify visible GUI input effects; the
+guide identifies provider-specific limits and host proof status.
+Run `npm run test:level3:hyper-v` on the Windows Hyper-V host to check
+screenshot, keyboard, pointer, and visible scrolling through the packaged MCP
+on disposable Windows and Linux VMs.
+
 The targeted Hyper-V commands rebuild the packaged test artifacts and prepare
 the host broker automatically before running the selected provider tests.
 
@@ -185,7 +193,8 @@ broker and do not require direct execution of files under `dist/`.
 
 Hyper-V Windows VMs use the same lifecycle surface. CCC automatically downloads,
 validates, and caches the official Windows Server 2025 evaluation VHDX on the
-first `windows-vm` create, then creates owner-scoped differencing disks:
+first `windows-vm` create, then makes a verified, owner-scoped full VHDX clone
+for each VM:
 
 ```text
 ccc devices setup hyper-v
@@ -266,6 +275,10 @@ Run destructive Hyper-V durability directly; a first-run cache miss is acquired 
 npm run test:durability:device-lab:real -- --target windows-vm --cycles 2
 npm run test:durability:device-lab:real -- --target linux-vm --cycles 2
 ```
+
+For the internal typed library's route inventory, package checks, Windows
+PowerShell checks, and real-host verification tiers, see
+[`doc/hyper-v-windows/GUIDE__typed-library-support.md`](doc/hyper-v-windows/GUIDE__typed-library-support.md).
 
 The regular Level 3 Windows VM scenario also packs the current CCC candidate,
 uploads it with the current Windows `node.exe`, runs `ccc --version` inside the

@@ -1,9 +1,10 @@
 import assert from "assert";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { basename, dirname, join, resolve } from "path";
 import { windowsVmBackend } from "../../device-lab-mcp/src/backends/windows-vm.mjs";
 import { ownerId } from "../../device-lab-mcp/src/context.mjs";
+import { assertDeviceLabPathWithinRoot } from "../../src/device-lab-state-file.ts";
 import { hyperVReadinessCommand, parseHyperVReadiness } from "../../src/host-control/hyper-v/index.ts";
 import { isHyperVWindowsEvaluationReceipt } from "../../src/device-lab/hyper-v-image-contracts.ts";
 import { hiddenSpawnSync, repoRoot } from "./helpers.ts";
@@ -13,9 +14,56 @@ import { cachedImageManifests, selectHyperVWindowsProfile } from "./select-windo
 import { captureHyperVWindowsConsole, type HyperVWindowsConsoleCaptureResult } from "./hyper-v-windows-console-capture.ts";
 import { captureHyperVWindowsSetupDiagnostics, publishHyperVWindowsSetupDiagnostics, type HyperVWindowsSetupDiagnosticsResult } from "./hyper-v-windows-setup-diagnostics.ts";
 import { requestElevatedSetupDiagnostics, type ElevatedSetupDiagnosticsOutcome } from "./hyper-v-windows-setup-diagnostics-elevation.ts";
+import { runHyperVGuiE2E } from "./hyper-v-gui-e2e.ts";
 
 const DEVICE_PREFIX = "windows-vm-real-e2e-";
 export const HYPER_V_WINDOWS_CONSOLE_TIMELINE_DELAYS_MS = [120000, 300000, 600000, 900000] as const;
+export const HYPER_V_WINDOWS_E2E_REBOOT_OPTIONS = Object.freeze({
+    force: true,
+    waitForBoot: true,
+    bootTimeoutMs: 1200000,
+});
+export const HYPER_V_WINDOWS_E2E_DELETE_OPTIONS = Object.freeze({
+    force: true,
+    confirmDestructive: true,
+    preserveNetwork: true,
+});
+
+export function ensureHyperVWindowsDownloadDestination(root: string, file: string): void {
+    let descriptor: number | null = null;
+    try {
+        assertDeviceLabPathWithinRoot(root, file, "hyper-v-windows-e2e-download-destination");
+        const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+        try {
+            descriptor = openSync(file, fsConstants.O_WRONLY | noFollow);
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+            descriptor = openSync(
+                file,
+                fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow,
+                0o600,
+            );
+        }
+        const opened = fstatSync(descriptor);
+        const path = lstatSync(file);
+        assertDeviceLabPathWithinRoot(root, file, "hyper-v-windows-e2e-download-destination");
+        if (!opened.isFile()
+            || !path.isFile()
+            || path.isSymbolicLink()
+            || opened.nlink !== 1
+            || path.nlink !== 1
+            || (opened.dev !== 0 && path.dev !== 0 && opened.dev !== path.dev)
+            || (opened.ino !== 0 && path.ino !== 0 && opened.ino !== path.ino)) {
+            throw new Error("hyper-v-windows-e2e-download-destination-invalid");
+        }
+        ftruncateSync(descriptor, 0);
+    } catch (error) {
+        if (error instanceof Error && error.message === "hyper-v-windows-e2e-download-destination-invalid") throw error;
+        throw new Error("hyper-v-windows-e2e-download-destination-invalid");
+    } finally {
+        if (descriptor !== null) closeSync(descriptor);
+    }
+}
 
 export function scheduleHyperVWindowsConsoleTimeline(input: {
     captureInput: Parameters<typeof captureHyperVWindowsConsole>[0];
@@ -82,6 +130,7 @@ export async function hyperVWindowsFailureReason(input: {
     setupDiagnosticsImpl?: typeof captureHyperVWindowsSetupDiagnostics;
     elevateSetupDiagnosticsImpl?: typeof requestElevatedSetupDiagnostics;
     publishSetupDiagnosticsImpl?: typeof publishHyperVWindowsSetupDiagnostics;
+    allowSetupDiagnosticsElevation?: boolean;
 }): Promise<string> {
     const profileTag = `profile=${input.profile}${input.sourceImage ? " sourceImage=set" : ""}`;
     const originalReason = `${input.step}: ${(input.error as any)?.message || String(input.error)}`;
@@ -114,65 +163,66 @@ export async function hyperVWindowsFailureReason(input: {
     } catch {
         setupDiagnostics = { ok: false, code: "hyper-v-setup-diagnostics-unexpected-failure" };
     }
-    // The mount failed for want of a privilege, so ask for that privilege instead of telling the
-    // operator to spend another build and another two-minute boot to arrive here again with one
-    // more right. This is the only step in the Level 3 run that needs elevation, it needs it once,
-    // and only after a guest has already failed — so the request is made here, for this operation,
-    // rather than by relaunching the launcher (which owns the terminal stdin the evaluation-licence
-    // question reads).
+    // The mount failed for want of a privilege. Preserve that diagnosis without opening UAC by
+    // default. An explicit caller or env opt-in may request one elevated collection for this failed
+    // fixture without relaunching the whole test process.
     //
-    // Elevation is attempted at most once, and only for the privilege code. Every other failure is
-    // returned as it was: prompting for UAC on a transient ResourceBusy would spend an operator's
-    // attention on something elevation cannot fix.
-    if (setupDiagnostics.ok === false && setupDiagnostics.code.startsWith("hyper-v-setup-diagnostics-mount-privilege-required[")) {
-        const elevate = input.elevateSetupDiagnosticsImpl || requestElevatedSetupDiagnostics;
-        let outcome: ElevatedSetupDiagnosticsOutcome;
-        try {
-            // No PowerShell path is sent. The child resolves its own from \\?\GLOBALROOT\SystemRoot:
-            // this side's copy comes from `where powershell.exe` on the invoking user's PATH, and
-            // handing that to an elevated process means it runs an executable an unelevated user
-            // could choose. The digest does not help — it faithfully carries the path this side
-            // picked, which is the problem.
-            outcome = await elevate({
-                ownerId: input.ownerId || ownerId(process.env, repoRoot),
-                deviceId: input.deviceId,
-                incarnationId: input.incarnationId,
-                vmId: input.vmId || "",
-            }, { platform: input.platform || process.platform });
-        } catch {
-            outcome = { attempted: true, errorCode: "elevation-request-failed" };
-        }
-        if (outcome.attempted === true && "result" in outcome) {
-            if (outcome.result.ok === true) {
-                // The elevated child collected the logs; THIS side writes them, under a repository
-                // root only this side knows. publishHyperVWindowsSetupDiagnostics re-validates and
-                // re-redacts the payload through the same validatedLogs the producer used.
-                const published = (input.publishSetupDiagnosticsImpl || publishHyperVWindowsSetupDiagnostics)(outcome.result.logs);
-                // A failed publish — results/ unwritable, disk full — used to replace the code
-                // outright, so the ONE case where the operator paid for a prompt, approved, and the
-                // elevated read SUCCEEDED was the case that rendered like a build that never asked.
-                // Every other branch here keeps both halves; this one now does too.
-                setupDiagnostics = published.ok === true
-                    ? published
-                    : { ok: false, code: `${setupDiagnostics.code}(elevation=approved,published=${published.code})` };
-            } else {
-                // Approved, ran elevated, and still failed. Replacing the code outright here — which
-                // is what this did first — rendered that byte-identically to a build that never
-                // asked, and it is the one state the plan says the next run exists to settle: the
-                // mount refused with the operator's full rights. So the original is kept and the
-                // elevated outcome named beside it, by code NAME only. The elevated failure can be
-                // another full privilege bracket, and pasting one bracket inside another would spend
-                // the reporter budget the earlier ACs guard on a field nobody parses.
-                const elevatedName = outcome.result.code.split("[")[0];
-                setupDiagnostics = { ok: false, code: `${setupDiagnostics.code}(elevation=approved,still=${elevatedName})` };
-            }
+    // Elevation is attempted at most once, only after opt-in, and only for the privilege code.
+    if (setupDiagnostics.ok === false
+        && setupDiagnostics.code.startsWith("hyper-v-setup-diagnostics-mount-privilege-required[")) {
+        const originalSetupDiagnosticsCode = setupDiagnostics.code;
+        if (input.allowSetupDiagnosticsElevation !== true) {
+            setupDiagnostics = { ok: false, code: `${originalSetupDiagnosticsCode}(elevation=disabled)` };
         } else {
-            // The unelevated code is kept, not replaced. It is still what happened, and losing it
-            // to report the elevation instead would tell the operator less than before. The reason
-            // the retry did not land is appended so the two are distinguishable: "we did not ask"
-            // and "we asked and it failed" call for different next steps.
-            const detail = outcome.attempted === true ? outcome.errorCode : outcome.reason;
-            setupDiagnostics = { ok: false, code: `${setupDiagnostics.code}(elevation=${detail})` };
+            const elevate = input.elevateSetupDiagnosticsImpl || requestElevatedSetupDiagnostics;
+            let outcome: ElevatedSetupDiagnosticsOutcome;
+            try {
+                // No PowerShell path is sent. The child resolves its own from \\?\GLOBALROOT\SystemRoot:
+                // this side's copy comes from `where powershell.exe` on the invoking user's PATH, and
+                // handing that to an elevated process means it runs an executable an unelevated user
+                // could choose. The digest does not help — it faithfully carries the path this side
+                // picked, which is the problem.
+                outcome = await elevate({
+                    ownerId: input.ownerId || ownerId(process.env, repoRoot),
+                    deviceId: input.deviceId,
+                    incarnationId: input.incarnationId,
+                    vmId: input.vmId || "",
+                }, { platform: input.platform || process.platform });
+            } catch {
+                outcome = { attempted: true, errorCode: "elevation-request-failed" };
+            }
+            if (outcome.attempted === true && "result" in outcome) {
+                if (outcome.result.ok === true) {
+                    // The elevated child collected the logs; THIS side writes them, under a repository
+                    // root only this side knows. publishHyperVWindowsSetupDiagnostics re-validates and
+                    // re-redacts the payload through the same validatedLogs the producer used.
+                    const published = (input.publishSetupDiagnosticsImpl || publishHyperVWindowsSetupDiagnostics)(outcome.result.logs);
+                    // A failed publish — results/ unwritable, disk full — used to replace the code
+                    // outright, so the ONE case where the operator paid for a prompt, approved, and the
+                    // elevated read SUCCEEDED was the case that rendered like a build that never asked.
+                    // Every other branch here keeps both halves; this one now does too.
+                    setupDiagnostics = published.ok === true
+                        ? published
+                        : { ok: false, code: `${originalSetupDiagnosticsCode}(elevation=approved,published=${published.code})` };
+                } else {
+                    // Approved, ran elevated, and still failed. Replacing the code outright here — which
+                    // is what this did first — rendered that byte-identically to a build that never
+                    // asked, and it is the one state the plan says the next run exists to settle: the
+                    // mount refused with the operator's full rights. So the original is kept and the
+                    // elevated outcome named beside it, by code NAME only. The elevated failure can be
+                    // another full privilege bracket, and pasting one bracket inside another would spend
+                    // the reporter budget the earlier ACs guard on a field nobody parses.
+                    const elevatedName = outcome.result.code.split("[")[0];
+                    setupDiagnostics = { ok: false, code: `${originalSetupDiagnosticsCode}(elevation=approved,still=${elevatedName})` };
+                }
+            } else {
+                // The unelevated code is kept, not replaced. It is still what happened, and losing it
+                // to report the elevation instead would tell the operator less than before. The reason
+                // the retry did not land is appended so the two are distinguishable: "we did not ask"
+                // and "we asked and it failed" call for different next steps.
+                const detail = outcome.attempted === true ? outcome.errorCode : outcome.reason;
+                setupDiagnostics = { ok: false, code: `${originalSetupDiagnosticsCode}(elevation=${detail})` };
+            }
         }
     }
     const guestSetupDiagnostics = setupDiagnostics.ok === true
@@ -312,7 +362,12 @@ async function cleanupPrevious(callTool: (tool: string, args: any) => Promise<an
         } catch {
             // Deletion is still attempted against the exact owner-scoped VM identity.
         }
-        payload(await callTool("device_delete", { backend: "windows-vm", deviceId: device.id, incarnationId: device.incarnationId, force: true, confirmDestructive: true }));
+        payload(await callTool("device_delete", {
+            backend: "windows-vm",
+            deviceId: device.id,
+            incarnationId: device.incarnationId,
+            ...HYPER_V_WINDOWS_E2E_DELETE_OPTIONS,
+        }));
     }
 }
 
@@ -426,8 +481,14 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
             assert.strictEqual(executed.provider, "hyper-v-powershell-direct");
             assert.match(executed.stdout || "", /ccc-hyper-v-e2e-ok/);
 
+            currentStep = "prove Windows GUI screenshot and computer input";
+            await runHyperVGuiE2E(callTool, direct, "windows");
+
             currentStep = "reboot VM and wait for PowerShell Direct";
-            const rebooted = lifecycleDevice(payload(await callTool("device_reboot", { ...direct, waitForBoot: true, bootTimeoutMs: 1200000 })), "device_reboot");
+            const rebooted = lifecycleDevice(payload(await callTool("device_reboot", {
+                ...direct,
+                ...HYPER_V_WINDOWS_E2E_REBOOT_OPTIONS,
+            })), "device_reboot");
             assert.strictEqual(rebooted.status, "running");
             assert.strictEqual(rebooted.bootReady, true);
             const afterReboot = resultValue(payload(await callTool("device_exec", { ...direct, command: "Write-Output ccc-hyper-v-reboot-ok" })));
@@ -439,6 +500,7 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
             const remotePath = "C:\\ccc\\hyper-v-e2e.txt";
             writeFileSync(uploadPath, "ccc-hyper-v-transfer-ok", "utf8");
             resultValue(payload(await callTool("device_upload", { ...direct, localPath: uploadPath, remotePath })));
+            ensureHyperVWindowsDownloadDestination(repoRoot, downloadPath);
             resultValue(payload(await callTool("device_download", { ...direct, remotePath, localPath: downloadPath })));
             assert.strictEqual(readFileSync(downloadPath, "utf8"), "ccc-hyper-v-transfer-ok");
 
@@ -474,6 +536,7 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
                 const packagedEvidenceRoot = join(repoRoot, "results", "device-lab-real");
                 const packagedEvidencePath = join(packagedEvidenceRoot, "hyper-v-windows-packaged-ccc-latest.json");
                 mkdirSync(packagedEvidenceRoot, { recursive: true });
+                ensureHyperVWindowsDownloadDestination(repoRoot, packagedEvidencePath);
                 resultValue(payload(await callTool("device_download", { ...direct, remotePath: guestResultPath, localPath: packagedEvidencePath })));
                 const packagedEvidence = JSON.parse(readFileSync(packagedEvidencePath, "utf8").replace(/^\uFEFF/, ""));
                 assert.strictEqual(packagedEvidence.version, packagedCandidate.version);
@@ -500,9 +563,12 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
             lifecycleDevice(payload(await callTool("device_stop", { ...direct, force: true })), "device_stop");
 
             currentStep = "delete VM";
-            payload(await callTool("device_delete", { ...direct, force: true, confirmDestructive: true }));
+            payload(await callTool("device_delete", { ...direct, ...HYPER_V_WINDOWS_E2E_DELETE_OPTIONS }));
             created = false;
-            const duplicateDelete = resultValue(payload(await callTool("device_delete", { ...direct, force: true, confirmDestructive: true })));
+            const duplicateDelete = resultValue(payload(await callTool("device_delete", {
+                ...direct,
+                ...HYPER_V_WINDOWS_E2E_DELETE_OPTIONS,
+            })));
             assert.strictEqual(duplicateDelete.idempotent, true);
             assert.strictEqual(duplicateDelete.alreadyMissing, true);
 
@@ -527,12 +593,17 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
                     setupDiagnosticsImpl: options.captureSetupDiagnosticsImpl,
                     elevateSetupDiagnosticsImpl: options.elevateSetupDiagnosticsImpl,
                     publishSetupDiagnosticsImpl: options.publishSetupDiagnosticsImpl,
+                    allowSetupDiagnosticsElevation: options.allowSetupDiagnosticsElevation === true
+                        || (options.allowSetupDiagnosticsElevation !== false
+                            && process.env.CCC_HYPER_V_SETUP_DIAGNOSTICS_ELEVATE === "1"),
                 }),
             };
         } finally {
             if (created) {
                 try { await callTool("device_stop", { ...direct, force: true }); } catch { /* best effort */ }
-                try { await callTool("device_delete", { ...direct, force: true, confirmDestructive: true }); } catch { /* evidence remains for the next verified recovery */ }
+                try {
+                    await callTool("device_delete", { ...direct, ...HYPER_V_WINDOWS_E2E_DELETE_OPTIONS });
+                } catch { /* evidence remains for the next verified recovery */ }
             }
             rmSync(tempDir, { recursive: true, force: true });
         }

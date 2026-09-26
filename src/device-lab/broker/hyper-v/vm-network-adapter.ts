@@ -1,7 +1,9 @@
 import {
     confirmHyperVBootstrapContainment,
     discoverHyperVBootstrapAddresses,
+    MAXIMUM_BOOTSTRAP_HOST_INTERFACES,
     planHyperVBootstrapTeardown,
+    selectHyperVBootstrapHostAddresses,
     type HyperVBootstrapAdapterExpectation,
     type HyperVBootstrapDiscoveryDiagnostic,
     type HyperVBootstrapHostObservation,
@@ -32,6 +34,11 @@ export type DeviceLabHyperVOwnedVm = {
     readonly vmName: string;
     readonly ownershipMarker: string;
 };
+
+type DeviceLabHyperVVmNetworkClient = Pick<HyperVWindowsNetworkClient,
+    "getVMsByExactNames" | "getVMNetworkAdapters" | "getManagementNetworkAdapters"
+    | "getNetIPAddresses" | "getNetNeighbors" | "getAllVMNetworkAdapters"
+    | "removeVMNetworkAdapter">;
 
 // Mirrors the legacy observations exactly. The broker maps these into public device status
 // today, so their shape and their diagnostic spellings are a compatibility surface.
@@ -86,11 +93,14 @@ export function deviceLabHyperVBootstrapMacAddress(managedMacAddress: string): H
  * reused by a later incarnation whose adapters must not be touched.
  */
 async function resolveOwnedVm(
-    client: HyperVWindowsNetworkClient,
+    client: DeviceLabHyperVVmNetworkClient,
     vm: DeviceLabHyperVOwnedVm,
 ): Promise<HyperVVirtualMachineSelector> {
     const name = parseHyperVVirtualMachineName(vm.vmName);
     const matches = await client.getVMsByExactNames({ names: [name] });
+    if (matches.length === 0) {
+        throw new DeviceLabHyperVVmNetworkAdapterError("hyper-v-vm-not-found");
+    }
     const match = matches.length === 1 ? matches[0] : null;
     if (!match || match.id !== vm.vmId.toLowerCase() || match.notes !== vm.ownershipMarker) {
         throw new DeviceLabHyperVVmNetworkAdapterError("hyper-v-vm-ownership-mismatch");
@@ -108,7 +118,7 @@ async function resolveOwnedVm(
  * failure, so it reads only what it decides from.
  */
 async function observeForDiscovery(
-    client: HyperVWindowsNetworkClient,
+    client: DeviceLabHyperVVmNetworkClient,
     selector: HyperVVirtualMachineSelector,
 ): Promise<HyperVBootstrapHostObservation> {
     const switchName = parseHyperVVirtualSwitchName(BOOTSTRAP_SWITCH_NAME);
@@ -121,13 +131,23 @@ async function observeForDiscovery(
     // host's own addresses on this network are known -- so this read cannot join the batch
     // above. Reading the whole table instead would be one round trip fewer and an unbounded
     // answer about networks this decision has no business seeing.
-    const interfaceIndexes = [...new Set(hostIPv4Addresses
-        .filter((entry) => managementAdapters.some((adapter) => adapter.ipAddresses.includes(entry.address))
-            || entry.interfaceAlias === BOOTSTRAP_EXPECTATION.managementInterfaceAlias)
+    const interfaceIndexes = [...new Set(selectHyperVBootstrapHostAddresses(
+        managementAdapters,
+        hostIPv4Addresses,
+        BOOTSTRAP_EXPECTATION.managementInterfaceAlias,
+    )
         .map((entry) => entry.interfaceIndex))];
-    const neighborBatches = await Promise.all(
-        interfaceIndexes.map((interfaceIndex) => client.getNetNeighbors({ interfaceIndex })),
-    );
+    if (interfaceIndexes.length > MAXIMUM_BOOTSTRAP_HOST_INTERFACES) {
+        throw new DeviceLabHyperVVmNetworkAdapterError("hyper-v-bootstrap-neighbor-inspection-failed");
+    }
+    let neighborBatches: Awaited<ReturnType<HyperVWindowsNetworkClient["getNetNeighbors"]>>[];
+    try {
+        neighborBatches = await Promise.all(
+            interfaceIndexes.map((interfaceIndex) => client.getNetNeighbors({ interfaceIndex })),
+        );
+    } catch {
+        throw new DeviceLabHyperVVmNetworkAdapterError("hyper-v-bootstrap-neighbor-inspection-failed");
+    }
     return {
         vmAdapters,
         managementAdapters,
@@ -144,7 +164,7 @@ async function observeForDiscovery(
  * ordinary state of a booting guest and the caller keeps waiting on it.
  */
 export async function discoverDeviceLabHyperVBootstrapNetwork(
-    client: HyperVWindowsNetworkClient,
+    client: DeviceLabHyperVVmNetworkClient,
     vm: DeviceLabHyperVOwnedVm,
 ): Promise<DeviceLabHyperVBootstrapNetworkObservation> {
     const selector = await resolveOwnedVm(client, vm);
@@ -168,7 +188,7 @@ export async function discoverDeviceLabHyperVBootstrapNetwork(
  * the same one.
  */
 export async function teardownDeviceLabHyperVBootstrapNetwork(
-    client: HyperVWindowsNetworkClient,
+    client: DeviceLabHyperVVmNetworkClient,
     vm: DeviceLabHyperVOwnedVm,
     managedMacAddress: string,
 ): Promise<DeviceLabHyperVBootstrapCleanupObservation> {
@@ -185,6 +205,7 @@ export async function teardownDeviceLabHyperVBootstrapNetwork(
             selector,
             adapterName: parseHyperVVMNetworkAdapterName(decision.adapterName),
             macAddress: decision.macAddress,
+            expectedNotes: vm.ownershipMarker,
         });
     }
 

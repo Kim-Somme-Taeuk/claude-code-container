@@ -152,16 +152,22 @@ Describe 'CCC Hyper-V snapshot journal repair' {
         BeforeEach {
             $script:RepairVm = [pscustomobject]@{ Id = [Guid]'12345678-1234-1234-1234-123456789abc'; CheckpointType = 'Standard' }
             $script:RepairSnapshots = @([pscustomobject]@{ Name = 'ccc-0123456789abcdef-baseline' })
-            Mock Set-VM { param($VM, $CheckpointType) $script:RepairVm.CheckpointType = $CheckpointType }
-            Mock Get-VM { $script:RepairVm }
-            Mock Get-VMSnapshot { $script:RepairSnapshots }
-            Mock Remove-VMSnapshot { $script:RepairSnapshots = @() }
+            $script:RepairPolicyWrites = 0
+            $script:RepairPolicyWriter = {
+                param($TargetVm, $Policy)
+                $script:RepairPolicyWrites++
+                $script:RepairVm.CheckpointType = $Policy
+            }
+            $script:RepairVmReader = { param($VmId) $script:RepairVm }
+            $script:RepairSnapshotReader = { param($TargetVm) @($script:RepairSnapshots) }
         }
 
         It 'restores the durable Production policy before accepting one candidate' {
-            $Result = Repair-CccVmSnapshotState $script:RepairVm 'ccc-0123456789abcdef-baseline' 'Production'
+            $Result = Repair-CccVmSnapshotState $script:RepairVm 'ccc-0123456789abcdef-baseline' 'Production' `
+                $script:RepairPolicyWriter $script:RepairVmReader $script:RepairSnapshotReader
             $Result.checkpointPolicy | Should -Be 'Production'
             $Result.candidateCount | Should -Be 1
+            $script:RepairPolicyWrites | Should -Be 1
         }
 
         It 'preserves ambiguous candidates for fail-closed reconciliation' {
@@ -169,26 +175,30 @@ Describe 'CCC Hyper-V snapshot journal repair' {
                 [pscustomobject]@{ Name = 'ccc-0123456789abcdef-baseline' },
                 [pscustomobject]@{ Name = 'ccc-0123456789abcdef-baseline' }
             )
-            { Repair-CccVmSnapshotState $script:RepairVm 'ccc-0123456789abcdef-baseline' 'Production' } | Should -Throw 'hyper-v-snapshot-reconciliation-ambiguous'
+            { Repair-CccVmSnapshotState $script:RepairVm 'ccc-0123456789abcdef-baseline' 'Production' `
+                $script:RepairPolicyWriter $script:RepairVmReader $script:RepairSnapshotReader } | Should -Throw 'hyper-v-snapshot-reconciliation-ambiguous'
             $script:RepairSnapshots.Count | Should -Be 2
-            Should -Invoke Remove-VMSnapshot -Times 0
         }
 
         It 'confirms Disabled quarantine when policy restoration fails' {
-            Mock Set-VM {
-                param($VM, $CheckpointType)
-                if ($CheckpointType -eq 'Production') { throw 'restore-failed' }
-                $script:RepairVm.CheckpointType = $CheckpointType
+            $script:RepairPolicyWriter = {
+                param($TargetVm, $Policy)
+                $script:RepairPolicyWrites++
+                if ($Policy -eq 'Production') { throw 'restore-failed' }
+                $script:RepairVm.CheckpointType = $Policy
             }
-            { Repair-CccVmSnapshotState $script:RepairVm 'ccc-0123456789abcdef-baseline' 'Production' } | Should -Throw 'hyper-v-snapshot-policy-restore-failed'
+            { Repair-CccVmSnapshotState $script:RepairVm 'ccc-0123456789abcdef-baseline' 'Production' `
+                $script:RepairPolicyWriter $script:RepairVmReader $script:RepairSnapshotReader } | Should -Throw 'hyper-v-snapshot-policy-restore-failed'
             $script:RepairVm.CheckpointType | Should -Be 'Disabled'
+            $script:RepairPolicyWrites | Should -Be 2
         }
 
         It 'does not automatically remove a pre-existing Disabled quarantine' {
             $script:RepairVm.CheckpointType = 'Disabled'
-            { Repair-CccVmSnapshotState $script:RepairVm 'ccc-0123456789abcdef-baseline' 'Production' } | Should -Throw 'hyper-v-snapshot-policy-quarantined'
+            { Repair-CccVmSnapshotState $script:RepairVm 'ccc-0123456789abcdef-baseline' 'Production' `
+                $script:RepairPolicyWriter $script:RepairVmReader $script:RepairSnapshotReader } | Should -Throw 'hyper-v-snapshot-policy-quarantined'
             $script:RepairVm.CheckpointType | Should -Be 'Disabled'
-            Should -Invoke Set-VM -Times 0
+            $script:RepairPolicyWrites | Should -Be 0
         }
     }
 }

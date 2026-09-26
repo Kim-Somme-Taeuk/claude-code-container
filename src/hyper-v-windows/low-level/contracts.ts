@@ -19,15 +19,29 @@ import type {
 
 export const HYPER_V_WINDOWS_OPERATIONS = Object.freeze([
     "Get-VM",
+    "Get-VMDiagnostic",
+    "Capture-VMConsole",
+    "Send-VMConsoleInput",
+    "Get-VMConsoleCursor",
+    "Configure-VMGuestBoot",
     "Get-VMHardDiskDrive",
     "Get-VMDvdDrive",
+    "Remove-VMDvdDrive",
+    "Get-VHD",
+    "Mount-VHD",
+    "Dismount-VHD",
+    "Convert-VHD",
+    "Resize-VHD",
     "Get-VMSnapshot",
     "Start-VM",
     "Stop-VM",
+    "Restart-VM",
     "Remove-VM",
+    "Remove-HostFiles",
     "Checkpoint-VM",
     "Remove-VMSnapshot",
     "Restore-VMSnapshot",
+    "Repair-VMSnapshotState",
     "Get-VMSwitch",
     "New-VMSwitch",
     "Set-VMSwitch",
@@ -37,6 +51,7 @@ export const HYPER_V_WINDOWS_OPERATIONS = Object.freeze([
     "Set-VMMemory",
     "Set-VMProcessor",
     "Get-VMFirmware",
+    "Get-VMBios",
     "Set-VMFirmware",
     "Set-VMBios",
     "Get-VMNetworkAdapter",
@@ -52,6 +67,7 @@ export const HYPER_V_WINDOWS_OPERATIONS = Object.freeze([
     "Get-NetNat",
     "New-NetNat",
     "Remove-NetNat",
+    "Invoke-Guest",
 ] as const);
 
 export type HyperVWindowsOperation = typeof HYPER_V_WINDOWS_OPERATIONS[number];
@@ -96,6 +112,171 @@ export type HyperVDvdDrive = {
     readonly controllerLocation: number;
 };
 
+export type HyperVRemoveVMDvdDriveRequest = {
+    readonly selector: { readonly kind: "id"; readonly id: string };
+    readonly expectedName: string;
+    readonly expectedNotes: string;
+    readonly path: string;
+};
+
+export type HyperVVirtualHardDisk = {
+    readonly path: string;
+    readonly vhdFormat: string;
+    readonly vhdType: string;
+    readonly parentPath: string | null;
+    readonly virtualSizeBytes: number;
+    readonly fileSizeBytes: number;
+};
+
+export type HyperVMountVHDRequest = {
+    readonly path: string;
+    readonly readOnly: boolean;
+    readonly noDriveLetter: boolean;
+};
+
+export type HyperVConvertVHDRequest = {
+    readonly sourcePath: string;
+    readonly destinationPath: string;
+    readonly vhdType: "Dynamic" | "Fixed";
+};
+
+export type HyperVResizeVHDRequest = {
+    readonly path: string;
+    readonly sizeBytes: number;
+};
+
+export type HyperVWindowsGuestBootDiagnostic = {
+    ok: true;
+    vmId: string;
+    vmName: string;
+    state: string;
+    uptimeMs: number;
+    generation: 1 | 2 | null;
+    secureBootEnabled: boolean | null;
+    heartbeatEnabled: boolean | null;
+    heartbeatPrimaryStatus: number | null;
+    heartbeatSecondaryStatus: number | null;
+    integrationServices: Array<{
+        name: string;
+        enabled: boolean;
+        primaryStatus: number | null;
+        secondaryStatus: number | null;
+    }>;
+    hardDiskCount: number;
+    dvdCount: number;
+    hardDiskControllers: string[];
+    bootDeviceTypes: string[];
+    bootEntries: Array<{
+        bootType: string;
+        deviceType: string;
+        controllerType: string;
+        controllerNumber: number | null;
+        controllerLocation: number | null;
+    }>;
+    hardDisks: Array<{
+        controllerType: string;
+        controllerNumber: number | null;
+        controllerLocation: number | null;
+        vhdFormat: string;
+        vhdType: string;
+        sizeBytes: number | null;
+        fileSizeBytes: number | null;
+        minimumSizeBytes: number | null;
+        logicalSectorSize: number | null;
+        physicalSectorSize: number | null;
+    }>;
+    dvdDrives: Array<{
+        controllerType: string;
+        controllerNumber: number | null;
+        controllerLocation: number | null;
+        mediaAttached: boolean;
+    }>;
+    diagnosticComplete: boolean;
+    diagnosticErrors: string[];
+};
+
+export type HyperVGetVMDiagnosticRequest = {
+    readonly selector: { readonly kind: "id"; readonly id: string };
+    readonly expectedName: string;
+    readonly expectedNotes: string;
+};
+
+export type HyperVConsoleIdentity = {
+    readonly selector: { readonly kind: "id"; readonly id: string };
+    readonly expectedName: string;
+    readonly expectedNotes: string;
+};
+
+export type HyperVConsoleCapture = {
+    readonly pngBase64: string;
+    readonly width: number;
+    readonly height: number;
+    readonly nativeWidth: number;
+    readonly nativeHeight: number;
+};
+
+export type HyperVConsoleCursor = {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+    readonly nativeWidth: number;
+    readonly nativeHeight: number;
+};
+
+export type HyperVConsolePointerInput = {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+    readonly nativeWidth: number;
+    readonly nativeHeight: number;
+};
+
+export type HyperVConsoleInput = HyperVConsoleIdentity & (
+    | (HyperVConsolePointerInput & { readonly action: "click" | "doubleClick"; readonly button: "left" | "right" })
+    | (HyperVConsolePointerInput & { readonly action: "cursor" })
+    | (HyperVConsolePointerInput & { readonly action: "scroll"; readonly direction: "up" | "down" | "left" | "right"; readonly amount: number })
+    | { readonly action: "key"; readonly keys: readonly string[] }
+    | { readonly action: "type"; readonly text: string }
+);
+
+type HyperVConfigureVMGuestBootIdentity = {
+    readonly selector: { readonly kind: "id"; readonly id: string };
+    readonly expectedName: string;
+    readonly expectedNotes: string;
+    readonly osDiskPath: string;
+    readonly mediaPath: string;
+    readonly bootSettings: HyperVVirtualMachineGeneration;
+};
+
+export type HyperVConfigureVMGuestBootRequest = HyperVConfigureVMGuestBootIdentity & (
+    | { readonly guestKind?: "windows"; readonly expectedBootstrapMacAddress?: never }
+    | { readonly guestKind: "linux"; readonly expectedBootstrapMacAddress: string }
+);
+
+export type HyperVGuestDirectIdentity = {
+    readonly selector: { readonly kind: "id"; readonly id: string };
+    readonly expectedName: string;
+    readonly expectedNotes: string;
+    readonly credentialPath: string;
+};
+
+export type HyperVGuestDirectAction =
+    | { readonly action: "exec"; readonly command: string }
+    | { readonly action: "job"; readonly command: string }
+    | { readonly action: "mkdir"; readonly remotePath: string }
+    | { readonly action: "upload"; readonly localPath: string; readonly remotePath: string }
+    | { readonly action: "download"; readonly localPath: string; readonly remotePath: string; readonly maxBytes: number };
+
+export type HyperVGuestDirectRequest = HyperVGuestDirectIdentity & HyperVGuestDirectAction;
+
+export type HyperVGuestDirectResult =
+    | { readonly action: "exec"; readonly status: number; readonly stdout: string; readonly stderr: string }
+    | { readonly action: "job"; readonly output: string }
+    | { readonly action: "mkdir" }
+    | { readonly action: "upload" | "download"; readonly localPath: string; readonly remotePath: string; readonly bytes: number };
+
 export type HyperVVirtualMachineSnapshot = {
     readonly id: string;
     readonly name: string;
@@ -123,19 +304,36 @@ type HyperVWindowsHostExecutionRequestWithoutSelectorBase<Operation extends Hype
     HyperVWindowsHostExecutionRequestBase<Operation> & { readonly selector?: never };
 
 export type HyperVWindowsExecutionRequest =
+    | (HyperVWindowsExecutionRequestBase<"Invoke-Guest"> & HyperVGuestDirectRequest)
     | HyperVWindowsExecutionRequestBase<"Get-VM">
+    | (HyperVWindowsExecutionRequestBase<"Get-VMDiagnostic"> & Omit<HyperVGetVMDiagnosticRequest, "selector">)
+    | (HyperVWindowsExecutionRequestBase<"Capture-VMConsole"> & Omit<HyperVConsoleIdentity, "selector">)
+    | (HyperVWindowsExecutionRequestBase<"Get-VMConsoleCursor"> & Omit<HyperVConsoleIdentity, "selector">)
+    | (HyperVWindowsExecutionRequestBase<"Send-VMConsoleInput"> & Omit<HyperVConsoleInput, "selector">)
+    | (HyperVWindowsExecutionRequestBase<"Configure-VMGuestBoot"> & Omit<HyperVConfigureVMGuestBootRequest, "selector">)
     | (HyperVWindowsHostExecutionRequestWithoutSelectorBase<"Get-VM"> & HyperVExactNameVMInventoryRequest)
     | HyperVWindowsExecutionRequestBase<"Get-VMHardDiskDrive">
     | HyperVWindowsExecutionRequestBase<"Get-VMDvdDrive">
+    | (HyperVWindowsExecutionRequestBase<"Remove-VMDvdDrive"> & Omit<HyperVRemoveVMDvdDriveRequest, "selector">)
+    | (HyperVWindowsHostExecutionRequestWithoutSelectorBase<"Get-VHD"> & { readonly path: string })
+    | (HyperVWindowsHostExecutionRequestWithoutSelectorBase<"Mount-VHD"> & HyperVMountVHDRequest)
+    | (HyperVWindowsHostExecutionRequestWithoutSelectorBase<"Dismount-VHD"> & { readonly path: string })
+    | (HyperVWindowsHostExecutionRequestWithoutSelectorBase<"Convert-VHD"> & HyperVConvertVHDRequest)
+    | (HyperVWindowsHostExecutionRequestWithoutSelectorBase<"Resize-VHD"> & HyperVResizeVHDRequest)
     | HyperVWindowsExecutionRequestBase<"Get-VMSnapshot">
-    | HyperVWindowsExecutionRequestBase<"Start-VM">
+    | (HyperVWindowsExecutionRequestBase<"Start-VM"> & HyperVPowerIdentityExpectation)
     | (HyperVWindowsExecutionRequestBase<"Stop-VM"> & {
         readonly mode: "shutdown" | "turn-off";
         readonly force: boolean;
-    })
+    } & HyperVPowerIdentityExpectation)
+    | (HyperVWindowsExecutionRequestBase<"Restart-VM"> & {
+        readonly force: boolean;
+    } & HyperVPowerIdentityExpectation)
     | (HyperVWindowsExecutionRequestBase<"Remove-VM"> & {
         readonly force: boolean;
+        readonly guard?: HyperVRemoveVMGuard;
     })
+    | (HyperVWindowsHostExecutionRequestWithoutSelectorBase<"Remove-HostFiles"> & HyperVRemoveHostFilesRequest)
     | (HyperVWindowsExecutionRequestBase<"Checkpoint-VM"> & {
         readonly snapshotName: string;
     })
@@ -146,6 +344,7 @@ export type HyperVWindowsExecutionRequest =
     | (HyperVWindowsExecutionRequestBase<"Restore-VMSnapshot"> & {
         readonly snapshot: HyperVSnapshotSelector;
     })
+    | (HyperVWindowsHostExecutionRequestBase<"Repair-VMSnapshotState"> & HyperVRepairVMSnapshotStateRequest)
     | (HyperVWindowsHostExecutionRequestBase<"Get-VMSwitch"> & {
         readonly selector: HyperVVirtualSwitchSelector;
     })
@@ -191,6 +390,7 @@ export type HyperVWindowsExecutionRequest =
         readonly count: number;
     })
     | HyperVWindowsExecutionRequestBase<"Get-VMFirmware">
+    | HyperVWindowsExecutionRequestBase<"Get-VMBios">
     | (HyperVWindowsExecutionRequestBase<"Set-VMFirmware"> & {
         readonly secureBoot: HyperVSecureBootSetting;
         readonly firstBootDiskPath?: string;
@@ -238,19 +438,53 @@ export type HyperVWindowsCallOptions = {
     readonly signal?: AbortSignal;
 };
 
+export type HyperVVhdMutationCallOptions = HyperVWindowsCallOptions & {
+    readonly timeoutMilliseconds?: number;
+};
+
 export type HyperVStartVirtualMachineRequest = {
     readonly selector: HyperVVirtualMachineSelector;
+} & HyperVPowerIdentityExpectation;
+
+export type HyperVPowerIdentityExpectation = {
+    readonly expectedName?: string;
+    readonly expectedNotes?: string;
 };
 
 export type HyperVStopVirtualMachineRequest = {
     readonly selector: HyperVVirtualMachineSelector;
     readonly mode: "shutdown" | "turn-off";
     readonly force?: boolean;
-};
+} & HyperVPowerIdentityExpectation;
+
+export type HyperVRestartVirtualMachineRequest = {
+    readonly selector: HyperVVirtualMachineSelector;
+    readonly force?: boolean;
+} & HyperVPowerIdentityExpectation;
 
 export type HyperVRemoveVirtualMachineRequest = {
     readonly selector: HyperVVirtualMachineSelector;
     readonly force?: boolean;
+    readonly guard?: HyperVRemoveVMGuard;
+};
+
+export type HyperVRemoveVMGuard = {
+    readonly expectedName: string;
+    readonly expectedNotes: string;
+    readonly expectedDiskPaths: readonly string[];
+    readonly ownedDiskDirectory: string;
+    readonly expectedDvdPaths: readonly string[];
+    readonly unmarkedRootDiskPath?: string;
+};
+
+export type HyperVRemoveHostFilesRequest = {
+    readonly rootDirectory: string;
+    readonly paths: readonly string[];
+    readonly checkpointDiskDirectory?: string;
+};
+
+export type HyperVRemoveHostFilesResult = {
+    readonly removedCount: number;
 };
 
 export type HyperVCheckpointVirtualMachineRequest = {
@@ -268,6 +502,19 @@ export type HyperVRemoveSnapshotRequest = {
 export type HyperVRestoreSnapshotRequest = {
     readonly selector: HyperVVirtualMachineSelector;
     readonly snapshot: HyperVSnapshotSelector;
+};
+
+export type HyperVRepairVMSnapshotStateRequest = {
+    readonly selector: { readonly kind: "id"; readonly id: string };
+    readonly expectedName: string;
+    readonly expectedNotes: string;
+    readonly snapshotName: string;
+    readonly expectedCheckpointPolicy: "Production" | "ProductionOnly";
+};
+
+export type HyperVRepairVMSnapshotStateResult = {
+    readonly checkpointPolicy: "Production" | "ProductionOnly";
+    readonly candidateCount: 0 | 1;
 };
 
 // Hyper-V's two firmware worlds. A generation-1 VM has a BIOS and no firmware object;
@@ -354,6 +601,11 @@ export type HyperVVirtualMachineFirmware = {
     readonly firstBootDevicePath: string | null;
 };
 
+export type HyperVVirtualMachineBios = {
+    readonly vmId: string;
+    readonly startupOrder: readonly HyperVBiosStartupDevice[];
+};
+
 export type HyperVAddVMNetworkAdapterRequest = {
     readonly selector: HyperVVirtualMachineSelector;
     readonly name: string;
@@ -390,6 +642,16 @@ export type HyperVSetVMNetworkAdapterRequest = {
 };
 
 export type HyperVWindowsClient = {
+    getVHD(path: string, options?: HyperVWindowsCallOptions): Promise<HyperVVirtualHardDisk>;
+    mountVHD(request: HyperVMountVHDRequest, options?: HyperVWindowsCallOptions): Promise<void>;
+    dismountVHD(path: string, options?: HyperVWindowsCallOptions): Promise<void>;
+    convertVHD(request: HyperVConvertVHDRequest, options?: HyperVVhdMutationCallOptions): Promise<void>;
+    resizeVHD(request: HyperVResizeVHDRequest, options?: HyperVVhdMutationCallOptions): Promise<void>;
+    getVMDiagnostic(request: HyperVGetVMDiagnosticRequest, options?: HyperVWindowsCallOptions & { readonly timeoutMilliseconds?: number }): Promise<HyperVWindowsGuestBootDiagnostic>;
+    captureVMConsole(request: HyperVConsoleIdentity, options?: HyperVWindowsCallOptions): Promise<HyperVConsoleCapture>;
+    getVMConsoleCursor(request: HyperVConsoleIdentity, options?: HyperVWindowsCallOptions): Promise<HyperVConsoleCursor>;
+    sendVMConsoleInput(request: HyperVConsoleInput, options?: HyperVWindowsCallOptions): Promise<void>;
+    configureVMGuestBoot(request: HyperVConfigureVMGuestBootRequest, options?: HyperVWindowsCallOptions): Promise<void>;
     getVM(
         selector: HyperVVirtualMachineSelector,
         options?: HyperVWindowsCallOptions,
@@ -402,6 +664,7 @@ export type HyperVWindowsClient = {
         selector: HyperVVirtualMachineSelector,
         options?: HyperVWindowsCallOptions,
     ): Promise<readonly HyperVDvdDrive[]>;
+    removeVMDvdDrive(request: HyperVRemoveVMDvdDriveRequest, options?: HyperVWindowsCallOptions): Promise<void>;
     startVM(
         request: HyperVStartVirtualMachineRequest,
         options?: HyperVWindowsCallOptions,
@@ -410,10 +673,18 @@ export type HyperVWindowsClient = {
         request: HyperVStopVirtualMachineRequest,
         options?: HyperVWindowsCallOptions,
     ): Promise<void>;
+    restartVM(
+        request: HyperVRestartVirtualMachineRequest,
+        options?: HyperVWindowsCallOptions,
+    ): Promise<void>;
     removeVM(
         request: HyperVRemoveVirtualMachineRequest,
         options?: HyperVWindowsCallOptions,
     ): Promise<void>;
+    removeHostFiles(
+        request: HyperVRemoveHostFilesRequest,
+        options?: HyperVWindowsCallOptions,
+    ): Promise<HyperVRemoveHostFilesResult>;
     getVMSnapshots(
         selector: HyperVVirtualMachineSelector,
         options?: HyperVWindowsCallOptions,
@@ -431,6 +702,10 @@ export type HyperVWindowsClient = {
         request: HyperVRestoreSnapshotRequest,
         options?: HyperVWindowsCallOptions,
     ): Promise<void>;
+    repairVMSnapshotState(
+        request: HyperVRepairVMSnapshotStateRequest,
+        options?: HyperVWindowsCallOptions,
+    ): Promise<HyperVRepairVMSnapshotStateResult>;
     // Returns the VM native created, so a caller never has to re-read by name to learn the id
     // it must use for every following step -- and never has to guess whether a name collision
     // means its own VM or someone else's.
@@ -454,6 +729,10 @@ export type HyperVWindowsClient = {
         selector: HyperVVirtualMachineSelector,
         options?: HyperVWindowsCallOptions,
     ): Promise<HyperVVirtualMachineFirmware>;
+    getVMBios(
+        selector: HyperVVirtualMachineSelector,
+        options?: HyperVWindowsCallOptions,
+    ): Promise<HyperVVirtualMachineBios>;
     setVMFirmware(
         request: HyperVSetVMFirmwareRequest,
         options?: HyperVWindowsCallOptions,

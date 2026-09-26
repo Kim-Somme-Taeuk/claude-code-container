@@ -42,14 +42,25 @@ export { hyperVSnapshotName, hyperVVmName, ownershipMarker } from "./core.js";
 export { hyperVReadinessCommand, hyperVRebootCommand, hyperVSetupCommand, hyperVEnsureNetworkCommand, hyperVCleanupNetworkCommand } from "./host.js";
 export { hyperVInspectNetworkAllocationsCommand } from "./network-allocations.js";
 export { hyperVCreateCommand } from "./vm-create.js";
-export { hyperVCreatePrologueCommand, type HyperVCreatePrologueOptions } from "./vm-create-prologue.js";
-export { hyperVLinuxSeedCommand, hyperVLinuxSshReadyCommand, hyperVBootstrapNetworkCommand, hyperVLinuxNetworkFinalizeCommand, hyperVBootstrapNetworkCleanupCommand, hyperVLinuxSshExecCommand, hyperVLinuxScpUploadCommand, hyperVLinuxScpDownloadCommand } from "./linux-guest.js";
-export { hyperVPrepareBaseImageCommand, hyperVAcquireBaseImageCommand } from "./images.js";
+export { hyperVCreatePrologueCommand, hyperVCreateCompensationCommand, parseHyperVCreatePrologueFailure, type HyperVCreatePrologueOptions } from "./vm-create-prologue.js";
+export { hyperVInspectCreateVhdCommand, parseHyperVCreateVhdInspection, type HyperVCreateVhdInspectionOptions, type HyperVCreateVhdInspection } from "./vm-create-inspect.js";
+export { hyperVLinuxSeedCommand, hyperVLinuxSshReadyCommand, hyperVLinuxGuiPrepareCommand, hyperVLinuxGuiReadyCommand, hyperVLinuxGuiTypeGuestCommand, hyperVLinuxGuiScrollGuestCommand, hyperVBootstrapNetworkCommand, hyperVLinuxNetworkFinalizeCommand, hyperVBootstrapNetworkCleanupCommand, hyperVLinuxSshExecCommand, hyperVLinuxScpUploadCommand, hyperVLinuxScpDownloadCommand } from "./linux-guest.js";
+export {
+    hyperVPrepareBaseImageCommand,
+    hyperVAcquireBaseImageCommand,
+    hyperVAcquireBaseImagePrepareCommand,
+    hyperVAcquireBaseImageFinalizeCommand,
+    parseHyperVAcquireBaseImagePrepareObservation,
+    type HyperVAcquireBaseImagePrepareObservation,
+    type HyperVAcquireBaseImageFinalizeOptions,
+} from "./images.js";
+export { hyperVImportedImageStorageCommand, parseHyperVImportedImageStorage } from "./image-storage.js";
 export { hyperVStatusCommand, hyperVStartCommand, hyperVGuestReadyCommand, hyperVGuestBootDiagnosticCommand, hyperVStopCommand, hyperVDeleteCommand, hyperVRecoverOrphanCommand } from "./lifecycle.js";
 export { hyperVSnapshotRepairCommand } from "./snapshots.js";
 export {
     hyperVGuestExecCommand,
     hyperVGuestProvisionCommand,
+    hyperVGuestProvisionMediaCommand,
     hyperVGuestUploadCommand,
     hyperVGuestDownloadCommand,
     HYPER_V_FIRST_LOGON_LAUNCHER,

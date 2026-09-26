@@ -101,7 +101,12 @@ const TERMINATION_UNCONFIRMED_CODE = "hyper-v-network-elevation-termination-unco
 
 export const HYPER_V_ELEVATED_NETWORK_ERROR_CODES = Object.freeze([
     "hyper-v-network-elevation-cancelled",
+    // The relay's RunAs (ShellExecute) failed for a reason other than a declined prompt.
     "hyper-v-network-elevation-launch-failed",
+    // Node refused the PowerShell path before starting the relay.
+    "hyper-v-network-elevation-executable-rejected",
+    // Node could not start the unelevated relay or hand it the launch envelope.
+    "hyper-v-network-elevation-relay-spawn-failed",
     "hyper-v-network-elevation-handshake-timeout",
     "hyper-v-network-elevation-authentication-failed",
     "hyper-v-network-elevation-administrator-required",
@@ -677,7 +682,7 @@ function defaultSpawnRelay(request: HyperVElevatedNetworkRelaySpawnRequest): Hyp
     if (!canonicalExecutable
         || !validSystemPowerShellPath(request.executable)
         || canonicalExecutable.toLocaleLowerCase("en-US") !== request.executable.toLocaleLowerCase("en-US")) {
-        throw new HyperVElevatedNetworkSessionError("hyper-v-network-elevation-launch-failed");
+        throw new HyperVElevatedNetworkSessionError("hyper-v-network-elevation-executable-rejected");
     }
     const pipeName = `ccc-hyper-v-network-${randomBytes(16).toString("hex")}`;
     const nonce = randomBytes(32).toString("hex");
@@ -1065,7 +1070,7 @@ function defaultSpawnRelay(request: HyperVElevatedNetworkRelaySpawnRequest): Hyp
         }
     });
     child.once("error", () => {
-        recordPrimaryFailureIfAbsent("hyper-v-network-elevation-launch-failed");
+        recordPrimaryFailureIfAbsent("hyper-v-network-elevation-relay-spawn-failed");
         finish(requestAttempted ? "hyper-v-windows-session-exited" : "hyper-v-windows-session-spawn-failed");
     });
     child.once("exit", () => {
@@ -1109,7 +1114,7 @@ function defaultSpawnRelay(request: HyperVElevatedNetworkRelaySpawnRequest): Hyp
     });
     child.stdin?.write(`${launchEnvelope}\n`, (error) => {
         if (error) {
-            recordPrimaryFailureIfAbsent("hyper-v-network-elevation-launch-failed");
+            recordPrimaryFailureIfAbsent("hyper-v-network-elevation-relay-spawn-failed");
             finish("hyper-v-windows-session-stdin-failed");
         }
     });
@@ -1151,7 +1156,7 @@ function defaultSpawnRelay(request: HyperVElevatedNetworkRelaySpawnRequest): Hyp
 function boundedElevationCode(error: unknown): HyperVElevatedNetworkErrorCode {
     return error instanceof HyperVElevatedNetworkSessionError
         ? error.code
-        : "hyper-v-network-elevation-launch-failed";
+        : "hyper-v-network-elevation-relay-spawn-failed";
 }
 
 function failedExecution(code: HyperVElevatedNetworkErrorCode): HyperVWindowsExecutionResult {

@@ -21,38 +21,31 @@ filter; two disagreeing IPv4 validators. The rules those established are in
 
 ### Still open
 
-**`Get-NetNeighbor` swallows real read failures.** The operation script uses
-`-ErrorAction SilentlyContinue`, justified as "an interface with no neighbours
-is the ordinary case" — true, but it swallows every non-terminating error, not
-just no-match. The legacy path used `-ErrorAction Stop` and mapped the catch to
-`hyper-v-bootstrap-neighbor-inspection-failed`. That code is still in the
-broker's public union and is now unreachable. A real neighbour-read failure is
-indistinguishable from an empty table: discovery silently loses one of its two
-address sources and the create times out as `hyper-v-bootstrap-address-unavailable`
-with no clue why. Fixing it means distinguishing no-match from error on the
-PowerShell side. Either make the code reachable or remove it from the union;
-leaving a public code that nothing can emit is the worst of the three.
+**`Get-NetNeighbor` read failures: addressed in source, Windows proof pending.**
+The operation script previously used `-ErrorAction SilentlyContinue` without
+checking the error stream, so a provider failure was indistinguishable from an
+empty neighbor table. It now captures nonterminating errors, accepts only an
+exact cmdletization no-match error for an empty result, and fails closed for
+every other error. The Device Lab adapter maps a failed typed neighbor read to
+the existing `hyper-v-bootstrap-neighbor-inspection-failed` readiness code.
+Fake-client and PowerShell fixture coverage pin those branches. The precise
+native no-match ErrorRecord still needs a Windows interface-scoped probe;
+unknown IDs fail closed until that evidence is available.
 
-**Empty host prefixes are reported as an inspection failure.** Discovery returns
-`hyper-v-bootstrap-host-prefix-inspection-failed` when no host prefix is found.
-In the PowerShell that code meant only "the `Get-NetIPAddress` read threw"; a
-successful read yielding zero prefixes returned a clean empty with no diagnostic.
-So this now names a failure for a state where nothing was inspected badly. The
-typed path also drops `hyper-v-bootstrap-management-adapter-inspection-failed`
-entirely. Fixing it needs a diagnostic for "no host address on this network"
-distinct from "the read failed", which widens a closed union the broker consumes.
+**Resolved: empty host prefixes are retryable availability.** A successful host
+read yielding zero eligible prefixes now returns an empty result without a
+diagnostic, matching the earlier behavior and allowing the caller's existing
+address-availability timeout to classify the outcome. Native read failures still
+fail the probe.
 
-**Two copies of the interface filter.** The adapter picks which interfaces to
-read neighbours on; the reconciler picks which host addresses count as prefixes.
-The adapter's copy omits the reconciler's `prefixLength` bound. Safe today only
-because the adapter's is strictly wider, and nothing pins that relationship. If
-it ever narrows, neighbours on a legitimate interface are never read and
-discovery silently loses half its sources.
+**Resolved: one interface filter.** Discovery and per-interface neighbour reads
+now share `selectHyperVBootstrapHostAddresses`, including the supported /16
+through /30 prefix rule. The adapter refuses more than 16 unique qualifying
+interfaces before issuing any neighbour request.
 
-**`resolveOwnedVm` cannot say "the VM is gone".** It reports
-`hyper-v-vm-ownership-mismatch` both for a VM that is missing and for one that
-belongs to someone else. Both codes exist and both are terminal, so behaviour is
-unaffected, but an operator loses a real distinction.
+**Resolved: `resolveOwnedVm` distinguishes absence.** Zero exact-name matches
+report `hyper-v-vm-not-found`; ambiguity, changed ID, and changed Notes remain
+`hyper-v-vm-ownership-mismatch`.
 
 **`confirmHyperVBootstrapContainment` reasons negatively over an absent value.**
 A MAC that fails to parse decodes to absent, and absent matches nothing. That is
@@ -60,15 +53,12 @@ the right default for destructive selection and the wrong one for a containment
 proof, which is asserting that nothing holds the address. Not reachable today,
 since native always spells a MAC parseably.
 
-**Defence-in-depth, from the security review, none exploitable.** The native
-`Remove-VMNetworkAdapter` re-resolves the VM by id and re-checks adapter name and
-MAC, but does not re-check the ownership marker, leaving a TOCTOU window that
-requires host privileges to exploit. `observeForDiscovery` issues one neighbour
-read per host interface with no cap (host configuration, not caller-controlled).
-The host-prefix floor accepts `/8` where `createHyperVHostNetworkSpec` requires
-`/16`-`/30`.
+**Resolved defence-in-depth items.** Native `Remove-VMNetworkAdapter` now carries
+the expected Notes and rechecks the current VM identity immediately before the
+exact adapter mutation. Discovery caps qualifying interfaces at 16, and its
+shared host-prefix filter accepts only `/16` through `/30`.
 
-### A flaky test that will read as a mystery CI red
+### Resolved: exhausted-boot test classification under load
 
 `device-lab-hyper-v-linux-broker.test.ts`, the "runs create, cloud-init, SSH,
 transfer, snapshot, and cleanup through one owner-fenced backend" case, asserts
@@ -98,18 +88,23 @@ outcome the same race has produced, and the list would still not be closed. The
 test is pinning a timing-dependent classification against a 1 s budget and
 calling it a fixed set.
 
-Two honest repairs, neither done here because both are a design decision rather
-than a patch: make the case deterministic about whether the probe is allowed to
-complete, so exactly one classification is reachable; or assert the property the
-test actually means -- the boot budget was exhausted, the device is reported
-not-ready, and specifically not as `hyper-v-guest-boot-signal-timeout` -- against
-the classifier's own closed set of codes rather than a hand-maintained copy of
-part of it.
+Resolved in slice 4A: the assertion now checks that the response is not-ready,
+has a nonempty readiness error, and specifically is not
+`hyper-v-guest-boot-signal-timeout`. It no longer copies a timing-dependent
+subset of classifier codes.
 
-**One `as unknown as` in the adapter test helper.** `client()` in
-`device-lab-hyper-v-vm-network-adapter.test.ts` ends in a double assertion,
-which defeats part of the point of adding that file to `tsconfig.tests.json`.
-Pre-existing, from `6c7a59bd`.
+During slice 5A full-suite verification, a separate host-key rejection case
+exposed another classification race. Several bootstrap probes succeeded and SSH
+reported `ssh-host-key-rejected`, but the final probe failed near the caller's
+deadline. The generic final `hyper-v-bootstrap-network-probe-failed` code then
+masked the observed SSH failure. The classifier now preserves the SSH error when
+at least one probe succeeded and a later generic probe failure follows an SSH
+attempt. The integration fixture allows 10 seconds for this classification;
+the previous 1-second budget could expire before the first probe under load.
+
+**Resolved: adapter seam is narrow enough to test directly.** The production
+adapter accepts the exact client method subset it calls, and the test helper now
+type-checks without `as unknown as`.
 
 ## From the slice 3A review (2026-09-18)
 
@@ -197,3 +192,21 @@ duplicated one, `{enabled: true, template: ""}`, and a `managed-and-bootstrap`
 intent whose two adapter names are equal. The client rejects the first three at
 runtime; the fourth produces a plan that renames and adds the same name, which
 native then refuses as ambiguous.
+
+## From the 2026-09-25 host Level 3 run
+
+**Fixed: the automatic-image finalizer never ran on Windows PowerShell 5.1.** It
+computed the partial image's file id with `[ulong]`, a type accelerator that exists
+only in PowerShell 6+. The broker runs its scripts through `powershell.exe` (5.1),
+so the finalizer threw before reading `base.partial.vhdx` and both Windows and
+Linux creates failed as `hyper-v-base-image-partial-open-failed` after a complete
+download. Earlier host runs never reached this path because the base images were
+already cached. A host probe confirmed that, spelled `[UInt64]`, the Win32 file index
+equals Node's bigint `ino` on NTFS, and that a VHDX can be moved immediately after
+`Get-VHD`. `device-lab-hyper-v-provider.test.ts` now rejects PowerShell 7-only
+accelerators in every `src/host-control/hyper-v` script builder.
+
+**Open: the stage name hides the real error.** The finalizer's identity check
+(`hyper-v-base-image-partial-identity-changed`) and any failure before the first
+`Set-CccAcquireStage` are reported under the `partial-open-failed` stage, and the
+failed-run cleanup deletes the partial image, so nothing is left to inspect.

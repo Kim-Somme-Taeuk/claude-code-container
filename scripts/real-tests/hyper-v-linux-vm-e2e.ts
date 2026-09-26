@@ -6,6 +6,7 @@ import { hyperVReadinessCommand, parseHyperVReadiness } from "../../src/host-con
 import { hiddenSpawnSync, repoRoot } from "./helpers.ts";
 import { brokerToolFailureEvidence, formatBrokerToolFailure, lifecycleDevice, parseToolPayload, parseToolResult, withDeviceLabMcp } from "./device-lab-mcp-client.ts";
 import { providerMcpSessionOptions } from "./provider-mcp-matrix.ts";
+import { runHyperVGuiE2E } from "./hyper-v-gui-e2e.ts";
 
 const DEVICE_PREFIX = "linux-hyper-v-real-e2e-";
 const CAPABILITIES = [
@@ -13,6 +14,15 @@ const CAPABILITIES = [
     "device_exec", "device_upload", "device_download",
     "device_snapshot_list", "device_snapshot_create", "device_snapshot_restore", "device_snapshot_delete",
 ];
+// Release this device's allocation but keep the shared managed switch, gateway and NAT, as the
+// Windows E2E does. Tearing that fabric down needs a UAC prompt, which an unattended Level 3 run
+// cannot answer; the 2026-09-25 host run failed its final delete exactly there.
+export const HYPER_V_LINUX_E2E_DELETE_OPTIONS = Object.freeze({
+    force: true,
+    confirmDestructive: true,
+    preserveNetwork: true,
+});
+
 export const HYPER_V_LINUX_PRE_REBOOT_COMMAND = "uname -sr && sudo test -s /etc/netplan/99-ccc-static.yaml && sudo netplan generate && sudo sync && printf ccc-hyper-v-linux-e2e-ok";
 
 export function prepareHyperVLinuxDownloadDestination(path: string) {
@@ -170,7 +180,7 @@ async function cleanupPrevious(callTool: (tool: string, args: any) => Promise<an
     const devices = Array.isArray(inventory?.devices) ? inventory.devices : [];
     for (const device of devices.filter((candidate: any) => String(candidate?.id || "").startsWith(DEVICE_PREFIX))) {
         try { await callTool("device_stop", { backend: "linux-vm", deviceId: device.id, incarnationId: device.incarnationId, force: true }); } catch { /* delete is still attempted */ }
-        hyperVLinuxToolPayload(await callTool("device_delete", { backend: "linux-vm", deviceId: device.id, incarnationId: device.incarnationId, force: true, confirmDestructive: true }));
+        hyperVLinuxToolPayload(await callTool("device_delete", { backend: "linux-vm", deviceId: device.id, incarnationId: device.incarnationId, ...HYPER_V_LINUX_E2E_DELETE_OPTIONS }));
     }
 }
 
@@ -250,6 +260,9 @@ export async function runHyperVLinuxVmE2E(options: any = {}) {
             const afterReboot = resultValue(hyperVLinuxToolPayload(await callTool("device_exec", { ...direct, command: "printf ccc-hyper-v-linux-reboot-ok" })));
             assert.match(afterReboot.stdout || "", /ccc-hyper-v-linux-reboot-ok/);
 
+            currentStep = "prove Linux GUI screenshot and computer input";
+            await runHyperVGuiE2E(callTool, direct, "linux");
+
             currentStep = "upload and download guest file";
             const uploadPath = join(tempDir, "upload.txt");
             const downloadPath = join(tempDir, "download.txt");
@@ -284,23 +297,47 @@ export async function runHyperVLinuxVmE2E(options: any = {}) {
             lifecycleDevice(hyperVLinuxToolPayload(await callTool("device_stop", { ...direct, force: true })), "device_stop");
 
             currentStep = "delete VM";
-            hyperVLinuxToolPayload(await callTool("device_delete", { ...direct, force: true, confirmDestructive: true }));
+            hyperVLinuxToolPayload(await callTool("device_delete", { ...direct, ...HYPER_V_LINUX_E2E_DELETE_OPTIONS }));
             created = false;
 
             currentStep = "verify advertised capability coverage";
             assert.deepStrictEqual(CAPABILITIES.filter((tool) => !calledCapabilities.has(tool)), []);
             return { status: "PASS", deviceId, verifiedCapabilities: [...calledCapabilities].sort() };
         } catch (error: any) {
+            let guiConsole = "";
+            if (currentStep === "prove Linux GUI screenshot and computer input" && created) {
+                try {
+                    const capture = await callTool("device_screenshot", { ...direct, helperTimeoutMs: 10000 });
+                    const image = capture?.isError === true ? null : capture?.content?.find((item: any) => item?.type === "image" && item?.mimeType === "image/png");
+                    const encoded = image?.data;
+                    if (typeof encoded === "string" && encoded.length <= 4 * 1024 * 1024
+                        && encoded.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
+                        const png = Buffer.from(encoded, "base64");
+                        if (png.length <= 2 * 1024 * 1024
+                            && png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+                            const outputRoot = join(repoRoot, "results", "device-lab-real");
+                            mkdirSync(outputRoot, { recursive: true });
+                            const target = join(outputRoot, "hyper-v-linux-gui-latest.png");
+                            const temporary = `${target}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+                            try {
+                                writeFileSync(temporary, png, { mode: 0o600, flag: "wx" });
+                                renameSync(temporary, target);
+                                guiConsole = "guestConsole=results/device-lab-real/hyper-v-linux-gui-latest.png; ";
+                            } finally { rmSync(temporary, { force: true }); }
+                        }
+                    }
+                } catch { /* the original GUI failure remains authoritative */ }
+            }
             try {
                 const diagnostic = writeHyperVLinuxFailureDiagnostic({ step: currentStep, created, error });
-                return { status: "FAIL", reason: `${currentStep}: details=results/device-lab-real/hyper-v-linux-diagnostic-latest.json; ${terminalFailureSummary(error)}` };
+                return { status: "FAIL", reason: `${currentStep}: ${guiConsole}details=results/device-lab-real/hyper-v-linux-diagnostic-latest.json; ${terminalFailureSummary(error)}` };
             } catch (diagnosticError) {
-                return { status: "FAIL", reason: `${currentStep}: diagnostic-write-failed=${boundedFailureMessage(diagnosticError)}; ${terminalFailureSummary(error)}` };
+                return { status: "FAIL", reason: `${currentStep}: ${guiConsole}diagnostic-write-failed=${boundedFailureMessage(diagnosticError)}; ${terminalFailureSummary(error)}` };
             }
         } finally {
             if (created) {
                 try { await callTool("device_stop", { ...direct, force: true }); } catch { /* best effort */ }
-                try { await callTool("device_delete", { ...direct, force: true, confirmDestructive: true }); } catch { /* evidence remains */ }
+                try { await callTool("device_delete", { ...direct, ...HYPER_V_LINUX_E2E_DELETE_OPTIONS }); } catch { /* evidence remains */ }
             }
             rmSync(tempDir, { recursive: true, force: true });
         }

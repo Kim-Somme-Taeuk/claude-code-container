@@ -205,6 +205,19 @@ describe("callback-scoped elevated Hyper-V network session", () => {
         expect(relay.forceKilled()).toBe(false);
     });
 
+    it.each([
+        ["an unexpected relay start error", new Error("spawn EACCES"), "hyper-v-network-elevation-relay-spawn-failed"],
+        ["a refused PowerShell path", new HyperVElevatedNetworkSessionError("hyper-v-network-elevation-executable-rejected"), "hyper-v-network-elevation-executable-rejected"],
+    ] as const)("reports %s separately from a RunAs launch failure", async (_name, thrown, code) => {
+        const result = await withElevatedHyperVNetworkExecutor({
+            executable,
+            deadlineUnixMilliseconds: Date.now() + 30_000,
+            spawnRelay: async () => { throw thrown; },
+        }, async (executor) => executor.execute(getVmRequest(), executorContext()));
+
+        expect(result).toEqual(expect.objectContaining({ status: null, error: code }));
+    });
+
     it("does not request UAC when the callback performs no administrator operation", async () => {
         const spawnRelay = vi.fn<HyperVElevatedNetworkRelaySpawn>();
         const beforeElevation = vi.fn();

@@ -1,4 +1,4 @@
-export function hyperVUbuntuQcow2ImageAcquisitionLines(): string[] {
+export function hyperVUbuntuQcow2ImageAcquisitionLines(phase: "legacy" | "prepare" = "legacy"): string[] {
     return [
         "    New-Item -ItemType Directory -Path $WorkPath -Force | Out-Null",
         "    $ImageDownloadPath = Join-Path $WorkPath 'source.download.qcow2'",
@@ -86,6 +86,7 @@ export function hyperVUbuntuQcow2ImageAcquisitionLines(): string[] {
         "    $NormalizedVhdGuard = [IO.File]::Open($NormalizedVhdPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))",
         "    $GuardedNormalizedHash = Get-CccGuardedSha256 $NormalizedVhdGuard",
         "    if ($GuardedNormalizedHash -ne $NormalizedHash) { throw 'hyper-v-base-image-normalize-failed' }",
+        ...(phase === "prepare" ? [] : [
         "    Set-CccAcquireStage 'hyper-v-base-image-source-inspection-failed'",
         "    $NormalizedVhd = Get-VHD -Path $NormalizedVhdPath -ErrorAction Stop",
         "    if ([string]$NormalizedVhd.VhdFormat -ne 'VHD' -or [string]$NormalizedVhd.VhdType -ne 'Fixed' -or $NormalizedVhd.ParentPath -or [long]$NormalizedVhd.Size -ne $SourceVirtualSize) { throw 'hyper-v-base-image-source-format-invalid' }",
@@ -121,5 +122,6 @@ export function hyperVUbuntuQcow2ImageAcquisitionLines(): string[] {
         "    }",
         "    $QemuHashAfterCompare = Get-CccGuardedSha256 $QemuGuard",
         "    if ($QemuHashAfterCompare -ne $QemuHashBefore) { throw 'hyper-v-qemu-img-mutated' }",
+        ]),
     ];
 }

@@ -150,7 +150,7 @@ describe("Hyper-V Windows slice 2B primitives", () => {
         expect(requests).toEqual([{ schemaVersion: 1, operation: "Get-NetNeighbor", interfaceIndex: 42 }]);
     });
 
-    it("names the VM, the adapter and the address on every removal", async () => {
+    it("names the VM ownership, adapter and address on every removal", async () => {
         const requests: HyperVWindowsExecutionRequest[] = [];
         const client = createHyperVWindowsNetworkClient(executorUsing((request) => {
             requests.push(request);
@@ -161,27 +161,29 @@ describe("Hyper-V Windows slice 2B primitives", () => {
             selector: { kind: "id", id: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA" },
             adapterName,
             macAddress: bootstrapMac,
+            expectedNotes: "ccc-device-lab:owner-1:device-1:incarnation-1",
         });
 
-        // All three travel together. The native side re-resolves from them and refuses
-        // unless they identify exactly one adapter, so a request that dropped any one of
-        // them would be asking the host to guess.
+        // All four identity fields travel together. The native side re-resolves from them
+        // and refuses unless the current owner and exactly one adapter agree.
         expect(requests).toEqual([{
             schemaVersion: 1,
             operation: "Remove-VMNetworkAdapter",
             selector: { kind: "id", id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
             adapterName: "CCC Bootstrap DHCP",
             macAddress: "06155d011a2c",
+            expectedNotes: "ccc-device-lab:owner-1:device-1:incarnation-1",
         }]);
     });
 
     it.each([
-        ["a missing selector", { adapterName, macAddress: bootstrapMac }],
-        ["an unknown selector kind", { selector: { kind: "mac" }, adapterName, macAddress: bootstrapMac }],
-        ["a malformed VM id", { selector: { kind: "id", id: "not-a-guid" }, adapterName, macAddress: bootstrapMac }],
-        ["no adapter name", { selector: { kind: "id", id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" }, macAddress: bootstrapMac }],
-        ["no MAC address", { selector: { kind: "id", id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" }, adapterName }],
-        ["an extra field", { selector: { kind: "id", id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" }, adapterName, macAddress: bootstrapMac, force: true }],
+        ["a missing selector", { adapterName, macAddress: bootstrapMac, expectedNotes: "owner" }],
+        ["an unknown selector kind", { selector: { kind: "mac" }, adapterName, macAddress: bootstrapMac, expectedNotes: "owner" }],
+        ["a malformed VM id", { selector: { kind: "id", id: "not-a-guid" }, adapterName, macAddress: bootstrapMac, expectedNotes: "owner" }],
+        ["no adapter name", { selector: { kind: "id", id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" }, macAddress: bootstrapMac, expectedNotes: "owner" }],
+        ["no MAC address", { selector: { kind: "id", id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" }, adapterName, expectedNotes: "owner" }],
+        ["no ownership marker", { selector: { kind: "id", id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" }, adapterName, macAddress: bootstrapMac }],
+        ["an extra field", { selector: { kind: "id", id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" }, adapterName, macAddress: bootstrapMac, expectedNotes: "owner", force: true }],
     ])("refuses a removal with %s before invoking the executor", async (_label, request) => {
         const execute = vi.fn(() => response("Remove-VMNetworkAdapter"));
         const client = createHyperVWindowsNetworkClient(executorUsing(execute));

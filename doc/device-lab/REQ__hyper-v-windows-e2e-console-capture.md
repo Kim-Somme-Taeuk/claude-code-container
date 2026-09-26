@@ -69,13 +69,14 @@ diagnostic lines:
 - resolve exactly one case-sensitive VM name from the owner/device/incarnation identity and exactly
   one attached OS VHD;
 - run a non-mutating preflight that resolves the VM by its broker-returned GUID, verifies the derived
-  name and ownership Notes, and fixes the exact single attached OS VHD path before any mutation;
+  name and ownership Notes, and fixes the exact single attached OS VHD path plus controller type,
+  number, and location before any mutation;
 - re-verify the same identity and path, turn off only that VM, remove only the exact
   `VMHardDiskDrive`, prove no hard disks remain attached, then make at most ten attempts to mount the
   fixed path with `Mount-VHD -ReadOnly -PassThru`, backing off between failed attempts to a 15-second
   ceiling and stopping once the next wait would cross a 60-second retry deadline; after a successful
-  or possibly partial host mount, locate exactly one volume containing `Windows\Panther` and attempt
-  `Dismount-VHD` before emitting a result;
+  or possibly partial host mount, locate exactly one volume containing `Windows\Panther`, attempt
+  `Dismount-VHD`, and restore the exact original VM disk attachment before emitting a result;
 - inspect only bounded tails of `Panther` and `Panther\UnattendGC` `setupact.log` / `setuperr.log`;
 - retain only bounded lines related to unattend, OOBE, Shell-Setup, errors, failures, or HRESULTs;
 - redact XML `Value` contents, password/token/secret assignments, and user-profile paths in both
@@ -84,15 +85,21 @@ diagnostic lines:
   `results/device-lab-real/hyper-v-windows-setup-diagnostics-latest.json`.
 
 This read-only observation is not authorization to inject `Windows\Panther\unattend.xml` or change
-the guest disk contents. The failure-only harness MUST NOT reattach the drive: the broker delete path
-allows zero attached hard disks and independently deletes its canonical owned VHD path. After a
-post-preflight timeout or malformed result, reconciliation MUST use the fixed path and exact VM
-identity. One matching still-attached drive proves detach did not complete; zero drives requires a
-bounded host-mount observation, conditional dismount, and a second `Attached=false` proof. Ambiguous
-drive counts, path mismatches, and failed mount observations MUST fail closed. Diagnostic failure
+the guest disk contents. The failure-only harness MUST restore the original attachment. An
+unelevated mount failure MUST NOT open UAC by default. Setting
+`CCC_HYPER_V_SETUP_DIAGNOSTICS_ELEVATE=1` explicitly enables one digest-verified elevated retry for
+that failed run, which must independently re-prove the disk through the owned VM. Restoration uses the preflight controller tuple and canonical
+path, requires the exact VM ID/name/Notes in the Off state when an add is needed, and confirms one
+exact attachment by fresh readback. A matching attachment already present proves detach did not
+complete and MUST NOT be added twice. After a post-preflight timeout or malformed result,
+reconciliation MUST conditionally dismount the fixed VHD and perform the same exact restoration.
+Ambiguous drive counts, path/controller mismatches, identity/state drift, and failed restoration MUST
+fail closed as `hyper-v-setup-diagnostics-cleanup-failed`. Diagnostic failure
 MUST remain secondary, MUST NOT replace the original E2E error, and MUST compose with the existing
 idempotent stop/delete cleanup. The compact reason reports either
 `guestSetupDiagnostics=<stable-relative-path>` or an allowlisted bounded `unavailable(...)` code.
+When automatic elevation is disabled, the latter retains the privilege-required code and appends
+`elevation=disabled` without launching an Administrator process.
 If every mount attempt fails, that code MAY contain only a Node-validated attempt count from 1 to 10,
 an allowlisted PowerShell `ErrorCategory`, an absolute .NET HResult from 0 to 2147483648, and a
 redacted bounded exception message. Raw exception messages, paths, identities, and arbitrary category

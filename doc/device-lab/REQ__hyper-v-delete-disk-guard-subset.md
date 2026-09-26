@@ -7,8 +7,9 @@ status: current
 # REQ — Hyper-V delete/orphan disk-ownership guard = owned-directory containment
 
 ## Requirement
+The typed Device Lab delete/orphan operations, and the retained dry-run
 `hyperVDeleteCommand` and `hyperVRecoverOrphanCommand` (src/host-control/hyper-v/
-lifecycle.ts) MUST verify attached-hard-disk ownership by **owned-directory
+lifecycle.ts), MUST verify attached-hard-disk ownership by **owned-directory
 containment**, not exact set-equality and not a pure expected-set subset:
 
 ```

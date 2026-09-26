@@ -892,7 +892,12 @@ describe("standalone launcher and boundary", () => {
         expect(fixture).toContain("Assert-RestrictedDirectoryDacl $Root");
         expect(fixture).toContain("Assert-ProtectedFixtureRoot $Root");
         expect(fixture).toContain("Assert-FixtureCleanupBoundary $Root");
-        expect(fixture).not.toMatch(/Get-VM\s+-Name/);
+        expect(fixture).toContain("Get-VM -ErrorAction Stop | Where-Object { [Guid]$_.Id -eq $Id }");
+        expect(fixture).toContain("Get-VM -ErrorAction Stop | Where-Object { [string]$_.Name -ceq $Name }");
+        expect(fixture).toContain('$script:FixtureCreateStage = "name-query"');
+        expect(fixture).toContain('"name-query" { "create-name-query-failed" }');
+        expect(fixture).toContain('$script:FixtureCreateStage = "module-import"');
+        expect(fixture).toContain('"module-import" { "create-module-import-failed" }');
         expect(fixture).not.toMatch(/Remove-Item[^\n]+-Recurse/);
         const missingRootBranch = fixture.slice(
             fixture.indexOf('if (-not (Test-Path -LiteralPath $Root -PathType Container)) {', fixture.indexOf("function Invoke-Cleanup")),

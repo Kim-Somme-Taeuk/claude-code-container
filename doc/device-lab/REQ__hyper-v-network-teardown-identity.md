@@ -47,7 +47,25 @@ that blocked residue cleanup even though the switch GUID matched.
 - src/__tests__/device-lab-hyper-v-provider.test.ts asserts the split guard
   (unconditional Internal type check; identity-gated marker check).
 
+## Explicit fabric preservation
+
+Hyper-V `device_delete` accepts `preserveNetwork: true` for callers that will
+reuse the verified shared host fabric. The broker MUST still remove the exact
+owner/device/incarnation allocation and complete VM, file, artifact, metadata,
+and journal cleanup. When that allocation is the last one, it atomically commits
+an empty allocation list while retaining the managed switch, gateway, NAT,
+their exact identities, and ownership receipts. It MUST NOT enter the
+administrator/elevation path for that retained fabric. The public cleanup
+observation reports `hyper-v-network-retained-by-request`.
+
+Omitting the option keeps the existing last-allocation teardown contract. The
+Windows disposable VM E2E uses preservation during residue and final cleanup
+because it immediately reuses the same fabric; the dedicated Hyper-V network
+real-host proof remains responsible for destructive exact-ID teardown coverage.
+
 ## History
 - v1: exact `SwitchType -ne 'Internal' -or Notes -cne $Marker` → rejected
   owner-scoped residue whose marker form drifted. Superseded.
 - v2 (current): identity-gated — switch GUID governs when available.
+- v3: explicit allocation-only release may retain verified managed fabric for
+  immediate reuse; ordinary delete teardown is unchanged.

@@ -19,6 +19,8 @@ const HYPER_V_HOST_LOCK_WAIT_MS = 600000;
 const HYPER_V_PROVIDER_LIFECYCLE_TIMEOUT_MS = 120000;
 const HYPER_V_LIFECYCLE_RPC_BUFFER_MS = 15000;
 const HYPER_V_MAX_BOOT_TIMEOUT_MS = 1200000;
+const HYPER_V_LINUX_GUI_TIMEOUT_MS = 17 * 60 * 1000;
+const HYPER_V_CLEANUP_RESERVE_MS = 5 * 60 * 1000;
 const REAL_MCP_CLIENT_RPC_BUFFER_MS = 30000;
 const HYPER_V_LIFECYCLE_TOOLS = new Set([
     "device_create",
@@ -49,6 +51,8 @@ export function realMcpToolRequestTimeoutMs(name: string, args: Record<string, a
         const automaticRpcTimeoutMs = HYPER_V_HOST_LOCK_WAIT_MS
             + HYPER_V_PROVIDER_LIFECYCLE_TIMEOUT_MS
             + bootTimeoutMs
+            + (args?.backend === "linux-vm" && args?.waitForBoot !== false ? HYPER_V_LINUX_GUI_TIMEOUT_MS : 0)
+            + (args?.waitForBoot !== false ? HYPER_V_CLEANUP_RESERVE_MS : 0)
             + HYPER_V_LIFECYCLE_RPC_BUFFER_MS;
         return Math.min(HYPER_V_MAX_CLIENT_TIMEOUT_MS, automaticRpcTimeoutMs + REAL_MCP_CLIENT_RPC_BUFFER_MS);
     }
@@ -416,6 +420,13 @@ export function brokerToolFailureEvidence(value: any) {
         bodyError: boundedBrokerDiagnosticCode(body?.error),
         ...(detail ? { detail } : {}),
     };
+    if (body?.error === "hyper-v-snapshot-inventory-conflict") {
+        evidence.snapshotInventory = {
+            untrackedCount: Array.isArray(body.untracked) ? Math.min(body.untracked.length, 1000) : null,
+            missingCount: Array.isArray(body.missing) ? Math.min(body.missing.length, 1000) : null,
+            observedOwnerSnapshotCount: safeNonNegativeInteger(body.observedOwnerSnapshotCount),
+        };
+    }
     if (lastAttempt && typeof lastAttempt === "object") {
         evidence.transport = {
             port: safeNonNegativeInteger(lastAttempt.port),

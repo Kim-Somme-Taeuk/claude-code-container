@@ -67,7 +67,7 @@ flow serves both profiles.
   entry-name contract (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`) and the entry count stays within the
   writer's 8-entry / 8 MB bounds.
 - Provisioning still requires the VM to be `Off` and stages the media before first boot.
-- The host broker MUST advertise `hyper-v-windows-unattend-oobe-schema-v2`, and the Hyper-V level-3
+- The host broker MUST advertise `hyper-v-windows-unattend-oobe-schema-v3`, and the Hyper-V level-3
   launcher MUST require that capability before starting the VM E2E. This makes an otherwise
   compatible same-version broker that predates the oobeSystem schema fix fail compatibility and
   enter the existing identity-fenced automatic restart path; rebuilding `dist` alone does not update
@@ -75,7 +75,8 @@ flow serves both profiles.
 
 ## Regression coverage
 - src/__tests__/device-lab-hyper-v-provider.test.ts asserts the oobeSystem `UserAccounts`/`LocalAccount`
-  design, canonical nested ordering, retained OOBE settings, absence of both `Skip*OOBE` elements,
+  design, the en-US `Microsoft-Windows-International-Core` locale quartet, canonical nested
+  ordering, retained OOBE settings, absence of both `Skip*OOBE` elements,
   and absence of the old `specialize`/`Microsoft-Windows-Deployment`/RunSynchronous account creation.
 - src/__tests__/device-lab-broker.test.ts and scripts/real-tests/hyper-v.test.ts assert advertisement,
   automatic same-version stale-broker replacement, and level-3 attestation of the schema capability.
@@ -88,11 +89,15 @@ flow serves both profiles.
 - v3: nested Shell-Setup children use current schema order; obsolete `Skip*OOBE`
   elements are omitted, and a dedicated broker capability prevents stale same-version processes from
   silently serving the prior generator.
-- v4 (current): the first-logon program moved off the `CommandLine` onto the ISO as
+- v4: the first-logon program moved off the `CommandLine` onto the ISO as
   `ccc-first-logon.ps1`, leaving a 379-character label-resolving launcher in its place. This removes
   the measured 3738-character `CommandLine` that violated the documented 1024-character maximum and
   caused Windows Setup to reject the whole answer file in `oobeSystem`. Capability bumped to
   `hyper-v-windows-unattend-oobe-schema-v2`.
+- v5 (current): Panther `UnattendGC/setupact.log` proved OOBE remained on the Localization page.
+  The oobeSystem pass now includes `Microsoft-Windows-International-Core` with
+  `InputLocale=0409:00000409` and `SystemLocale`, `UILanguage`, and `UserLocale` set to `en-US`.
+  The capability is `hyper-v-windows-unattend-oobe-schema-v3`.
 
 ## Hardware evidence and deferred fallback
 The real Windows-host console capture shows Windows Setup reporting that it could not parse

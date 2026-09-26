@@ -1,5 +1,6 @@
 import { HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP } from "../../hyper-v-windows/index.js";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, statSync } from "fs";
+import { dirname } from "path";
 
 type ProviderCommand = { readonly args?: readonly string[]; readonly input?: string };
 
@@ -7,6 +8,7 @@ type OperationRequest = {
     readonly schemaVersion: 1;
     readonly operation: string;
     readonly names?: readonly string[];
+    readonly selector?: { readonly kind?: string; readonly name?: string; readonly id?: string };
     readonly name?: string;
     readonly notes?: string;
     readonly identity?: { readonly id?: string; readonly instanceId?: string; readonly name?: string };
@@ -14,6 +16,18 @@ type OperationRequest = {
     readonly address?: string;
     readonly prefixLength?: number;
     readonly internalAddressPrefix?: string;
+    readonly generation?: number;
+    readonly vhdPath?: string;
+    readonly path?: string;
+    readonly switchName?: string;
+    readonly checkpointType?: string;
+    readonly newName?: string;
+    readonly adapter?: { readonly kind?: string; readonly name?: string };
+    readonly staticMacAddress?: string;
+    readonly managementSwitchName?: string;
+    readonly secureBoot?: { readonly enabled?: boolean; readonly template?: string };
+    readonly firstBootDiskPath?: string;
+    readonly startupOrder?: readonly string[];
 };
 
 type NativeItem = Record<string, unknown>;
@@ -23,6 +37,7 @@ export type TypedHyperVNetworkSimulationOptions = {
     readonly natInstanceIdOverride?: string;
     readonly beforeOperation?: (request: OperationRequest) => Record<string, unknown> | null;
     readonly onOperation?: (request: OperationRequest) => void;
+    readonly simulateVmCreate?: boolean | "until-readback";
 };
 
 const configuredRunners = new WeakMap<object, TypedHyperVNetworkSimulationOptions>();
@@ -66,7 +81,29 @@ export function createTypedHyperVNetworkOperationSimulator(options: TypedHyperVN
         interfaceAlias: "vEthernet (Default Switch)",
     }];
     const nats: NativeItem[] = [];
+    const mountedImages = new Set<string>();
     const virtualMachines: NativeItem[] = [];
+    const createdVmId = "12345678-1234-1234-1234-123456789abc";
+    let createdVm: NativeItem | null = null;
+    let simulateVmCreate = Boolean(options.simulateVmCreate);
+    let createdDiskPath = "";
+    let virtualSizeBytes = 64 * 1024 * 1024 * 1024;
+    let firstBootDiskPath = "";
+    let secureBoot: NativeItem = { enabled: false };
+    let biosStartupOrder: readonly string[] = ["IDE", "CD", "LegacyNetworkAdapter", "Floppy"];
+    const vmAdapters: NativeItem[] = [];
+    const managedSwitchId = () => {
+        if (options.stateFile && existsSync(options.stateFile)) {
+            const state = JSON.parse(readFileSync(options.stateFile, "utf8")) as { switchId?: string };
+            if (state.switchId) return state.switchId;
+        }
+        return switches.find((item) => item.name === "CCC Device Lab")?.id ?? null;
+    };
+    const adapter = (name: string, switchName: string, macAddress: string | null): NativeItem => ({
+        vmId: createdVmId, vmName: createdVm?.name, name,
+        switchId: switchName === "Default Switch" ? "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" : managedSwitchId(),
+        switchName, status: "Ok", managementOperatingSystem: false, macAddress, ipAddresses: [],
+    });
     let nextSwitchId = 1;
     let nextNatId = 1;
     if (options.stateFile && existsSync(options.stateFile)) {
@@ -111,13 +148,115 @@ export function createTypedHyperVNetworkOperationSimulator(options: TypedHyperVN
     }
 
     return (command: ProviderCommand) => {
+        const encodedIndex = command.args?.indexOf("-EncodedCommand") ?? -1;
+        const script = encodedIndex >= 0
+            ? Buffer.from(command.args?.[encodedIndex + 1] ?? "", "base64").toString("utf16le")
+            : "";
+        if (script.includes("Storage\\Get-DiskImage -ImagePath $VhdPath")) {
+            const path = script.match(/\$VhdPath = '((?:''|[^'])*)'/)?.[1]?.replaceAll("''", "'") ?? "";
+            return {
+                status: 0,
+                stdout: JSON.stringify({ ok: true, path, attached: mountedImages.has(path), partitionStyle: script.includes("$ReadPartitionStyle = $true") ? "GPT" : null }),
+                stderr: "",
+            };
+        }
         const request = requestOf(command);
         if (!request) return null;
         options.onOperation?.(request);
         const intercepted = options.beforeOperation?.(request);
         if (intercepted) return intercepted;
+        if (request.operation === "Mount-VHD" && request.path) {
+            mountedImages.add(request.path);
+            return success(request.operation);
+        }
+        if (request.operation === "Dismount-VHD" && request.path) {
+            mountedImages.delete(request.path);
+            return success(request.operation);
+        }
+        if (request.operation === "Get-VHD" && request.path) {
+            if (!existsSync(request.path)) return {
+                status: 1,
+                stdout: JSON.stringify({ schemaVersion: 1, operation: "Get-VHD", ok: false, errorCode: "vhd-not-found" }),
+                stderr: "",
+            };
+            const manifestPath = `${dirname(request.path)}/manifest.json`;
+            if (existsSync(manifestPath)) {
+                const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { virtualSizeBytes?: number };
+                if (typeof manifest.virtualSizeBytes === "number") virtualSizeBytes = manifest.virtualSizeBytes;
+            }
+            return success(request.operation, [{
+                path: request.path, vhdFormat: "VHDX", vhdType: "Dynamic", parentPath: null,
+                virtualSizeBytes, fileSizeBytes: statSync(request.path).size,
+            }]);
+        }
+        if (options.simulateVmCreate === "until-readback" && request.operation === "New-VM") {
+            simulateVmCreate = true;
+            createdVm = null;
+            vmAdapters.length = 0;
+        }
+        if (simulateVmCreate) {
+            switch (request.operation) {
+                case "Get-VM":
+                    if (request.selector) return success(request.operation, createdVm && (request.selector.id === createdVmId || request.selector.name === createdVm.name) ? [createdVm] : []);
+                    break;
+                case "New-VM":
+                    vmAdapters.length = 0;
+                    createdDiskPath = request.vhdPath ?? "";
+                    firstBootDiskPath = createdDiskPath;
+                    createdVm = { id: createdVmId, name: request.name, state: "Off", status: "Operating normally", notes: "", uptimeMilliseconds: 0, generation: request.generation, checkpointType: "Disabled" };
+                    if (request.switchName) vmAdapters.push(adapter("Network Adapter", request.switchName, null));
+                    return success(request.operation, [createdVm]);
+                case "Set-VM":
+                    if (createdVm) { createdVm.notes = request.notes ?? createdVm.notes; createdVm.checkpointType = request.checkpointType ?? createdVm.checkpointType; }
+                    return success(request.operation);
+                case "Set-VMMemory": case "Set-VMProcessor": return success(request.operation);
+                case "Set-VMBios": biosStartupOrder = request.startupOrder ?? biosStartupOrder; return success(request.operation);
+                case "Get-VMBios": return success(request.operation, [{ vmId: createdVmId, startupOrder: biosStartupOrder }]);
+                case "Set-VMFirmware":
+                    secureBoot = request.secureBoot ?? secureBoot;
+                    firstBootDiskPath = request.firstBootDiskPath ?? firstBootDiskPath;
+                    return success(request.operation);
+                case "Get-VMFirmware": return success(request.operation, [{
+                    vmId: createdVmId, secureBoot: secureBoot.enabled ? "On" : "Off",
+                    secureBootTemplate: secureBoot.template ?? "", firstBootDevicePath: firstBootDiskPath,
+                }]);
+                case "Get-VMHardDiskDrive": return success(request.operation, createdVm ? [{
+                    vmId: createdVmId, vmName: createdVm.name, path: createdDiskPath,
+                    controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0, diskNumber: null,
+                }] : []);
+                case "Get-VMDvdDrive": return success(request.operation, []);
+                case "Rename-VMNetworkAdapter": {
+                    const found = request.adapter?.kind === "sole" && vmAdapters.length === 1
+                        ? vmAdapters[0] : vmAdapters.find((item) => item.name === request.adapter?.name);
+                    if (found) found.name = request.newName;
+                    return success(request.operation);
+                }
+                case "Add-VMNetworkAdapter":
+                    vmAdapters.push(adapter(request.name ?? "", request.switchName ?? "", null));
+                    return success(request.operation);
+                case "Set-VMNetworkAdapter": {
+                    const found = request.adapter?.kind === "sole" && vmAdapters.length === 1
+                        ? vmAdapters[0] : vmAdapters.find((item) => item.name === request.adapter?.name);
+                    if (found) found.macAddress = request.staticMacAddress;
+                    return success(request.operation);
+                }
+                case "Get-VMNetworkAdapter":
+                    if (!request.managementSwitchName) {
+                        const result = success(request.operation, createdVm ? vmAdapters : []);
+                        if (options.simulateVmCreate === "until-readback" && createdVm
+                            && ((vmAdapters.length === 1 && Boolean(request.selector))
+                                || (vmAdapters.length === 2 && !request.selector))) simulateVmCreate = false;
+                        return result;
+                    }
+                    break;
+                case "Remove-VM": createdVm = null; vmAdapters.length = 0; return success(request.operation);
+            }
+        }
         switch (request.operation) {
-            case "Get-VMSwitch": return success(request.operation, switches);
+            case "Get-VMSwitch": return success(request.operation,
+                request.selector?.name === "Default Switch"
+                    ? [{ id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", name: "Default Switch", switchType: "Internal", notes: "" }]
+                    : switches);
             case "New-VMSwitch": {
                 const item = {
                     id: `00000000-0000-0000-0000-${String(nextSwitchId++).padStart(12, "0")}`,

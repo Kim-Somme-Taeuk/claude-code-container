@@ -59,7 +59,7 @@ const BROKER_CAPABLE_DEVICE_TOOLS = [
 
 const DEVICE_ROUTE_PORT_COLLISION_TOOLS = new Set(["device_create", "device_attach"]);
 const DEVICE_BACKEND_ENUM = ["android-emulator", "android-device", "ios-simulator", "ios-device", "windows-sandbox", "windows-vm", "macos-vm", "linux-vm"] as const;
-const DEVICE_WITH_DISPLAY_BACKEND_ENUM = ["x11-current-display", "android-emulator", "android-device", "ios-simulator", "ios-device", "windows-sandbox", "macos-vm"] as const;
+const DEVICE_WITH_DISPLAY_BACKEND_ENUM = ["x11-current-display", "android-emulator", "android-device", "ios-simulator", "ios-device", "windows-sandbox", "windows-vm", "macos-vm", "linux-vm"] as const;
 const DEVICE_STATUS_BACKEND_ENUM = ["x11-current-display", "android-emulator", "android-device", "ios-simulator", "ios-device", "windows-sandbox", "windows-vm", "macos-vm", "linux-vm"] as const;
 const DEVICE_CREATE_BACKEND_ENUM = ["android-emulator", "ios-simulator", "windows-sandbox", "windows-vm", "macos-vm", "linux-vm"] as const;
 const DEVICE_EXEC_BACKEND_ENUM = ["android-emulator", "android-device", "ios-simulator", "windows-sandbox", "windows-vm", "macos-vm", "linux-vm"] as const;
@@ -68,7 +68,7 @@ const ANDROID_BACKEND_ENUM = ["android-emulator", "android-device"] as const;
 const ANDROID_EMULATOR_BACKEND_ENUM = ["android-emulator"] as const;
 const PHYSICAL_BACKEND_ENUM = ["android-device", "ios-device"] as const;
 const DESKTOP_BACKEND_ENUM = ["windows-sandbox", "macos-vm"] as const;
-const DISPLAY_DESKTOP_BACKEND_ENUM = ["x11-current-display", "windows-sandbox", "macos-vm"] as const;
+const DISPLAY_DESKTOP_BACKEND_ENUM = ["x11-current-display", "windows-sandbox", "windows-vm", "macos-vm", "linux-vm"] as const;
 const SNAPSHOT_BACKEND_ENUM = ["windows-vm", "macos-vm", "linux-vm"] as const;
 const RECORDING_BACKEND_ENUM = ["android-emulator", "android-device", "ios-simulator", "windows-sandbox", "macos-vm"] as const;
 const FILE_TRANSFER_BACKEND_ENUM = ["android-emulator", "android-device", "ios-simulator", "windows-sandbox", "windows-vm", "macos-vm", "linux-vm"] as const;
@@ -475,6 +475,11 @@ describe("device-lab MCP foundation and definitions", () => {
             expectBackendProperty(routedLifecycleProperties, expectedDeviceToolBackends(name));
             expectRoutingProperties(routedLifecycleProperties);
         }
+        expect(toolProperties(result.tools.find((tool) => tool.name === "device_delete"))).toEqual(
+            expect.objectContaining({
+                preserveNetwork: expect.objectContaining({ type: "boolean" }),
+            }),
+        );
         for (const name of ["device_status", "device_snapshot_list"]) {
             expect(toolProperties(result.tools.find((tool) => tool.name === name))).toEqual(expect.objectContaining({
                 incarnationId: expect.objectContaining({ type: "string", pattern: "^[a-f0-9]{32}$" }),

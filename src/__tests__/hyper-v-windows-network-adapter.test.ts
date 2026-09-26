@@ -534,28 +534,51 @@ describe("Device Lab Hyper-V network adapter", () => {
     ] as const)("reinspects bounded transient %s observations without repeating mutations", async (_case, options) => {
         const state = emptyState();
         const administrator = administratorScope(memoryClient(state, options));
+        const waits: number[] = [];
 
         const result = await ensureDeviceLabHyperVHostNetwork({
             client: memoryClient(state),
             network: NETWORK,
             provenance: FRESH,
             withAdministratorClient: administrator.scope,
+            sleep: async (milliseconds) => { waits.push(milliseconds); },
         });
 
         expect(result.outcome.kind).toBe("settled");
         expect(state.actions).toEqual(["create-switch", "create-gateway", "create-nat"]);
         expect(state.reads.filter((entry) => entry === "switch:name")).toHaveLength(6);
+        expect(waits).toEqual([250]);
     });
 
-    it("stops after three transient observations without repeating the preceding mutation", async () => {
+    it("waits through more than three tentative gateway observations without repeating mutations", async () => {
         const state = emptyState();
-        const administrator = administratorScope(memoryClient(state, { hostAdapterMissingReadsAfterCreate: 10 }));
+        const administrator = administratorScope(memoryClient(state, { gatewayTentativeReadsAfterCreate: 4 }));
+        const waits: number[] = [];
 
         const result = await ensureDeviceLabHyperVHostNetwork({
             client: memoryClient(state),
             network: NETWORK,
             provenance: FRESH,
             withAdministratorClient: administrator.scope,
+            sleep: async (milliseconds) => { waits.push(milliseconds); },
+        });
+
+        expect(result.outcome.kind).toBe("settled");
+        expect(state.actions).toEqual(["create-switch", "create-gateway", "create-nat"]);
+        expect(waits).toEqual([250, 250, 250, 250]);
+    });
+
+    it("stops after twelve transient observations without repeating the preceding mutation", async () => {
+        const state = emptyState();
+        const administrator = administratorScope(memoryClient(state, { hostAdapterMissingReadsAfterCreate: 20 }));
+        const waits: number[] = [];
+
+        const result = await ensureDeviceLabHyperVHostNetwork({
+            client: memoryClient(state),
+            network: NETWORK,
+            provenance: FRESH,
+            withAdministratorClient: administrator.scope,
+            sleep: async (milliseconds) => { waits.push(milliseconds); },
         });
 
         expect(result.outcome).toEqual({
@@ -565,6 +588,38 @@ describe("Device Lab Hyper-V network adapter", () => {
         });
         expect(result.completedActions).toHaveLength(1);
         expect(state.actions).toEqual(["create-switch"]);
+        expect(state.reads.filter((entry) => entry === "switch:name")).toHaveLength(14);
+        expect(waits).toHaveLength(11);
+        expect(new Set(waits)).toEqual(new Set([250]));
+    });
+
+    it("stops transient retries when the deadline cannot admit another poll", async () => {
+        const state = emptyState();
+        const administrator = administratorScope(memoryClient(state, { hostAdapterMissingReadsAfterCreate: 20 }));
+        let now = 1_000;
+        const waits: number[] = [];
+
+        const result = await ensureDeviceLabHyperVHostNetwork({
+            client: memoryClient(state),
+            network: NETWORK,
+            provenance: FRESH,
+            withAdministratorClient: administrator.scope,
+            deadlineAt: 1_501,
+            now: () => now,
+            sleep: async (milliseconds) => {
+                waits.push(milliseconds);
+                now += milliseconds;
+            },
+        });
+
+        expect(result.outcome).toEqual({
+            kind: "indeterminate",
+            operation: "ensure",
+            reason: "host-adapter-missing",
+        });
+        expect(state.actions).toEqual(["create-switch"]);
+        expect(administrator.count()).toBe(1);
+        expect(waits).toEqual([250, 250]);
         expect(state.reads.filter((entry) => entry === "switch:name")).toHaveLength(5);
     });
 

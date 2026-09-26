@@ -130,7 +130,11 @@ function preflightProgram(vmName: string, vmId: string, marker: string): string 
         "  if ([string]::IsNullOrWhiteSpace([string]$Drives[0].Path)) { throw 'hyper-v-setup-diagnostics-disk-not-exact' }",
         "  $DiskPath = [IO.Path]::GetFullPath([string]$Drives[0].Path)",
         "  if (-not [IO.Path]::IsPathRooted($DiskPath) -or [IO.Path]::GetExtension($DiskPath) -notin @('.vhd','.vhdx')) { throw 'hyper-v-setup-diagnostics-disk-not-exact' }",
-        "  [ordered]@{ ok = $true; diskPath = $DiskPath } | ConvertTo-Json -Compress",
+        "  $ControllerType = [string]$Drives[0].ControllerType",
+        "  $ControllerNumber = [int]$Drives[0].ControllerNumber",
+        "  $ControllerLocation = [int]$Drives[0].ControllerLocation",
+        "  if ($ControllerType -notin @('IDE','SCSI') -or $ControllerNumber -lt 0 -or $ControllerLocation -lt 0) { throw 'hyper-v-setup-diagnostics-disk-not-exact' }",
+        "  [ordered]@{ ok = $true; diskPath = $DiskPath; controllerType = $ControllerType; controllerNumber = $ControllerNumber; controllerLocation = $ControllerLocation } | ConvertTo-Json -Compress",
         "} catch {",
         "  $Message = [string]$_.Exception.Message",
         "  if ($Message -match '^hyper-v-setup-diagnostics-[a-z-]+$') { $Code = $Message } else { $Code = $Stage }",
@@ -139,15 +143,27 @@ function preflightProgram(vmName: string, vmId: string, marker: string): string 
     ].join("\n");
 }
 
-function diagnosticsProgram(vmName: string, vmId: string, marker: string, expectedDiskPath: string): string {
+function diagnosticsProgram(
+    vmName: string,
+    vmId: string,
+    marker: string,
+    expectedDiskPath: string,
+    expectedControllerType: "IDE" | "SCSI",
+    expectedControllerNumber: number,
+    expectedControllerLocation: number,
+): string {
     return [
         "$ErrorActionPreference = 'Stop'",
         `$VmName = ${psQuote(vmName)}`,
         `$ExpectedId = [Guid]${psQuote(vmId)}`,
         `$ExpectedMarker = ${psQuote(marker)}`,
         `$ExpectedDisk = ${psQuote(expectedDiskPath)}`,
+        `$ExpectedControllerType = ${psQuote(expectedControllerType)}`,
+        `$ExpectedControllerNumber = ${expectedControllerNumber}`,
+        `$ExpectedControllerLocation = ${expectedControllerLocation}`,
         "$Stage = 'hyper-v-setup-diagnostics-vm-not-exact'",
         "$Mounted = $false",
+        "$Detached = $false",
         "$DiskPath = $null",
         "$Result = $null",
         "$MountAttempts = 0",
@@ -198,9 +214,11 @@ function diagnosticsProgram(vmName: string, vmId: string, marker: string, expect
         "  if ($Drives.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$Drives[0].Path)) { throw 'hyper-v-setup-diagnostics-detach-failed' }",
         "  $DetachPath = [IO.Path]::GetFullPath([string]$Drives[0].Path)",
         "  if (-not [string]::Equals($DetachPath, [IO.Path]::GetFullPath($ExpectedDisk), [StringComparison]::OrdinalIgnoreCase)) { throw 'hyper-v-setup-diagnostics-detach-failed' }",
+        "  if ([string]$Drives[0].ControllerType -cne $ExpectedControllerType -or [int]$Drives[0].ControllerNumber -ne $ExpectedControllerNumber -or [int]$Drives[0].ControllerLocation -ne $ExpectedControllerLocation) { throw 'hyper-v-setup-diagnostics-detach-failed' }",
         "  Remove-VMHardDiskDrive -VMHardDiskDrive $Drives[0] -ErrorAction Stop",
         "  $RemainingDrives = @(Get-VMHardDiskDrive -VM $Vm -ErrorAction Stop)",
         "  if ($RemainingDrives.Count -ne 0) { throw 'hyper-v-setup-diagnostics-detach-failed' }",
+        "  $Detached = $true",
         "  $Stage = 'hyper-v-setup-diagnostics-mount-failed'",
         "  $MountedImage = $null",
         `  $MountDeadline = [DateTime]::UtcNow.AddMilliseconds(${MOUNT_RETRY_BUDGET_MS})`,
@@ -317,18 +335,43 @@ function diagnosticsProgram(vmName: string, vmId: string, marker: string, expect
         "  if ($Mounted -and $DiskPath) {",
         "    try { Dismount-VHD -Path $DiskPath -ErrorAction Stop } catch { $Result = [ordered]@{ ok = $false; code = 'hyper-v-setup-diagnostics-dismount-failed' } }",
         "  }",
+        "  if ($Detached -and $DiskPath) {",
+        "    try {",
+        "      $RestoreVm = Get-VM -Id $ExpectedId -ErrorAction Stop",
+        "      if ($RestoreVm.Name -cne $VmName -or [string]$RestoreVm.Notes -cne $ExpectedMarker -or $RestoreVm.State -ne 'Off') { throw 'restore-identity' }",
+        "      $RestoreDrives = @(Get-VMHardDiskDrive -VM $RestoreVm -ErrorAction Stop)",
+        "      if ($RestoreDrives.Count -eq 0) {",
+        "        try { Add-VMHardDiskDrive -VM $RestoreVm -ControllerType $ExpectedControllerType -ControllerNumber $ExpectedControllerNumber -ControllerLocation $ExpectedControllerLocation -Path $DiskPath -ErrorAction Stop | Out-Null } catch { }",
+        "        $RestoreDrives = @(Get-VMHardDiskDrive -VM $RestoreVm -ErrorAction Stop)",
+        "      }",
+        "      if ($RestoreDrives.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$RestoreDrives[0].Path)) { throw 'restore-count' }",
+        "      $RestorePath = [IO.Path]::GetFullPath([string]$RestoreDrives[0].Path)",
+        "      if (-not [string]::Equals($RestorePath, [IO.Path]::GetFullPath($ExpectedDisk), [StringComparison]::OrdinalIgnoreCase) -or [string]$RestoreDrives[0].ControllerType -cne $ExpectedControllerType -or [int]$RestoreDrives[0].ControllerNumber -ne $ExpectedControllerNumber -or [int]$RestoreDrives[0].ControllerLocation -ne $ExpectedControllerLocation) { throw 'restore-mismatch' }",
+        "    } catch { $Result = [ordered]@{ ok = $false; code = 'hyper-v-setup-diagnostics-cleanup-failed' } }",
+        "  }",
         "}",
         "$Result | ConvertTo-Json -Compress -Depth 5",
     ].join("\n");
 }
 
-function cleanupProgram(vmName: string, vmId: string, marker: string, expectedDiskPath: string): string {
+function cleanupProgram(
+    vmName: string,
+    vmId: string,
+    marker: string,
+    expectedDiskPath: string,
+    expectedControllerType: "IDE" | "SCSI",
+    expectedControllerNumber: number,
+    expectedControllerLocation: number,
+): string {
     return [
         "$ErrorActionPreference = 'Stop'",
         `$VmName = ${psQuote(vmName)}`,
         `$ExpectedId = [Guid]${psQuote(vmId)}`,
         `$ExpectedMarker = ${psQuote(marker)}`,
         `$ExpectedDisk = ${psQuote(expectedDiskPath)}`,
+        `$ExpectedControllerType = ${psQuote(expectedControllerType)}`,
+        `$ExpectedControllerNumber = ${expectedControllerNumber}`,
+        `$ExpectedControllerLocation = ${expectedControllerLocation}`,
         "try {",
         "  $Vm = Get-VM -Id $ExpectedId -ErrorAction Stop",
         "  if ($Vm.Name -cne $VmName -or [string]$Vm.Notes -cne $ExpectedMarker) { throw 'hyper-v-setup-diagnostics-cleanup-failed' }",
@@ -338,6 +381,7 @@ function cleanupProgram(vmName: string, vmId: string, marker: string, expectedDi
         "    if ([string]::IsNullOrWhiteSpace([string]$Drives[0].Path)) { throw 'hyper-v-setup-diagnostics-cleanup-failed' }",
         "    $AttachedPath = [IO.Path]::GetFullPath([string]$Drives[0].Path)",
         "    if (-not [string]::Equals($AttachedPath, [IO.Path]::GetFullPath($ExpectedDisk), [StringComparison]::OrdinalIgnoreCase)) { throw 'hyper-v-setup-diagnostics-cleanup-failed' }",
+        "    if ([string]$Drives[0].ControllerType -cne $ExpectedControllerType -or [int]$Drives[0].ControllerNumber -ne $ExpectedControllerNumber -or [int]$Drives[0].ControllerLocation -ne $ExpectedControllerLocation) { throw 'hyper-v-setup-diagnostics-cleanup-failed' }",
         "    [ordered]@{ ok = $true; detached = $false } | ConvertTo-Json -Compress",
         "    exit 0",
         "  }",
@@ -346,6 +390,13 @@ function cleanupProgram(vmName: string, vmId: string, marker: string, expectedDi
         "  if ([bool]$DiskImages[0].Attached) { Dismount-VHD -Path $ExpectedDisk -ErrorAction Stop }",
         "  $VerifiedImages = @(Get-DiskImage -ImagePath $ExpectedDisk -ErrorAction Stop)",
         "  if ($VerifiedImages.Count -ne 1 -or [bool]$VerifiedImages[0].Attached) { throw 'hyper-v-setup-diagnostics-cleanup-failed' }",
+        "  $Vm = Get-VM -Id $ExpectedId -ErrorAction Stop",
+        "  if ($Vm.Name -cne $VmName -or [string]$Vm.Notes -cne $ExpectedMarker -or $Vm.State -ne 'Off') { throw 'hyper-v-setup-diagnostics-cleanup-failed' }",
+        "  try { Add-VMHardDiskDrive -VM $Vm -ControllerType $ExpectedControllerType -ControllerNumber $ExpectedControllerNumber -ControllerLocation $ExpectedControllerLocation -Path $ExpectedDisk -ErrorAction Stop | Out-Null } catch { }",
+        "  $RestoredDrives = @(Get-VMHardDiskDrive -VM $Vm -ErrorAction Stop)",
+        "  if ($RestoredDrives.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$RestoredDrives[0].Path)) { throw 'hyper-v-setup-diagnostics-cleanup-failed' }",
+        "  $RestoredPath = [IO.Path]::GetFullPath([string]$RestoredDrives[0].Path)",
+        "  if (-not [string]::Equals($RestoredPath, [IO.Path]::GetFullPath($ExpectedDisk), [StringComparison]::OrdinalIgnoreCase) -or [string]$RestoredDrives[0].ControllerType -cne $ExpectedControllerType -or [int]$RestoredDrives[0].ControllerNumber -ne $ExpectedControllerNumber -or [int]$RestoredDrives[0].ControllerLocation -ne $ExpectedControllerLocation) { throw 'hyper-v-setup-diagnostics-cleanup-failed' }",
         "  [ordered]@{ ok = $true; detached = $true } | ConvertTo-Json -Compress",
         "} catch {",
         "  [ordered]@{ ok = $false; code = 'hyper-v-setup-diagnostics-cleanup-failed' } | ConvertTo-Json -Compress",
@@ -488,7 +539,15 @@ function writeExclusiveThenRename(target: string, content: string): void {
     }
 }
 
-function recoverDiagnosticMount(input: HyperVWindowsSetupDiagnosticsInput, vmName: string, marker: string, diskPath: string): boolean {
+function recoverDiagnosticMount(
+    input: HyperVWindowsSetupDiagnosticsInput,
+    vmName: string,
+    marker: string,
+    diskPath: string,
+    controllerType: "IDE" | "SCSI",
+    controllerNumber: number,
+    controllerLocation: number,
+): boolean {
     let cleanup: SpawnResult;
     try {
         cleanup = (input.spawnSyncImpl || hiddenSpawnSync)(String(input.powershell), [
@@ -498,7 +557,15 @@ function recoverDiagnosticMount(input: HyperVWindowsSetupDiagnosticsInput, vmNam
             "-ExecutionPolicy",
             "Bypass",
             "-EncodedCommand",
-            encodedPowerShell(cleanupProgram(vmName, input.vmId, marker, diskPath)),
+            encodedPowerShell(cleanupProgram(
+                vmName,
+                input.vmId,
+                marker,
+                diskPath,
+                controllerType,
+                controllerNumber,
+                controllerLocation,
+            )),
         ], {
             encoding: "utf8",
             timeout: 30000,
@@ -534,8 +601,8 @@ export function hyperVWindowsSetupDiagnosticsPrograms(): string[] {
     const diskPath = "C:\\ccc\\parse-check.vhdx";
     return [
         preflightProgram(vmName, vmId, marker),
-        diagnosticsProgram(vmName, vmId, marker, diskPath),
-        cleanupProgram(vmName, vmId, marker, diskPath),
+        diagnosticsProgram(vmName, vmId, marker, diskPath, "SCSI", 0, 0),
+        cleanupProgram(vmName, vmId, marker, diskPath, "SCSI", 0, 0),
     ];
 }
 
@@ -582,9 +649,25 @@ export function collectHyperVWindowsSetupDiagnostics(input: HyperVWindowsSetupDi
     }
     if (preflightResult?.ok === false) return failure(typeof preflightResult.code === "string" ? preflightResult.code : "");
     const diskPath = typeof preflightResult?.diskPath === "string" ? preflightResult.diskPath : "";
-    if (preflightResult?.ok !== true || diskPath.length < 4 || diskPath.length > 4096 || diskPath.includes("\0") || !/^[A-Za-z]:\\/.test(diskPath) || !/\.vhdx?$/i.test(diskPath)) {
+    const controllerType = preflightResult?.controllerType;
+    const controllerNumber = preflightResult?.controllerNumber;
+    const controllerLocation = preflightResult?.controllerLocation;
+    if (preflightResult?.ok !== true || diskPath.length < 4 || diskPath.length > 4096 || diskPath.includes("\0")
+        || !/^[A-Za-z]:\\/.test(diskPath) || !/\.vhdx?$/i.test(diskPath)
+        || (controllerType !== "IDE" && controllerType !== "SCSI")
+        || !Number.isSafeInteger(controllerNumber) || controllerNumber < 0 || controllerNumber > 255
+        || !Number.isSafeInteger(controllerLocation) || controllerLocation < 0 || controllerLocation > 255) {
         return failure("hyper-v-setup-diagnostics-output-invalid");
     }
+    const recover = () => recoverDiagnosticMount(
+        input,
+        vmName,
+        marker,
+        diskPath,
+        controllerType,
+        controllerNumber,
+        controllerLocation,
+    );
 
     let spawned: SpawnResult;
     try {
@@ -595,7 +678,15 @@ export function collectHyperVWindowsSetupDiagnostics(input: HyperVWindowsSetupDi
             "-ExecutionPolicy",
             "Bypass",
             "-EncodedCommand",
-            encodedPowerShell(diagnosticsProgram(vmName, input.vmId, marker, diskPath)),
+            encodedPowerShell(diagnosticsProgram(
+                vmName,
+                input.vmId,
+                marker,
+                diskPath,
+                controllerType,
+                controllerNumber,
+                controllerLocation,
+            )),
         ], {
             encoding: "utf8",
             timeout: DIAGNOSTICS_PROCESS_TIMEOUT_MS,
@@ -603,36 +694,36 @@ export function collectHyperVWindowsSetupDiagnostics(input: HyperVWindowsSetupDi
             windowsHide: true,
         });
     } catch {
-        return failure(recoverDiagnosticMount(input, vmName, marker, diskPath) ? "hyper-v-setup-diagnostics-process-failed" : "hyper-v-setup-diagnostics-cleanup-failed");
+        return failure(recover() ? "hyper-v-setup-diagnostics-process-failed" : "hyper-v-setup-diagnostics-cleanup-failed");
     }
     if (spawned.error?.code === "ETIMEDOUT") {
-        return failure(recoverDiagnosticMount(input, vmName, marker, diskPath) ? "hyper-v-setup-diagnostics-process-timeout" : "hyper-v-setup-diagnostics-cleanup-failed");
+        return failure(recover() ? "hyper-v-setup-diagnostics-process-timeout" : "hyper-v-setup-diagnostics-cleanup-failed");
     }
     if (spawned.error || spawned.status !== 0) {
-        return failure(recoverDiagnosticMount(input, vmName, marker, diskPath) ? "hyper-v-setup-diagnostics-process-failed" : "hyper-v-setup-diagnostics-cleanup-failed");
+        return failure(recover() ? "hyper-v-setup-diagnostics-process-failed" : "hyper-v-setup-diagnostics-cleanup-failed");
     }
     const stdout = String(spawned.stdout || "").trim();
     if (!stdout || Buffer.byteLength(stdout) > MAX_OUTPUT_BYTES) {
-        return failure(recoverDiagnosticMount(input, vmName, marker, diskPath) ? "hyper-v-setup-diagnostics-output-invalid" : "hyper-v-setup-diagnostics-cleanup-failed");
+        return failure(recover() ? "hyper-v-setup-diagnostics-output-invalid" : "hyper-v-setup-diagnostics-cleanup-failed");
     }
     let parsed: any;
     try {
         parsed = JSON.parse(stdout);
     } catch {
-        return failure(recoverDiagnosticMount(input, vmName, marker, diskPath) ? "hyper-v-setup-diagnostics-output-invalid" : "hyper-v-setup-diagnostics-cleanup-failed");
+        return failure(recover() ? "hyper-v-setup-diagnostics-output-invalid" : "hyper-v-setup-diagnostics-cleanup-failed");
     }
     if (parsed?.ok === false) {
         const code = typeof parsed.code === "string" ? parsed.code : "";
         if (code === "hyper-v-setup-diagnostics-mount-failed") {
             const observedCode = mountFailureCode(parsed.mount);
-            if (!recoverDiagnosticMount(input, vmName, marker, diskPath)) return failure("hyper-v-setup-diagnostics-cleanup-failed");
+            if (!recover()) return failure("hyper-v-setup-diagnostics-cleanup-failed");
             return observedCode ? { ok: false, code: observedCode } : failure("");
         }
-        return failure(recoverDiagnosticMount(input, vmName, marker, diskPath) ? code : "hyper-v-setup-diagnostics-cleanup-failed");
+        return failure(recover() ? code : "hyper-v-setup-diagnostics-cleanup-failed");
     }
-    if (parsed?.ok !== true) return failure(recoverDiagnosticMount(input, vmName, marker, diskPath) ? "hyper-v-setup-diagnostics-output-invalid" : "hyper-v-setup-diagnostics-cleanup-failed");
+    if (parsed?.ok !== true) return failure(recover() ? "hyper-v-setup-diagnostics-output-invalid" : "hyper-v-setup-diagnostics-cleanup-failed");
     const logs = validatedLogs(parsed.logs);
-    if (!logs) return failure(recoverDiagnosticMount(input, vmName, marker, diskPath) ? "hyper-v-setup-diagnostics-output-invalid" : "hyper-v-setup-diagnostics-cleanup-failed");
+    if (!logs) return failure(recover() ? "hyper-v-setup-diagnostics-output-invalid" : "hyper-v-setup-diagnostics-cleanup-failed");
     return { ok: true, logs };
 }
 

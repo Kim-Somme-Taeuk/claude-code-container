@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES, evaluateDestructivePolicy } from "../../device-lab-mcp/src/policy/destructive.mjs";
 import { TOOLS } from "../../device-lab-mcp/src/tools.mjs";
+import { ownerDeviceOperationTools } from "../../device-lab-mcp/src/state/device-operation-policy.mjs";
 import {
     cleanupDeviceLabMcpTestContext,
     createDeviceLabMcpTestContext,
@@ -23,6 +24,22 @@ function jsonPayload(result: Awaited<ReturnType<DeviceLabMcpTestContext["client"
 }
 
 describe("device-lab destructive action policy", () => {
+    it("exposes the same owner-scoped GUI contract for both Hyper-V guest backends", () => {
+        const guiTools = ["device_screenshot", "device_click", "device_double_click", "device_key", "device_type", "device_scroll", "device_cursor_position"];
+        for (const backend of ["windows-vm", "linux-vm"]) {
+            const ownerOperations = ownerDeviceOperationTools(backend);
+            for (const name of guiTools) {
+                const tool = TOOLS.find((candidate) => candidate.name === name);
+                expect(tool?.inputSchema?.properties?.backend?.enum).toContain(backend);
+                expect(tool?.inputSchema?.properties?.incarnationId).toEqual(expect.objectContaining({ type: "string" }));
+                expect(ownerOperations).toContain(name);
+            }
+        }
+        const cursor = TOOLS.find((candidate) => candidate.name === "device_cursor_position");
+        expect(cursor?.inputSchema?.properties?.x).toEqual(expect.objectContaining({ type: "integer", minimum: 0 }));
+        expect(cursor?.inputSchema?.properties?.y).toEqual(expect.objectContaining({ type: "integer", minimum: 0 }));
+    });
+
     let context: DeviceLabMcpTestContext;
     let client: DeviceLabMcpTestContext["client"];
 

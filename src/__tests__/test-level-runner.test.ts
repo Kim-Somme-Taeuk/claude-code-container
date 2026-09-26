@@ -161,15 +161,28 @@ function propertyKey(property: Record<string, unknown>) {
     return null;
 }
 
+// Accept `{...}` and `Object.freeze({...})`; real E2E scripts freeze shared option sets.
+function frozenObjectExpression(init: Record<string, unknown> | undefined): Record<string, unknown> | null {
+    if (init?.type === "ObjectExpression") return init;
+    if (init?.type !== "CallExpression") return null;
+    const callee = init.callee as Record<string, unknown> | undefined;
+    const object = callee?.object as Record<string, unknown> | undefined;
+    const property = callee?.property as Record<string, unknown> | undefined;
+    const args = Array.isArray(init.arguments) ? init.arguments as Record<string, unknown>[] : [];
+    if (callee?.type !== "MemberExpression" || object?.name !== "Object" || property?.name !== "freeze") return null;
+    return args.length === 1 && args[0]?.type === "ObjectExpression" ? args[0] : null;
+}
+
 function literalObjectBindings(ast: unknown) {
     const bindings = new Map<string, Record<string, unknown> | null>();
     walkAst(ast, (node) => {
         if (node.type !== "VariableDeclarator") return;
         const id = node.id as Record<string, unknown> | undefined;
         const init = node.init as Record<string, unknown> | undefined;
-        if (id?.type !== "Identifier" || init?.type !== "ObjectExpression") return;
+        const object = frozenObjectExpression(init);
+        if (id?.type !== "Identifier" || !object) return;
         const name = String(id.name);
-        bindings.set(name, bindings.has(name) ? null : init);
+        bindings.set(name, bindings.has(name) ? null : object);
     });
     return bindings;
 }
@@ -594,6 +607,12 @@ function quotedMapKeys(text: string, name: string) {
     return new Set([...(match?.[1] || "").matchAll(/\["([^"]+)",\s*"[^"]+"\]/g)].map((item) => item[1]));
 }
 
+// The broker serves linux-vm through Hyper-V on Windows hosts as well as QEMU in the container.
+function hyperVLinuxVmCapabilities(brokerText: string) {
+    expect(brokerText).toContain("const HYPER_V_LINUX_VM_CAPABILITIES = [...HYPER_V_VM_CAPABILITIES];");
+    return quotedArrayConstant(brokerText, "HYPER_V_VM_CAPABILITIES");
+}
+
 function backendAdvertisedSupportDrift() {
     const brokerText = readFileSync(join(repoRoot, "src", "device-lab-broker.ts"), "utf-8");
     const desktopCapabilities = quotedArrayConstant(brokerText, "DESKTOP_DEVICE_CAPABILITIES");
@@ -616,7 +635,7 @@ function backendAdvertisedSupportDrift() {
         ["windows-sandbox", desktopCapabilities],
         ["windows-vm", quotedArrayConstant(brokerText, "HYPER_V_VM_CAPABILITIES")],
         ["macos-vm", new Set([...desktopCapabilities, ...quotedArrayConstant(brokerText, "MACOS_VM_CAPABILITIES")])],
-        ["linux-vm", new Set(LINUX_VM_CAPABILITIES)],
+        ["linux-vm", new Set([...LINUX_VM_CAPABILITIES, ...hyperVLinuxVmCapabilities(brokerText)])],
     ]);
     const schemas = deviceLabToolBackendEnums();
     const backends = [...capabilityCases.keys()];

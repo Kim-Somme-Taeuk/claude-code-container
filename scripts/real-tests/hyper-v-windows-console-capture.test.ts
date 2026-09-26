@@ -360,7 +360,7 @@ describe("captureHyperVWindowsConsole", () => {
             platform: "win32",
             spawnSyncImpl: () => {
                 mountCalls += 1;
-                if (mountCalls === 1) return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx" }) };
+                if (mountCalls === 1) return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx", controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0 }) };
                 if (mountCalls === 2) {
                     return {
                         status: 0,

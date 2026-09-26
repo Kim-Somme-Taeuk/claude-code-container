@@ -150,6 +150,40 @@ describe("compensating what creation actually did", () => {
         }]);
     });
 
+    it("removes the VM by its recorded id before the disk and directories", async () => {
+        const { deviceRoot, diskDirectory, diskPath } = deviceTree();
+        const vmId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        const calls: string[] = [];
+        const attempts = await runHyperVCreateCompensation([
+            { kind: "directory-created", path: deviceRoot },
+            { kind: "directory-created", path: diskDirectory },
+            { kind: "file-created", path: diskPath },
+            { kind: "vm-created", vmId },
+        ], { removeVM: async (id) => { calls.push(id); } });
+
+        expect(calls).toEqual([vmId]);
+        expect(attempts.map(({ compensation, ok }) => [compensation.kind, ok])).toEqual([
+            ["remove-vm", true], ["delete-file", true],
+            ["delete-directory", true], ["delete-directory", true],
+        ]);
+        expect(existsSync(deviceRoot)).toBe(false);
+    });
+
+    it("preserves the attached disk when VM removal fails", async () => {
+        const { deviceRoot, diskDirectory, diskPath } = deviceTree();
+        const attempts = await runHyperVCreateCompensation([
+            { kind: "directory-created", path: deviceRoot },
+            { kind: "directory-created", path: diskDirectory },
+            { kind: "file-created", path: diskPath },
+            { kind: "vm-created", vmId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+        ], { removeVM: async () => { throw new Error("remove-failed"); } });
+
+        expect(attempts.map(({ ok }) => ok)).toEqual([false]);
+        expect(attempts[0]?.error).toBe("remove-failed");
+        expect(existsSync(diskPath)).toBe(true);
+        expect(existsSync(deviceRoot)).toBe(true);
+    });
+
     // The report is read by a human deciding whether residue was left behind, so the
     // condition is named rather than carried as a raw errno.
     it.each([

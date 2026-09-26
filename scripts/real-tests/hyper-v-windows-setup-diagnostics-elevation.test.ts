@@ -54,6 +54,7 @@ function failureReasonInput(overrides: Record<string, unknown> = {}) {
         // powershell.exe` on the invoking user's PATH.
         powershell: "C:\\Users\\Someone\\Downloads\\powershell.exe",
         platform: "win32",
+        allowSetupDiagnosticsElevation: true,
         captureImpl: (() => ({ ok: false, code: "hyper-v-console-wmi-method-failed" })) as any,
         setupDiagnosticsImpl: (() => ({ ok: false, code: PRIVILEGE_CODE })) as any,
         publishSetupDiagnosticsImpl: ((logs: unknown) => ({
@@ -68,6 +69,16 @@ function failureReasonInput(overrides: Record<string, unknown> = {}) {
 }
 
 describe("Windows Setup diagnostics elevation request", () => {
+    it("does not request UAC unless the run explicitly opts into elevated diagnostics", async () => {
+        const elevate = vi.fn();
+        const reason = await hyperVWindowsFailureReason(failureReasonInput({
+            allowSetupDiagnosticsElevation: false,
+            elevateSetupDiagnosticsImpl: elevate,
+        }));
+        expect(elevate).not.toHaveBeenCalled();
+        expect(reason).toContain(`${PRIVILEGE_CODE}(elevation=disabled)`);
+    });
+
     it("announces the Administrator request immediately before launching UAC", async () => {
         const events: string[] = [];
         const writeOutput = vi.fn(() => { events.push("request"); });
@@ -186,6 +197,26 @@ describe("Windows Setup diagnostics elevation request", () => {
             elevateSetupDiagnosticsImpl: async () => { throw new Error("pipe exploded"); },
         }));
         expect(threw, "a throw out of the elevation path must not lose the diagnosis either").toContain(`${PRIVILEGE_CODE}(elevation=elevation-request-failed)`);
+    });
+
+    it("preserves the bounded RunAs failure fingerprint in the E2E reason", async () => {
+        const errorCode = "elevation-launch-failed[stage=runas,native=740,hresult=-2147467259]";
+        const outcome = await requestElevatedSetupDiagnostics(IDENTITY, {
+            platform: "win32",
+            resolveTrustedWindowsPowerShellImpl: () => TRUSTED_POWERSHELL,
+            isAdministratorImpl: () => false,
+            bundlePath: "bundle.mjs",
+            statSyncImpl: () => ({ size: 32 }),
+            readFileSyncImpl: () => Buffer.from("export const bundled = 1;\n"),
+            nodePath: "C:\\node.exe",
+            fileDigestImpl: async () => "a".repeat(64),
+            requestAdministratorImpl: async () => ({ status: 1, stdout: "", stderr: "", errorCode }),
+        });
+        expect(outcome).toEqual({ attempted: true, errorCode });
+        const reason = await hyperVWindowsFailureReason(failureReasonInput({
+            elevateSetupDiagnosticsImpl: async () => outcome,
+        }));
+        expect(reason).toContain(`${PRIVILEGE_CODE}(elevation=${errorCode})`);
     });
 
     // The one case where the operator paid for a prompt, approved, and the elevated read SUCCEEDED

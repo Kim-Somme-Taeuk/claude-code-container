@@ -39,6 +39,11 @@ const virtualMachineFirmware = {
     secureBootTemplate: "MicrosoftWindows",
     firstBootDevicePath: "C:\\devices\\device-1\\root.vhdx",
 };
+const virtualMachineBios = { vmId, startupOrder: ["IDE", "CD", "LegacyNetworkAdapter", "Floppy"] };
+const virtualHardDisk = {
+    path: "/state/images/base.vhdx", vhdFormat: "VHDX", vhdType: "Dynamic",
+    parentPath: null, virtualSizeBytes: 64 * 1024 * 1024 * 1024, fileSizeBytes: 1024,
+};
 
 function response(
     operation: HyperVWindowsOperation,
@@ -57,6 +62,167 @@ function executorUsing(
 }
 
 describe("Hyper-V Windows low-level client", () => {
+    it("removes only an exact VM DVD path and rejects ambiguous responses", async () => {
+        const execute = vi.fn((request: HyperVWindowsExecutionRequest) => response(request.operation));
+        const client = createHyperVWindowsClient(executorUsing(execute));
+        const request = { selector, expectedName: "library-test", expectedNotes: "opaque-notes", path: "C:\\Users\\Alice [Org]\\autounattend.iso" };
+        await client.removeVMDvdDrive(request);
+        expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+            operation: "Remove-VMDvdDrive", selector: { kind: "id", id: canonicalVmId }, path: request.path,
+        }), expect.anything());
+        await expect(client.removeVMDvdDrive({ ...request, path: "relative.iso" })).rejects.toMatchObject({ category: "validation" });
+        await expect(client.removeVMDvdDrive({ ...request, selector: { kind: "id", id: "bad" } })).rejects.toMatchObject({ category: "validation" });
+        expect(execute).toHaveBeenCalledTimes(1);
+        execute.mockImplementation((operationRequest) => response(operationRequest.operation, [{ removed: true }]));
+        await expect(client.removeVMDvdDrive(request)).rejects.toMatchObject({ category: "protocol", code: "result-ambiguous" });
+    });
+    it("maps Get-VHD to one native path operation and preserves metadata", async () => {
+        const requests: HyperVWindowsExecutionRequest[] = [];
+        const client = createHyperVWindowsClient(executorUsing((request) => {
+            requests.push(request);
+            return response(request.operation, [virtualHardDisk]);
+        }));
+        await expect(client.getVHD(virtualHardDisk.path)).resolves.toEqual(virtualHardDisk);
+        expect(requests).toEqual([{ schemaVersion: 1, operation: "Get-VHD", path: virtualHardDisk.path }]);
+    });
+
+    it("rejects unsafe Get-VHD requests and malformed native metadata", async () => {
+        const execute = vi.fn((request: HyperVWindowsExecutionRequest) => response(request.operation, [virtualHardDisk]));
+        const client = createHyperVWindowsClient(executorUsing(execute));
+        await expect(client.getVHD("relative.vhdx")).rejects.toMatchObject({ category: "validation", code: "vhd-path-invalid" });
+        await expect(client.getVHD("/state/\u0000bad.vhdx")).rejects.toMatchObject({ category: "validation", code: "vhd-path-invalid" });
+        expect(execute).not.toHaveBeenCalled();
+        for (const item of [
+            { ...virtualHardDisk, path: "" },
+            { ...virtualHardDisk, parentPath: 42 },
+            { ...virtualHardDisk, virtualSizeBytes: -1 },
+            { ...virtualHardDisk, fileSizeBytes: 1.5 },
+            { ...virtualHardDisk, extra: true },
+        ]) {
+            const invalid = createHyperVWindowsClient(executorUsing((request) => response(request.operation, [item])));
+            await expect(invalid.getVHD(virtualHardDisk.path)).rejects.toMatchObject({ category: "protocol", code: "result-shape-invalid" });
+        }
+    });
+
+    it("keeps unknown native VHD format and type strings visible", async () => {
+        const native = { ...virtualHardDisk, vhdFormat: "FutureFormat", vhdType: "FutureType" };
+        const client = createHyperVWindowsClient(executorUsing((request) => response(request.operation, [native])));
+        await expect(client.getVHD(virtualHardDisk.path)).resolves.toEqual(native);
+    });
+
+    it("maps VHD mount and dismount to exact native requests and empty results", async () => {
+        const requests: HyperVWindowsExecutionRequest[] = [];
+        const client = createHyperVWindowsClient(executorUsing((request) => {
+            requests.push(request);
+            return response(request.operation);
+        }));
+        await expect(client.mountVHD({ path: virtualHardDisk.path, readOnly: true, noDriveLetter: true })).resolves.toBeUndefined();
+        await expect(client.dismountVHD(virtualHardDisk.path)).resolves.toBeUndefined();
+        expect(requests).toEqual([
+            { schemaVersion: 1, operation: "Mount-VHD", path: virtualHardDisk.path, readOnly: true, noDriveLetter: true },
+            { schemaVersion: 1, operation: "Dismount-VHD", path: virtualHardDisk.path },
+        ]);
+    });
+
+    it("refuses unsafe VHD mutation paths and flags before the executor", async () => {
+        const execute = vi.fn((request: HyperVWindowsExecutionRequest) => response(request.operation));
+        const client = createHyperVWindowsClient(executorUsing(execute));
+        for (const path of ["relative.vhdx", "/state/*.vhdx", "/state/\u0000bad.vhdx", ""]) {
+            await expect(client.mountVHD({ path, readOnly: true, noDriveLetter: true })).rejects.toMatchObject({
+                category: "validation", operation: "Mount-VHD", code: "vhd-path-invalid",
+            });
+            await expect(client.dismountVHD(path)).rejects.toMatchObject({
+                category: "validation", operation: "Dismount-VHD", code: "vhd-path-invalid",
+            });
+        }
+        for (const request of [
+            { path: virtualHardDisk.path, readOnly: "true", noDriveLetter: true },
+            { path: virtualHardDisk.path, readOnly: true, noDriveLetter: null },
+            { path: virtualHardDisk.path, readOnly: true, noDriveLetter: true, extra: true },
+        ]) {
+            await expect(client.mountVHD(request as never)).rejects.toMatchObject({ category: "validation" });
+        }
+        expect(execute).not.toHaveBeenCalled();
+    });
+
+    it.each(["Mount-VHD", "Dismount-VHD"] as const)("requires exact zero-item %s responses and classifies native errors", async (operation) => {
+        const call = (client: ReturnType<typeof createHyperVWindowsClient>) => operation === "Mount-VHD"
+            ? client.mountVHD({ path: virtualHardDisk.path, readOnly: true, noDriveLetter: true })
+            : client.dismountVHD(virtualHardDisk.path);
+        const unexpected = createHyperVWindowsClient(executorUsing(() => response(operation, [{}])));
+        await expect(call(unexpected)).rejects.toMatchObject({ category: "protocol", operation, code: "result-ambiguous" });
+        const malformed = createHyperVWindowsClient(executorUsing(() => ({ status: 0, stdout: "not-json" })));
+        await expect(call(malformed)).rejects.toMatchObject({ category: "protocol", operation, code: "response-malformed" });
+        const failed = createHyperVWindowsClient(executorUsing(() => ({
+            status: 1,
+            stdout: JSON.stringify({ schemaVersion: 1, operation, ok: false, errorCode: "native-vhd-failed" }),
+            stderr: "private native path",
+        })));
+        const caught = await call(failed).catch((error: unknown) => error);
+        expect(caught).toMatchObject({ category: "native", operation, code: "native-vhd-failed", nativeStatus: 1 });
+        expect(String(caught)).not.toContain("private native path");
+    });
+    it("routes Convert-VHD and Resize-VHD through one exact native request with per-call long budgets", async () => {
+        const requests: HyperVWindowsExecutionRequest[] = [];
+        const contexts: HyperVWindowsExecutionContext[] = [];
+        const client = createHyperVWindowsClient({ execute(request, context) {
+            requests.push(request);
+            contexts.push(context);
+            return response(request.operation);
+        } });
+        await client.convertVHD({ sourcePath: "/state/fixed.vhd", destinationPath: "/state/partial.vhdx", vhdType: "Dynamic" }, { timeoutMilliseconds: 4 * 60 * 60 * 1000 });
+        await client.resizeVHD({ path: "/state/partial.vhdx", sizeBytes: 32 * 1024 * 1024 * 1024 }, { timeoutMilliseconds: 60 * 60 * 1000 });
+        await client.mountVHD({ path: virtualHardDisk.path, readOnly: true, noDriveLetter: true });
+        expect(requests.slice(0, 2)).toEqual([
+            { schemaVersion: 1, operation: "Convert-VHD", sourcePath: "/state/fixed.vhd", destinationPath: "/state/partial.vhdx", vhdType: "Dynamic" },
+            { schemaVersion: 1, operation: "Resize-VHD", path: "/state/partial.vhdx", sizeBytes: 32 * 1024 * 1024 * 1024 },
+        ]);
+        expect(contexts.map((context) => context.timeoutMilliseconds)).toEqual([4 * 60 * 60 * 1000, 60 * 60 * 1000, 120 * 1000]);
+    });
+
+    it("rejects invalid VHD mutation requests before execution", async () => {
+        const execute = vi.fn((request: HyperVWindowsExecutionRequest) => response(request.operation));
+        const client = createHyperVWindowsClient(executorUsing(execute));
+        for (const request of [
+            { sourcePath: "relative.vhd", destinationPath: "/state/partial.vhdx", vhdType: "Dynamic" },
+            { sourcePath: "/state/fixed.vhd", destinationPath: "/state/*.vhdx", vhdType: "Dynamic" },
+            { sourcePath: "/state/fixed.vhd", destinationPath: "/state/./fixed.vhd", vhdType: "Dynamic" },
+            { sourcePath: "/state/fixed.vhd", destinationPath: "/state/partial.vhdx", vhdType: "Differencing" },
+            { sourcePath: "/state/fixed.vhd", destinationPath: "/state/partial.vhdx", vhdType: "Dynamic", extra: true },
+        ]) await expect(client.convertVHD(request as never)).rejects.toMatchObject({ category: "validation", operation: "Convert-VHD" });
+        for (const request of [
+            { path: "relative.vhdx", sizeBytes: 1 },
+            { path: "/state/partial.vhdx", sizeBytes: 0 },
+            { path: "/state/partial.vhdx", sizeBytes: 1.5 },
+            { path: "/state/partial.vhdx", sizeBytes: Number.MAX_SAFE_INTEGER + 1 },
+            { path: "/state/partial.vhdx", sizeBytes: 1, extra: true },
+        ]) await expect(client.resizeVHD(request as never)).rejects.toMatchObject({ category: "validation", operation: "Resize-VHD" });
+        await expect(client.convertVHD({ sourcePath: "/state/fixed.vhd", destinationPath: "/state/partial.vhdx", vhdType: "Dynamic" }, { timeoutMilliseconds: 4 * 60 * 60 * 1000 + 1 })).rejects.toMatchObject({ category: "validation", code: "timeout-invalid" });
+        await expect(client.resizeVHD({ path: "/state/partial.vhdx", sizeBytes: 1 }, { timeoutMilliseconds: 0 })).rejects.toMatchObject({ category: "validation", code: "timeout-invalid" });
+        expect(execute).not.toHaveBeenCalled();
+    });
+
+    it.each(["Convert-VHD", "Resize-VHD"] as const)("requires exact zero-item %s responses", async (operation) => {
+        const call = (client: ReturnType<typeof createHyperVWindowsClient>) => operation === "Convert-VHD"
+            ? client.convertVHD({ sourcePath: "/state/fixed.vhd", destinationPath: "/state/partial.vhdx", vhdType: "Dynamic" })
+            : client.resizeVHD({ path: "/state/partial.vhdx", sizeBytes: 32 * 1024 * 1024 * 1024 });
+        const unexpected = createHyperVWindowsClient(executorUsing(() => response(operation, [{}])));
+        await expect(call(unexpected)).rejects.toMatchObject({ category: "protocol", operation, code: "result-ambiguous" });
+        const malformed = createHyperVWindowsClient(executorUsing(() => ({ status: 0, stdout: "not-json" })));
+        await expect(call(malformed)).rejects.toMatchObject({ category: "protocol", operation, code: "response-malformed" });
+        const execute = vi.fn(() => ({ status: null, stdout: "", timedOut: true }));
+        const timedOut = createHyperVWindowsClient(executorUsing(execute));
+        await expect(call(timedOut)).rejects.toMatchObject({ category: "transport", operation, code: "timeout" });
+        expect(execute).toHaveBeenCalledTimes(1);
+        const failed = createHyperVWindowsClient(executorUsing(() => ({
+            status: 1,
+            stdout: JSON.stringify({ schemaVersion: 1, operation, ok: false, errorCode: "native-vhd-failed" }),
+            stderr: "private native path",
+        })));
+        const caught = await call(failed).catch((error: unknown) => error);
+        expect(caught).toMatchObject({ category: "native", operation, code: "native-vhd-failed" });
+        expect(String(caught)).not.toContain("private native path");
+    });
     it("maps each method to one exact native operation and normalized parameters", async () => {
         const requests: HyperVWindowsExecutionRequest[] = [];
         const contexts: HyperVWindowsExecutionContext[] = [];
@@ -74,6 +240,7 @@ describe("Hyper-V Windows low-level client", () => {
         await client.getVMDvdDrives(selector);
         await client.startVM({ selector });
         await client.stopVM({ selector, mode: "shutdown" });
+        await client.restartVM({ selector });
         await client.removeVM({ selector, force: true });
 
         expect(requests).toEqual([
@@ -82,12 +249,130 @@ describe("Hyper-V Windows low-level client", () => {
             { schemaVersion: 1, operation: "Get-VMDvdDrive", selector: { kind: "id", id: canonicalVmId } },
             { schemaVersion: 1, operation: "Start-VM", selector: { kind: "id", id: canonicalVmId } },
             { schemaVersion: 1, operation: "Stop-VM", selector: { kind: "id", id: canonicalVmId }, mode: "shutdown", force: false },
+            { schemaVersion: 1, operation: "Restart-VM", selector: { kind: "id", id: canonicalVmId }, force: false },
             { schemaVersion: 1, operation: "Remove-VM", selector: { kind: "id", id: canonicalVmId }, force: true },
         ]);
-        expect(contexts).toEqual(Array.from({ length: 6 }, () => ({
+        expect(contexts).toEqual(Array.from({ length: 7 }, () => ({
             timeoutMilliseconds: 120_000,
             maximumOutputBytes: 65_536,
         })));
+    });
+
+    it("passes paired VM identity through each power operation and maps force exactly", async () => {
+        const execute = vi.fn((request: HyperVWindowsExecutionRequest) => response(request.operation));
+        const client = createHyperVWindowsClient(executorUsing(execute));
+        const identity = { selector, expectedName: "library-test", expectedNotes: "opaque-notes" };
+
+        await client.startVM(identity);
+        await client.stopVM({ ...identity, mode: "shutdown", force: true });
+        await client.stopVM({ ...identity, mode: "turn-off", force: true });
+        await client.restartVM({ ...identity, force: true });
+
+        expect(execute.mock.calls.map(([request]) => request)).toEqual([
+            { schemaVersion: 1, operation: "Start-VM", selector: { kind: "id", id: canonicalVmId }, expectedName: "library-test", expectedNotes: "opaque-notes" },
+            { schemaVersion: 1, operation: "Stop-VM", selector: { kind: "id", id: canonicalVmId }, expectedName: "library-test", expectedNotes: "opaque-notes", mode: "shutdown", force: true },
+            { schemaVersion: 1, operation: "Stop-VM", selector: { kind: "id", id: canonicalVmId }, expectedName: "library-test", expectedNotes: "opaque-notes", mode: "turn-off", force: true },
+            { schemaVersion: 1, operation: "Restart-VM", selector: { kind: "id", id: canonicalVmId }, expectedName: "library-test", expectedNotes: "opaque-notes", force: true },
+        ]);
+    });
+
+    it("requires an exact guarded deletion target and narrows blank Notes to the single root disk", async () => {
+        const execute = vi.fn((request: HyperVWindowsExecutionRequest) => response(request.operation));
+        const client = createHyperVWindowsClient(executorUsing(execute));
+        const marked = {
+            expectedName: "library-test", expectedNotes: "opaque-notes",
+            ownedDiskDirectory: "C:\\lab\\device\\disks",
+            expectedDiskPaths: ["C:\\lab\\device\\disks\\root.vhdx"],
+            expectedDvdPaths: ["C:\\lab\\device\\media\\cidata.iso"],
+        };
+        await client.removeVM({ selector, force: true, guard: marked });
+        expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+            operation: "Remove-VM", selector: { kind: "id", id: canonicalVmId }, force: true, guard: marked,
+        }), expect.anything());
+        const unmarked = { ...marked, expectedNotes: "",
+            unmarkedRootDiskPath: "C:\\lab\\device\\disks\\root.vhdx" };
+        await client.removeVM({ selector, force: true, guard: unmarked });
+        expect(execute).toHaveBeenLastCalledWith(expect.objectContaining({
+            operation: "Remove-VM", guard: expect.objectContaining({ expectedNotes: "", expectedDvdPaths: marked.expectedDvdPaths }),
+        }), expect.anything());
+        expect(execute).toHaveBeenCalledTimes(2);
+
+        const invalid = [
+            { selector: { kind: "name", name: "library-test" }, guard: marked },
+            { selector, guard: { ...marked, expectedDiskPaths: ["C:\\foreign\\root.vhdx"] } },
+            { selector, guard: { ...marked, expectedNotes: "" } },
+            { selector, guard: { ...unmarked, expectedDiskPaths: [...unmarked.expectedDiskPaths, "C:\\lab\\device\\disks\\other.vhdx"] } },
+            { selector, guard: { ...marked, expectedDvdPaths: ["relative.iso"] } },
+        ];
+        for (const request of invalid) {
+            await expect(client.removeVM(request as never)).rejects.toMatchObject({ category: "validation", operation: "Remove-VM" });
+        }
+        expect(execute).toHaveBeenCalledTimes(2);
+    });
+
+    it("bounds owner-scoped cleanup and decodes only path-free counts", async () => {
+        const execute = vi.fn((request: HyperVWindowsExecutionRequest) => response(request.operation,
+            request.operation === "Remove-HostFiles" ? [{ removedCount: 3 }] : []));
+        const client = createHyperVWindowsClient(executorUsing(execute));
+        const cleanup = { rootDirectory: "C:\\lab\\device", paths: ["C:\\lab\\device\\disks\\root.vhdx"],
+            checkpointDiskDirectory: "C:\\lab\\device\\disks" };
+        await expect(client.removeHostFiles(cleanup)).resolves.toEqual({ removedCount: 3 });
+        expect(execute).toHaveBeenCalledWith({ schemaVersion: 1, operation: "Remove-HostFiles", ...cleanup }, expect.anything());
+        await expect(client.removeHostFiles({ ...cleanup, paths: ["C:\\lab\\other\\root.vhdx"] })).rejects.toMatchObject({
+            category: "validation", operation: "Remove-HostFiles", code: "host-files-request-invalid",
+        });
+        await expect(client.removeHostFiles({ ...cleanup, checkpointDiskDirectory: "C:\\lab\\other\\disks" })).rejects.toMatchObject({
+            category: "validation", operation: "Remove-HostFiles", code: "host-files-request-invalid",
+        });
+        expect(execute).toHaveBeenCalledTimes(1);
+        const bad = createHyperVWindowsClient(executorUsing((request) => response(request.operation,
+            [{ removedCount: 1, path: "private" }])));
+        await expect(bad.removeHostFiles(cleanup)).rejects.toMatchObject({ category: "protocol", code: "result-shape-invalid" });
+    });
+
+    it("allows native absolute fixture paths only off Windows and keeps them within their root", async () => {
+        const execute = vi.fn((request: HyperVWindowsExecutionRequest) => response(request.operation,
+            request.operation === "Remove-HostFiles" ? [{ removedCount: 0 }] : []));
+        const client = createHyperVWindowsClient(executorUsing(execute));
+        const rootDirectory = "/tmp/lab-device";
+        const path = "/tmp/lab-device/disks/root.vhdx";
+        if (process.platform === "win32") {
+            await expect(client.removeHostFiles({ rootDirectory, paths: [path] })).rejects.toMatchObject({
+                category: "validation", code: "owned-path-invalid",
+            });
+        } else {
+            await expect(client.removeHostFiles({ rootDirectory, paths: [path] })).resolves.toEqual({ removedCount: 0 });
+            await expect(client.removeVM({ selector, guard: {
+                expectedName: "library-test", expectedNotes: "opaque-notes",
+                ownedDiskDirectory: "/tmp/lab-device/disks", expectedDiskPaths: [path], expectedDvdPaths: [],
+            } })).resolves.toBeUndefined();
+            await expect(client.removeHostFiles({ rootDirectory, paths: ["/tmp/lab-device-other/root.vhdx"] })).rejects.toMatchObject({
+                category: "validation", code: "host-files-request-invalid",
+            });
+            expect(execute).toHaveBeenCalledTimes(2);
+        }
+    });
+
+    it("rejects incomplete or non-ID power identity before native execution", async () => {
+        const execute = vi.fn((request: HyperVWindowsExecutionRequest) => response(request.operation));
+        const client = createHyperVWindowsClient(executorUsing(execute));
+
+        await expect(client.startVM({ selector, expectedName: "library-test" })).rejects.toMatchObject({
+            category: "validation", operation: "Start-VM", code: "vm-identity-invalid",
+        });
+        await expect(client.stopVM({ selector, mode: "shutdown", expectedNotes: "opaque-notes" })).rejects.toMatchObject({
+            category: "validation", operation: "Stop-VM", code: "vm-identity-invalid",
+        });
+        await expect(client.restartVM({ selector: { kind: "name", name: "library-test" }, expectedName: "library-test", expectedNotes: "opaque-notes" })).rejects.toMatchObject({
+            category: "validation", operation: "Restart-VM", code: "vm-identity-invalid",
+        });
+        await expect(client.restartVM({ selector, force: "true" as never })).rejects.toMatchObject({
+            category: "validation", operation: "Restart-VM", code: "force-invalid",
+        });
+        await expect(client.startVM({ selector, expectedName: "library-test", expectedNotes: "line\nbreak" })).rejects.toMatchObject({
+            category: "validation", operation: "Start-VM", code: "vm-identity-invalid",
+        });
+        expect(execute).not.toHaveBeenCalled();
     });
 
     it("preserves zero, one, and many attachment records in native order", async () => {
@@ -263,6 +548,9 @@ describe("Hyper-V Windows PowerShell transport", () => {
         expect(fileRequest.input.endsWith("\n")).toBe(true);
         const source = fileRequest.scriptSource;
         expect(source).toBe(readFileSync(fileRequest.scriptPath, "utf8"));
+        expect(source).toContain('$Guard.expectedNotes -ceq ""');
+        expect(source).toContain('not (@($ExpectedMedia | Where-Object');
+        expect(source).not.toContain('$Guard.expectedNotes -ceq "" -and $AttachedMedia.Count -ne 0');
         expect(source).toContain('[Environment]::SystemDirectory');
         expect(source).toContain('Import-Module -Name $ModulePath -Force -PassThru');
         expect(source).toContain("Resolve-HyperVWindowsTrustedModulePath");
@@ -271,35 +559,103 @@ describe("Hyper-V Windows PowerShell transport", () => {
         expect(source).toContain("[Version]$VersionDirectory.Name");
         expect(source).toContain("[string]$_.ModuleBase");
         expect(source).toContain("[IO.FileAttributes]::ReparsePoint");
-        expect(source).toContain('Hyper-V\\Get-VM -ErrorAction Stop');
+        expect(source).toContain('Hyper-V\\Get-VM -Id $ExpectedId');
         expect(source).toContain('Hyper-V\\Remove-VM -VM $VirtualMachine');
+        const removeBranch = source.split('        "Remove-VM" {')[1]?.split('        "Remove-HostFiles" {')[0] || "";
+        expect(removeBranch.indexOf("$VirtualMachine = Assert-HyperVWindowsRemoveGuard $Request"))
+            .toBeLessThan(removeBranch.indexOf("Hyper-V\\Stop-VM -VM $VirtualMachine -TurnOff -Force"));
+        expect(removeBranch.lastIndexOf("$VirtualMachine = Assert-HyperVWindowsRemoveGuard $Request"))
+            .toBeLessThan(removeBranch.indexOf("Hyper-V\\Remove-VM -VM $VirtualMachine"));
+        const cleanupBranch = source.split('        "Remove-HostFiles" {')[1]?.split('        "Get-VMSnapshot" {')[0] || "";
+        expect(cleanupBranch).toContain("Assert-HyperVWindowsOwnedFilePath $Path $Root");
+        expect(cleanupBranch).toContain('Get-ChildItem -LiteralPath $CheckpointDir -Filter "*.avhdx" -File');
+        expect(cleanupBranch).toContain("Microsoft.PowerShell.Management\\Remove-Item -LiteralPath $Path -Force");
+        const ownedPathGuard = source.split("function Get-HyperVWindowsOwnedItem")[1]?.split("\nfunction Assert-HyperVWindowsVhdMutationPath")[0] || "";
+        expect(ownedPathGuard).toContain("Get-Item -LiteralPath $Path -Force -ErrorAction Stop");
+        expect(ownedPathGuard).toContain("Get-ChildItem -LiteralPath $Parent -Force -ErrorAction Stop");
+        expect(ownedPathGuard).toContain("host-file-reparse-point-rejected");
+        expect(ownedPathGuard).not.toContain("Test-Path -LiteralPath $Current");
         expect(source).toContain('$RawRequest = [string]$global:CccHyperVJsonInput');
         expect(source).not.toContain('[Console]::In.ReadToEnd()');
         expect(source).toContain("Get-VMHardDiskDrive");
         expect(source).toContain("Get-VMDvdDrive");
         expect(source).toContain("Start-VM");
         expect(source).toContain("Stop-VM");
+        expect(source).toContain("Restart-VM");
         expect(source).not.toMatch(/Stop-VM[^\r\n]*-Shutdown/);
+        const powerGuard = source.split("function Assert-HyperVWindowsPowerIdentity")[1]?.split("\nfunction ")[0] || "";
+        expect(powerGuard).toContain('$Request.PSObject.Properties.Name -contains "expectedName"');
+        expect(powerGuard).toContain('$Request.PSObject.Properties.Name -contains "expectedNotes"');
+        expect(powerGuard).toContain('[string]$Request.selector.kind -cne "id"');
+        expect(powerGuard).toContain('$CurrentVirtualMachine = Assert-HyperVWindowsSingleVirtualMachine @(Get-HyperVWindowsVirtualMachines $Request.selector)');
+        expect(powerGuard).toContain('[string]$CurrentVirtualMachine.Name -cne [string]$Request.expectedName');
+        expect(powerGuard).toContain('[string]$CurrentVirtualMachine.Notes -cne [string]$Request.expectedNotes');
+        for (const operation of ["Start-VM", "Stop-VM", "Restart-VM"]) {
+            const branch = source.split(`        "${operation}" {`)[1]?.split("        }")[0] || "";
+            const guard = branch.indexOf("$VirtualMachine = Assert-HyperVWindowsPowerIdentity $VirtualMachine $Request");
+            const mutation = branch.indexOf(`Hyper-V\\${operation} -VM $VirtualMachine`);
+            expect(guard, `${operation} must guard identity`).toBeGreaterThanOrEqual(0);
+            expect(mutation, `${operation} must mutate after the guard`).toBeGreaterThan(guard);
+        }
+        expect(source).toContain('Hyper-V\\Restart-VM -VM $VirtualMachine -Force:([bool]$Request.force) -Confirm:$false -ErrorAction Stop');
         expect(source).toContain("Remove-VM -VM $VirtualMachine");
-        expect(source).not.toContain("Remove-Item");
+        expect(source.match(/\bRemove-Item\b/g)).toHaveLength(2);
+        expect(source).toContain("Remove-Item -LiteralPath $StdoutPath,$StderrPath -Force -ErrorAction SilentlyContinue");
         expect(source).not.toContain("Get-VM -Id ([Guid][string]$Selector.id) -ErrorAction SilentlyContinue");
-        expect(source).toContain("Get-VM -ErrorAction Stop | Where-Object");
-        expect(source).not.toContain('CategoryInfo.Category -eq "ObjectNotFound"');
+        const idSelectorBranch = source.split('if ([string]$Selector.kind -eq "id") {')[1]?.split("    $ExpectedName")[0] || "";
+        expect(idSelectorBranch).toContain("Get-VM -Id $ExpectedId -ErrorAction SilentlyContinue -ErrorVariable +QueryErrors");
+        expect(idSelectorBranch).toContain("if ($QueryErrors.Count -gt 0) {");
+        expect(idSelectorBranch).toContain("Get-VM -ErrorAction Stop | Where-Object { [Guid]$_.Id -eq $ExpectedId }");
+        expect(idSelectorBranch).toContain('FullyQualifiedErrorId -ne "ObjectNotFound,Microsoft.HyperV.PowerShell.Commands.GetVM"');
+        expect(idSelectorBranch).not.toContain("$MissingTarget");
+        const nameSelectorBranch = source.split("    $ExpectedName = [string]$Selector.name")[1]?.split("\nfunction Convert-HyperVWindowsVirtualMachine")[0] || "";
+        expect(nameSelectorBranch).toContain("Get-VM -Name $ExpectedName -ErrorAction SilentlyContinue -ErrorVariable +QueryErrors");
+        expect(nameSelectorBranch).toContain('FullyQualifiedErrorId -eq "ObjectNotFound,Microsoft.HyperV.PowerShell.Commands.GetVM"');
+        expect(nameSelectorBranch).toContain('FullyQualifiedErrorId -eq "InvalidParameter,Microsoft.HyperV.PowerShell.Commands.GetVM"');
+        expect(nameSelectorBranch).toContain('CategoryInfo.Category -eq "InvalidArgument"');
+        expect(nameSelectorBranch).toContain("if ($QueryErrors.Count -gt 0) {");
+        expect(nameSelectorBranch).toContain("Get-VM -ErrorAction Stop | Where-Object { [string]$_.Name -eq $ExpectedName }");
+        expect(nameSelectorBranch).toContain('CategoryInfo.Category -eq "ObjectNotFound"');
         expect(source).not.toContain("CommandNotFoundException");
         expect(source).toContain("Get-VMHardDiskDrive -VM $VirtualMachine -ErrorAction Stop");
         expect(source).toContain("Get-VMDvdDrive -VM $VirtualMachine -ErrorAction Stop");
+        const guestBranch = source.split('        "Invoke-Guest" {')[1]?.split('        "Get-VM" {')[0] || "";
+        const jobBranch = guestBranch.split('if ($Action -eq "job") {')[1]?.split('$Session = $null')[0] || "";
+        expect(jobBranch).toContain("Invoke-Command -VMId ([Guid]$Request.selector.id)");
+        expect(jobBranch).toContain("-AsJob -ErrorAction Stop");
+        expect(jobBranch).toContain("Wait-Job -Job $GuestJob -Timeout 15");
+        expect(jobBranch).toContain("Receive-Job -Job $GuestJob -ErrorAction Stop");
+        expect(jobBranch).toContain("Remove-Job -Job $GuestJob -Force -ErrorAction SilentlyContinue");
+        expect(jobBranch).not.toMatch(/^\s*\$Session = New-PSSession/m);
+        const dvdBranch = source.split('        "Remove-VMDvdDrive" {')[1]?.split('        "Get-VHD" {')[0] || "";
+        expect(dvdBranch).toContain('if ($Attached.Count -gt 1) { throw "dvd-attachment-ambiguous" }');
+        expect(dvdBranch).toContain('if ($Attached.Count -eq 1) {');
+        expect(dvdBranch).toContain('Hyper-V\\Remove-VMDvdDrive -VMDvdDrive $Attached[0] -ErrorAction Stop');
+        expect(dvdBranch).toContain('if ($Remaining.Count -ne 0) { throw "dvd-still-attached" }');
+        expect(dvdBranch.indexOf("$Remaining =")).toBeGreaterThan(dvdBranch.indexOf("Hyper-V\\Remove-VMDvdDrive"));
+        expect(source).toContain("Hyper-V\\Get-VHD -Path $VhdPath -ErrorAction Stop");
+        expect(source).toContain("Assert-HyperVWindowsNoReparsePath $VhdPath");
+        expect(source).toContain("Hyper-V\\Mount-VHD -Path $VhdPath -ReadOnly:$ReadOnly -NoDriveLetter:$NoDriveLetter -ErrorAction Stop");
+        expect(source).toContain("Hyper-V\\Dismount-VHD -Path $VhdPath -ErrorAction Stop");
+        expect(source).toContain("Hyper-V\\Convert-VHD -Path $SourcePath -DestinationPath $DestinationPath -VHDType $VhdType -ErrorAction Stop");
+        expect(source).toContain("Hyper-V\\Resize-VHD -Path $VhdPath -SizeBytes ([long]$RawSize) -ErrorAction Stop");
+        expect(source).toContain('if (Test-Path -LiteralPath $Value) { throw "vhd-destination-exists" }');
+        expect(source).toContain("Assert-HyperVWindowsVhdMutationPath $Request.path");
         // Every VM-scoped operation resolves exactly one virtual machine before touching it,
         // and Get-VM itself is the only exception. The count rises with each such operation:
-        // the disk, DVD and snapshot reads, start, stop, remove, checkpoint, snapshot removal
+        // the disk, DVD and snapshot reads, start, stop, restart, remove, checkpoint, snapshot removal
         // and restore, plus the VM-scoped adapter read and the adapter removal -- and, from
         // the creation slice, the VM/memory/processor/BIOS settings, the firmware read and
-        // write, and the adapter add, rename and address.
+        // write, and the adapter add, rename and address. The guest action
+        // resolves the same exact VM before opening its credential-bound session;
+        // exact DVD detachment and guest boot configuration resolve it before
+        // comparing media and changing boot state.
         //
         // New-VM is deliberately absent: it is the call that brings the VM into existence, so
         // there is nothing to resolve. If it ever appears in this count, it has been given a
         // selector it cannot have.
         expect(source.match(/\$VirtualMachine = Assert-HyperVWindowsSingleVirtualMachine \$VirtualMachines/g))
-            .toHaveLength(20);
+            .toHaveLength(29);
         expect(source).toContain("Get-VMSnapshot -VM $VirtualMachine -ErrorAction Stop");
         expect(source).toContain("Checkpoint-VM -VM $VirtualMachine -SnapshotName $SnapshotName -Passthru -ErrorAction Stop");
         expect(source).toContain("Remove-VMSnapshot -VMSnapshot $Snapshot -Confirm:$false -ErrorAction Stop");
@@ -356,6 +712,7 @@ describe("Hyper-V Windows creation primitives", () => {
             requests.push(request);
             if (request.operation === "New-VM") return response(request.operation, [virtualMachine]);
             if (request.operation === "Get-VMFirmware") return response(request.operation, [virtualMachineFirmware]);
+            if (request.operation === "Get-VMBios") return response(request.operation, [virtualMachineBios]);
             return response(request.operation, []);
         }));
         return { client, requests };
@@ -368,6 +725,7 @@ describe("Hyper-V Windows creation primitives", () => {
         await client.setVMMemory({ selector, dynamicMemoryEnabled: false });
         await client.setVMProcessor({ selector, count: 4 });
         await client.getVMFirmware(selector);
+        await client.getVMBios(selector);
         await client.setVMFirmware({ selector, secureBoot: { enabled: true, template: "MicrosoftWindows" } });
         await client.setVMBios({ selector, startupOrder: ["IDE", "CD"] });
         await client.addVMNetworkAdapter({ selector, name: "CCC Device Network", switchName: "ccc-internal" });
@@ -406,6 +764,7 @@ describe("Hyper-V Windows creation primitives", () => {
             { schemaVersion: 1, operation: "Set-VMMemory", selector: id, dynamicMemoryEnabled: false },
             { schemaVersion: 1, operation: "Set-VMProcessor", selector: id, count: 4 },
             { schemaVersion: 1, operation: "Get-VMFirmware", selector: id },
+            { schemaVersion: 1, operation: "Get-VMBios", selector: id },
             {
                 schemaVersion: 1,
                 operation: "Set-VMFirmware",
@@ -479,6 +838,13 @@ describe("Hyper-V Windows creation primitives", () => {
             secureBootTemplate: "MicrosoftWindows",
             firstBootDevicePath: "C:\\devices\\device-1\\root.vhdx",
         });
+    });
+
+    it("decodes generation 1 BIOS order and rejects an ambiguous order", async () => {
+        const { client } = recordingClient();
+        await expect(client.getVMBios(selector)).resolves.toEqual({ vmId: canonicalVmId, startupOrder: ["IDE", "CD", "LegacyNetworkAdapter", "Floppy"] });
+        const malformed = createHyperVWindowsClient(executorUsing((request) => response(request.operation, [{ vmId, startupOrder: ["IDE", "IDE"] }])));
+        await expect(malformed.getVMBios(selector)).rejects.toThrow(/result-shape-invalid/);
     });
 
     // Absent is a real answer, not a decode failure: a VM whose first boot entry is a network

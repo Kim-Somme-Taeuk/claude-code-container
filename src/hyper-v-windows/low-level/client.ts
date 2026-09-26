@@ -1,12 +1,30 @@
+import { isAbsolute, resolve, win32 } from "path";
+
 import type {
+    HyperVConsoleIdentity,
+    HyperVConsoleInput,
+    HyperVConsoleCapture,
+    HyperVConsoleCursor,
     HyperVAddVMNetworkAdapterRequest,
     HyperVBiosStartupDevice,
     HyperVCheckpointVirtualMachineRequest,
+    HyperVConvertVHDRequest,
+    HyperVConfigureVMGuestBootRequest,
     HyperVDvdDrive,
+    HyperVGetVMDiagnosticRequest,
     HyperVHardDiskDrive,
+    HyperVMountVHDRequest,
     HyperVNewVirtualMachineRequest,
     HyperVRemoveSnapshotRequest,
+    HyperVRepairVMSnapshotStateRequest,
+    HyperVRepairVMSnapshotStateResult,
+    HyperVRemoveHostFilesRequest,
+    HyperVRemoveHostFilesResult,
+    HyperVRemoveVMGuard,
+    HyperVRemoveVMDvdDriveRequest,
     HyperVRemoveVirtualMachineRequest,
+    HyperVRestartVirtualMachineRequest,
+    HyperVResizeVHDRequest,
     HyperVRenameVMNetworkAdapterRequest,
     HyperVRestoreSnapshotRequest,
     HyperVSecureBootSetting,
@@ -19,11 +37,15 @@ import type {
     HyperVSnapshotSelector,
     HyperVStartVirtualMachineRequest,
     HyperVStopVirtualMachineRequest,
+    HyperVPowerIdentityExpectation,
     HyperVVirtualMachine,
+    HyperVVirtualMachineBios,
     HyperVVirtualMachineFirmware,
+    HyperVVirtualHardDisk,
     HyperVVMNetworkAdapterTarget,
     HyperVVirtualMachineSelector,
     HyperVVirtualMachineSnapshot,
+    HyperVVhdMutationCallOptions,
     HyperVWindowsCallOptions,
     HyperVWindowsClient,
     HyperVWindowsExecutionRequest,
@@ -31,12 +53,18 @@ import type {
     HyperVWindowsExecutor,
     HyperVWindowsOperation,
 } from "./contracts.js";
+import { parseHyperVWindowsGuestBootDiagnostic } from "./diagnostic.js";
 import { HyperVWindowsError } from "./errors.js";
 
 const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NATIVE_ERROR_CODE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_RESPONSE_BYTES = 64 * 1024;
+const MAX_CONSOLE_RESPONSE_BYTES = 6 * 1024 * 1024;
+const MAX_CONSOLE_PNG_BYTES = 4 * 1024 * 1024;
+const CONSOLE_WIDTH = 640;
+const CONSOLE_HEIGHT = 480;
 const EXECUTION_TIMEOUT_MILLISECONDS = 120 * 1000;
+const MAX_VHD_MUTATION_TIMEOUT_MILLISECONDS = 4 * 60 * 60 * 1000;
 const MAX_NAME_LENGTH = 100;
 const MAX_NATIVE_STRING_LENGTH = 32 * 1024;
 // The wildcard characters the Hyper-V cmdlets treat as patterns rather than literals.
@@ -103,6 +131,96 @@ function boundedString(value: unknown, allowEmpty = true): value is string {
         && (allowEmpty || value.length > 0)
         && value.length <= MAX_NATIVE_STRING_LENGTH
         && !value.includes("\u0000");
+}
+
+function normalizeVhdMutationPath(operation: HyperVWindowsOperation, path: unknown): string {
+    if (!boundedString(path, false) || !isAbsolute(path) || /[\u0000-\u001f*?\[\]]/.test(path)) {
+        throw error("validation", operation, "vhd-path-invalid");
+    }
+    return path;
+}
+
+function normalizeOwnedPath(operation: HyperVWindowsOperation, value: unknown): string {
+    if (!boundedString(value, false) || value.length > 4096 || /[\u0000-\u001f*?\[\]]/.test(value)) {
+        throw error("validation", operation, "owned-path-invalid");
+    }
+    // Broker fixtures use host-native temporary paths on Linux. Production runs on Windows and
+    // accepts only fully qualified Windows paths; POSIX support never reaches the native script.
+    if (process.platform !== "win32" && value.startsWith("/") && isAbsolute(value)) return resolve(value);
+    if (!/^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+[\\/])/.test(value)) {
+        throw error("validation", operation, "owned-path-invalid");
+    }
+    return win32.normalize(value);
+}
+
+function isInsideOwnedDirectory(directory: string, path: string): boolean {
+    if (directory.startsWith("/")) {
+        const normalizedDirectory = directory.replace(/\/+$/, "");
+        return path.startsWith(`${normalizedDirectory}/`);
+    }
+    const normalizedDirectory = directory.toLowerCase().replace(/[\\/]+$/, "");
+    return path.toLowerCase().startsWith(`${normalizedDirectory}\\`);
+}
+
+function normalizeRemoveGuard(operation: HyperVWindowsOperation, value: unknown): HyperVRemoveVMGuard {
+    const candidate = record(value);
+    if (!candidate || !validNativeName(candidate.expectedName)
+        || !boundedString(candidate.expectedNotes) || candidate.expectedNotes.length > 4096
+        || /[\u0000-\u001f]/.test(candidate.expectedNotes)
+        || !Array.isArray(candidate.expectedDiskPaths) || candidate.expectedDiskPaths.length < 1
+        || candidate.expectedDiskPaths.length > 128
+        || !Array.isArray(candidate.expectedDvdPaths) || candidate.expectedDvdPaths.length > 128) {
+        throw error("validation", operation, "vm-remove-guard-invalid");
+    }
+    const ownedDiskDirectory = normalizeOwnedPath(operation, candidate.ownedDiskDirectory);
+    const expectedDiskPaths = candidate.expectedDiskPaths.map((path) => normalizeOwnedPath(operation, path));
+    const expectedDvdPaths = candidate.expectedDvdPaths.map((path) => normalizeOwnedPath(operation, path));
+    if (expectedDiskPaths.some((path) => !isInsideOwnedDirectory(ownedDiskDirectory, path))
+        || new Set(expectedDiskPaths.map((path) => path.toLowerCase())).size !== expectedDiskPaths.length
+        || new Set(expectedDvdPaths.map((path) => path.toLowerCase())).size !== expectedDvdPaths.length) {
+        throw error("validation", operation, "vm-remove-guard-invalid");
+    }
+    const hasUnmarkedRoot = Object.hasOwn(candidate, "unmarkedRootDiskPath");
+    if (candidate.expectedNotes.length === 0) {
+        if (!hasUnmarkedRoot || expectedDiskPaths.length !== 1) {
+            throw error("validation", operation, "vm-remove-guard-invalid");
+        }
+        const root = normalizeOwnedPath(operation, candidate.unmarkedRootDiskPath);
+        if (root.toLowerCase() !== expectedDiskPaths[0]?.toLowerCase()) {
+            throw error("validation", operation, "vm-remove-guard-invalid");
+        }
+        return { expectedName: candidate.expectedName, expectedNotes: "", expectedDiskPaths,
+            ownedDiskDirectory, expectedDvdPaths, unmarkedRootDiskPath: root };
+    }
+    if (hasUnmarkedRoot) throw error("validation", operation, "vm-remove-guard-invalid");
+    return { expectedName: candidate.expectedName, expectedNotes: candidate.expectedNotes,
+        expectedDiskPaths, ownedDiskDirectory, expectedDvdPaths };
+}
+
+function normalizeRemoveHostFiles(operation: HyperVWindowsOperation, value: unknown): HyperVRemoveHostFilesRequest {
+    const candidate = record(value);
+    if (!candidate || !Array.isArray(candidate.paths) || candidate.paths.length > 128) {
+        throw error("validation", operation, "host-files-request-invalid");
+    }
+    const rootDirectory = normalizeOwnedPath(operation, candidate.rootDirectory);
+    const paths = candidate.paths.map((path) => normalizeOwnedPath(operation, path));
+    const checkpointDiskDirectory = candidate.checkpointDiskDirectory === undefined
+        ? undefined : normalizeOwnedPath(operation, candidate.checkpointDiskDirectory);
+    if (paths.some((path) => !isInsideOwnedDirectory(rootDirectory, path))
+        || (checkpointDiskDirectory && !isInsideOwnedDirectory(rootDirectory, checkpointDiskDirectory))
+        || new Set(paths.map((path) => path.toLowerCase())).size !== paths.length) {
+        throw error("validation", operation, "host-files-request-invalid");
+    }
+    return { rootDirectory, paths, ...(checkpointDiskDirectory ? { checkpointDiskDirectory } : {}) };
+}
+
+function vhdMutationTimeout(operation: HyperVWindowsOperation, options?: HyperVVhdMutationCallOptions): number {
+    const requested = options?.timeoutMilliseconds;
+    if (requested === undefined) return EXECUTION_TIMEOUT_MILLISECONDS;
+    if (!Number.isSafeInteger(requested) || requested <= 0 || requested > MAX_VHD_MUTATION_TIMEOUT_MILLISECONDS) {
+        throw error("validation", operation, "timeout-invalid");
+    }
+    return requested;
 }
 
 function safeInteger(value: unknown, minimum = 0): value is number {
@@ -234,6 +352,25 @@ function validNativeName(value: unknown): value is string {
     return true;
 }
 
+function normalizePowerIdentity(
+    operation: HyperVWindowsOperation,
+    request: HyperVPowerIdentityExpectation,
+    selector: HyperVVirtualMachineSelector,
+): HyperVPowerIdentityExpectation {
+    const candidate = record(request);
+    const hasName = candidate !== null && Object.hasOwn(candidate, "expectedName");
+    const hasNotes = candidate !== null && Object.hasOwn(candidate, "expectedNotes");
+    if (!hasName && !hasNotes) return {};
+    if (!hasName || !hasNotes || selector.kind !== "id"
+        || !validNativeName(candidate.expectedName)
+        || !boundedString(candidate.expectedNotes, false)
+        || candidate.expectedNotes.length > 4096
+        || /[\u0000-\u001f]/.test(candidate.expectedNotes)) {
+        throw error("validation", operation, "vm-identity-invalid");
+    }
+    return { expectedName: candidate.expectedName, expectedNotes: candidate.expectedNotes };
+}
+
 function normalizeSnapshotSelector(
     operation: HyperVWindowsOperation,
     selector: HyperVSnapshotSelector,
@@ -259,7 +396,8 @@ function decodeEnvelope(
     operation: HyperVWindowsOperation,
     execution: HyperVWindowsExecutionResult,
 ): SuccessEnvelope {
-    if (execution.outputLimitExceeded || Buffer.byteLength(execution.stdout, "utf8") > MAX_RESPONSE_BYTES) {
+    if (execution.outputLimitExceeded || Buffer.byteLength(execution.stdout, "utf8") >
+        (operation === "Capture-VMConsole" ? MAX_CONSOLE_RESPONSE_BYTES : MAX_RESPONSE_BYTES)) {
         throw error("protocol", operation, "response-too-large");
     }
     let parsed: unknown;
@@ -287,17 +425,18 @@ function decodeEnvelope(
     return envelope as SuccessEnvelope;
 }
 
-async function execute(
+export async function execute(
     executor: HyperVWindowsExecutor,
     request: HyperVWindowsExecutionRequest,
     options?: HyperVWindowsCallOptions,
+    timeoutMilliseconds = EXECUTION_TIMEOUT_MILLISECONDS,
 ): Promise<SuccessEnvelope> {
     if (options?.signal?.aborted) throw error("transport", request.operation, "cancelled");
     let execution: HyperVWindowsExecutionResult;
     try {
         execution = await executor.execute(request, {
-            timeoutMilliseconds: EXECUTION_TIMEOUT_MILLISECONDS,
-            maximumOutputBytes: MAX_RESPONSE_BYTES,
+            timeoutMilliseconds,
+            maximumOutputBytes: request.operation === "Capture-VMConsole" ? MAX_CONSOLE_RESPONSE_BYTES : MAX_RESPONSE_BYTES,
             ...(options?.signal ? { signal: options.signal } : {}),
         });
     } catch (cause) {
@@ -357,6 +496,27 @@ function parseVirtualMachineFirmware(value: unknown): HyperVVirtualMachineFirmwa
     };
 }
 
+function parseVirtualMachineBios(value: unknown): HyperVVirtualMachineBios | null {
+    const item = record(value);
+    if (!item || !hasExactKeys(item, ["vmId", "startupOrder"])) return null;
+    const vmId = canonicalGuid(item.vmId);
+    if (!vmId || !Array.isArray(item.startupOrder) || item.startupOrder.length < 1
+        || item.startupOrder.length > BIOS_STARTUP_DEVICES.length
+        || !item.startupOrder.every((device) => BIOS_STARTUP_DEVICES.includes(device))
+        || new Set(item.startupOrder).size !== item.startupOrder.length) return null;
+    return { vmId, startupOrder: Object.freeze([...item.startupOrder as HyperVBiosStartupDevice[]]) };
+}
+
+function parseVirtualHardDisk(value: unknown): HyperVVirtualHardDisk | null {
+    const item = record(value);
+    if (!item || !hasExactKeys(item, ["path", "vhdFormat", "vhdType", "parentPath", "virtualSizeBytes", "fileSizeBytes"])) return null;
+    if (!boundedString(item.path, false) || !boundedString(item.vhdFormat, false)
+        || !boundedString(item.vhdType, false)
+        || (item.parentPath !== null && !boundedString(item.parentPath, false))
+        || !safeInteger(item.virtualSizeBytes, 1) || !safeInteger(item.fileSizeBytes)) return null;
+    return item as HyperVVirtualHardDisk;
+}
+
 // Secure Boot off carries no template, because native rejects one. Validating the pair here
 // keeps the client from sending a combination the host will only reject after a process launch.
 function normalizeSecureBoot(
@@ -409,8 +569,306 @@ function decodeSingleItem<T>(
     return decoded;
 }
 
+function normalizeConsoleIdentity(operation: HyperVWindowsOperation, input: HyperVConsoleIdentity) {
+    const candidate = record(input);
+    if (!candidate || !validNativeName(candidate.expectedName) || !boundedString(candidate.expectedNotes, false)
+        || candidate.expectedNotes.length > 4096 || /[\u0000-\u001f]/.test(candidate.expectedNotes)) {
+        throw error("validation", operation, "console-identity-invalid");
+    }
+    const selector = normalizeSelector(operation, input.selector);
+    if (selector.kind !== "id") throw error("validation", operation, "selector-id-required");
+    return { selector, expectedName: input.expectedName, expectedNotes: input.expectedNotes };
+}
+
+function consoleDimension(value: unknown, maximum = 8192): value is number {
+    return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= maximum;
+}
+
+function decodeConsoleCapture(value: unknown): HyperVConsoleCapture | null {
+    const item = record(value);
+    if (!item || !hasExactKeys(item, ["pngBase64", "width", "height", "nativeWidth", "nativeHeight"])
+        || item.width !== CONSOLE_WIDTH || item.height !== CONSOLE_HEIGHT
+        || !consoleDimension(item.nativeWidth) || !consoleDimension(item.nativeHeight)
+        || typeof item.pngBase64 !== "string" || item.pngBase64.length > Math.ceil(MAX_CONSOLE_PNG_BYTES / 3) * 4
+        || item.pngBase64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(item.pngBase64)) return null;
+    const png = Buffer.from(item.pngBase64, "base64");
+    if (png.length < 33 || png.length > MAX_CONSOLE_PNG_BYTES || png.toString("base64") !== item.pngBase64
+        || !png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+        || png.subarray(12, 16).toString("ascii") !== "IHDR"
+        || png.readUInt32BE(8) !== 13
+        || png.readUInt32BE(16) !== CONSOLE_WIDTH || png.readUInt32BE(20) !== CONSOLE_HEIGHT) return null;
+    let offset = 8;
+    let sawImage = false;
+    let ended = false;
+    while (offset + 12 <= png.length) {
+        const length = png.readUInt32BE(offset);
+        const type = png.toString("ascii", offset + 4, offset + 8);
+        if (offset + 12 + length > png.length) return null;
+        if (type === "IDAT") sawImage = true;
+        offset += 12 + length;
+        if (type === "IEND") {
+            if (length !== 0) return null;
+            ended = true;
+            break;
+        }
+    }
+    if (!sawImage || !ended || offset !== png.length) return null;
+    return item as HyperVConsoleCapture;
+}
+
+function decodeConsoleCursor(value: unknown): HyperVConsoleCursor | null {
+    const item = record(value);
+    if (!item || !hasExactKeys(item, ["x", "y", "width", "height", "nativeWidth", "nativeHeight"])
+        || item.width !== CONSOLE_WIDTH || item.height !== CONSOLE_HEIGHT
+        || !consoleDimension(item.nativeWidth) || !consoleDimension(item.nativeHeight)
+        || !Number.isSafeInteger(item.x) || !Number.isSafeInteger(item.y)
+        || (item.x as number) < 0 || (item.x as number) >= CONSOLE_WIDTH
+        || (item.y as number) < 0 || (item.y as number) >= CONSOLE_HEIGHT) return null;
+    return item as HyperVConsoleCursor;
+}
+
+const CONSOLE_KEYS = new Set([
+    "CTRL", "ALT", "SHIFT", "WIN", "ENTER", "TAB", "ESC", "SPACE", "BACKSPACE", "DELETE", "INSERT",
+    "HOME", "END", "PAGEUP", "PAGEDOWN", "UP", "DOWN", "LEFT", "RIGHT",
+    ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", ...Array.from({ length: 12 }, (_, i) => `F${i + 1}`),
+]);
+const CONSOLE_MODIFIERS = new Set(["CTRL", "ALT", "SHIFT", "WIN"]);
+
+function normalizeConsoleInput(operation: HyperVWindowsOperation, input: HyperVConsoleInput) {
+    const candidate = record(input);
+    if (!candidate) throw error("validation", operation, "console-input-invalid");
+    const identity = normalizeConsoleIdentity(operation, input);
+    if (candidate.action === "key") {
+        if (!hasExactKeys(candidate, ["selector", "expectedName", "expectedNotes", "action", "keys"])
+            || !Array.isArray(candidate.keys) || candidate.keys.length < 1 || candidate.keys.length > 4) {
+            throw error("validation", operation, "console-keys-invalid");
+        }
+        const keys = candidate.keys.map((key) => typeof key === "string" ? key.toUpperCase() : "");
+        if (keys.some((key) => !CONSOLE_KEYS.has(key)) || CONSOLE_MODIFIERS.has(keys.at(-1) || "")
+            || keys.slice(0, -1).some((key) => !CONSOLE_MODIFIERS.has(key)) || new Set(keys).size !== keys.length) {
+            throw error("validation", operation, "console-keys-invalid");
+        }
+        return { ...identity, action: "key" as const, keys };
+    }
+    if (candidate.action === "type") {
+        if (!hasExactKeys(candidate, ["selector", "expectedName", "expectedNotes", "action", "text"])
+            || typeof candidate.text !== "string" || candidate.text.length < 1 || candidate.text.length > 2048
+            || candidate.text.includes("\u0000") || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(candidate.text)) {
+            throw error("validation", operation, "console-text-invalid");
+        }
+        return { ...identity, action: "type" as const, text: candidate.text };
+    }
+    const pointer = candidate as Record<string, unknown>;
+    const expectedKeys = ["selector", "expectedName", "expectedNotes", "action", "x", "y", "width", "height", "nativeWidth", "nativeHeight",
+        ...((candidate.action === "click" || candidate.action === "doubleClick") ? ["button"] : []),
+        ...(candidate.action === "scroll" ? ["direction", "amount"] : [])];
+    if (!["click", "doubleClick", "cursor", "scroll"].includes(String(candidate.action))
+        || !hasExactKeys(candidate, expectedKeys)
+        || pointer.width !== CONSOLE_WIDTH || pointer.height !== CONSOLE_HEIGHT
+        || !consoleDimension(pointer.nativeWidth) || !consoleDimension(pointer.nativeHeight)
+        || !Number.isSafeInteger(pointer.x) || !Number.isSafeInteger(pointer.y)
+        || (pointer.x as number) < 0 || (pointer.x as number) >= CONSOLE_WIDTH
+        || (pointer.y as number) < 0 || (pointer.y as number) >= CONSOLE_HEIGHT) {
+        throw error("validation", operation, "console-pointer-invalid");
+    }
+    if ((candidate.action === "click" || candidate.action === "doubleClick") && candidate.button !== "left" && candidate.button !== "right") {
+        throw error("validation", operation, "console-button-invalid");
+    }
+    if (candidate.action === "scroll" && (!["up", "down", "left", "right"].includes(String(candidate.direction))
+        || !Number.isSafeInteger(candidate.amount) || (candidate.amount as number) < 1 || (candidate.amount as number) > 10)) {
+        throw error("validation", operation, "console-scroll-invalid");
+    }
+    return { ...input, ...identity };
+}
+
 export function createHyperVWindowsClient(executor: HyperVWindowsExecutor): HyperVWindowsClient {
     return {
+        async captureVMConsole(request: HyperVConsoleIdentity, options?: HyperVWindowsCallOptions) {
+            const operation = "Capture-VMConsole";
+            const identity = normalizeConsoleIdentity(operation, request);
+            const envelope = await execute(executor, { schemaVersion: 1, operation, ...identity }, options, 30000);
+            return decodeSingleItem(operation, envelope, decodeConsoleCapture);
+        },
+        async getVMConsoleCursor(request: HyperVConsoleIdentity, options?: HyperVWindowsCallOptions) {
+            const operation = "Get-VMConsoleCursor";
+            const identity = normalizeConsoleIdentity(operation, request);
+            const envelope = await execute(executor, { schemaVersion: 1, operation, ...identity }, options, 15000);
+            return decodeSingleItem(operation, envelope, decodeConsoleCursor);
+        },
+        async sendVMConsoleInput(request: HyperVConsoleInput, options?: HyperVWindowsCallOptions) {
+            const operation = "Send-VMConsoleInput";
+            const normalized = normalizeConsoleInput(operation, request);
+            const envelope = await execute(executor, { schemaVersion: 1, operation, ...normalized }, options, 30000);
+            expectNoItems(operation, envelope);
+        },
+        async configureVMGuestBoot(request: HyperVConfigureVMGuestBootRequest, options?: HyperVWindowsCallOptions) {
+            const operation = "Configure-VMGuestBoot";
+            const candidate = record(request);
+            const guestKind = candidate?.guestKind === undefined ? "windows" : candidate.guestKind;
+            if (!candidate || (guestKind !== "windows" && guestKind !== "linux") || !hasExactKeys(candidate, [
+                "selector", "expectedName", "expectedNotes", "osDiskPath", "mediaPath", "bootSettings",
+                ...(candidate.guestKind === undefined ? [] : ["guestKind"]),
+                ...(guestKind === "linux" ? ["expectedBootstrapMacAddress"] : []),
+            ])) throw error("validation", operation, "request-invalid");
+            let expectedBootstrapMacAddress: string | undefined;
+            if (guestKind === "linux") {
+                const rawMac = candidate.expectedBootstrapMacAddress;
+                if (typeof rawMac !== "string" || !/^(?:[0-9A-Fa-f]{12}|(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})$/.test(rawMac)) {
+                    throw error("validation", operation, "bootstrap-mac-invalid");
+                }
+                expectedBootstrapMacAddress = rawMac.replace(/:/g, "").toUpperCase();
+                if (!expectedBootstrapMacAddress.startsWith("06")) {
+                    throw error("validation", operation, "bootstrap-mac-invalid");
+                }
+            }
+            const selector = normalizeSelector(operation, request.selector);
+            if (selector.kind !== "id") throw error("validation", operation, "selector-id-required");
+            if (!validNativeName(request.expectedName)
+                || !boundedString(request.expectedNotes, false) || request.expectedNotes.length > 4096
+                || /[\u0000-\u001f]/.test(request.expectedNotes)) {
+                throw error("validation", operation, "vm-identity-invalid");
+            }
+            const validPath = (path: unknown): path is string => boundedString(path, false)
+                && path.length <= 4096
+                && ((win32.isAbsolute(path) && /^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+\\)/.test(path))
+                    || (process.platform !== "win32" && isAbsolute(path)))
+                && !/[\u0000-\u001f*?\[\]]/.test(path);
+            if (!validPath(request.osDiskPath)) throw error("validation", operation, "os-disk-path-invalid");
+            if (!validPath(request.mediaPath)) throw error("validation", operation, "media-path-invalid");
+            const bootSettings = record(request.bootSettings);
+            if (!bootSettings) throw error("validation", operation, "boot-settings-invalid");
+            let normalizedBootSettings: HyperVConfigureVMGuestBootRequest["bootSettings"];
+            if (bootSettings.generation === 2) {
+                if (!hasExactKeys(bootSettings, ["generation", "secureBoot"])) {
+                    throw error("validation", operation, "boot-settings-invalid");
+                }
+                const secureBoot = normalizeSecureBoot(operation, request.bootSettings.generation === 2
+                    ? request.bootSettings.secureBoot : { enabled: false });
+                if (guestKind === "windows" && !secureBoot.enabled) throw error("validation", operation, "secure-boot-required");
+                if (guestKind === "linux" && secureBoot.enabled) throw error("validation", operation, "secure-boot-must-be-disabled");
+                normalizedBootSettings = { generation: 2, secureBoot };
+            } else if (bootSettings.generation === 1) {
+                if (!hasExactKeys(bootSettings, ["generation", "startupOrder"])
+                    || !Array.isArray(bootSettings.startupOrder) || bootSettings.startupOrder.length < 1
+                    || bootSettings.startupOrder.length > BIOS_STARTUP_DEVICES.length
+                    || !bootSettings.startupOrder.every((device) => BIOS_STARTUP_DEVICES.includes(device))
+                    || new Set(bootSettings.startupOrder).size !== bootSettings.startupOrder.length) {
+                    throw error("validation", operation, "boot-settings-invalid");
+                }
+                normalizedBootSettings = { generation: 1, startupOrder: [...bootSettings.startupOrder as HyperVBiosStartupDevice[]] };
+                if (guestKind === "linux" && normalizedBootSettings.startupOrder[0] !== "IDE") {
+                    throw error("validation", operation, "linux-bios-disk-first-required");
+                }
+            } else {
+                throw error("validation", operation, "boot-settings-invalid");
+            }
+            const payload = {
+                schemaVersion: 1, operation, selector,
+                expectedName: request.expectedName, expectedNotes: request.expectedNotes,
+                osDiskPath: request.osDiskPath, mediaPath: request.mediaPath,
+                bootSettings: normalizedBootSettings,
+            } as const;
+            const executionRequest: HyperVWindowsExecutionRequest = guestKind === "linux"
+                ? { ...payload, guestKind: "linux" as const, expectedBootstrapMacAddress: expectedBootstrapMacAddress! }
+                : candidate.guestKind === undefined ? payload : { ...payload, guestKind: "windows" as const };
+            const envelope = await execute(executor, executionRequest, options);
+            expectNoItems(operation, envelope);
+        },
+        async getVMDiagnostic(request: HyperVGetVMDiagnosticRequest, options?: HyperVWindowsCallOptions & { readonly timeoutMilliseconds?: number }) {
+            const operation = "Get-VMDiagnostic";
+            const candidate = record(request);
+            if (!candidate || !hasExactKeys(candidate, ["selector", "expectedName", "expectedNotes"])) {
+                throw error("validation", operation, "request-invalid");
+            }
+            const selector = normalizeSelector(operation, request.selector);
+            if (selector.kind !== "id") throw error("validation", operation, "selector-id-required");
+            if (!boundedString(request.expectedName, false) || request.expectedName.length > MAX_NAME_LENGTH
+                || !boundedString(request.expectedNotes, false) || request.expectedNotes.length > 4096
+                || /[\u0000-\u001f]/.test(request.expectedName)
+                || /[\u0000-\u001f]/.test(request.expectedNotes)) {
+                throw error("validation", operation, "vm-identity-invalid");
+            }
+            const timeout = options?.timeoutMilliseconds ?? 15000;
+            if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 15000) {
+                throw error("validation", operation, "timeout-invalid");
+            }
+            const envelope = await execute(executor, {
+                schemaVersion: 1, operation, selector,
+                expectedName: request.expectedName, expectedNotes: request.expectedNotes,
+            }, options, timeout);
+            if (envelope.items.length !== 1) throw error("protocol", operation, "result-ambiguous");
+            const diagnostic = parseHyperVWindowsGuestBootDiagnostic(envelope.items[0]);
+            if (!diagnostic) throw error("protocol", operation, "result-shape-invalid");
+            if (diagnostic.vmId !== selector.id || diagnostic.vmName !== request.expectedName) {
+                throw error("protocol", operation, "result-identity-mismatch");
+            }
+            return diagnostic;
+        },
+        async getVHD(path, options) {
+            const operation = "Get-VHD";
+            if (!boundedString(path, false) || !isAbsolute(path)) {
+                throw error("validation", operation, "vhd-path-invalid");
+            }
+            const envelope = await execute(executor, { schemaVersion: 1, operation, path }, options);
+            return decodeSingleItem(operation, envelope, parseVirtualHardDisk);
+        },
+        async mountVHD(request: HyperVMountVHDRequest, options?: HyperVWindowsCallOptions) {
+            const operation = "Mount-VHD";
+            const candidate = record(request);
+            if (!candidate || !hasExactKeys(candidate, ["path", "readOnly", "noDriveLetter"])) {
+                throw error("validation", operation, "request-invalid");
+            }
+            const path = normalizeVhdMutationPath(operation, candidate.path);
+            if (typeof candidate.readOnly !== "boolean" || typeof candidate.noDriveLetter !== "boolean") {
+                throw error("validation", operation, "vhd-flags-invalid");
+            }
+            const envelope = await execute(executor, {
+                schemaVersion: 1, operation, path,
+                readOnly: candidate.readOnly, noDriveLetter: candidate.noDriveLetter,
+            }, options);
+            expectNoItems(operation, envelope);
+        },
+        async dismountVHD(path, options) {
+            const operation = "Dismount-VHD";
+            const envelope = await execute(executor, {
+                schemaVersion: 1, operation, path: normalizeVhdMutationPath(operation, path),
+            }, options);
+            expectNoItems(operation, envelope);
+        },
+        async convertVHD(request: HyperVConvertVHDRequest, options?: HyperVVhdMutationCallOptions) {
+            const operation = "Convert-VHD";
+            const candidate = record(request);
+            if (!candidate || !hasExactKeys(candidate, ["sourcePath", "destinationPath", "vhdType"])) {
+                throw error("validation", operation, "request-invalid");
+            }
+            const sourcePath = normalizeVhdMutationPath(operation, candidate.sourcePath);
+            const destinationPath = normalizeVhdMutationPath(operation, candidate.destinationPath);
+            if (resolve(sourcePath).toLowerCase() === resolve(destinationPath).toLowerCase()) {
+                throw error("validation", operation, "vhd-path-conflict");
+            }
+            if (candidate.vhdType !== "Dynamic" && candidate.vhdType !== "Fixed") {
+                throw error("validation", operation, "vhd-type-invalid");
+            }
+            const timeout = vhdMutationTimeout(operation, options);
+            const envelope = await execute(executor, {
+                schemaVersion: 1, operation, sourcePath, destinationPath, vhdType: candidate.vhdType,
+            }, options, timeout);
+            expectNoItems(operation, envelope);
+        },
+        async resizeVHD(request: HyperVResizeVHDRequest, options?: HyperVVhdMutationCallOptions) {
+            const operation = "Resize-VHD";
+            const candidate = record(request);
+            if (!candidate || !hasExactKeys(candidate, ["path", "sizeBytes"])) {
+                throw error("validation", operation, "request-invalid");
+            }
+            const path = normalizeVhdMutationPath(operation, candidate.path);
+            if (!safeInteger(candidate.sizeBytes, 1)) throw error("validation", operation, "vhd-size-invalid");
+            const timeout = vhdMutationTimeout(operation, options);
+            const envelope = await execute(executor, {
+                schemaVersion: 1, operation, path, sizeBytes: candidate.sizeBytes,
+            }, options, timeout);
+            expectNoItems(operation, envelope);
+        },
         async getVM(selector, options) {
             const operation = "Get-VM";
             const envelope = await execute(executor, {
@@ -438,12 +896,36 @@ export function createHyperVWindowsClient(executor: HyperVWindowsExecutor): Hype
             }, options);
             return decodeItems(operation, envelope, parseDvdDrive);
         },
+        async removeVMDvdDrive(request: HyperVRemoveVMDvdDriveRequest, options?: HyperVWindowsCallOptions) {
+            const operation = "Remove-VMDvdDrive";
+            const candidate = record(request);
+            if (!candidate || !hasExactKeys(candidate, ["selector", "expectedName", "expectedNotes", "path"])) {
+                throw error("validation", operation, "request-invalid");
+            }
+            const selector = normalizeSelector(operation, request.selector);
+            if (selector.kind !== "id") throw error("validation", operation, "selector-id-required");
+            if (!boundedString(request.expectedName, false) || request.expectedName.length > MAX_NAME_LENGTH
+                || !boundedString(request.expectedNotes, false) || request.expectedNotes.length > 4096) {
+                throw error("validation", operation, "vm-identity-invalid");
+            }
+            if (!boundedString(request.path, false) || !(isAbsolute(request.path) || win32.isAbsolute(request.path))
+                || /[\u0000-\u001f*?]/.test(request.path)) {
+                throw error("validation", operation, "dvd-path-invalid");
+            }
+            const envelope = await execute(executor, {
+                schemaVersion: 1, operation, selector,
+                expectedName: request.expectedName, expectedNotes: request.expectedNotes, path: request.path,
+            }, options);
+            expectNoItems(operation, envelope);
+        },
         async startVM(request: HyperVStartVirtualMachineRequest, options?: HyperVWindowsCallOptions) {
             const operation = "Start-VM";
+            const selector = normalizeSelector(operation, request?.selector);
             const envelope = await execute(executor, {
                 schemaVersion: 1,
                 operation,
-                selector: normalizeSelector(operation, request?.selector),
+                selector,
+                ...normalizePowerIdentity(operation, request, selector),
             }, options);
             expectNoItems(operation, envelope);
         },
@@ -455,12 +937,29 @@ export function createHyperVWindowsClient(executor: HyperVWindowsExecutor): Hype
             if (request.force !== undefined && typeof request.force !== "boolean") {
                 throw error("validation", operation, "force-invalid");
             }
+            const selector = normalizeSelector(operation, request.selector);
             const envelope = await execute(executor, {
                 schemaVersion: 1,
                 operation,
-                selector: normalizeSelector(operation, request.selector),
+                selector,
                 mode: request.mode,
                 force: request.force ?? false,
+                ...normalizePowerIdentity(operation, request, selector),
+            }, options);
+            expectNoItems(operation, envelope);
+        },
+        async restartVM(request: HyperVRestartVirtualMachineRequest, options?: HyperVWindowsCallOptions) {
+            const operation = "Restart-VM";
+            if (request?.force !== undefined && typeof request.force !== "boolean") {
+                throw error("validation", operation, "force-invalid");
+            }
+            const selector = normalizeSelector(operation, request?.selector);
+            const envelope = await execute(executor, {
+                schemaVersion: 1,
+                operation,
+                selector,
+                force: request.force ?? false,
+                ...normalizePowerIdentity(operation, request, selector),
             }, options);
             expectNoItems(operation, envelope);
         },
@@ -469,13 +968,30 @@ export function createHyperVWindowsClient(executor: HyperVWindowsExecutor): Hype
             if (request?.force !== undefined && typeof request.force !== "boolean") {
                 throw error("validation", operation, "force-invalid");
             }
+            const selector = normalizeSelector(operation, request?.selector);
+            if (request?.guard !== undefined && selector.kind !== "id") {
+                throw error("validation", operation, "vm-remove-guard-invalid");
+            }
             const envelope = await execute(executor, {
                 schemaVersion: 1,
                 operation,
-                selector: normalizeSelector(operation, request?.selector),
+                selector,
                 force: request.force ?? false,
+                ...(request?.guard === undefined ? {} : { guard: normalizeRemoveGuard(operation, request.guard) }),
             }, options);
             expectNoItems(operation, envelope);
+        },
+        async removeHostFiles(request: HyperVRemoveHostFilesRequest, options?: HyperVWindowsCallOptions) {
+            const operation = "Remove-HostFiles";
+            const normalized = normalizeRemoveHostFiles(operation, request);
+            const envelope = await execute(executor, { schemaVersion: 1, operation, ...normalized }, options);
+            const items = decodeItems<HyperVRemoveHostFilesResult>(operation, envelope, (value) => {
+                const item = record(value);
+                return item && hasExactKeys(item, ["removedCount"]) && safeInteger(item.removedCount)
+                    ? { removedCount: item.removedCount } : null;
+            });
+            if (items.length !== 1) throw error("protocol", operation, "result-ambiguous");
+            return items[0]!;
         },
         async getVMSnapshots(selector, options) {
             const operation = "Get-VMSnapshot";
@@ -522,6 +1038,44 @@ export function createHyperVWindowsClient(executor: HyperVWindowsExecutor): Hype
                 snapshot: normalizeSnapshotSelector(operation, request?.snapshot),
             }, options);
             expectNoItems(operation, envelope);
+        },
+        async repairVMSnapshotState(request: HyperVRepairVMSnapshotStateRequest, options?: HyperVWindowsCallOptions) {
+            const operation = "Repair-VMSnapshotState";
+            const candidate = record(request);
+            if (!candidate || !hasExactKeys(candidate, ["selector", "expectedName", "expectedNotes", "snapshotName", "expectedCheckpointPolicy"])) {
+                throw error("validation", operation, "repair-request-invalid");
+            }
+            const selector = normalizeSelector(operation, request.selector);
+            if (selector.kind !== "id") throw error("validation", operation, "selector-id-required");
+            if (!validNativeName(request.expectedName)
+                || !boundedString(request.expectedNotes, false)
+                || request.expectedNotes.length > 4096
+                || /[\u0000-\u001f]/.test(request.expectedNotes)) {
+                throw error("validation", operation, "vm-identity-invalid");
+            }
+            if (typeof request.snapshotName !== "string" || request.snapshotName.length < 1
+                || request.snapshotName.length > 256 || /[\u0000-\u001f*?\[\]]/.test(request.snapshotName)) {
+                throw error("validation", operation, "snapshot-name-invalid");
+            }
+            if (request.expectedCheckpointPolicy !== "Production" && request.expectedCheckpointPolicy !== "ProductionOnly") {
+                throw error("validation", operation, "snapshot-policy-invalid");
+            }
+            const envelope = await execute(executor, {
+                schemaVersion: 1,
+                operation,
+                selector,
+                expectedName: request.expectedName,
+                expectedNotes: request.expectedNotes,
+                snapshotName: request.snapshotName,
+                expectedCheckpointPolicy: request.expectedCheckpointPolicy,
+            }, options);
+            return decodeSingleItem(operation, envelope, (value): HyperVRepairVMSnapshotStateResult | null => {
+                const item = record(value);
+                return item && hasExactKeys(item, ["checkpointPolicy", "candidateCount"])
+                    && (item.checkpointPolicy === "Production" || item.checkpointPolicy === "ProductionOnly")
+                    && (item.candidateCount === 0 || item.candidateCount === 1)
+                    ? { checkpointPolicy: item.checkpointPolicy, candidateCount: item.candidateCount } : null;
+            });
         },
         async newVM(request: HyperVNewVirtualMachineRequest, options?: HyperVWindowsCallOptions) {
             const operation = "New-VM";
@@ -620,6 +1174,15 @@ export function createHyperVWindowsClient(executor: HyperVWindowsExecutor): Hype
                 selector: normalizeSelector(operation, selector),
             }, options);
             return decodeSingleItem(operation, envelope, parseVirtualMachineFirmware);
+        },
+        async getVMBios(selector: HyperVVirtualMachineSelector, options?: HyperVWindowsCallOptions) {
+            const operation = "Get-VMBios";
+            const envelope = await execute(executor, {
+                schemaVersion: 1,
+                operation,
+                selector: normalizeSelector(operation, selector),
+            }, options);
+            return decodeSingleItem(operation, envelope, parseVirtualMachineBios);
         },
         async setVMFirmware(request: HyperVSetVMFirmwareRequest, options?: HyperVWindowsCallOptions) {
             const operation = "Set-VMFirmware";

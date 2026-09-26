@@ -1,16 +1,17 @@
 ---
 area: device-lab
 slug: hyper-v-windows-e2e-session-handoff
-status: current
+status: resolved
 ---
 
 # HANDOFF — Hyper-V Windows VM E2E (`npm run test:level3:hyper-v:windows`)
 
-Continuation note for a fresh-session agent. The Linux E2E (`:linux`) already passes end-to-end.
-The Windows E2E is **not yet passing** — it now runs cleanly up to the real guest-bring-up step and
-fails there. Chronological captures from the latest fresh-broker run prove that Windows Setup still
-rejects `D:\unattend.xml`, now explicitly in `oobeSystem`; the later black frame is display idle, not
-proof that the schema was accepted. The PowerShell Direct timeout is downstream of that open modal.
+Historical continuation note retained for the failure chronology below. The Linux E2E (`:linux`)
+passes end-to-end. The Windows E2E also passed on the real host on 2026-09-23 with broker PID 50876:
+`SUMMARY real-tests total=1 pass=1 skip=0 fail=0 failOnSkip=false`. That run covered VM creation,
+guest readiness, forced reboot, PowerShell Direct, upload/download, packaged-candidate execution,
+snapshots, deletion, and guarded cleanup. Earlier statements below that a particular stage is still
+failing describe the chronology at that point; they are not the current status.
 
 ## Environment / how this is run
 - Real level-3 tests run on the USER's Windows host `C:\Users\Luxus\Project\_Project\claude-code-container`.
@@ -236,9 +237,13 @@ guestSetupDiagnostics=unavailable(hyper-v-setup-diagnostics-mount-failed)
 Exact VM identity, the single OS drive, and shutdown completed before this stage. The VHD was still
 configured as the VM's `VMHardDiskDrive`, so the failure-only diagnostic now performs a read-only
 preflight to fix the exact owned path, repeats GUID/name/Notes/path checks, removes only that drive,
-then mounts the file read-only. It deliberately does not reattach: broker `device_delete` permits zero
-attached disks and independently removes the canonical VM and disk artifact. Detach-aware secondary
-cleanup uses the preflight path so a killed PowerShell cannot lose the host mount.
+then mounts the file read-only. That original implementation deliberately did not reattach because
+broker `device_delete` permits zero attached disks. Later failure-time elevation made that choice
+invalid: an unelevated attempt detached the disk, then the approved elevated retry could no longer
+prove an exact VM disk and returned `hyper-v-setup-diagnostics-disk-not-exact`. The diagnostic now
+captures the controller tuple and restores the exact attachment after dismount or mount failure, with
+fresh ID/name/Notes/Off-state and attachment readback checks. Detach-aware secondary cleanup uses the
+same preflight identity so a killed PowerShell cannot leave the fixture diskless.
 
 ## Detached-mount convergence evidence (2026-08-31)
 

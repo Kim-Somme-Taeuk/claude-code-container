@@ -560,34 +560,42 @@ describe("Hyper-V Windows PowerShell session", () => {
         // counter — without expiry the budget is an absorbing state. Three stalls spread over a
         // broker's lifetime would then leave a perfectly healthy host on the one-shot transport
         // permanently, which is the same class of defect the lifetime counter had.
-        let spawns = 0;
-        let wedged = true;
-        const session = createHyperVWindowsPowerShellSession({
-            operationAsset: ASSET,
-            maximumStarts: 2,
-            healthTimeoutMilliseconds: 5,
-            startBudgetWindowMilliseconds: 300,
-            spawn: () => {
-                spawns += 1;
-                const child = wedged ? fakeChild() : autoReplyChild(() => "recovered");
-                if (wedged) queueMicrotask(() => child.ready());
-                return child;
-            },
-        });
+        // Only Date is faked. The 5 ms request timers still run normally, while unrelated
+        // scheduler/file-system delays cannot age the 300 ms start window mid-assertion.
+        vi.useFakeTimers({ toFake: ["Date"] });
+        try {
+            const startedAt = Date.now();
+            let spawns = 0;
+            let wedged = true;
+            const session = createHyperVWindowsPowerShellSession({
+                operationAsset: ASSET,
+                maximumStarts: 2,
+                healthTimeoutMilliseconds: 5,
+                startBudgetWindowMilliseconds: 300,
+                spawn: () => {
+                    spawns += 1;
+                    const child = wedged ? fakeChild() : autoReplyChild(() => "recovered");
+                    if (wedged) queueMicrotask(() => child.ready());
+                    return child;
+                },
+            });
 
-        // The health floor is never shorter than the caller's own budget, so both are small here.
-        const stalling = { ...CONTEXT, timeoutMilliseconds: 5 };
-        for (let stall = 0; stall < 2; stall += 1) {
-            expect((await session.execute(REQUEST, stalling)).error).toBe("hyper-v-windows-session-timeout");
+            // The health floor is never shorter than the caller's own budget, so both are small here.
+            const stalling = { ...CONTEXT, timeoutMilliseconds: 5 };
+            for (let stall = 0; stall < 2; stall += 1) {
+                expect((await session.execute(REQUEST, stalling)).error).toBe("hyper-v-windows-session-timeout");
+            }
+            expect((await session.execute(REQUEST, stalling)).error).toBe("hyper-v-windows-session-unavailable");
+            expect(spawns).toBe(2);
+
+            // The host is healthy again and enough time has passed that the old stalls no longer count.
+            wedged = false;
+            vi.setSystemTime(startedAt + 400);
+            expect((await session.execute(REQUEST, CONTEXT)).stdout).toBe("recovered");
+            expect(spawns).toBe(3);
+        } finally {
+            vi.useRealTimers();
         }
-        expect((await session.execute(REQUEST, stalling)).error).toBe("hyper-v-windows-session-unavailable");
-        expect(spawns).toBe(2);
-
-        // The host is healthy again and enough time has passed that the old stalls no longer count.
-        wedged = false;
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        expect((await session.execute(REQUEST, CONTEXT)).stdout).toBe("recovered");
-        expect(spawns).toBe(3);
     });
 
     it("kills the child on close and refuses to start another", async () => {

@@ -1,4 +1,5 @@
 export { createHyperVWindowsClient } from "./client.js";
+export { createHyperVGuestDirectClient } from "./guest-direct-client.js";
 export { createHyperVWindowsNetworkClient } from "./network-client.js";
 export {
     createHyperVHostNetworkSpec,
@@ -45,15 +46,38 @@ export type {
     HyperVWindowsSessionSpawn,
 } from "./powershell-session.js";
 export { HYPER_V_WINDOWS_OPERATIONS } from "./contracts.js";
+export { parseHyperVWindowsGuestBootDiagnostic } from "./diagnostic.js";
 export type {
+    HyperVConsoleIdentity,
+    HyperVConsoleCapture,
+    HyperVConsoleCursor,
+    HyperVConsoleInput,
+    HyperVConsolePointerInput,
+    HyperVGetVMDiagnosticRequest,
+    HyperVConfigureVMGuestBootRequest,
+    HyperVWindowsGuestBootDiagnostic,
+    HyperVGuestDirectAction,
+    HyperVGuestDirectIdentity,
+    HyperVGuestDirectRequest,
+    HyperVGuestDirectResult,
     HyperVAddVMNetworkAdapterRequest,
     HyperVBiosStartupDevice,
     HyperVCheckpointVirtualMachineRequest,
+    HyperVConvertVHDRequest,
     HyperVDvdDrive,
     HyperVHardDiskDrive,
+    HyperVMountVHDRequest,
     HyperVNewVirtualMachineRequest,
     HyperVRemoveSnapshotRequest,
+    HyperVRepairVMSnapshotStateRequest,
+    HyperVRepairVMSnapshotStateResult,
+    HyperVRemoveHostFilesRequest,
+    HyperVRemoveHostFilesResult,
+    HyperVRemoveVMGuard,
+    HyperVRemoveVMDvdDriveRequest,
     HyperVRemoveVirtualMachineRequest,
+    HyperVRestartVirtualMachineRequest,
+    HyperVResizeVHDRequest,
     HyperVRenameVMNetworkAdapterRequest,
     HyperVRestoreSnapshotRequest,
     HyperVSecureBootSetting,
@@ -67,7 +91,10 @@ export type {
     HyperVStartVirtualMachineRequest,
     HyperVStopVirtualMachineRequest,
     HyperVVirtualMachine,
+    HyperVVirtualMachineBios,
     HyperVVirtualMachineFirmware,
+    HyperVVirtualHardDisk,
+    HyperVVhdMutationCallOptions,
     HyperVVirtualMachineGeneration,
     HyperVVirtualMachineSelector,
     HyperVVirtualMachineSnapshot,

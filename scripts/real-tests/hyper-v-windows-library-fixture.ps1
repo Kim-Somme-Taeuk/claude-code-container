@@ -376,22 +376,32 @@ function Invoke-Preflight {
 }
 
 function Invoke-Create([object]$Request) {
+    $script:FixtureCreateStage = "identity"
     $Root = Assert-FixtureIdentity $Request
     $VmName = [string]$Request.vmName
+    $script:FixtureCreateStage = "parent"
     [void](Initialize-FixtureParent $Root)
+    $script:FixtureCreateStage = "existing-root"
     if (Test-Path -LiteralPath $Root) { throw "fixture-root-already-exists" }
+    $script:FixtureCreateStage = "name-query"
     if ((Get-VMByExactName $VmName).Count -ne 0) { throw "vm-name-already-exists" }
 
     $CreatedVm = $null
     try {
+        $script:FixtureCreateStage = "root-create"
         New-Item -ItemType Directory -Path $Root -ErrorAction Stop | Out-Null
+        $script:FixtureCreateStage = "root-protection"
         Protect-FixtureDirectory $Root
         Assert-ProtectedFixtureRoot $Root
+        $script:FixtureCreateStage = "marker-initial"
         Set-FixtureMarker $Request ""
+        $script:FixtureCreateStage = "new-vm"
         try {
             $CreatedVm = Hyper-V\New-VM -Name $VmName -Generation 2 -NoVHD -ErrorAction Stop
         } catch { throw "new-vm-failed" }
+        $script:FixtureCreateStage = "marker-id"
         Set-FixtureMarker $Request (([Guid]$CreatedVm.Id).ToString("D").ToLowerInvariant())
+        $script:FixtureCreateStage = "set-vm"
         try {
             # Standard, not Disabled: the scenario exercises the library's checkpoint primitives
             # against this fixture. Standard rather than Production because the fixture has blank
@@ -399,6 +409,7 @@ function Invoke-Create([object]$Request) {
             # Automatic checkpoints stay off so starting the VM never creates one behind the test.
             Hyper-V\Set-VM -VM $CreatedVm -Notes ([string]$Request.notes) -AutomaticCheckpointsEnabled $false -CheckpointType Standard -ErrorAction Stop
         } catch { throw "set-vm-failed" }
+        $script:FixtureCreateStage = "default-dvd"
         try {
             $DefaultDvds = @(Hyper-V\Get-VMDvdDrive -VM $CreatedVm -ErrorAction Stop)
         } catch { throw "get-default-dvd-failed" }
@@ -408,6 +419,7 @@ function Invoke-Create([object]$Request) {
                 Hyper-V\Remove-VMDvdDrive -VMDvdDrive $Dvd -ErrorAction Stop
             } catch { throw "remove-default-dvd-failed" }
         }
+        $script:FixtureCreateStage = "result"
         return [ordered]@{
             token = [string]$Request.token
             root = $Root
@@ -566,6 +578,7 @@ try {
     $Request = $RawRequest | ConvertFrom-Json -ErrorAction Stop
     if ([int]$Request.schemaVersion -ne 1) { throw "request-schema-invalid" }
     $Operation = [string]$Request.operation
+    if ($Operation -eq "create") { $script:FixtureCreateStage = "module-import" }
     Import-TrustedHyperVModule
     $Result = switch ($Operation) {
         "preflight" { Invoke-Preflight }
@@ -579,7 +592,24 @@ try {
     $ErrorCode = [string]$_.Exception.Message
     if (-not $DeclaredFixtureErrorCodes.Contains($ErrorCode)) {
         $ErrorCode = switch ($Operation) {
-            "create" { "create-failed" }
+            "create" {
+                switch ($script:FixtureCreateStage) {
+                    "module-import" { "create-module-import-failed" }
+                    "identity" { "create-identity-failed" }
+                    "parent" { "create-parent-failed" }
+                    "existing-root" { "create-existing-root-check-failed" }
+                    "name-query" { "create-name-query-failed" }
+                    "root-create" { "create-root-create-failed" }
+                    "root-protection" { "create-root-protection-failed" }
+                    "marker-initial" { "create-marker-initial-failed" }
+                    "new-vm" { "create-new-vm-result-failed" }
+                    "marker-id" { "create-marker-id-failed" }
+                    "set-vm" { "create-set-vm-result-failed" }
+                    "default-dvd" { "create-default-dvd-result-failed" }
+                    "result" { "create-result-failed" }
+                    default { "create-failed" }
+                }
+            }
             "attach" { "attach-failed" }
             "cleanup" { "cleanup-failed" }
             default { "preflight-failed" }
