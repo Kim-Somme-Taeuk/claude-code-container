@@ -2418,6 +2418,291 @@ try {
     });
 });
 
+// The broker's elevation gate decides from this callback whether a scope used up the one prompt
+// it allows. `prompted` and `ready` have to mean what the real relay did, not what a fake says,
+// so the declined and approved cases run the relay's own control-line handling.
+describe("elevated network acquisition settlement", () => {
+    function scriptedRelayChild(outcome: "approve" | string) {
+        const events = new EventEmitter();
+        const stdoutEvents = new EventEmitter();
+        const stdout = Object.assign(stdoutEvents, { setEncoding: () => stdout });
+        const stderr = new EventEmitter();
+        let launched = false;
+        let terminalToken = "";
+        let pending = "";
+        const exit = () => {
+            stdout.emit("end");
+            events.emit("exit", outcome === "approve" ? 0 : 1, null);
+            events.emit("close", outcome === "approve" ? 0 : 1, null);
+        };
+        const accept = (line: string) => {
+            if (!launched) {
+                launched = true;
+                const envelope: unknown = JSON.parse(Buffer.from(line, "base64").toString("utf8"));
+                terminalToken = String(Reflect.get(Object(envelope), "terminalToken"));
+                queueMicrotask(() => stdout.emit("data", "CCC_HYPER_V_ELEVATED_NETWORK_REQUEST\n"));
+            } else if (line === "CCC_HYPER_V_ELEVATED_NETWORK_APPROVE") {
+                queueMicrotask(() => {
+                    if (outcome === "approve") {
+                        stdout.emit("data", "CCC_HYPER_V_ELEVATED_NETWORK_RELAY_READY\n");
+                        return;
+                    }
+                    stdout.emit("data", `CCC_HYPER_V_ELEVATED_NETWORK_FAILURE:${outcome}\n`);
+                    exit();
+                });
+            } else if (line.startsWith(HYPER_V_WINDOWS_SESSION_REQUEST_PREFIX)) {
+                const frame: unknown = JSON.parse(Buffer.from(
+                    line.slice(HYPER_V_WINDOWS_SESSION_REQUEST_PREFIX.length),
+                    "base64",
+                ).toString("utf8"));
+                const reply = Buffer.from(JSON.stringify({
+                    id: Reflect.get(Object(frame), "id"),
+                    code: 0,
+                    stdout: successEnvelope("Get-VM"),
+                }), "utf8").toString("base64");
+                queueMicrotask(() => stdout.emit("data", `${HYPER_V_WINDOWS_SESSION_RESPONSE_PREFIX}${reply}\n`));
+            } else if (line.startsWith(elevationClosePrefix)) {
+                queueMicrotask(() => {
+                    stdout.emit("data", `CCC_HYPER_V_ELEVATED_NETWORK_TERMINAL:${terminalToken}\n`);
+                    exit();
+                });
+            }
+        };
+        const stdin = Object.assign(new EventEmitter(), {
+            write(chunk: string, settled?: (error?: Error) => void) {
+                pending += chunk;
+                let index = pending.indexOf("\n");
+                while (index >= 0) {
+                    const line = pending.slice(0, index);
+                    pending = pending.slice(index + 1);
+                    accept(line);
+                    index = pending.indexOf("\n");
+                }
+                settled?.();
+                return true;
+            },
+            end() {
+                return stdin;
+            },
+        });
+        return Object.assign(events, { stdin, stdout, stderr, kill: vi.fn(() => true) });
+    }
+
+    it("reports an approved relay once as prompted and ready, however many primitives run", async () => {
+        childProcessMocks.spawn.mockReset();
+        childProcessMocks.spawn.mockReturnValueOnce(scriptedRelayChild("approve"));
+        const settled = vi.fn();
+        const beforeElevation = vi.fn();
+
+        const result = await withElevatedHyperVNetworkExecutor({
+            executable,
+            deadlineUnixMilliseconds: Date.now() + 30_000,
+            onBeforeElevation: beforeElevation,
+            onAcquisitionSettled: settled,
+        }, async (executor) => [
+            await executor.execute(getVmRequest(), executorContext()),
+            await executor.execute(getVmRequest(), executorContext()),
+        ]);
+
+        expect(result).toEqual([
+            { status: 0, stdout: successEnvelope("Get-VM") },
+            { status: 0, stdout: successEnvelope("Get-VM") },
+        ]);
+        expect(beforeElevation).toHaveBeenCalledTimes(1);
+        expect(settled).toHaveBeenCalledTimes(1);
+        expect(settled.mock.calls[0]?.[0]).toEqual({ prompted: true, ready: true, code: null });
+    });
+
+    it.each([
+        "hyper-v-network-elevation-cancelled",
+        "hyper-v-network-elevation-handshake-timeout",
+        "hyper-v-network-elevation-launch-failed",
+    ] satisfies HyperVElevatedNetworkErrorCode[])(
+        "reports a relay that asked and then failed with %s as prompted and not ready",
+        async (code) => {
+            childProcessMocks.spawn.mockReset();
+            childProcessMocks.spawn.mockReturnValueOnce(scriptedRelayChild(code));
+            const settled = vi.fn();
+
+            const result = await withElevatedHyperVNetworkExecutor({
+                executable,
+                deadlineUnixMilliseconds: Date.now() + 30_000,
+                onAcquisitionSettled: settled,
+            }, (executor) => executor.execute(getVmRequest(), executorContext()));
+
+            expect(result).toMatchObject({ status: null, error: code });
+            expect(settled.mock.calls).toEqual([[{ prompted: true, ready: false, code }]]);
+        },
+    );
+
+    it("rejects a relay that claims the gate's suppression code", async () => {
+        childProcessMocks.spawn.mockReset();
+        childProcessMocks.spawn.mockReturnValueOnce(scriptedRelayChild("hyper-v-network-elevation-suppressed"));
+        const settled = vi.fn();
+
+        const result = await withElevatedHyperVNetworkExecutor({
+            executable,
+            deadlineUnixMilliseconds: Date.now() + 30_000,
+            onAcquisitionSettled: settled,
+        }, (executor) => executor.execute(getVmRequest(), executorContext()));
+
+        expect(result).toMatchObject({ status: null, error: "hyper-v-network-elevation-protocol-invalid" });
+        expect(settled.mock.calls).toEqual([[{
+            prompted: true,
+            ready: false,
+            code: "hyper-v-network-elevation-protocol-invalid",
+        }]]);
+    });
+
+    it("reports a relay that never started as not prompted", async () => {
+        const settled = vi.fn();
+
+        const result = await withElevatedHyperVNetworkExecutor({
+            executable,
+            deadlineUnixMilliseconds: Date.now() + 30_000,
+            onAcquisitionSettled: settled,
+            spawnRelay: async () => { throw new Error("spawn EACCES"); },
+        }, (executor) => executor.execute(getVmRequest(), executorContext()));
+
+        expect(result).toMatchObject({ error: "hyper-v-network-elevation-relay-spawn-failed" });
+        expect(settled.mock.calls).toEqual([[{
+            prompted: false,
+            ready: false,
+            code: "hyper-v-network-elevation-relay-spawn-failed",
+        }]]);
+    });
+
+    it("marks the attempt prompted before the caller's hook runs, even when that hook throws", async () => {
+        const settled = vi.fn();
+        const spawnRelay: HyperVElevatedNetworkRelaySpawn = async (request) => {
+            const relay = fakeRelay();
+            try {
+                request.onBeforeElevation();
+            } catch {
+                queueMicrotask(() => relay.fail("hyper-v-network-elevation-request-failed"));
+            }
+            return { ...relay.process, ready: relay.process.completion.then(() => undefined) };
+        };
+
+        const result = await withElevatedHyperVNetworkExecutor({
+            executable,
+            deadlineUnixMilliseconds: Date.now() + 30_000,
+            onBeforeElevation: () => { throw new Error("stderr closed"); },
+            onAcquisitionSettled: settled,
+            spawnRelay,
+        }, (executor) => executor.execute(getVmRequest(), executorContext()));
+
+        expect(result).toMatchObject({ error: "hyper-v-network-elevation-request-failed" });
+        expect(settled.mock.calls).toEqual([[{
+            prompted: true,
+            ready: false,
+            code: "hyper-v-network-elevation-request-failed",
+        }]]);
+    });
+
+    it("does not report a scope that performed no administrator operation", async () => {
+        const settled = vi.fn();
+        const spawnRelay = vi.fn<HyperVElevatedNetworkRelaySpawn>();
+
+        await expect(withElevatedHyperVNetworkExecutor({
+            executable,
+            deadlineUnixMilliseconds: Date.now() + 30_000,
+            onAcquisitionSettled: settled,
+            spawnRelay,
+        }, async () => "no-op")).resolves.toBe("no-op");
+
+        expect(settled).not.toHaveBeenCalled();
+        expect(spawnRelay).not.toHaveBeenCalled();
+    });
+
+    it("keeps a relay that turns up after the scope closed from rewriting the verdict", async () => {
+        const controller = new AbortController();
+        let releaseSpawn = () => undefined as void;
+        const spawnReleased = new Promise<void>((resolve) => {
+            releaseSpawn = resolve;
+        });
+        const relay = fakeRelay();
+        const settled = vi.fn();
+
+        const result = withElevatedHyperVNetworkExecutor({
+            executable,
+            deadlineUnixMilliseconds: Date.now() + 30_000,
+            signal: controller.signal,
+            onAcquisitionSettled: settled,
+            spawnRelay: async (request) => {
+                request.onBeforeElevation();
+                await spawnReleased;
+                // No `ready`: a relay that does not report one counts as ready once it exists.
+                return relay.process;
+            },
+        }, (executor) => executor.execute(getVmRequest(), executorContext()));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        controller.abort();
+        await expect(result).resolves.toMatchObject({ error: "hyper-v-network-elevation-cancelled" });
+
+        releaseSpawn();
+        for (let turn = 0; turn < 3; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled.mock.calls).toEqual([[{ prompted: true, ready: false, code: null }]]);
+        expect(relay.forceKilled()).toBe(true);
+    });
+
+    it("reports a still-starting relay before the scope returns and refuses its later prompt", async () => {
+        const controller = new AbortController();
+        let releaseSpawn = () => undefined as void;
+        const spawnReleased = new Promise<void>((resolve) => {
+            releaseSpawn = resolve;
+        });
+        const relay = fakeRelay();
+        const settled = vi.fn();
+        const beforeElevation = vi.fn();
+        let lateRequest: unknown = null;
+
+        const result = withElevatedHyperVNetworkExecutor({
+            executable,
+            deadlineUnixMilliseconds: Date.now() + 30_000,
+            signal: controller.signal,
+            onBeforeElevation: beforeElevation,
+            onAcquisitionSettled: settled,
+            spawnRelay: async (request) => {
+                await spawnReleased;
+                try {
+                    request.onBeforeElevation();
+                } catch (error) {
+                    lateRequest = error;
+                }
+                return relay.process;
+            },
+        }, (executor) => executor.execute(getVmRequest(), executorContext()));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        controller.abort();
+        await expect(result).resolves.toMatchObject({ error: "hyper-v-network-elevation-cancelled" });
+        expect(settled.mock.calls).toEqual([[{ prompted: false, ready: false, code: null }]]);
+
+        releaseSpawn();
+        for (let turn = 0; turn < 3; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(lateRequest).toMatchObject({ code: "hyper-v-network-elevation-scope-closed" });
+        expect(beforeElevation).not.toHaveBeenCalled();
+        expect(settled).toHaveBeenCalledTimes(1);
+    });
+
+    it("finishes the scope normally when the listener throws", async () => {
+        const relay = fakeRelay();
+
+        await expect(withElevatedHyperVNetworkExecutor({
+            executable,
+            deadlineUnixMilliseconds: Date.now() + 30_000,
+            onAcquisitionSettled: () => { throw new Error("observer failed"); },
+            spawnRelay: async (request) => {
+                request.onBeforeElevation();
+                return relay.process;
+            },
+        }, (executor) => executor.execute(getVmRequest(), executorContext()))).resolves.toEqual({
+            status: 0,
+            stdout: successEnvelope("Get-VM"),
+        });
+    });
+});
+
 // The bounds of the shutdown sequence nest: the child's own termination happens inside the
 // relay's lifetime, which happens inside the caller's wait for a completion record. When one
 // rung was raised alone, an outer timer fired while an inner stage was still legitimately

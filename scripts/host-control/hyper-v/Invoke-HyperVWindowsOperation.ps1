@@ -172,6 +172,40 @@ function Convert-HyperVWindowsVirtualMachine([object]$VirtualMachine) {
     }
 }
 
+function Get-HyperVWindowsVirtualMachinesByExactNames([string[]]$RequestedNames) {
+    if ($RequestedNames.Count -lt 1 -or $RequestedNames.Count -gt 32) { throw "inventory-names-invalid" }
+    if (@($RequestedNames | Sort-Object -Unique).Count -ne $RequestedNames.Count) { throw "inventory-names-duplicate" }
+    # Names are validated by the TypeScript boundary to exclude PowerShell wildcard
+    # metacharacters. Passing the bounded (<= 32) set directly avoids enumerating an
+    # unbounded host-wide VM inventory when every name exists, while the exact comparison
+    # still fences native matching behavior.
+    $QueryErrors = @()
+    $MatchedVirtualMachines = @(Hyper-V\Get-VM -Name $RequestedNames -ErrorAction SilentlyContinue -ErrorVariable +QueryErrors)
+    foreach ($QueryError in $QueryErrors) {
+        # Hosts report a missing exact name as either native no-match shape. Every other
+        # native failure (authorization, VMMS/RPC failure, provider failure, and so on)
+        # must remain an error so callers never mistake an unavailable inventory for proof
+        # that a VM is absent.
+        $MissingByObjectNotFound = (
+            [string]$QueryError.CategoryInfo.Category -eq "ObjectNotFound" -and
+            [string]$QueryError.FullyQualifiedErrorId -eq "ObjectNotFound,Microsoft.HyperV.PowerShell.Commands.GetVM"
+        )
+        $MissingByInvalidParameter = (
+            [string]$QueryError.CategoryInfo.Category -eq "InvalidArgument" -and
+            [string]$QueryError.FullyQualifiedErrorId -eq "InvalidParameter,Microsoft.HyperV.PowerShell.Commands.GetVM"
+        )
+        if (-not $MissingByObjectNotFound -and -not $MissingByInvalidParameter) {
+            throw $QueryError
+        }
+    }
+    if ($QueryErrors.Count -gt 0) {
+        # Either shape can also describe an existing VM the scoped read could not return.
+        # Only a successful inventory read proves which requested names are absent.
+        return @(Hyper-V\Get-VM -ErrorAction Stop | Where-Object { $RequestedNames -ccontains [string]$_.Name })
+    }
+    return @($MatchedVirtualMachines | Where-Object { $RequestedNames -ccontains [string]$_.Name })
+}
+
 function Assert-HyperVWindowsSingleVirtualMachine([object[]]$VirtualMachines) {
     if ($VirtualMachines.Count -eq 0) { throw "virtual-machine-not-found" }
     if ($VirtualMachines.Count -ne 1) { throw "virtual-machine-selector-ambiguous" }
@@ -1348,33 +1382,7 @@ try {
         "Get-VM" {
             if ($GetVmByNames) {
                 $RequestedNames = @($Request.names | ForEach-Object { [string]$_ })
-                if ($RequestedNames.Count -lt 1 -or $RequestedNames.Count -gt 32) { throw "inventory-names-invalid" }
-                if (@($RequestedNames | Sort-Object -Unique).Count -ne $RequestedNames.Count) { throw "inventory-names-duplicate" }
-                # Names are validated by the TypeScript boundary to exclude PowerShell wildcard
-                # metacharacters. Passing the bounded (<= 32) set directly avoids enumerating an
-                # unbounded host-wide VM inventory while the exact comparison still fences native
-                # matching behavior.
-                $QueryErrors = @()
-                $MatchedVirtualMachines = @(Hyper-V\Get-VM -Name $RequestedNames -ErrorAction SilentlyContinue -ErrorVariable +QueryErrors)
-                foreach ($QueryError in $QueryErrors) {
-                    # A requested exact name may legitimately be absent. Every other native
-                    # failure (authorization, VMMS/RPC failure, provider failure, and so on)
-                    # must remain an error so callers never mistake an unavailable inventory
-                    # for proof that a VM is absent.
-                    $MissingVmErrorId = "ObjectNotFound,Microsoft.HyperV.PowerShell.Commands.GetVM"
-                    $MissingVmTarget = if (-not [string]::IsNullOrEmpty([string]$QueryError.TargetObject)) {
-                        [string]$QueryError.TargetObject
-                    } else {
-                        [string]$QueryError.CategoryInfo.TargetName
-                    }
-                    if ([string]$QueryError.CategoryInfo.Category -ne "ObjectNotFound" -or
-                        [string]$QueryError.FullyQualifiedErrorId -ne $MissingVmErrorId -or
-                        [string]::IsNullOrEmpty($MissingVmTarget) -or
-                        $RequestedNames -cnotcontains $MissingVmTarget) {
-                        throw $QueryError
-                    }
-                }
-                $Items = @($MatchedVirtualMachines | Where-Object { $RequestedNames -ccontains [string]$_.Name } | ForEach-Object {
+                $Items = @(Get-HyperVWindowsVirtualMachinesByExactNames $RequestedNames | ForEach-Object {
                     [ordered]@{
                         id = ([Guid]$_.Id).ToString("D").ToLowerInvariant()
                         name = [string]$_.Name

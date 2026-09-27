@@ -210,3 +210,53 @@ accelerators in every `src/host-control/hyper-v` script builder.
 (`hyper-v-base-image-partial-identity-changed`) and any failure before the first
 `Set-CccAcquireStage` are reported under the `partial-open-failed` stage, and the
 failed-run cleanup deletes the partial image, so nothing is left to inspect.
+
+## From the 2026-09-27 host Level 3 run
+
+An unattended run failed both Hyper-V creates, and the broker log held six UAC
+`REQUEST` lines. The log spans the whole broker launch and the line had no
+timestamp, so they were not six prompts from that run.
+
+**Fixed: a missing orphan VM blocked every networked create.** The batch
+exact-name `Get-VM` accepted only `ObjectNotFound`, and this host reports a
+missing name as `InvalidParameter` with category `InvalidArgument`. Allocation
+reconciliation therefore failed with 409 on every create. The batch read now
+follows the selector's absence rule (`hyper-v-windows-library-v17`).
+
+**Fixed: the Windows create failure code was discarded.** The 502 detail now
+carries the bounded typed code and the failed `operation`, and real-test output
+prints the rollback. The root cause of that failure is still unknown; the next
+host run names it.
+
+**Fixed: a failed create could raise UAC and leave an orphan allocation.**
+Compensation tore down the shared fabric, which needs Administrator. It now
+keeps the fabric and removes the allocation row at once. A declined or
+unanswered prompt also stops the broker from asking again until it restarts,
+and Level 3 refuses to start at all against such a broker, non-Hyper-V steps
+included.
+
+### Still open
+
+These need a Windows host; none can be settled from fakes.
+
+- **The new Pester cases have not run.** The batch-absence `Describe` in
+  `Invoke-HyperVWindowsOperation.VmAbsence.Tests.ps1` needs
+  `npm run test:hyper-v:pester`.
+- **Batch no-match shape.** The fakes assume one error record per missing
+  name, and that a mixed present/missing query still returns the present VM.
+- **Unelevated host-wide `Get-VM -ErrorAction Stop`.** Batch absence now
+  depends on it. If it fails, reconciliation stays blocked with a `hyper-v-ps-*`
+  code; that fails closed but blocks creates.
+- **`Get-VM -Id` for a missing GUID.** If it reports `InvalidParameter`, the ID
+  selector still rethrows it by contract, and a delete could fail after a
+  successful removal. The ID branch is unchanged until that shape is known.
+- **Standard-token fabric reads.** Zero prompts on a warm host assumes an
+  unelevated read proves the switch Notes marker, a Preferred gateway, the NAT
+  prefix, and the switch and NAT IDs recorded in `hyper-v.json`.
+- **Unanswered UAC timeout.** Whether an unanswered prompt dismisses itself,
+  and after how long, cannot be probed read-only; the broker's `ELEVATION`
+  outcome line records it on the next run.
+- **Acceptance run.** One unattended `npm run test:level3` with the fabric in
+  place should add no `REQUEST` line, prune the stale
+  `windows-vm-real-e2e-1790500523012` allocation without elevation, and either
+  pass the Windows create or report a specific code with its operation.

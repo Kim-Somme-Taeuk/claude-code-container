@@ -1114,6 +1114,7 @@ describe("Hyper-V provider adapter", () => {
         for (const code of [
             "hyper-v-network-elevation-cancelled",
             "hyper-v-network-elevation-failed",
+            "hyper-v-network-elevation-suppressed",
             "hyper-v-network-pipe-handshake-timeout",
             "hyper-v-network-subnet-conflict",
             "hyper-v-network-gateway-conflict",

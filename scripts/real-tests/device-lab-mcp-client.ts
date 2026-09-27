@@ -392,6 +392,71 @@ function boundedHyperVReadiness(value: unknown) {
     };
 }
 
+// The typed primitive behind a Hyper-V create failure: a closed Verb-Noun cmdlet name, never host text.
+function boundedHyperVOperation(value: unknown): string | undefined {
+    return typeof value === "string" && /^[A-Z][a-z]{1,15}-[A-Z][A-Za-z]{1,31}$/.test(value)
+        ? value
+        : undefined;
+}
+
+// A failed create's compensation, reduced to codes. The broker reports it in two shapes: the
+// create-residue reconcile ({ok, status, error, detail, stage}) and the post-create rollback
+// ({ok, reason, stage, allocation, artifacts, result}). In the second, a failed network release
+// leaves the artifacts unattempted, so the allocation's own code is read first.
+function boundedBrokerRollback(value: any) {
+    const body = value?.body && typeof value.body === "object" && !Array.isArray(value.body) ? value.body : null;
+    const rollback = body?.rollback ?? value?.rollback;
+    if (!rollback || typeof rollback !== "object" || Array.isArray(rollback) || typeof rollback.ok !== "boolean") {
+        return undefined;
+    }
+    const part = (candidate: unknown) => candidate && typeof candidate === "object" && !Array.isArray(candidate)
+        ? candidate as Record<string, unknown>
+        : null;
+    const allocation = part(rollback.allocation);
+    const artifacts = part(rollback.artifacts);
+    const result = part(rollback.result);
+    const status = safeNonNegativeInteger(rollback.status);
+    const error = boundedBrokerDiagnosticCode(rollback.error) || boundedBrokerDiagnosticCode(rollback.reason);
+    const detail = boundedBrokerDiagnosticCode(rollback.detail)
+        || (allocation?.ok === false ? boundedBrokerDiagnosticCode(allocation.error) : undefined)
+        || (artifacts?.ok === false ? boundedBrokerDiagnosticCode(artifacts.error) : undefined)
+        || (rollback.ok === false ? boundedBrokerDiagnosticCode(result?.diagnosticCode) : undefined);
+    const stage = boundedBrokerDiagnosticCode(rollback.stage);
+    return {
+        ok: rollback.ok as boolean,
+        ...(typeof status === "number" ? { status } : {}),
+        ...(error ? { error } : {}),
+        ...(detail && detail !== error ? { detail } : {}),
+        ...(stage ? { stage } : {}),
+    };
+}
+
+// "rollback=<error>/<detail>" for a failed compensation, "rollback=ok" for a clean one, or "".
+export function brokerRollbackSummary(value: any): string {
+    const rollback = boundedBrokerRollback(value);
+    if (!rollback) return "";
+    if (rollback.ok) return "rollback=ok";
+    return `rollback=${rollback.error || "failed"}${rollback.detail ? `/${rollback.detail}` : ""}`;
+}
+
+// The create failure behind a failed allocation compensation. The broker's create wrapper reports
+// that compensation at the top level (hyper-v-create-allocation-cleanup-failed) and the failure it
+// was compensating as `lifecycleFailure`, which is reduced here to codes like the rest.
+function boundedBrokerLifecycleFailure(value: any) {
+    const body = value?.body && typeof value.body === "object" && !Array.isArray(value.body) ? value.body : null;
+    const failure = body?.lifecycleFailure ?? value?.lifecycleFailure;
+    if (!failure || typeof failure !== "object" || Array.isArray(failure)) return undefined;
+    const error = boundedBrokerDiagnosticCode(failure.error);
+    if (!error) return undefined;
+    const detail = boundedBrokerDiagnosticCode(failure.detail);
+    const operation = boundedHyperVOperation(failure.operation);
+    return {
+        error,
+        ...(detail && detail !== error ? { detail } : {}),
+        ...(operation ? { operation } : {}),
+    };
+}
+
 export function brokerToolFailureEvidence(value: any) {
     const body = value?.body && typeof value.body === "object" && !Array.isArray(value.body) ? value.body : null;
     const attempts = Array.isArray(value?.attempts)
@@ -415,10 +480,16 @@ export function brokerToolFailureEvidence(value: any) {
         : null;
     const sanitizeController = (candidate: unknown) => ["ide", "scsi", ""].includes(String(candidate)) ? String(candidate) : undefined;
     const detail = boundedBrokerDiagnosticCode(body?.detail) || boundedBrokerDiagnosticCode(value?.detail);
+    const operation = boundedHyperVOperation(body?.operation) || boundedHyperVOperation(value?.operation);
+    const rollback = boundedBrokerRollback(value);
+    const lifecycleFailure = boundedBrokerLifecycleFailure(value);
     const evidence: Record<string, unknown> = {
         error: boundedBrokerDiagnosticCode(value?.error),
         bodyError: boundedBrokerDiagnosticCode(body?.error),
         ...(detail ? { detail } : {}),
+        ...(operation ? { operation } : {}),
+        ...(rollback ? { rollback } : {}),
+        ...(lifecycleFailure ? { lifecycleFailure } : {}),
     };
     if (body?.error === "hyper-v-snapshot-inventory-conflict") {
         evidence.snapshotInventory = {
@@ -670,12 +741,22 @@ export function formatBrokerToolFailure(value: any, fallback: string) {
         if (codes.length > 0) return [...new Set(codes)].slice(0, 4).join(",");
         return "";
     };
+    const lifecycleFailure = boundedBrokerLifecycleFailure(value);
+    const operation = boundedHyperVOperation(body?.operation) || boundedHyperVOperation(value?.operation)
+        || lifecycleFailure?.operation;
     const parts = [
         boundedBrokerDiagnosticCode(value?.error),
         boundedBrokerDiagnosticCode(body?.error),
         bootDiagnostic ? `boot=${bootDiagnostic}` : "",
         bootDiagnostic ? "" : boundedDetail(value?.detail),
         bootDiagnostic ? "" : boundedDetail(body?.detail),
+        // What a failed allocation compensation was cleaning up after, which is the root cause.
+        lifecycleFailure
+            ? `lifecycle=${lifecycleFailure.error}${lifecycleFailure.detail ? `/${lifecycleFailure.detail}` : ""}`
+            : "",
+        operation ? `operation=${operation}` : "",
+        // Whether the failed create left anything behind, ahead of the bulkier diagnostics below.
+        brokerRollbackSummary(value),
         diagnostic,
         transportRecovery,
         transportDiagnostic,

@@ -63,9 +63,29 @@ Windows disposable VM E2E uses preservation during residue and final cleanup
 because it immediately reuses the same fabric; the dedicated Hyper-V network
 real-host proof remains responsible for destructive exact-ID teardown coverage.
 
+## Broker-internal compensation preserves fabric
+
+Releases the broker makes on its own behalf MUST retain the managed fabric the
+same way: failed-create rollback, create-residue recovery, and operation-journal
+replay ahead of any command other than `device_delete`, including
+`device_create`. Each removes the device's exact allocation row immediately, so
+a failed create leaves no orphan allocation, never needs Administrator, and so
+never raises UAC. Journal replay ahead of `device_delete` follows that command's
+own `preserveNetwork`.
+
+Only an explicit `device_delete` without `preserveNetwork` tears down the last
+allocation's switch, gateway, and NAT. Create-residue recovery for a device with
+no recorded incarnation also stays destructive: preservation requires a matching
+incarnation and would otherwise report
+`hyper-v-network-allocation-incarnation-conflict`. The fence is
+`hyper-v-setup-network-v11`; a v10 broker tears the fabric down after a failed
+create.
+
 ## History
 - v1: exact `SwitchType -ne 'Internal' -or Notes -cne $Marker` → rejected
   owner-scoped residue whose marker form drifted. Superseded.
 - v2 (current): identity-gated — switch GUID governs when available.
 - v3: explicit allocation-only release may retain verified managed fabric for
   immediate reuse; ordinary delete teardown is unchanged.
+- v4: broker-internal compensation always retains the managed fabric; only an
+  explicit `device_delete` without `preserveNetwork` tears it down.

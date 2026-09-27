@@ -62,6 +62,31 @@ bootstrap MAC ownership MUST be checked before creation reports success.
   fields. MCP and CLI output MUST redact credentials, host paths, PowerShell
   input, and other private provider data. A typed error MUST NOT leak those
   values or become an unstructured exception.
+- A typed create failure MUST keep its identity in the public 502. `detail` is
+  the bounded typed code: an admitted `hyper-v-*` code unchanged, a forwarded
+  session-transport code as `hyper-v-windows-transport-session-<reason>`, a
+  native error as `hyper-v-ps-<sanitized fully qualified error id>`, and any
+  other transport, protocol, or validation error as
+  `hyper-v-windows-<category>-<sanitized code>`, each limited to `[a-z0-9-]` and
+  80 characters. The admitted create-path codes include those the clone's path
+  checks derive from their labels (`hyper-v-{base-image,device-root,disk}-path-*`).
+  A top-level `operation` names the failed primitive from the library's closed
+  operation list, such as `New-VM`. A failed Get-VHD read keeps its stage code
+  (`hyper-v-base-image-inspection-failed`, `hyper-v-vm-disk-create-failed`, or a
+  not-found or reparse code) with `operation: "Get-VHD"`; its native code is not
+  reported. Any other code still reports `hyper-v-provider-command-failed`. The
+  broker fence is `hyper-v-network-failure-diagnostics-v11`.
+- Compensation MUST release the device's network allocation while keeping the
+  shared CCC switch, gateway, and NAT, so a failed create leaves no orphan
+  allocation and raises no UAC prompt
+  ([[hyper-v-network-teardown-identity]]). When that release fails, artifact
+  cleanup is not attempted and the rollback names the stage
+  (`stage: "network-release"`) and the network code: create-residue recovery
+  reports `hyper-v-recovery-cleanup-failed` with that code as `detail`, and the
+  post-create rollback reports it as `allocation.error` beside
+  `artifacts: { ok: false, attempted: false }`. `hyper-v-artifact-cleanup-failed`
+  means artifact cleanup ran and failed. A failed rollback removal keeps its
+  typed code in `result.diagnosticCode`.
 
 ## Boundary and proof
 

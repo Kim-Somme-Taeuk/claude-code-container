@@ -17,6 +17,10 @@ describe("Device Lab typed Get-VHD creation policy", () => {
         expect(hyperVCreateVhdReadError("clone", native).message).toBe("hyper-v-created-disk-not-found");
         expect(hyperVCreateVhdReadError("base", protocol).message).toBe("hyper-v-base-image-inspection-failed");
         expect(hyperVCreateVhdReadError("clone", protocol).message).toBe("hyper-v-vm-disk-create-failed");
+        // The typed failure stays attached so the 502 can still name Get-VHD.
+        for (const [kind, typed] of [["base", native], ["clone", protocol]] as const) {
+            expect(hyperVCreateVhdReadError(kind, typed).cause).toBe(typed);
+        }
     });
     it("accepts the expected base and exact clone virtual size", () => {
         expect(inspectHyperVCreateVhd({ kind: "base", path }, metadata)).toBe(metadata.virtualSizeBytes);

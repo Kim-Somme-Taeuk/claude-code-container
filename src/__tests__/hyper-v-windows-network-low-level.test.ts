@@ -493,6 +493,16 @@ describe("Hyper-V Windows network low-level client", () => {
             code: "hyper-v-network-elevation-cancelled",
         });
 
+        const suppressed = createHyperVWindowsNetworkClient(executorUsing(() => ({
+            status: null,
+            stdout: "",
+            error: "hyper-v-network-elevation-suppressed",
+        })));
+        await expect(suppressed.getVMSwitches({ kind: "all" })).rejects.toMatchObject({
+            category: "transport",
+            code: "hyper-v-network-elevation-suppressed",
+        });
+
         const arbitrary = createHyperVWindowsNetworkClient(executorUsing(() => ({
             status: null,
             stdout: "",
@@ -564,6 +574,27 @@ describe("Hyper-V Windows network PowerShell asset", () => {
         expect(source).toContain("-ErrorVariable +QueryErrors");
         expect(source).toContain('$QueryError.CategoryInfo.Category -ne "ObjectNotFound"');
         expect(source).toContain('"ObjectNotFound,Microsoft.HyperV.PowerShell.Commands.GetVM"');
-        expect(source).toContain('$RequestedNames -cnotcontains $MissingVmTarget');
+
+        // Batch exact-name absence follows the single-name selector: either native no-match shape is
+        // only a candidate, and a successful host-wide inventory read is what proves absence.
+        const exactNames = source.split("\nfunction Get-HyperVWindowsVirtualMachinesByExactNames([string[]]$RequestedNames) {")[1]
+            ?.split("\nfunction ")[0] || "";
+        expect(exactNames).toContain('if ($RequestedNames.Count -lt 1 -or $RequestedNames.Count -gt 32) { throw "inventory-names-invalid" }');
+        expect(exactNames).toContain('throw "inventory-names-duplicate"');
+        expect(exactNames).toContain("Hyper-V\\Get-VM -Name $RequestedNames -ErrorAction SilentlyContinue -ErrorVariable +QueryErrors");
+        expect(exactNames).toContain('[string]$QueryError.CategoryInfo.Category -eq "ObjectNotFound"');
+        expect(exactNames).toContain('[string]$QueryError.FullyQualifiedErrorId -eq "ObjectNotFound,Microsoft.HyperV.PowerShell.Commands.GetVM"');
+        expect(exactNames).toContain('[string]$QueryError.CategoryInfo.Category -eq "InvalidArgument"');
+        expect(exactNames).toContain('[string]$QueryError.FullyQualifiedErrorId -eq "InvalidParameter,Microsoft.HyperV.PowerShell.Commands.GetVM"');
+        expect(exactNames).toContain("throw $QueryError");
+        expect(exactNames).toContain("if ($QueryErrors.Count -gt 0) {");
+        expect(exactNames).toContain("return @(Hyper-V\\Get-VM -ErrorAction Stop | Where-Object { $RequestedNames -ccontains [string]$_.Name })");
+        expect(exactNames).toContain("@($MatchedVirtualMachines | Where-Object { $RequestedNames -ccontains [string]$_.Name })");
+        expect(exactNames).not.toContain("$MissingVmTarget");
+        expect(exactNames).not.toContain("TargetObject");
+        const batchBranch = source.split('        "Get-VM" {\n            if ($GetVmByNames) {')[1]?.split("            } else {")[0] || "";
+        expect(batchBranch).toContain("$Items = @(Get-HyperVWindowsVirtualMachinesByExactNames $RequestedNames | ForEach-Object {");
+        expect(batchBranch).not.toContain("Hyper-V\\Get-VM");
+        expect(source).not.toContain("$MissingVmTarget");
     });
 });

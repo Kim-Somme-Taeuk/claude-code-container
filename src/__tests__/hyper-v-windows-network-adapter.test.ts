@@ -284,16 +284,22 @@ function memoryClient(
 function administratorScope(
     client: HyperVWindowsNetworkClient,
     onEnter: () => void = () => undefined,
-): { readonly scope: WithAdministratorHyperVWindowsNetworkClient; readonly count: () => number } {
+): {
+    readonly scope: WithAdministratorHyperVWindowsNetworkClient;
+    readonly count: () => number;
+    readonly purposes: () => readonly (string | undefined)[];
+} {
     let count = 0;
+    const purposes: (string | undefined)[] = [];
     const scope: WithAdministratorHyperVWindowsNetworkClient = async <Result>(operation: (
         client: HyperVWindowsNetworkClient,
-    ) => Result | Promise<Result>) => {
+    ) => Result | Promise<Result>, purpose?: string) => {
         count += 1;
+        purposes.push(purpose);
         onEnter();
         return operation(client);
     };
-    return { scope, count: () => count };
+    return { scope, count: () => count, purposes: () => [...purposes] };
 }
 
 function managedCleanup(): HyperVHostNetworkCleanupProvenance {
@@ -407,6 +413,7 @@ describe("Device Lab Hyper-V network adapter", () => {
             },
         ]);
         expect(administrator.count()).toBe(1);
+        expect(administrator.purposes()).toEqual(["ensure"]);
         expect(state.actions).toEqual(["create-switch", "create-gateway", "create-nat"]);
         expect(state.reads.filter((entry) => entry === "switch:name")).toHaveLength(5);
     });
@@ -702,7 +709,10 @@ describe("Device Lab Hyper-V network adapter", () => {
         expect(state.actions.filter((action) => action === lostAction)).toHaveLength(1);
     });
 
-    it("preserves a pre-mutation UAC cancellation instead of retrying or flattening it", async () => {
+    it.each([
+        ["UAC cancellation", "hyper-v-network-elevation-cancelled"],
+        ["elevation-gate suppression", "hyper-v-network-elevation-suppressed"],
+    ])("preserves a pre-mutation %s instead of retrying or flattening it", async (_label, code) => {
         const state = emptyState();
         const administratorClient: HyperVWindowsNetworkClient = {
             ...memoryClient(state),
@@ -710,7 +720,7 @@ describe("Device Lab Hyper-V network adapter", () => {
                 throw new HyperVWindowsError({
                     category: "transport",
                     operation: "New-VMSwitch",
-                    code: "hyper-v-network-elevation-cancelled",
+                    code,
                 });
             },
         };
@@ -724,7 +734,7 @@ describe("Device Lab Hyper-V network adapter", () => {
         })).rejects.toMatchObject({
             category: "transport",
             operation: "New-VMSwitch",
-            code: "hyper-v-network-elevation-cancelled",
+            code,
         });
         expect(administrator.count()).toBe(1);
         expect(state.actions).toEqual([]);
@@ -825,6 +835,7 @@ describe("Device Lab Hyper-V network adapter", () => {
             },
         ]);
         expect(administrator.count()).toBe(1);
+        expect(administrator.purposes()).toEqual(["cleanup"]);
         expect(state.actions).toEqual(["remove-nat", "remove-gateway", "remove-switch"]);
     });
 

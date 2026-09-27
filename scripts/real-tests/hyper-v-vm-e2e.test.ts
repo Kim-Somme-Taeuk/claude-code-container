@@ -11,13 +11,14 @@ import {
     HYPER_V_WINDOWS_E2E_DELETE_OPTIONS,
     HYPER_V_WINDOWS_E2E_REBOOT_OPTIONS,
     hyperVWindowsFailureReason,
+    hyperVWindowsToolPayload,
     hyperVWindowsVmE2ECapability,
     resolveNpmCliPath,
     scheduleHyperVWindowsConsoleTimeline,
     selectHyperVWindowsProfile,
 } from "./hyper-v-windows-vm-e2e.ts";
 import { captureHyperVWindowsSetupDiagnostics } from "./hyper-v-windows-setup-diagnostics.ts";
-import { brokerToolFailureEvidence, formatBrokerToolFailure } from "./device-lab-mcp-client.ts";
+import { brokerRollbackSummary, brokerToolFailureEvidence, formatBrokerToolFailure } from "./device-lab-mcp-client.ts";
 import {
     HYPER_V_WINDOWS_EVALUATION_LICENSE_ID,
     HYPER_V_WINDOWS_EVALUATION_LICENSE_URL,
@@ -40,6 +41,30 @@ const readiness = JSON.stringify({
 function spawnReady(_command: string, args: string[]) {
     if (args[0] === "ssh.exe" || args[0] === "scp.exe") return { status: 0, stdout: `${args[0]}\n` };
     return { status: 0, stdout: readiness };
+}
+
+// The MCP view of a typed New-VM failure whose create-residue rollback could not release the
+// network allocation, as the broker's device_create 502 reports it.
+function hyperVCreateFailureWithRollback(): any {
+    return {
+        ok: false,
+        method: "device_create",
+        error: "provider-command-failed",
+        status: 502,
+        body: {
+            ok: false,
+            error: "provider-command-failed",
+            detail: "hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-newvm",
+            operation: "New-VM",
+            rollback: {
+                ok: false,
+                status: 502,
+                error: "hyper-v-recovery-cleanup-failed",
+                stage: "network-release",
+                detail: "hyper-v-network-elevation-cancelled",
+            },
+        },
+    };
 }
 
 afterEach(() => {
@@ -707,6 +732,160 @@ describe("Hyper-V E2E zero-config image selection", () => {
         }) as any;
         expect(evidence).not.toHaveProperty("detail");
         expect(JSON.stringify(evidence)).not.toContain("C:\\Users");
+    });
+
+    it("reports a failed create's rollback right after the detail and ahead of the bulky diagnostics", () => {
+        const failure = hyperVCreateFailureWithRollback();
+        expect(formatBrokerToolFailure(failure, "fallback")).toBe(
+            "provider-command-failed: hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-newvm: operation=New-VM: "
+            + "rollback=hyper-v-recovery-cleanup-failed/hyper-v-network-elevation-cancelled",
+        );
+
+        const crowded = formatBrokerToolFailure({
+            ...failure,
+            transportRecovery: {
+                attempted: true,
+                recovered: false,
+                initial: { port: 17373, error: "connection-reset", brokerDiagnostics: Array.from({ length: 8 }, (_, index) => `hyper-v-network-diagnostic-code-number-${index}`) },
+                retry: { port: 17373, error: "connection-refused", brokerDiagnostics: Array.from({ length: 8 }, (_, index) => `hyper-v-network-retry-code-number-${index}`) },
+            },
+            body: {
+                ...failure.body,
+                provisioning: { status: 1, error: "hyper-v-guest-provision-failed", diagnosticCode: "hyper-v-provisioning-media-stream-invalid" },
+            },
+            attempts: [{ port: 17373, status: 502, durationMs: 35120, timeoutMs: 21615000 }],
+        }, "fallback");
+        expect(crowded.length).toBe(511);
+        expect(crowded).toContain(": rollback=hyper-v-recovery-cleanup-failed/hyper-v-network-elevation-cancelled: ");
+    });
+
+    it("reports the create failure behind a failed wrapper compensation by code alone", () => {
+        const failure = {
+            ok: false,
+            method: "device_create",
+            error: "hyper-v-create-allocation-cleanup-failed",
+            status: 502,
+            body: {
+                ok: false,
+                error: "hyper-v-create-allocation-cleanup-failed",
+                detail: "hyper-v-network-elevation-cancelled",
+                stage: "network-release",
+                lifecycleFailure: {
+                    ok: false,
+                    error: "provider-command-failed",
+                    detail: "hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-newvm",
+                    operation: "New-VM",
+                    stderr: "New-VM : C:\\Users\\private token=secret",
+                },
+            },
+        };
+        expect(formatBrokerToolFailure(failure, "fallback")).toBe(
+            "hyper-v-create-allocation-cleanup-failed: hyper-v-network-elevation-cancelled: "
+            + "lifecycle=provider-command-failed/hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-newvm: "
+            + "operation=New-VM",
+        );
+        const evidence = brokerToolFailureEvidence(failure) as any;
+        expect(evidence.lifecycleFailure).toEqual({
+            error: "provider-command-failed",
+            detail: "hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-newvm",
+            operation: "New-VM",
+        });
+        expect(JSON.stringify(evidence)).not.toContain("secret");
+
+        const unsafe = { ...failure, body: { ...failure.body, lifecycleFailure: { error: "C:\\Users\\private", detail: "token=secret" } } };
+        expect(formatBrokerToolFailure(unsafe, "fallback")).not.toContain("lifecycle=");
+        expect(brokerToolFailureEvidence(unsafe)).not.toHaveProperty("lifecycleFailure");
+    });
+
+    it("summarizes each broker rollback shape by code alone", () => {
+        const summary = (rollback: unknown) => brokerRollbackSummary({ ok: false, error: "provider-command-failed", body: { rollback } });
+        // The create-residue reconcile.
+        expect(summary({ ok: true, recoveredVm: true, removedDisk: true, releasedAddress: true })).toBe("rollback=ok");
+        expect(summary({ ok: false, status: 502, error: "hyper-v-recovery-failed", detail: "hyper-v-ps-removeitemioerror-microsoft-powershell-commands-removeitemcommand" }))
+            .toBe("rollback=hyper-v-recovery-failed/hyper-v-ps-removeitemioerror-microsoft-powershell-commands-removeitemcommand");
+        // The post-create rollback: a failed release leaves the artifacts unattempted and names its own code.
+        expect(summary({
+            attempted: true,
+            ok: false,
+            stage: "network-release",
+            result: { mode: "exec", provider: "hyper-v", status: 0, outputRedacted: true },
+            artifacts: { ok: false, attempted: false, removed: false },
+            allocation: { ok: false, released: false, error: "hyper-v-network-elevation-cancelled" },
+        })).toBe("rollback=failed/hyper-v-network-elevation-cancelled");
+        expect(summary({
+            attempted: true,
+            ok: false,
+            artifacts: { ok: false, removed: false, error: "hyper-v-artifact-cleanup-failed" },
+            allocation: { ok: true, released: true },
+        })).toBe("rollback=failed/hyper-v-artifact-cleanup-failed");
+        expect(summary({
+            attempted: true,
+            ok: false,
+            reason: "hyper-v-rollback-command-failed",
+            result: { mode: "exec", provider: "hyper-v", status: 1, diagnosticCode: "hyper-v-windows-transport-executor-failed" },
+        })).toBe("rollback=hyper-v-rollback-command-failed/hyper-v-windows-transport-executor-failed");
+        expect(summary({
+            attempted: true,
+            ok: false,
+            reason: "hyper-v-rollback-command-failed",
+            result: { mode: "exec", provider: "hyper-v", status: 1, diagnosticCode: "hyper-v-rollback-command-failed" },
+        })).toBe("rollback=hyper-v-rollback-command-failed");
+        expect(summary({ attempted: false, ok: false, reason: "created-hyper-v-vm-identity-missing" })).toBe("rollback=created-hyper-v-vm-identity-missing");
+        expect(summary({ attempted: true, ok: true, observation: { recoveredVm: true, removedDisk: true } })).toBe("rollback=ok");
+        // Host text never becomes part of the summary.
+        expect(summary({ ok: false, error: "C:\\Users\\private token=secret", detail: "token=secret" })).toBe("rollback=failed");
+        expect(summary({ ok: false, error: "hyper-v-recovery-failed", detail: "Remove-Item C:\\Users\\private" })).toBe("rollback=hyper-v-recovery-failed");
+        // No verdict, no summary.
+        expect(summary({ error: "hyper-v-recovery-failed" })).toBe("");
+        expect(summary(["hyper-v-recovery-failed"])).toBe("");
+        expect(summary(null)).toBe("");
+        expect(brokerRollbackSummary({ ok: false, rollback: { ok: true } })).toBe("rollback=ok");
+    });
+
+    it("records a failed create's rollback and operation in the Linux diagnostic without host text", () => {
+        const outputRoot = mkdtempSync(join(tmpdir(), "ccc-hyper-v-rollback-diagnostic-"));
+        const failure = hyperVCreateFailureWithRollback();
+        failure.body.rollback = {
+            ...failure.body.rollback,
+            path: "C:\\Users\\Luxus\\private\\hyper-v.json",
+            result: { stdout: "token=secret" },
+        };
+        const error = new Error("provider-command-failed");
+        Object.defineProperty(error, "brokerPayload", { value: failure });
+        try {
+            const paths = writeHyperVLinuxFailureDiagnostic({ outputRoot, step: "create VM", created: false, error });
+            const content = readFileSync(paths.latestPath, "utf8");
+            const record = JSON.parse(content);
+            expect(record.failure.detail).toBe("hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-newvm");
+            expect(record.failure.operation).toBe("New-VM");
+            expect(record.failure.rollback).toEqual({
+                ok: false,
+                status: 502,
+                error: "hyper-v-recovery-cleanup-failed",
+                detail: "hyper-v-network-elevation-cancelled",
+                stage: "network-release",
+            });
+            expect(content).not.toContain("token=secret");
+            expect(content).not.toContain("C:\\Users");
+
+            const unsafe = hyperVCreateFailureWithRollback();
+            unsafe.body.operation = "New-VM C:\\Users\\private";
+            unsafe.body.rollback = { ok: false, error: "token=secret", stage: "C:\\Users\\private" };
+            const unsafeError = new Error("provider-command-failed");
+            Object.defineProperty(unsafeError, "brokerPayload", { value: unsafe });
+            const unsafeRecord = JSON.parse(readFileSync(writeHyperVLinuxFailureDiagnostic({ outputRoot, step: "create VM", created: false, error: unsafeError }).latestPath, "utf8"));
+            expect(unsafeRecord.failure).not.toHaveProperty("operation");
+            expect(unsafeRecord.failure.rollback).toEqual({ ok: false });
+
+            const none = hyperVCreateFailureWithRollback();
+            delete none.body.rollback;
+            const noneError = new Error("provider-command-failed");
+            Object.defineProperty(noneError, "brokerPayload", { value: none });
+            const noneRecord = JSON.parse(readFileSync(writeHyperVLinuxFailureDiagnostic({ outputRoot, step: "create VM", created: false, error: noneError }).latestPath, "utf8"));
+            expect(noneRecord.failure).not.toHaveProperty("rollback");
+        } finally {
+            rmSync(outputRoot, { recursive: true, force: true });
+        }
     });
 
     it("keeps Hyper-V boot diagnostics ahead of long nested wrapper details", () => {
@@ -1623,5 +1802,38 @@ describe("Hyper-V E2E zero-config image selection", () => {
         expect(captureIndex).toBeGreaterThan(catchIndex);
         expect(finallyIndex).toBeGreaterThan(captureIndex);
         expect(stopIndex).toBeGreaterThan(finallyIndex);
+    });
+
+    it("keeps a failed create's rollback in the Windows FAIL reason even though nothing was created", async () => {
+        const brokerPayload = hyperVCreateFailureWithRollback();
+        let failure: any;
+        try {
+            hyperVWindowsToolPayload({ content: [{ type: "text", text: JSON.stringify(brokerPayload) }] });
+        } catch (error) {
+            failure = error;
+        }
+        expect(failure).toBeInstanceOf(Error);
+        expect(failure.brokerPayload).toEqual(brokerPayload);
+        const createReason = await hyperVWindowsFailureReason({
+            profile: "windows-server",
+            step: "create VM",
+            error: failure,
+            created: false,
+            deviceId: "windows-vm-real-e2e-123",
+        });
+        expect(createReason).toBe(
+            "profile=windows-server; create VM: provider-command-failed: hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-newvm: "
+            + "operation=New-VM: rollback=hyper-v-recovery-cleanup-failed/hyper-v-network-elevation-cancelled",
+        );
+        // A message that lost the rollback (cut at the formatter's cap) gets it back from the payload.
+        const cut = new Error("provider-command-failed: hyper-v-ps-invalidparameter");
+        Object.defineProperty(cut, "brokerPayload", { value: brokerPayload });
+        expect(await hyperVWindowsFailureReason({
+            profile: "windows-server",
+            step: "create VM",
+            error: cut,
+            created: false,
+            deviceId: "windows-vm-real-e2e-123",
+        })).toBe("profile=windows-server; create VM: provider-command-failed: hyper-v-ps-invalidparameter; rollback=hyper-v-recovery-cleanup-failed/hyper-v-network-elevation-cancelled");
     });
 });

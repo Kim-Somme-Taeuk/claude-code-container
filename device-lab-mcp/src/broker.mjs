@@ -82,7 +82,7 @@ export const REQUIRED_CCC_HOST_BROKER_CAPABILITIES = [
     "physical-unattached-wireless-routing-v1",
     "android-recording-signal-fallback-v1",
     "hyper-v-vm-managed-auto-images-v20",
-    "hyper-v-setup-network-v10",
+    "hyper-v-setup-network-v11",
     "hyper-v-guest-readiness-diagnostics-v24",
     "hyper-v-azure-bootstrap-dhcp-v1",
     "hyper-v-bootstrap-nic-cleanup-v1",
@@ -97,7 +97,7 @@ export const REQUIRED_CCC_HOST_BROKER_CAPABILITIES = [
     "hyper-v-image-acquisition-stage-cache-v1",
     "hyper-v-powershell-stage-propagation-v1",
     "hyper-v-provider-image-finalization-v40",
-    "hyper-v-network-failure-diagnostics-v10",
+    "hyper-v-network-failure-diagnostics-v11",
     // Added late, and deliberately: this list had never carried the Hyper-V Windows library
     // capability at any version, so the MCP gate admitted a broker whose session re-issued a
     // privileged mutation on a false never-ran — a duplicate Remove-VMSnapshot, reachable from the
@@ -110,7 +110,7 @@ export const REQUIRED_CCC_HOST_BROKER_CAPABILITIES = [
     // capability string at any version nor the session pool at all, so no shipped broker advertises
     // it. Adding it before the branch ships costs nothing; adding it after costs the fleet migration
     // the old comment described.
-    "hyper-v-windows-library-v16",
+    "hyper-v-windows-library-v17",
 ];
 const DEFAULT_LIFECYCLE_RPC_TIMEOUT_MS = 120000;
 const MAX_RPC_TIMEOUT_MS = 21615000;

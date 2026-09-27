@@ -34,6 +34,8 @@ const ELEVATED_MUTATION_PROVEN_NOT_STARTED = new Set([
     "hyper-v-network-elevation-deadline-exceeded",
     "hyper-v-network-elevation-protocol-invalid",
     "hyper-v-network-elevation-scope-closed",
+    // The broker's elevation gate refused to start a relay at all.
+    "hyper-v-network-elevation-suppressed",
 ]);
 
 function throwIfElevatedMutationNeverStarted(cause: unknown): void {
@@ -44,8 +46,13 @@ function throwIfElevatedMutationNeverStarted(cause: unknown): void {
     }
 }
 
+// Why an administrator transaction was opened. The broker writes it on its elevation log lines
+// so a UAC prompt can be attributed; it never changes what the transaction may do.
+export type DeviceLabHyperVAdministratorPurpose = "ensure" | "cleanup";
+
 export type WithAdministratorHyperVWindowsNetworkClient = <Result>(
     operation: (client: HyperVWindowsNetworkClient) => Result | Promise<Result>,
+    purpose?: DeviceLabHyperVAdministratorPurpose,
 ) => Promise<Result>;
 
 export type DeviceLabHyperVHostNetworkInspectionOptions = {
@@ -452,7 +459,7 @@ export async function ensureDeviceLabHyperVHostNetwork(
 ): Promise<DeviceLabHyperVHostNetworkEnsureTransactionResult> {
     const outcome = await reconcileEnsureWithoutMutation(options.client, options);
     if (outcome.kind !== "needs-administrator") return { outcome, completedActions: [] };
-    return options.withAdministratorClient((client) => reconcileEnsureAsAdministrator(client, options));
+    return options.withAdministratorClient((client) => reconcileEnsureAsAdministrator(client, options), "ensure");
 }
 
 async function reconcileCleanupAsAdministrator(
@@ -521,5 +528,5 @@ export async function cleanupDeviceLabHyperVHostNetwork(
         planHyperVHostNetworkCleanup(observation, options.network, options.provenance),
     );
     if (outcome.kind !== "needs-administrator") return { outcome, completedActions: [] };
-    return options.withAdministratorClient((client) => reconcileCleanupAsAdministrator(client, options));
+    return options.withAdministratorClient((client) => reconcileCleanupAsAdministrator(client, options), "cleanup");
 }

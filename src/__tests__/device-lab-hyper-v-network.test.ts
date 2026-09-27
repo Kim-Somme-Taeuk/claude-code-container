@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+    createHyperVWindowsNetworkClient,
     HyperVWindowsError,
     parseHyperVInterfaceIndex,
     parseHyperVNatInstanceId,
@@ -39,6 +40,7 @@ import {
     type HyperVNetworkCommandResult,
     type HyperVNetworkRuntime,
 } from "../device-lab/broker/hyper-v/network.js";
+import { HYPER_V_ELEVATION_SUPPRESSED_EXECUTOR } from "../device-lab/broker/hyper-v/elevation-gate.js";
 
 const OWNER_ID = "0123456789abcdef";
 const DEVICE_ID = "network-test";
@@ -126,6 +128,7 @@ function typedHostFabricRuntime(
         };
         readonly administratorFailureCode?: string;
         readonly removeNatFailureCode?: string;
+        readonly inventoryFailure?: HyperVWindowsError;
         readonly beforeMutation?: (action: string) => void;
         readonly mutationAppliedThenLost?:
             | "create-switch"
@@ -213,6 +216,7 @@ function typedHostFabricRuntime(
         async getAllVMNetworkAdapters() { return [...vmNetworkAdapters]; },
         async getVMsByExactNames(request) {
             inventoryRequests.push(request.names.map(String));
+            if (options.inventoryFailure) throw options.inventoryFailure;
             return [];
         },
         async getHostNetworkAdapters(request) {
@@ -1364,6 +1368,70 @@ describe("Hyper-V network module", () => {
         });
     });
 
+    // The broker's elevation gate hands the transaction a client over an executor that fails every
+    // call. That has to reach callers through the same bounded shapes as a declined prompt, and the
+    // standard-rights work around it must still run.
+    it("reports a suppressed elevation in the bounded setup and cleanup shapes without mutating", async () => {
+        const root = privateRoot();
+        const { network, mutations } = typedHostFabricRuntime(root);
+        const suppressed = (): HyperVNetworkRuntime => {
+            const hostFabric = network.hostFabric;
+            if (hostFabric.kind !== "typed") throw new Error("typed host fabric expected");
+            return {
+                ...network,
+                hostFabric: {
+                    ...hostFabric,
+                    withAdministratorClient: async (operation) => operation(
+                        createHyperVWindowsNetworkClient(HYPER_V_ELEVATION_SUPPRESSED_EXECUTOR),
+                    ),
+                },
+            };
+        };
+        const diagnostic = {
+            mode: "exec",
+            provider: "hyper-v",
+            status: null,
+            stdoutPresent: false,
+            stderrPresent: false,
+            outputRedacted: true,
+            diagnosticCode: "hyper-v-network-elevation-suppressed",
+        };
+
+        await expect(ensureHyperVNetworkAllocation(
+            suppressed(),
+            OWNER_ID,
+            DEVICE_ID,
+            INCARNATION_ID,
+        )).resolves.toMatchObject({
+            ok: false,
+            status: 502,
+            error: "hyper-v-network-setup-failed",
+            detail: "hyper-v-network-elevation-suppressed",
+            preserveEvidence: true,
+            execution: diagnostic,
+        });
+        expect(mutations).toEqual([]);
+
+        expect((await ensureHyperVNetworkAllocation(
+            network,
+            OWNER_ID,
+            DEVICE_ID,
+            INCARNATION_ID,
+        )).ok).toBe(true);
+        const created = [...mutations];
+        await expect(releaseHyperVNetworkAllocationAndCleanup(
+            suppressed(),
+            OWNER_ID,
+            DEVICE_ID,
+            INCARNATION_ID,
+        )).resolves.toMatchObject({
+            ok: false,
+            error: "hyper-v-network-elevation-suppressed",
+            networkCleanup: diagnostic,
+        });
+        expect(mutations).toEqual(created);
+    });
+
     it("adopts the same exact host IDs from token state to the observed stable CCC identity", async () => {
         const root = privateRoot();
         const token = "e".repeat(24);
@@ -2151,6 +2219,51 @@ describe("Hyper-V network module", () => {
         expect(readFileSync(join(root, "network", "hyper-v.json"), "utf8")).toBe(before);
     });
 
+    // The typed batch read names a native failure by its FullyQualifiedErrorId. Cut at the first
+    // colon of its message, every such failure read as hyper-v-windows-native, so a host that
+    // could not confirm an absence looked like any other host failure.
+    it.each([
+        {
+            name: "native InvalidParameter",
+            failure: new HyperVWindowsError({
+                category: "native",
+                operation: "Get-VM",
+                code: "InvalidParameter-Microsoft.HyperV.PowerShell.Commands.GetVM",
+            }),
+            detail: "hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-getvm",
+        },
+        {
+            name: "transport",
+            failure: new HyperVWindowsError({ category: "transport", operation: "Get-VM", code: "executor-failed" }),
+            detail: "hyper-v-windows-transport-executor-failed",
+        },
+    ])("fails closed with the typed inventory failure's own code during orphan reconciliation ($name)", async ({
+        failure,
+        detail,
+    }) => {
+        const root = privateRoot();
+        const existingIncarnationId = "b".repeat(32);
+        const { network, mutations, inventoryRequests, legacyRun } = typedHostFabricRuntime(root, {
+            inventoryFailure: failure,
+        });
+        expect((await ensureHyperVNetworkAllocation(network, OWNER_ID, "existing-device", existingIncarnationId)).ok)
+            .toBe(true);
+        const before = readFileSync(join(root, "network", "hyper-v.json"), "utf8");
+        network.allocationReferenced = () => false;
+
+        expect(await ensureHyperVNetworkAllocation(network, OWNER_ID, DEVICE_ID, INCARNATION_ID)).toEqual({
+            ok: false,
+            status: 409,
+            error: "hyper-v-network-allocation-reconciliation-failed",
+            detail,
+            preserveEvidence: true,
+        });
+        expect(inventoryRequests).toEqual([[`ccc-${OWNER_ID}-existing-device-${existingIncarnationId}`]]);
+        expect(mutations).toEqual(["create-switch", "create-gateway", "create-nat"]);
+        expect(legacyRun).not.toHaveBeenCalled();
+        expect(readFileSync(join(root, "network", "hyper-v.json"), "utf8")).toBe(before);
+    });
+
     it("fails closed on malformed VM inspection output without changing allocation state", async () => {
         const root = privateRoot();
         writeNetworkState(root, {
@@ -2534,6 +2647,67 @@ describe("Hyper-V network module", () => {
             managedNat: true,
             allocations: [],
         });
+    });
+
+    it("keeps a typed managed fabric without an administrator transaction when compensation preserves it", async () => {
+        const root = privateRoot();
+        const { network, mutations, legacyRun } = typedHostFabricRuntime(root);
+        const typedFabric = network.hostFabric;
+        if (typedFabric.kind !== "typed") throw new Error("typed-host-fabric-expected");
+        let administratorTransactions = 0;
+        network.hostFabric = {
+            ...typedFabric,
+            withAdministratorClient: (operation) => {
+                administratorTransactions += 1;
+                return typedFabric.withAdministratorClient(operation);
+            },
+        };
+        expect((await ensureHyperVNetworkAllocation(
+            network,
+            OWNER_ID,
+            DEVICE_ID,
+            INCARNATION_ID,
+        )).ok).toBe(true);
+        expect(administratorTransactions).toBe(1);
+        expect(mutations).toEqual(["create-switch", "create-gateway", "create-nat"]);
+
+        const released = await releaseHyperVNetworkAllocationAndCleanup(
+            network,
+            OWNER_ID,
+            DEVICE_ID,
+            INCARNATION_ID,
+            Number.POSITIVE_INFINITY,
+            { preserveManagedFabric: true },
+        );
+
+        expect(released).toMatchObject({
+            ok: true,
+            released: true,
+            remaining: 0,
+            preservedManagedFabric: true,
+            networkCleanup: { skipped: true, reason: "hyper-v-network-retained-by-request" },
+        });
+        expect(administratorTransactions).toBe(1);
+        expect(mutations).toEqual(["create-switch", "create-gateway", "create-nat"]);
+        expect(JSON.parse(readFileSync(join(root, "network", "hyper-v.json"), "utf8"))).toMatchObject({
+            switchId: SWITCH_ID,
+            natInstanceId: NAT_INSTANCE_ID,
+            managedSwitch: true,
+            managedGateway: true,
+            managedNat: true,
+            allocations: [],
+        });
+
+        // The next device reuses the retained fabric, so it needs no administrator transaction either.
+        expect((await ensureHyperVNetworkAllocation(
+            network,
+            OWNER_ID,
+            "network-test-next",
+            "c".repeat(32),
+        )).ok).toBe(true);
+        expect(administratorTransactions).toBe(1);
+        expect(mutations).toEqual(["create-switch", "create-gateway", "create-nat"]);
+        expect(legacyRun).not.toHaveBeenCalled();
     });
 
     it("refuses a deferred release when the persisted allocation has no incarnation", async () => {

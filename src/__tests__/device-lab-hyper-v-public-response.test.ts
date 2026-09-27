@@ -1,11 +1,22 @@
+import { readFileSync } from "fs";
+import { join } from "path";
 import { describe, expect, it } from "vitest";
+import { HYPER_V_ELEVATED_NETWORK_ERROR_CODES } from "../device-lab/broker/hyper-v/elevated-network-session.js";
 import {
     boundedPowerShellErrorId,
     hyperVProviderDiagnosticCode,
+    hyperVTypedErrorCode,
+    hyperVTypedErrorOperation,
     publicHyperVCreateConfiguration,
     redactHyperVDeviceSecrets,
     redactHyperVResultSecrets,
 } from "../device-lab/broker/hyper-v/public-response.js";
+import {
+    HYPER_V_WINDOWS_SESSION_ERROR_CODES,
+    HyperVWindowsError,
+    type HyperVWindowsErrorCategory,
+    type HyperVWindowsOperation,
+} from "../hyper-v-windows/low-level/index.js";
 
 describe("Hyper-V bounded PowerShell error id (last-resort diagnostic)", () => {
     it("surfaces a bounded hyper-v-ps-* code from a raw PowerShell FullyQualifiedErrorId", () => {
@@ -434,5 +445,199 @@ describe("Hyper-V public response projection", () => {
             lastBootCheck: { ready: false, provider: "hyper-v-powershell-direct", scrubContainmentFailed: "C:\\secret" },
         }) as Record<string, any>;
         expect(contained.lastBootCheck).not.toHaveProperty("scrubContainmentFailed");
+    });
+});
+
+describe("Hyper-V typed error code", () => {
+    const typed = (
+        category: HyperVWindowsErrorCategory,
+        code: string,
+        operation: HyperVWindowsOperation = "New-VM",
+    ) => new HyperVWindowsError({ category, operation, code });
+
+    it.each([
+        ["native FullyQualifiedErrorId", typed("native", "InvalidParameter-Microsoft.HyperV.PowerShell.Commands.GetVM", "Get-VM"),
+            "hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-getvm"],
+        ["native asset code", typed("native", "virtual-machine-create-result-ambiguous"),
+            "hyper-v-ps-virtual-machine-create-result-ambiguous"],
+        ["native code with separators", typed("native", "ObjectNotFound:Some.Value"), "hyper-v-ps-objectnotfound-some-value"],
+        ["native id longer than the bound", typed("native", "RemoveItemUnauthorizedAccessError-Microsoft.PowerShell.Commands.RemoveItemCommand"),
+            "hyper-v-ps-removeitemunauthorizedaccesserror-microsoft-powershell-commands-remov"],
+        ["native asset hyper-v code", typed("native", "hyper-v-module-missing"), "hyper-v-module-missing"],
+        ["transport code", typed("transport", "executor-failed"), "hyper-v-windows-transport-executor-failed"],
+        ["forwarded elevation code", typed("transport", "hyper-v-network-elevation-cancelled", "New-VMSwitch"),
+            "hyper-v-network-elevation-cancelled"],
+        ["protocol code", typed("protocol", "response-envelope-invalid"), "hyper-v-windows-protocol-response-envelope-invalid"],
+        ["validation code", typed("validation", "selector-name-invalid", "Get-VM"), "hyper-v-windows-validation-selector-name-invalid"],
+    ])("keeps a %s in a bounded family the 502 detail admits", (_label, error, expected) => {
+        const code = hyperVTypedErrorCode(error, "hyper-v-vm-create-failed");
+        expect(code).toBe(expected);
+        expect(code).toMatch(/^[a-z0-9-]{1,80}$/);
+        expect(hyperVProviderDiagnosticCode({ error: code, stdout: "", stderr: "" }, "hyper-v-provider-command-failed"))
+            .toBe(code);
+    });
+
+    it.each([
+        ["bounded ccc code", new Error("hyper-v-vm-already-exists"), "hyper-v-vm-already-exists"],
+        ["ccc code with host detail", new Error("hyper-v-base-image-hash-mismatch: C:\\Users\\secret\\base.vhdx"),
+            "hyper-v-base-image-hash-mismatch"],
+        ["host message", new Error("EACCES: permission denied, open 'C:\\Users\\secret\\root.vhdx'"), "hyper-v-vm-create-failed"],
+        ["ccc code longer than the bound", new Error(`hyper-v-${"a".repeat(100)}`), "hyper-v-vm-create-failed"],
+        ["missing error", undefined, "hyper-v-vm-create-failed"],
+        ["typed error with an unknown category", new HyperVWindowsError({
+            category: "C:\\Users\\secret" as HyperVWindowsErrorCategory,
+            operation: "New-VM",
+            code: "executor-failed",
+        }), "hyper-v-vm-create-failed"],
+    ])("falls back to the bounded projection for a %s", (_label, error, expected) => {
+        expect(hyperVTypedErrorCode(error, "hyper-v-vm-create-failed")).toBe(expected);
+    });
+
+    it("reports the failing operation only from the library's closed list", () => {
+        expect(hyperVTypedErrorOperation(typed("native", "x", "Set-VMFirmware"))).toBe("Set-VMFirmware");
+        expect(hyperVTypedErrorOperation(new HyperVWindowsError({
+            category: "native",
+            operation: "C:\\Users\\secret" as HyperVWindowsOperation,
+            code: "x",
+        }))).toBeUndefined();
+        expect(hyperVTypedErrorOperation(new Error("hyper-v-windows-native:New-VM:x"))).toBeUndefined();
+        // A stage error wrapping a typed failure names that failure's primitive, from the same list.
+        expect(hyperVTypedErrorOperation(new Error("hyper-v-base-image-inspection-failed", {
+            cause: typed("native", "vhd-metadata-read-failed", "Get-VHD"),
+        }))).toBe("Get-VHD");
+        expect(hyperVTypedErrorOperation(new Error("hyper-v-base-image-inspection-failed", {
+            cause: new HyperVWindowsError({ category: "native", operation: "C:\\Users\\secret" as HyperVWindowsOperation, code: "x" }),
+        }))).toBeUndefined();
+        expect(hyperVTypedErrorOperation(new Error("hyper-v-base-image-inspection-failed", { cause: new Error("Get-VHD") })))
+            .toBeUndefined();
+    });
+
+    it("admits the minted families only as the whole error field, never from host text", () => {
+        const minted = "hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-newvm";
+        for (const result of [
+            { error: `New-VM failed near ${minted}`, stdout: "", stderr: "" },
+            { error: "", stdout: "", stderr: "Remove-Item : C:\\hyper-v-ps-secret-user\\root.vhdx" },
+            { error: "hyper-v-windows-shell-escape", stdout: "", stderr: "" },
+            { error: `hyper-v-ps-${"a".repeat(80)}`, stdout: "", stderr: "" },
+            { error: "hyper-v-ps", stdout: "", stderr: "" },
+        ]) {
+            expect(hyperVProviderDiagnosticCode(result, "hyper-v-provider-command-failed"))
+                .toBe("hyper-v-provider-command-failed");
+        }
+    });
+
+    it("admits every elevation code the typed network client forwards", () => {
+        for (const code of HYPER_V_ELEVATED_NETWORK_ERROR_CODES) {
+            expect(hyperVProviderDiagnosticCode({ error: code, stdout: "", stderr: "" }, "hyper-v-provider-command-failed"))
+                .toBe(code);
+        }
+    });
+
+    it("keeps a forwarded session code in the transport family but out of the recorded-execution allowlist", () => {
+        for (const code of HYPER_V_WINDOWS_SESSION_ERROR_CODES) {
+            const typedCode = hyperVTypedErrorCode(typed("transport", code, "Get-VMSwitch"), "hyper-v-vm-create-failed");
+            expect(typedCode).toBe(code.replace(/^hyper-v-windows-/, "hyper-v-windows-transport-"));
+            expect(typedCode).toMatch(/^[a-z0-9-]{1,80}$/);
+            expect(hyperVProviderDiagnosticCode({ error: typedCode, stdout: "", stderr: "" }, "hyper-v-provider-command-failed"))
+                .toBe(typedCode);
+            // A recorded execution still cannot report one: the one-shot transport has no such code.
+            expect(hyperVProviderDiagnosticCode({ error: code, stdout: "", stderr: "" }, "hyper-v-provider-command-failed"))
+                .toBe("hyper-v-provider-command-failed");
+        }
+    });
+});
+
+// A failed create's 502 detail is hyperVProviderDiagnosticCode over the code runTypedHyperVCreate
+// returns, so a create-path code the projection does not admit is reported as the generic
+// hyper-v-provider-command-failed -- which is how a real Windows create failure went
+// undiagnosable. Read from source so a new code cannot land without being admitted. The
+// compensation module is deliberately not scanned: runHyperVCreateCompensation records its
+// failures as attempts and never replaces the error that triggered it.
+describe("Hyper-V typed create failure codes", () => {
+    const root = join(__dirname, "..");
+    const broker = readFileSync(join(root, "device-lab-broker.ts"), "utf8");
+    const createStart = broker.indexOf("async function runTypedHyperVCreate(");
+    // Up to the catch: codes thrown inside compensation callbacks never become the result either.
+    const createBody = broker.slice(createStart, broker.indexOf("// Classify the triggering failure", createStart));
+    const sources: readonly (readonly [string, string])[] = [
+        ...[
+            join("device-lab", "broker", "hyper-v", "vm-create-adapter.ts"),
+            join("device-lab", "broker", "hyper-v", "vhd-create-inspection.ts"),
+            join("device-lab", "broker", "hyper-v", "vm-create-preflight.ts"),
+            join("device-lab", "broker", "hyper-v", "deadline.ts"),
+            join("hyper-v-windows", "lifecycle", "vm-create-reconcile.ts"),
+        ].map((relativePath) => [relativePath, readFileSync(join(root, relativePath), "utf8")] as const),
+        ["runTypedHyperVCreate", createBody] as const,
+    ];
+    // Path-assertion labels are prefixes rather than codes: the assertion appends its own suffix.
+    const labelsOf = (source: string) => new Set([...source.matchAll(
+        /(?:const label = |(?:assertNoSymlinkPathComponents|assertDeviceLabPathWithinRoot)\([^()]*?, )"(hyper-v-[a-z0-9-]+)"/g,
+    )].map(([, label]) => label));
+    const codesOf = (source: string) => {
+        const labels = labelsOf(source);
+        return [...new Set([...source.matchAll(/"(hyper-v-[a-z0-9-]+)"/g)].map(([, code]) => code))]
+            .filter((code) => !labels.has(code));
+    };
+    // What each path assertion appends to its label, so the codes a label produces are scanned too.
+    const pathAssertionSuffixes: Readonly<Record<string, readonly string[]>> = {
+        assertNoSymlinkPathComponents: ["path-symlink-rejected"],
+        assertDeviceLabPathWithinRoot: ["path-outside-root", "path-invalid"],
+    };
+    const pathAssertionCallsOf = (source: string) => [...source.matchAll(
+        /\b(assertNoSymlinkPathComponents|assertDeviceLabPathWithinRoot)\([^()]*?, (?:"(hyper-v-[a-z0-9-]+)"|(label))\)/g,
+    )];
+    const pathAssertionCodesOf = (source: string) => {
+        const label = /const label = "(hyper-v-[a-z0-9-]+)"/.exec(source)?.[1];
+        return pathAssertionCallsOf(source).flatMap(([, assertion, literal]) => (
+            pathAssertionSuffixes[assertion ?? ""] ?? []
+        ).map((suffix) => `${literal ?? label}-${suffix}`));
+    };
+
+    it("scans the typed create transaction itself", () => {
+        expect(createStart).toBeGreaterThanOrEqual(0);
+        expect(createBody).toContain('throw new Error("hyper-v-vm-preflight-failed")');
+        expect(createBody).not.toContain("runHyperVCreateCompensation");
+    });
+
+    it.each(sources)("admits every hyper-v code %s can throw", (_label, source) => {
+        const codes = [...codesOf(source), ...pathAssertionCodesOf(source)];
+        expect(codes.length).toBeGreaterThan(0);
+        expect(codes.filter((code) => hyperVProviderDiagnosticCode(
+            { error: code, stdout: "", stderr: "" },
+            "hyper-v-provider-command-failed",
+        ) !== code)).toEqual([]);
+    });
+
+    it("excludes only the known path labels from the scan", () => {
+        expect([...new Set(sources.flatMap(([, source]) => [...labelsOf(source)]))].sort()).toEqual([
+            "hyper-v-base-image",
+            "hyper-v-device-root",
+            "hyper-v-disk",
+        ]);
+        // Every assertion call is one the derivation understands, and it yields exactly these.
+        for (const [, source] of sources) {
+            expect(pathAssertionCallsOf(source)).toHaveLength(
+                [...source.matchAll(/\b(?:assertNoSymlinkPathComponents|assertDeviceLabPathWithinRoot)\(/g)].length,
+            );
+        }
+        expect([...new Set(sources.flatMap(([, source]) => pathAssertionCodesOf(source)))].sort()).toEqual([
+            "hyper-v-base-image-path-invalid",
+            "hyper-v-base-image-path-outside-root",
+            "hyper-v-base-image-path-symlink-rejected",
+            "hyper-v-device-root-path-symlink-rejected",
+            "hyper-v-disk-path-invalid",
+            "hyper-v-disk-path-outside-root",
+            "hyper-v-disk-path-symlink-rejected",
+        ]);
+        const scanned = sources.flatMap(([, source]) => codesOf(source));
+        for (const code of [
+            "hyper-v-create-plan-invalid",
+            "hyper-v-base-image-copy-short-write",
+            "hyper-v-created-disk-short-read",
+            "hyper-v-operation-deadline-exceeded",
+            "hyper-v-create-bootstrap-mac-address-not-derivable",
+        ]) {
+            expect(scanned).toContain(code);
+        }
     });
 });

@@ -77,6 +77,7 @@ const FORWARDED_EXECUTOR_ERROR_CODES: ReadonlySet<string> = new Set([
     "hyper-v-network-elevation-request-failed",
     "hyper-v-network-elevation-termination-unconfirmed",
     "hyper-v-network-elevation-scope-closed",
+    "hyper-v-network-elevation-suppressed",
 ]);
 
 type SuccessEnvelope = {

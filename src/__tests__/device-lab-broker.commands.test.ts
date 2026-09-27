@@ -1,6 +1,6 @@
 import { spawn } from "child_process";
 import { createHash } from "crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "fs";
 import { request } from "http";
 import { hostname, tmpdir, uptime } from "os";
 import { dirname, join } from "path";
@@ -10,6 +10,7 @@ import { createDeviceBrokerServer as createRawDeviceBrokerServer, hiddenChildPro
 import { deviceLabOwnerId, deviceLabProjectMountPath } from "../device-lab-owner.js";
 import { readDeviceRuntimeProcessIdentity } from "../device-lab-process-identity.js";
 import { withSharedMutationLockAsync } from "../device-lab-shared-state.js";
+import { releaseHyperVNetworkAllocationAndCleanup } from "../device-lab/broker/hyper-v/network.js";
 import { hyperVVmName } from "../host-control/hyper-v/index.js";
 import { HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP } from "../hyper-v-windows/low-level/powershell-transport.js";
 import { backendRoot, cleanupOwner, close, listen, ownerRoot, ownerRpcEndpoint, ownerRpcHeaders, writeBrokerDevices } from "./helpers/host-broker-test-fixture.js";
@@ -17,6 +18,17 @@ import {
     configureTypedHyperVNetworkOperations,
     withTypedHyperVNetworkOperations,
 } from "./helpers/hyper-v-network-operation-simulator.js";
+
+// A pass-through, so a test can stand in one network release failure the host would report.
+// Create compensation keeps the shared fabric, so a rollback never reaches an elevated cleanup
+// that could fail on its own here.
+vi.mock("../device-lab/broker/hyper-v/network.js", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("../device-lab/broker/hyper-v/network.js")>();
+    return {
+        ...actual,
+        releaseHyperVNetworkAllocationAndCleanup: vi.fn(actual.releaseHyperVNetworkAllocationAndCleanup),
+    };
+});
 
 function createDeviceBrokerServer(options: Parameters<typeof createRawDeviceBrokerServer>[0]) {
     const networkRunner = options.commandRunner && withTypedHyperVNetworkOperations(options.commandRunner, {
@@ -2012,8 +2024,9 @@ describe("device-lab host broker lifecycle commands", () => {
             const invalidProviderCleanupBody = await invalidProviderCleanup.json();
             expect(invalidProviderCleanupBody).toEqual(expect.objectContaining({
                 error: "hyper-v-delete-reconciliation-cleanup-failed",
+                // A malformed response is a protocol failure, not a native error id.
                 detail: expect.stringContaining(
-                    "hyper-v-ps-response-malformed",
+                    "hyper-v-windows-protocol-response-malformed",
                 ),
             }));
             expect(JSON.stringify(invalidProviderCleanupBody))
@@ -2134,7 +2147,7 @@ describe("device-lab host broker lifecycle commands", () => {
         },
         {
             group: "VM creation",
-            variants: ["nonzero", "timeout", "overflow", "malformed", "wrong-name", "wrong-disk", "artifact-cleanup-failure", "allocation-cleanup-failure", "provision-failure", "provision-ownership-failure", "provision-untagged-failure", "typed-boot-failure", "typed-integration-failure", "typed-media-ambiguous", "missing-credential", "state-claim-conflict"] as const,
+            variants: ["nonzero", "timeout", "overflow", "malformed", "wrong-name", "wrong-disk", "artifact-cleanup-failure", "allocation-cleanup-failure", "allocation-elevation-cancelled", "recovery-native-failure", "provision-failure", "provision-ownership-failure", "provision-untagged-failure", "typed-boot-failure", "typed-integration-failure", "typed-media-ambiguous", "missing-credential", "state-claim-conflict"] as const,
         },
     ])("rolls back Hyper-V resources when create output cannot be trusted ($group)", async ({ variants }) => {
         const cwd = join(process.env.HOME!, "broker-hyper-v-invalid-create-test");
@@ -2268,6 +2281,11 @@ describe("device-lab host broker lifecycle commands", () => {
                         recoveredVariants.add(currentRequestVariant);
                         recoveryCalls += 1;
                     }
+                    if (activeVariant === "recovery-native-failure") {
+                        return { status: 1, stdout: JSON.stringify({ schemaVersion: 1, operation: request.operation, ok: false,
+                            errorCode: "RemoveItemIOError-Microsoft.PowerShell.Commands.RemoveItemCommand" }),
+                        stderr: `Remove-Item : C:\\host-secret\\${rollbackSecretEcho}` };
+                    }
                     const paths = (request as typeof request & { paths?: readonly string[] }).paths ?? [];
                     return { status: 0, stdout: nativeEnvelope(request.operation, [{
                         removedCount: paths.length > 0 && activeVariant && !vhdVariants.has(activeVariant) ? 1 : 0,
@@ -2339,10 +2357,20 @@ describe("device-lab host broker lifecycle commands", () => {
                     networkStateBeforeCleanupFailure = readFileSync(networkStatePath, "utf8");
                     writeFileSync(networkStatePath, "{malformed");
                 }
+                if (variant === "allocation-elevation-cancelled") {
+                    vi.mocked(releaseHyperVNetworkAllocationAndCleanup).mockResolvedValueOnce({
+                        ok: false,
+                        released: false,
+                        statePresent: true,
+                        remaining: 1,
+                        error: "hyper-v-network-elevation-cancelled",
+                        networkCleanup: null,
+                    });
+                }
                 if (variant === "nonzero") return { status: 1, stdout: "", stderr: "New-VM failed with a host-specific secret" };
                 if (variant === "timeout") return { status: null, stdout: "", stderr: "", error: "device-lab backend tool timed out", timedOut: true };
                 if (variant === "overflow") return { status: null, stdout: "partial output", stderr: "", error: "device-lab provider output exceeded limit" };
-                if (["malformed", "artifact-cleanup-failure", "allocation-cleanup-failure"].includes(variant)) return { status: 0, stdout: "not-json", stderr: "" };
+                if (["malformed", "artifact-cleanup-failure", "allocation-cleanup-failure", "allocation-elevation-cancelled", "recovery-native-failure"].includes(variant)) return { status: 0, stdout: "not-json", stderr: "" };
                 if (variant === "wrong-name") return { status: 0, stdout: JSON.stringify({ schemaVersion: 1, operation: "New-VM", ok: true, items: [{
                     id: "12345678-1234-1234-1234-123456789abc", name: "foreign-vm", state: "Off",
                     status: "Operating normally", notes: "", uptimeMilliseconds: 0, generation: 2, checkpointType: "Disabled",
@@ -2377,16 +2405,44 @@ describe("device-lab host broker lifecycle commands", () => {
                 const privateRoot = join(process.env.HOME!, ".ccc", "device-broker-private", "owners", ownerId, "windows-vm", `invalid-create-${variant}`);
                 const networkStatePath = join(process.env.HOME!, ".ccc", "device-broker-private", "network", "hyper-v.json");
                 if (variant === "artifact-cleanup-failure") {
-                    expect(body).toEqual(expect.objectContaining({ error: "hyper-v-create-invalid-result", rollback: expect.objectContaining({ ok: false, error: "hyper-v-recovery-cleanup-failed" }) }));
+                    expect(body).toEqual(expect.objectContaining({ error: "hyper-v-create-invalid-result", rollback: expect.objectContaining({ ok: false, error: "hyper-v-recovery-cleanup-failed", detail: "hyper-v-artifact-cleanup-failed" }) }));
+                    expect(body.rollback).not.toHaveProperty("stage");
                     expect(lstatSync(privateRoot).isSymbolicLink()).toBe(true);
                     const allocations = existsSync(networkStatePath) ? JSON.parse(readFileSync(networkStatePath, "utf8")).allocations : [];
                     expect(allocations).not.toEqual(expect.arrayContaining([expect.objectContaining({ ownerId, deviceId: `invalid-create-${variant}` })]));
                     rmSync(privateRoot, { force: true });
-                } else if (variant === "allocation-cleanup-failure") {
-                    expect(body).toEqual(expect.objectContaining({ error: "hyper-v-create-invalid-result", rollback: expect.objectContaining({ ok: false, error: "hyper-v-recovery-cleanup-failed" }) }));
+                } else if (variant === "allocation-cleanup-failure" || variant === "allocation-elevation-cancelled") {
+                    // The release failed, so the artifacts were never touched: the rollback names the
+                    // network error and its stage, not an artifact cleanup that did not run.
+                    expect(body).toEqual(expect.objectContaining({
+                        error: "hyper-v-create-invalid-result",
+                        rollback: {
+                            ok: false,
+                            status: 502,
+                            error: "hyper-v-recovery-cleanup-failed",
+                            stage: "network-release",
+                            detail: variant === "allocation-cleanup-failure"
+                                ? "hyper-v-network-state-state-invalid"
+                                : "hyper-v-network-elevation-cancelled",
+                        },
+                    }));
                     expect(existsSync(privateRoot)).toBe(true);
-                    expect(networkStateBeforeCleanupFailure).not.toBeNull();
-                    writeFileSync(networkStatePath, networkStateBeforeCleanupFailure!);
+                    if (variant === "allocation-cleanup-failure") {
+                        expect(networkStateBeforeCleanupFailure).not.toBeNull();
+                        writeFileSync(networkStatePath, networkStateBeforeCleanupFailure!);
+                    }
+                } else if (variant === "recovery-native-failure") {
+                    // The typed library's own code for the step that failed, not its bare category.
+                    expect(body).toEqual(expect.objectContaining({
+                        error: "hyper-v-create-invalid-result",
+                        rollback: {
+                            ok: false,
+                            status: 502,
+                            error: "hyper-v-recovery-failed",
+                            detail: "hyper-v-ps-removeitemioerror-microsoft-powershell-commands-removeitemcommand",
+                        },
+                    }));
+                    expect(existsSync(privateRoot)).toBe(true);
                 } else if (variant === "wrong-disk") {
                     expect(body).toEqual(expect.objectContaining({
                         error: "hyper-v-create-invalid-result",
@@ -2406,6 +2462,12 @@ describe("device-lab host broker lifecycle commands", () => {
                                         : "hyper-v-base-image-parent-invalid",
                         rollback: expect.objectContaining({ ok: true, recoveredVm: false, removedDisk: false }),
                     }));
+                    // A failed typed read still names its primitive; a policy mismatch has none.
+                    if (["vhd-native-failure", "vhd-missing-clone", "vhd-reparse", "vhd-clone-native-failure", "vhd-malformed", "vhd-clone-malformed"].includes(variant)) {
+                        expect(body.operation).toBe("Get-VHD");
+                    } else {
+                        expect(body).not.toHaveProperty("operation");
+                    }
                     expect(createdVmNames.has(`invalid-create-${variant}`)).toBe(false);
                     expect(existsSync(privateRoot)).toBe(false);
                     const allocations = existsSync(networkStatePath) ? JSON.parse(readFileSync(networkStatePath, "utf8")).allocations : [];
@@ -2452,7 +2514,9 @@ describe("device-lab host broker lifecycle commands", () => {
                         rollback: expect.objectContaining({ ok: true, removedDisk: true }),
                     }));
                     if (variant === "nonzero") {
-                        expect(body.detail).toBe("hyper-v-provider-command-failed");
+                        // The typed client's own code, not the generic provider fallback.
+                        expect(body.detail).toBe("hyper-v-windows-protocol-response-malformed");
+                        expect(body.operation).toBe("New-VM");
                         expect(JSON.stringify(body)).not.toContain("host-specific secret");
                     }
                     expect(existsSync(privateRoot)).toBe(false);
@@ -2467,6 +2531,525 @@ describe("device-lab host broker lifecycle commands", () => {
             cleanupOwner(ownerId);
         }
     }, 120000);
+
+    // Rolling back a failed create is compensation, not a delete request. Tearing the shared
+    // switch, gateway and NAT down behind it needs Administrator, which is a UAC prompt in an
+    // unattended run and an orphaned allocation when nobody answers it.
+    it.each([
+        { name: "typed VM creation failure", failure: "vm-create", error: "provider-command-failed" },
+        { name: "guest provisioning failure", failure: "provision", error: "hyper-v-guest-provision-failed" },
+    ] as const)("keeps the shared Hyper-V fabric when a failed create compensates its only allocation ($name)", async ({ failure, error }) => {
+        const cwd = join(process.env.HOME!, "broker-hyper-v-compensation-fabric-test");
+        mkdirSync(cwd, { recursive: true });
+        const ownerId = deviceLabOwnerId(cwd);
+        const profileRoot = join(process.env.HOME!, ".ccc", "device-broker-private", "owners", ownerId, "images", "hyper-v", "windows-11");
+        const imagePath = join(profileRoot, "base.vhdx");
+        mkdirSync(profileRoot, { recursive: true });
+        writeFileSync(imagePath, "owner-scoped-vhdx");
+        writeFileSync(join(profileRoot, "manifest.json"), JSON.stringify({
+            version: 3,
+            profile: "windows-11",
+            catalogId: "user-provided-vhdx",
+            sourceUrl: null,
+            sourceFormat: "vhdx",
+            sourceSha256: null,
+            licenseId: null,
+            generation: 2,
+            secureBootTemplate: "MicrosoftWindows",
+            preparationVersion: 1,
+            imagePath,
+            sha256: createHash("sha256").update("owner-scoped-vhdx").digest("hex"),
+            sizeBytes: 17,
+            virtualSizeBytes: 64 * 1024 * 1024 * 1024,
+            vhdType: "Dynamic",
+            preparedAt: new Date().toISOString(),
+        }));
+        const networkStatePath = join(process.env.HOME!, ".ccc", "device-broker-private", "network", "hyper-v.json");
+        const fabricMutations: string[] = [];
+        const commandRunner = vi.fn((command) => {
+            const script = providerScript(command);
+            if (failure === "provision" && script.includes("Write-CccIso $IsoFiles $ProvisioningMedia 'CCC_UNATTEND'")) {
+                return { mode: command.mode, provider: command.provider, status: 1, stdout: "", stderr: "hyper-v-provisioning-media-create-failed: host detail" };
+            }
+            throw new Error("unexpected Hyper-V command");
+        });
+        configureTypedHyperVNetworkOperations(commandRunner, {
+            simulateVmCreate: true,
+            onOperation(request) {
+                if (["New-VMSwitch", "New-NetIPAddress", "New-NetNat", "Remove-NetNat", "Remove-NetIPAddress", "Remove-VMSwitch"].includes(request.operation)) {
+                    fabricMutations.push(request.operation);
+                }
+            },
+            beforeOperation(request) {
+                if (request.operation === "Remove-HostFiles") {
+                    return { status: 0, stdout: nativeEnvelope(request.operation, [{ removedCount: 0 }]), stderr: "" };
+                }
+                if (request.operation === "Configure-VMGuestBoot") {
+                    return { status: 0, stdout: nativeEnvelope(request.operation, []), stderr: "" };
+                }
+                if (failure === "vm-create" && request.operation === "New-VM") {
+                    return { status: 1, stdout: "", stderr: "New-VM failed with a host-specific detail" };
+                }
+                return null;
+            },
+        });
+        const server = createDeviceBrokerServer({
+            cwd,
+            host: "127.0.0.1",
+            port: 0,
+            platform: "win32",
+            providerPaths: { "powershell.exe": "/fake/powershell.exe" },
+            commandRunner,
+        });
+        const baseUrl = await listen(server);
+        const create = (deviceId: string) => fetch(ownerRpcEndpoint(baseUrl, ownerId), {
+            method: "POST",
+            headers: ownerRpcHeaders(ownerId),
+            body: JSON.stringify({ method: "broker.command.invoke", params: { backend: "windows-vm", command: "device_create", deviceId, name: "Compensated VM", profile: "windows-11" } }),
+        });
+        try {
+            for (const deviceId of ["compensated-first", "compensated-second"]) {
+                const response = await create(deviceId);
+                const body = await response.json();
+                expect(response.status, JSON.stringify(body)).toBe(502);
+                expect(body).toEqual(expect.objectContaining({ error, rollback: expect.objectContaining({ ok: true }) }));
+                // The fabric is built once for the first create and never torn down, so neither
+                // rollback nor the second create needed an administrator transaction.
+                expect(fabricMutations).toEqual(["New-VMSwitch", "New-NetIPAddress", "New-NetNat"]);
+                expect(JSON.parse(readFileSync(networkStatePath, "utf8"))).toMatchObject({
+                    managedSwitch: true,
+                    managedGateway: true,
+                    managedNat: true,
+                    allocations: [],
+                });
+                expect(existsSync(join(process.env.HOME!, ".ccc", "device-broker-private", "owners", ownerId, "windows-vm", deviceId))).toBe(false);
+            }
+        } finally {
+            await close(server);
+            cleanupOwner(ownerId);
+        }
+    }, 60000);
+
+    // A post-create rollback that fails names its own cause: a native removal failure keeps its
+    // id, and a failed network release is reported by stage beside artifacts it never touched.
+    it.each([
+        { name: "native removal failure", failure: "remove-host-files" },
+        { name: "network release failure", failure: "release" },
+    ] as const)("reports a failed provisioning rollback by its own cause ($name)", async ({ failure }) => {
+        const cwd = join(process.env.HOME!, "broker-hyper-v-rollback-cause-test");
+        mkdirSync(cwd, { recursive: true });
+        const ownerId = deviceLabOwnerId(cwd);
+        const profileRoot = join(process.env.HOME!, ".ccc", "device-broker-private", "owners", ownerId, "images", "hyper-v", "windows-11");
+        const imagePath = join(profileRoot, "base.vhdx");
+        mkdirSync(profileRoot, { recursive: true });
+        writeFileSync(imagePath, "owner-scoped-vhdx");
+        writeFileSync(join(profileRoot, "manifest.json"), JSON.stringify({
+            version: 3,
+            profile: "windows-11",
+            catalogId: "user-provided-vhdx",
+            sourceUrl: null,
+            sourceFormat: "vhdx",
+            sourceSha256: null,
+            licenseId: null,
+            generation: 2,
+            secureBootTemplate: "MicrosoftWindows",
+            preparationVersion: 1,
+            imagePath,
+            sha256: createHash("sha256").update("owner-scoped-vhdx").digest("hex"),
+            sizeBytes: 17,
+            virtualSizeBytes: 64 * 1024 * 1024 * 1024,
+            vhdType: "Dynamic",
+            preparedAt: new Date().toISOString(),
+        }));
+        const deviceId = `rollback-cause-${failure}`;
+        const privateRoot = join(process.env.HOME!, ".ccc", "device-broker-private", "owners", ownerId, "windows-vm", deviceId);
+        let provisioningFailed = false;
+        const commandRunner = vi.fn((command) => {
+            if (providerScript(command).includes("Write-CccIso $IsoFiles $ProvisioningMedia 'CCC_UNATTEND'")) {
+                provisioningFailed = true;
+                if (failure === "release") {
+                    vi.mocked(releaseHyperVNetworkAllocationAndCleanup).mockResolvedValueOnce({
+                        ok: false,
+                        released: false,
+                        statePresent: true,
+                        remaining: 1,
+                        error: "hyper-v-network-elevation-cancelled",
+                        networkCleanup: null,
+                    });
+                }
+                return { mode: command.mode, provider: command.provider, status: 1, stdout: "", stderr: "hyper-v-provisioning-media-create-failed: host detail" };
+            }
+            throw new Error("unexpected Hyper-V command");
+        });
+        configureTypedHyperVNetworkOperations(commandRunner, {
+            simulateVmCreate: true,
+            beforeOperation(request) {
+                if (request.operation === "Remove-HostFiles") {
+                    if (failure === "remove-host-files" && provisioningFailed) {
+                        return { status: 1, stdout: JSON.stringify({ schemaVersion: 1, operation: request.operation, ok: false,
+                            errorCode: "RemoveItemIOError-Microsoft.PowerShell.Commands.RemoveItemCommand" }),
+                        stderr: "Remove-Item : C:\\host-secret\\rollback-cause" };
+                    }
+                    return { status: 0, stdout: nativeEnvelope(request.operation, [{ removedCount: 0 }]), stderr: "" };
+                }
+                if (request.operation === "Configure-VMGuestBoot") {
+                    return { status: 0, stdout: nativeEnvelope(request.operation, []), stderr: "" };
+                }
+                return null;
+            },
+        });
+        const server = createDeviceBrokerServer({
+            cwd,
+            host: "127.0.0.1",
+            port: 0,
+            platform: "win32",
+            providerPaths: { "powershell.exe": "/fake/powershell.exe" },
+            commandRunner,
+        });
+        const baseUrl = await listen(server);
+        try {
+            const response = await fetch(ownerRpcEndpoint(baseUrl, ownerId), {
+                method: "POST",
+                headers: ownerRpcHeaders(ownerId),
+                body: JSON.stringify({ method: "broker.command.invoke", params: { backend: "windows-vm", command: "device_create", deviceId, name: "Rollback cause VM", profile: "windows-11" } }),
+            });
+            const body = await response.json();
+            expect(response.status, JSON.stringify(body)).toBe(502);
+            expect(body.error).toBe("hyper-v-guest-provision-failed");
+            if (failure === "remove-host-files") {
+                expect(body.rollback).toEqual(expect.objectContaining({
+                    attempted: true,
+                    ok: false,
+                    reason: "hyper-v-rollback-command-failed",
+                    result: expect.objectContaining({
+                        diagnosticCode: "hyper-v-ps-removeitemioerror-microsoft-powershell-commands-removeitemcommand",
+                    }),
+                }));
+            } else {
+                expect(body.rollback).toEqual({
+                    attempted: true,
+                    ok: false,
+                    stage: "network-release",
+                    result: expect.objectContaining({ status: 0, outputRedacted: true }),
+                    artifacts: { ok: false, attempted: false, removed: false },
+                    allocation: { ok: false, released: false, error: "hyper-v-network-elevation-cancelled" },
+                });
+            }
+            expect(existsSync(privateRoot)).toBe(true);
+            expect(JSON.stringify(body)).not.toContain("host-secret");
+            expect(JSON.stringify(body)).not.toContain("host detail");
+        } finally {
+            await close(server);
+            cleanupOwner(ownerId);
+        }
+    }, 60000);
+
+    // A create that fails without a rollback of its own is compensated by the create wrapper. When
+    // that compensation's network release fails, the stage is reported beside the failure it was
+    // compensating, so neither is lost.
+    it("names the stage of a failed wrapper compensation beside the create failure it followed", async () => {
+        const cwd = join(process.env.HOME!, "broker-hyper-v-wrapper-compensation-test");
+        mkdirSync(cwd, { recursive: true });
+        const ownerId = deviceLabOwnerId(cwd);
+        const profileRoot = join(process.env.HOME!, ".ccc", "device-broker-private", "owners", ownerId, "images", "hyper-v", "windows-11");
+        const imagePath = join(profileRoot, "base.vhdx");
+        mkdirSync(profileRoot, { recursive: true });
+        writeFileSync(imagePath, "owner-scoped-vhdx");
+        writeFileSync(join(profileRoot, "manifest.json"), JSON.stringify({
+            version: 3,
+            profile: "windows-11",
+            catalogId: "user-provided-vhdx",
+            sourceUrl: null,
+            sourceFormat: "vhdx",
+            sourceSha256: null,
+            licenseId: null,
+            generation: 2,
+            secureBootTemplate: "MicrosoftWindows",
+            preparationVersion: 1,
+            imagePath,
+            sha256: createHash("sha256").update("owner-scoped-vhdx").digest("hex"),
+            sizeBytes: 17,
+            virtualSizeBytes: 64 * 1024 * 1024 * 1024,
+            vhdType: "Dynamic",
+            preparedAt: new Date().toISOString(),
+        }));
+        const deviceId = "wrapper-compensation";
+        const privateRoot = join(process.env.HOME!, ".ccc", "device-broker-private", "owners", ownerId, "windows-vm", deviceId);
+        const movedRoot = join(cwd, "moved-private-root");
+        let swapped = false;
+        const commandRunner = vi.fn(() => {
+            throw new Error("unexpected Hyper-V command");
+        });
+        configureTypedHyperVNetworkOperations(commandRunner, {
+            simulateVmCreate: true,
+            onOperation(request) {
+                // Once the incarnation is on record and the allocation is being made, the private
+                // root turns into a symlink, so the create fails its own root check with no rollback.
+                if (!swapped && request.operation === "New-VMSwitch") {
+                    swapped = true;
+                    rmSync(movedRoot, { recursive: true, force: true });
+                    renameSync(privateRoot, movedRoot);
+                    symlinkSync(movedRoot, privateRoot, "dir");
+                    vi.mocked(releaseHyperVNetworkAllocationAndCleanup).mockResolvedValueOnce({
+                        ok: false,
+                        released: false,
+                        statePresent: true,
+                        remaining: 1,
+                        error: "hyper-v-network-elevation-cancelled",
+                        networkCleanup: null,
+                    });
+                }
+            },
+            beforeOperation(request) {
+                if (request.operation === "Remove-HostFiles") {
+                    return { status: 0, stdout: nativeEnvelope(request.operation, [{ removedCount: 0 }]), stderr: "" };
+                }
+                return null;
+            },
+        });
+        const server = createDeviceBrokerServer({
+            cwd,
+            host: "127.0.0.1",
+            port: 0,
+            platform: "win32",
+            providerPaths: { "powershell.exe": "/fake/powershell.exe" },
+            commandRunner,
+        });
+        const baseUrl = await listen(server);
+        try {
+            const response = await fetch(ownerRpcEndpoint(baseUrl, ownerId), {
+                method: "POST",
+                headers: ownerRpcHeaders(ownerId),
+                body: JSON.stringify({ method: "broker.command.invoke", params: { backend: "windows-vm", command: "device_create", deviceId, name: "Wrapper compensation", profile: "windows-11" } }),
+            });
+            const body = await response.json();
+            expect(swapped).toBe(true);
+            expect(response.status, JSON.stringify(body)).toBe(502);
+            expect(body).toEqual(expect.objectContaining({
+                error: "hyper-v-create-allocation-cleanup-failed",
+                detail: "hyper-v-network-elevation-cancelled",
+                stage: "network-release",
+                lifecycleFailure: expect.objectContaining({
+                    error: "hyper-v-private-root-invalid",
+                    detail: "hyper-v-private-root-path-symlink-rejected",
+                }),
+            }));
+        } finally {
+            await close(server);
+            rmSync(privateRoot, { force: true });
+            cleanupOwner(ownerId);
+            rmSync(movedRoot, { recursive: true, force: true });
+        }
+    }, 60000);
+
+    // The 502 detail names what failed: the typed library's code in a bounded family, with the
+    // operation that raised it, and never the host text that came back beside it.
+    it.each([
+        {
+            name: "native error id",
+            result: {
+                status: 1,
+                stdout: JSON.stringify({ schemaVersion: 1, operation: "New-VM", ok: false, errorCode: "InvalidParameter-Microsoft.HyperV.PowerShell.Commands.NewVM" }),
+                stderr: "New-VM : host-specific secret at C:\\Users\\secret-user\\vm",
+            },
+            detail: "hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-newvm",
+        },
+        {
+            name: "transport failure",
+            result: { status: null, stdout: "", stderr: "host-specific secret", error: "spawn C:\\Users\\secret-user\\powershell.exe failed" },
+            detail: "hyper-v-windows-transport-executor-failed",
+        },
+    ] as const)("reports a failed typed create by its own code and operation ($name)", async ({ result, detail }) => {
+        const cwd = join(process.env.HOME!, "broker-hyper-v-typed-create-code-test");
+        mkdirSync(cwd, { recursive: true });
+        const ownerId = deviceLabOwnerId(cwd);
+        const profileRoot = join(process.env.HOME!, ".ccc", "device-broker-private", "owners", ownerId, "images", "hyper-v", "windows-11");
+        const imagePath = join(profileRoot, "base.vhdx");
+        mkdirSync(profileRoot, { recursive: true });
+        writeFileSync(imagePath, "owner-scoped-vhdx");
+        writeFileSync(join(profileRoot, "manifest.json"), JSON.stringify({
+            version: 3,
+            profile: "windows-11",
+            catalogId: "user-provided-vhdx",
+            sourceUrl: null,
+            sourceFormat: "vhdx",
+            sourceSha256: null,
+            licenseId: null,
+            generation: 2,
+            secureBootTemplate: "MicrosoftWindows",
+            preparationVersion: 1,
+            imagePath,
+            sha256: createHash("sha256").update("owner-scoped-vhdx").digest("hex"),
+            sizeBytes: 17,
+            virtualSizeBytes: 64 * 1024 * 1024 * 1024,
+            vhdType: "Dynamic",
+            preparedAt: new Date().toISOString(),
+        }));
+        const commandRunner = vi.fn(() => {
+            throw new Error("unexpected Hyper-V command");
+        });
+        configureTypedHyperVNetworkOperations(commandRunner, {
+            simulateVmCreate: true,
+            beforeOperation(request) {
+                if (request.operation === "Remove-HostFiles") {
+                    return { status: 0, stdout: nativeEnvelope(request.operation, [{ removedCount: 0 }]), stderr: "" };
+                }
+                return request.operation === "New-VM" ? result : null;
+            },
+        });
+        const server = createDeviceBrokerServer({
+            cwd,
+            host: "127.0.0.1",
+            port: 0,
+            platform: "win32",
+            providerPaths: { "powershell.exe": "/fake/powershell.exe" },
+            commandRunner,
+        });
+        const baseUrl = await listen(server);
+        try {
+            const response = await fetch(ownerRpcEndpoint(baseUrl, ownerId), {
+                method: "POST",
+                headers: ownerRpcHeaders(ownerId),
+                body: JSON.stringify({ method: "broker.command.invoke", params: { backend: "windows-vm", command: "device_create", deviceId: "typed-create-code", name: "Typed create code", profile: "windows-11" } }),
+            });
+            const body = await response.json();
+            expect(response.status, JSON.stringify(body)).toBe(502);
+            expect(body).toEqual(expect.objectContaining({
+                error: "provider-command-failed",
+                detail,
+                operation: "New-VM",
+                rollback: expect.objectContaining({ ok: true }),
+            }));
+            expect(JSON.stringify(body)).not.toContain("secret");
+            expect(JSON.stringify(body)).not.toContain("Microsoft.HyperV");
+        } finally {
+            await close(server);
+            cleanupOwner(ownerId);
+        }
+    }, 60000);
+
+    // Only an explicit device_delete may tear the shared fabric down. The stop and create cases
+    // replay the same journal as compensation and then fail on their own terms: the replay removed
+    // the device the stop was for, and this fixture prepares no image for the create.
+    it.each([
+        { command: "device_stop", keepsFabric: true, status: 404, error: "owner-device-not-found" },
+        { command: "device_create", keepsFabric: true, status: 409, error: "hyper-v-base-image-not-prepared" },
+        { command: "device_delete", keepsFabric: false, status: 200, error: null },
+    ] as const)("replays a pending Hyper-V delete journal ahead of $command with the matching fabric policy", async ({ command, keepsFabric, status, error }) => {
+        const cwd = join(process.env.HOME!, "broker-hyper-v-journal-fabric-test");
+        mkdirSync(cwd, { recursive: true });
+        const ownerId = deviceLabOwnerId(cwd);
+        const deviceId = "journal-fabric";
+        const incarnationId = "c".repeat(32);
+        const vmId = "12345678-1234-1234-1234-123456789abc";
+        const vmName = hyperVVmName(ownerId, deviceId, incarnationId);
+        const privateRoot = join(process.env.HOME!, ".ccc", "device-broker-private", "owners", ownerId, "windows-vm", deviceId);
+        const deviceRoot = join(privateRoot, "artifacts");
+        const diskPath = join(deviceRoot, "disks", "root.vhdx");
+        mkdirSync(dirname(diskPath), { recursive: true });
+        writeFileSync(diskPath, "fake-root-vhdx");
+        writeFileSync(join(deviceRoot, "operation.json"), JSON.stringify({
+            version: 1,
+            operationId: "11111111-2222-3333-4444-555555555555",
+            ownerId,
+            deviceId,
+            incarnationId,
+            command: "device_delete",
+            vmId,
+            vmName,
+            diskPath,
+            startedAt: new Date().toISOString(),
+        }));
+        const networkRoot = join(process.env.HOME!, ".ccc", "device-broker-private", "network");
+        const networkStatePath = join(networkRoot, "hyper-v.json");
+        mkdirSync(networkRoot, { recursive: true });
+        writeFileSync(networkStatePath, JSON.stringify({
+            version: 1,
+            switchName: "CCC Device Lab",
+            switchId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            marker: "ccc-device-lab:hyper-v-network:v1",
+            natName: "CCCDeviceLab",
+            natInstanceId: "ccc-nat-instance-1",
+            prefix: "172.29.0.0/24",
+            gateway: "172.29.0.1",
+            outboundPolicy: "nat",
+            managedSwitch: true,
+            managedGateway: true,
+            managedNat: true,
+            allocations: [{ ownerId, deviceId, incarnationId, address: "172.29.0.20", macAddress: "02:11:22:33:44:55", allocatedAt: new Date().toISOString() }],
+        }));
+        const fabricTeardowns: string[] = [];
+        const commandRunner = vi.fn(() => {
+            throw new Error("unexpected Hyper-V command");
+        });
+        configureTypedHyperVNetworkOperations(commandRunner, {
+            onOperation(request) {
+                if (["Remove-NetNat", "Remove-NetIPAddress", "Remove-VMSwitch"].includes(request.operation)) {
+                    fabricTeardowns.push(request.operation);
+                }
+            },
+            beforeOperation(request) {
+                // The journaled VM is already gone; the replay proves that and finishes the delete.
+                if (request.operation === "Get-VM" && request.selector) {
+                    return { status: 0, stdout: nativeEnvelope(request.operation, []), stderr: "" };
+                }
+                if (request.operation === "Remove-HostFiles") {
+                    return { status: 0, stdout: nativeEnvelope(request.operation, [{ removedCount: 1 }]), stderr: "" };
+                }
+                return null;
+            },
+        });
+        const server = createDeviceBrokerServer({
+            cwd,
+            host: "127.0.0.1",
+            port: 0,
+            platform: "win32",
+            providerPaths: { "powershell.exe": "/fake/powershell.exe" },
+            commandRunner,
+        });
+        const baseUrl = await listen(server);
+        try {
+            const response = await fetch(ownerRpcEndpoint(baseUrl, ownerId), {
+                method: "POST",
+                headers: ownerRpcHeaders(ownerId),
+                body: JSON.stringify({
+                    method: "broker.command.invoke",
+                    params: command === "device_create"
+                        ? { backend: "windows-vm", command, deviceId, name: "Journal fabric", profile: "windows-11" }
+                        : { backend: "windows-vm", command, deviceId, incarnationId },
+                }),
+            });
+            const body = await response.json();
+            expect(response.status, JSON.stringify(body)).toBe(status);
+            expect(existsSync(privateRoot)).toBe(false);
+            if (keepsFabric) {
+                expect(body).toEqual(expect.objectContaining({ error }));
+                expect(fabricTeardowns).toEqual([]);
+                expect(JSON.parse(readFileSync(networkStatePath, "utf8"))).toMatchObject({
+                    managedSwitch: true,
+                    managedGateway: true,
+                    managedNat: true,
+                    allocations: [],
+                });
+            } else {
+                expect(body).toEqual(expect.objectContaining({
+                    result: expect.objectContaining({
+                        reconciled: true,
+                        hyperVNetworkAllocationCleanup: expect.objectContaining({
+                            released: true,
+                            remaining: 0,
+                            networkCleanup: expect.objectContaining({ removedNat: true, removedGateway: true, removedSwitch: true }),
+                        }),
+                    }),
+                }));
+                expect(fabricTeardowns).toEqual(["Remove-NetNat", "Remove-NetIPAddress", "Remove-VMSwitch"]);
+                expect(existsSync(networkStatePath)).toBe(false);
+            }
+        } finally {
+            await close(server);
+            cleanupOwner(ownerId);
+        }
+    });
 
     it("refreshes canonical Windows Sandbox configs before starting existing definitions", async () => {
         const ownerId = deviceLabOwnerId("/project/broker-windows-config-refresh-test");

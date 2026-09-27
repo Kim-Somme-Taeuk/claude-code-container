@@ -3244,9 +3244,10 @@ remain unchanged where they are the behavior under test.
     proves the exact switch ID, NAT InstanceID, and subnet prefix. With that
     complete evidence, CCC repairs only the switch marker under elevation,
     verifies the write, and restores the original marker if a later step fails.
-    Brokers advertise and Level 3 requires `hyper-v-setup-network-v10` and
-    `hyper-v-network-failure-diagnostics-v9`, replacing older brokers that lack
-    the exact-identity marker repair contract.
+    Brokers advertise and Level 3 requires `hyper-v-setup-network-v11` and
+    `hyper-v-network-failure-diagnostics-v11` (this contract arrived in v10 and
+    v9), replacing older brokers that lack the exact-identity marker repair
+    contract.
 65. Unattended Hyper-V Linux guests use Canonical's dated generic Ubuntu Server
     QCOW2. Canonical documents the Azure VHD artifact as unable to run on
     on-premises Hyper-V, so CCC rejects that source. The provider verifies the
@@ -3296,7 +3297,8 @@ remain unchanged where they are the behavior under test.
     and operation journal may be finalized, and the owned switch/NAT state is
     retained for attached CCC guests. Other cleanup failures remain fail-closed
     and preserve the allocation for diagnosis and retry. Brokers advertise and
-    Level 3 requires `hyper-v-setup-network-v10` for this cleanup contract.
+    Level 3 requires `hyper-v-setup-network-v11` (this cleanup contract arrived
+    in v10).
 67. Automatic Hyper-V image acquisition holds source and partial VHDX file
     artifacts in a non-inheriting Windows DACL restricted to the current CCC
     user SID, SYSTEM, and Administrators. Setup recursively rejects reparse
@@ -3415,3 +3417,26 @@ remain unchanged where they are the behavior under test.
     to `results/device-lab-real/hyper-v-linux-diagnostic-latest.json` plus a
     timestamped record before cleanup. Host paths, VM names, credentials,
     endpoints, and raw PowerShell output are never copied into these records.
+74. An unattended Hyper-V run needs no UAC prompt when the CCC fabric
+    already exists and at most one when it does not. Broker-internal
+    compensation (failed-create rollback, create-residue recovery, and journal
+    replay ahead of any command other than `device_delete`) releases the
+    device's allocation but keeps the shared switch, gateway, and NAT, so it
+    never needs Administrator; only an explicit `device_delete` without
+    `preserveNetwork` tears the fabric down (`hyper-v-setup-network-v11`). The
+    one exception is create-residue recovery for a device with no recorded
+    incarnation, which stays destructive; see
+    `doc/device-lab/REQ__hyper-v-network-teardown-identity.md` for the exact
+    rule. A declined or unanswered prompt sets the broker's in-memory elevation
+    gate to `refused`: later administrator transactions start no relay and fail
+    with `hyper-v-network-elevation-suppressed` until the broker restarts. The
+    gate can only deny, is never persisted, and is reported as
+    `hyperVElevationGate` in the broker `/status`. The Level 3 broker preflight
+    prints it and, while it is `refused`, stops the run before any step starts
+    (the non-Hyper-V Level 3 steps included), naming the remedy: restart the
+    broker, and run an attended `ccc devices setup hyper-v --confirm` first when
+    nobody will answer a prompt. Typed create failures report a bounded `hyper-v-ps-*` or
+    `hyper-v-windows-<category>-*` detail plus the failed `operation`
+    (`hyper-v-network-failure-diagnostics-v11`), and batch exact-name VM
+    absence is proven by a host-wide inventory read
+    (`hyper-v-windows-library-v17`).

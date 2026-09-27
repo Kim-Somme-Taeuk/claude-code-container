@@ -46,7 +46,7 @@ function sendCurrentBrokerStatus(req: { url?: string }, res: { setHeader(name: s
 
 describe("device-lab MCP", () => {
     it("requires the current Hyper-V computer-use broker capability and caps screenshot responses separately", () => {
-        expect(REQUIRED_CCC_HOST_BROKER_CAPABILITIES).toContain("hyper-v-windows-library-v16");
+        expect(REQUIRED_CCC_HOST_BROKER_CAPABILITIES).toContain("hyper-v-windows-library-v17");
         expect(REQUIRED_CCC_HOST_BROKER_CAPABILITIES).toContain("hyper-v-linux-x11-type-v2");
         expect(BROKER_RPC_SCREENSHOT_RESPONSE_LIMIT_BYTES).toBe(8 * 1024 * 1024);
         expect(BROKER_RPC_SCREENSHOT_RESPONSE_LIMIT_BYTES).toBeLessThan(BROKER_RPC_RESPONSE_LIMIT_BYTES);
@@ -1291,8 +1291,8 @@ describe("device-lab MCP", () => {
                     ok: true,
                     broker: {
                         implemented: [
-                            ...REQUIRED_CCC_HOST_BROKER_CAPABILITIES.filter((capability) => capability !== "hyper-v-setup-network-v10"),
-                            "hyper-v-setup-network-v7",
+                            ...REQUIRED_CCC_HOST_BROKER_CAPABILITIES.filter((capability) => capability !== "hyper-v-setup-network-v11"),
+                            "hyper-v-setup-network-v10",
                         ],
                     },
                 }));
@@ -1321,7 +1321,7 @@ describe("device-lab MCP", () => {
                     reused: false,
                     error: "host-broker-incompatible",
                     compatibility: expect.objectContaining({
-                        missingCapabilities: ["hyper-v-setup-network-v10"],
+                        missingCapabilities: ["hyper-v-setup-network-v11"],
                     }),
                 }),
             }));
@@ -1342,7 +1342,7 @@ describe("device-lab MCP", () => {
         ["Hyper-V image acquisition stage/cache contract", "hyper-v-image-acquisition-stage-cache-v1"],
         ["Hyper-V PowerShell stage propagation contract", "hyper-v-powershell-stage-propagation-v1"],
         ["Hyper-V provider-bound automatic image finalization contract", "hyper-v-provider-image-finalization-v40"],
-        ["Hyper-V redacted network failure diagnostics", "hyper-v-network-failure-diagnostics-v10"],
+        ["Hyper-V redacted network failure diagnostics", "hyper-v-network-failure-diagnostics-v11"],
     ])("rejects a same-version broker without %s", async (_label, missingCapability) => {
         const server = createServer((req, res) => {
             res.setHeader("content-type", "application/json");

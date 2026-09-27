@@ -56,7 +56,7 @@ import {
     createDeviceLabHyperVWindowsClient,
     reconcileDeviceLabHyperVOperation,
 } from "./device-lab/broker/hyper-v/lifecycle-adapter.js";
-import { createDeviceLabHyperVWindowsNetworkClient } from "./device-lab/broker/hyper-v/network-adapter.js";
+import { createDeviceLabHyperVWindowsNetworkClient, type DeviceLabHyperVAdministratorPurpose } from "./device-lab/broker/hyper-v/network-adapter.js";
 import { invokeDeviceLabHyperVGuestDirect } from "./device-lab/broker/hyper-v/guest-direct-adapter.js";
 import { waitForDeviceLabHyperVGuestReadiness } from "./device-lab/broker/hyper-v/guest-readiness-adapter.js";
 import { provisionDeviceLabHyperVWindowsGuest } from "./device-lab/broker/hyper-v/windows-guest-provisioning.js";
@@ -71,13 +71,14 @@ import { runHyperVCreateCompensation } from "./device-lab/broker/hyper-v/vm-crea
 import { executeDeviceLabHyperVVmCreation } from "./device-lab/broker/hyper-v/vm-create-adapter.js";
 import { discoverDeviceLabHyperVBootstrapNetwork, teardownDeviceLabHyperVBootstrapNetwork, type DeviceLabHyperVOwnedVm } from "./device-lab/broker/hyper-v/vm-network-adapter.js";
 import type { HyperVCreateEffect, HyperVCreateVirtualMachineRequest } from "./hyper-v-windows/lifecycle/index.js";
-import type { HyperVWindowsNetworkClient } from "./hyper-v-windows/low-level/index.js";
-import { withElevatedHyperVNetworkExecutor } from "./device-lab/broker/hyper-v/elevated-network-session.js";
-import { hyperVBoundedErrorCode, hyperVProviderDiagnosticCode, publicHyperVArtifactCleanup, publicHyperVCreateConfiguration, publicHyperVNetworkCleanup, redactHyperVDeviceSecrets, redactHyperVResultSecrets, redactProviderCommandInput } from "./device-lab/broker/hyper-v/public-response.js";
+import type { HyperVWindowsNetworkClient, HyperVWindowsOperation } from "./hyper-v-windows/low-level/index.js";
+import { withElevatedHyperVNetworkExecutor, type WithElevatedHyperVNetworkExecutorOptions } from "./device-lab/broker/hyper-v/elevated-network-session.js";
+import { hyperVElevationGateStatus, withHyperVElevationGate } from "./device-lab/broker/hyper-v/elevation-gate.js";
+import { hyperVBoundedErrorCode, hyperVProviderDiagnosticCode, hyperVTypedErrorCode, hyperVTypedErrorOperation, publicHyperVArtifactCleanup, publicHyperVCreateConfiguration, publicHyperVNetworkCleanup, redactHyperVDeviceSecrets, redactHyperVResultSecrets, redactProviderCommandInput } from "./device-lab/broker/hyper-v/public-response.js";
 export { redactProviderCommandInput } from "./device-lab/broker/hyper-v/public-response.js";
 import { createRecordingDeviceLabHyperVWindowsClient } from "./device-lab/broker/hyper-v/lifecycle-adapter.js";
 import { brokerHyperVWindowsSession, retainBrokerHyperVWindowsSessions } from "./device-lab/broker/hyper-v/session-pool.js";
-import { createHyperVWindowsNetworkClient, HyperVWindowsError, type HyperVGuestDirectAction } from "./hyper-v-windows/index.js";
+import { createHyperVWindowsNetworkClient, HyperVWindowsError, type HyperVGuestDirectAction, type HyperVWindowsExecutor } from "./hyper-v-windows/index.js";
 import {
     createDeviceLabHyperVSnapshot,
     settleHyperVSnapshotInventory,
@@ -272,7 +273,12 @@ const DEVICE_BROKER_CAPABILITY_GUEST_HELPER_RECORDING_PROXY = "guest-helper-reco
 const DEVICE_BROKER_CAPABILITY_PHYSICAL_UNATTACHED_WIRELESS = "physical-unattached-wireless-routing-v1";
 const DEVICE_BROKER_CAPABILITY_ANDROID_RECORDING_SIGNAL_FALLBACK = "android-recording-signal-fallback-v1";
 const DEVICE_BROKER_CAPABILITY_HYPER_V_LIFECYCLE = "hyper-v-vm-managed-auto-images-v20";
-const DEVICE_BROKER_CAPABILITY_HYPER_V_SETUP_NETWORK = "hyper-v-setup-network-v10";
+// v11: broker-internal compensation (create rollback, create-residue recovery, and operation-journal
+// replay other than an explicit device_delete) releases the device's allocation but retains the
+// shared CCC switch, gateway and NAT. A v10 process tears the fabric down after a failed create,
+// which needs Administrator, so an unattended run meets a UAC prompt and, when it goes unanswered,
+// leaves an orphaned allocation behind. Explicit device_delete keeps its preserveNetwork default.
+const DEVICE_BROKER_CAPABILITY_HYPER_V_SETUP_NETWORK = "hyper-v-setup-network-v11";
 // v17: guest readiness emits its structured failure on every exit path, not only the deadline one
 // (adding the hyper-v-guest-ready-failed shape), and the not-ready payload carries errorDetail. A
 // broker predating this answers powershell-direct-unavailable for causes it can now name.
@@ -364,7 +370,12 @@ const DEVICE_BROKER_CAPABILITY_HYPER_V_WINDOWS_BOOT_CONTRACT = "hyper-v-windows-
 // v14: snapshot listing re-observes transient inventory drift inside one bounded deadline.
 // v15: checkpoint creation confirms its native ID in the inventory before tracking it.
 // A v14 broker already running in memory still publishes an unconfirmed created ID.
-const DEVICE_BROKER_CAPABILITY_HYPER_V_WINDOWS_LIBRARY = "hyper-v-windows-library-v16";
+// v17: batch exact-name Get-VM absence accepts the InvalidParameter no-match shape and, like the
+// single-name selector, proves any no-match with a successful host-wide inventory read. A v16
+// process rejected a missing orphan VM name as a native error, which blocked every networked
+// create at allocation reconciliation, and it still holds the previous asset digest. Requiring v17
+// replaces it before the next Level 3 run reaches network reconciliation.
+const DEVICE_BROKER_CAPABILITY_HYPER_V_WINDOWS_LIBRARY = "hyper-v-windows-library-v17";
 const DEVICE_BROKER_CAPABILITY_HYPER_V_WINDOWS_UNATTEND_OOBE_SCHEMA = "hyper-v-windows-unattend-oobe-schema-v3";
 const DEVICE_BROKER_CAPABILITY_HYPER_V_POWERSHELL_DIRECT_BOUNDED_PROBE = "hyper-v-powershell-direct-bounded-probe-v1";
 const DEVICE_BROKER_CAPABILITY_HYPER_V_BOOT_DISK_GENERATION = "hyper-v-boot-disk-generation-v1";
@@ -376,7 +387,13 @@ const DEVICE_BROKER_CAPABILITY_HYPER_V_LINUX_X11_TYPE = "hyper-v-linux-x11-type-
 const DEVICE_BROKER_CAPABILITY_HYPER_V_IMAGE_ACQUISITION_STAGE_CACHE = "hyper-v-image-acquisition-stage-cache-v1";
 const DEVICE_BROKER_CAPABILITY_HYPER_V_POWERSHELL_STAGE_PROPAGATION = "hyper-v-powershell-stage-propagation-v1";
 const DEVICE_BROKER_CAPABILITY_HYPER_V_AUTOMATIC_IMAGE_FINALIZATION = HYPER_V_PROVIDER_IMAGE_FINALIZATION_CONTRACT;
-const DEVICE_BROKER_CAPABILITY_HYPER_V_NETWORK_FAILURE_DIAGNOSTICS = "hyper-v-network-failure-diagnostics-v10";
+// v11: a failed typed create reports the library's code instead of its category -- hyper-v-ps-<native
+// id> or hyper-v-windows-<category>-<code> -- with the failing operation, and the redacted
+// diagnostic admits those bounded families, every elevation code, and the create-path literals it
+// used to flatten. A v10 process answers hyper-v-provider-command-failed for all of them. Network
+// setup and cleanup use the same projection, so a transport or protocol failure there is no longer
+// labelled hyper-v-ps-*.
+const DEVICE_BROKER_CAPABILITY_HYPER_V_NETWORK_FAILURE_DIAGNOSTICS = "hyper-v-network-failure-diagnostics-v11";
 // What the broker actually advertises over /status — as opposed to
 // DEVICE_BROKER_REQUIRED_CAPABILITIES below, which is what the ccc CLI requires OF a remote
 // broker. Extracted so a test can pin the invariant that matters: everything any consumer
@@ -1154,6 +1171,7 @@ type ProviderCommandResult = {
     outputLimitExceeded?: boolean;
     cleanup?: BrokerProcessTreeCleanup;
     typedCreateInvalidResult?: boolean;
+    typedCreateOperation?: HyperVWindowsOperation;
 };
 type ProviderCommandRunnerOptions = {
     timeoutMs: number;
@@ -3364,6 +3382,9 @@ export function deviceBrokerStatus(options: DeviceBrokerOptions = {}) {
             ownedByCurrentOwner: serviceOwner?.ownerId === ownerId,
             actions: ["status"],
         },
+        // The gate of the process answering, so read it from the broker's /status: a CLI
+        // process has its own. Bounded to a state, a closed code and a timestamp.
+        hyperVElevationGate: hyperVElevationGateStatus(),
         implemented: [...DEVICE_BROKER_IMPLEMENTED_CAPABILITIES],
         deferred: [],
     };
@@ -6344,30 +6365,43 @@ async function rollbackProviderCreateAfterConflict(
                 true,
                 "hyper-v-rollback-command-failed",
             );
-            const allocation = await releaseHyperVNetworkAllocationAndCleanup(String(device.ownerId), String(device.id), incarnationId, normalized, hyperVDeadlineAt);
-            const artifacts = allocation.ok
-                ? cleanupHyperVDeviceArtifacts(String(device.ownerId), parsed.backend, String(device.id))
-                : { ok: false, removed: false, reason: "network-allocation-cleanup-failed" };
-            if (!artifacts.ok || !allocation.ok) {
+            // Compensation, not a delete request: keep the shared fabric so a failed create never
+            // needs Administrator to tear it down (see DEVICE_BROKER_CAPABILITY_HYPER_V_SETUP_NETWORK).
+            const allocation = await releaseHyperVNetworkAllocationAndCleanup(
+                String(device.ownerId),
+                String(device.id),
+                incarnationId,
+                normalized,
+                hyperVDeadlineAt,
+                { preserveManagedFabric: true },
+            );
+            // A failed release leaves the artifacts untouched, so it is reported as itself: the
+            // network code, named by its stage, beside artifacts that were never attempted.
+            if (!allocation.ok) {
+                return {
+                    attempted: true,
+                    ok: false,
+                    stage: "network-release",
+                    result: publicResult,
+                    artifacts: { ok: false, attempted: false, removed: false },
+                    allocation: {
+                        ok: false,
+                        released: allocation.released,
+                        error: typeof allocation.error === "string"
+                            && /^hyper-v-[a-z0-9-]{3,128}$/.test(allocation.error)
+                            ? allocation.error
+                            : "hyper-v-network-cleanup-failed",
+                    },
+                };
+            }
+            const artifacts = cleanupHyperVDeviceArtifacts(String(device.ownerId), parsed.backend, String(device.id));
+            if (!artifacts.ok) {
                 return {
                     attempted: true,
                     ok: false,
                     result: publicResult,
-                    artifacts: {
-                        ok: artifacts.ok,
-                        removed: artifacts.removed,
-                        ...(!artifacts.ok ? { error: "hyper-v-artifact-cleanup-failed" } : {}),
-                    },
-                    allocation: {
-                        ok: allocation.ok,
-                        released: allocation.released,
-                        ...(!allocation.ok ? {
-                            error: typeof allocation.error === "string"
-                                && /^hyper-v-[a-z0-9-]{3,128}$/.test(allocation.error)
-                                ? allocation.error
-                                : "hyper-v-network-cleanup-failed",
-                        } : {}),
-                    },
+                    artifacts: { ok: false, removed: artifacts.removed, error: "hyper-v-artifact-cleanup-failed" },
+                    allocation: { ok: true, released: allocation.released },
                 };
             }
             return {
@@ -6385,7 +6419,8 @@ async function rollbackProviderCreateAfterConflict(
                 },
             };
         } catch (error) {
-            const code = hyperVBoundedErrorCode(error, "hyper-v-rollback-command-failed");
+            // Typed, like create-residue recovery: a native Remove-VM failure keeps its id.
+            const code = hyperVTypedErrorCode(error, "hyper-v-rollback-command-failed");
             return {
                 attempted: true,
                 ok: false,
@@ -9695,6 +9730,72 @@ function hyperVNetworkStateRuntime(): HyperVNetworkStateRuntime {
     };
 }
 
+// Elevation log lines are a fixed word, ISO times and bounded enums or numbers only: never a
+// path, a VM or switch name, or host text. A line that cannot be written must not change how an
+// administrator transaction ends, except REQUEST, below.
+function writeHyperVElevationLogLine(line: string): void {
+    try {
+        process.stderr.write(`${line}\n`);
+    } catch {
+        // The transaction's own result is what reports it.
+    }
+}
+
+/**
+ * Run one broker administrator transaction. The gate decides whether it may prompt at all, and
+ * `withElevatedHyperVNetworkExecutor` stays the only way a prompt starts. `elevation` is read
+ * only once the gate admits the attempt, so a suppressed transaction never resolves the elevated
+ * PowerShell and a queued one does not start its deadline while it waits.
+ */
+function withHyperVAdministratorExecutor<Result>(
+    purpose: DeviceLabHyperVAdministratorPurpose | undefined,
+    elevation: () => Pick<WithElevatedHyperVNetworkExecutorOptions, "executable" | "deadlineUnixMilliseconds" | "spawnRelay">,
+    operation: (executor: HyperVWindowsExecutor) => Result | Promise<Result>,
+): Promise<Result> {
+    const purposeLabel = purpose === "ensure" || purpose === "cleanup" ? purpose : "unspecified";
+    // After a declined or unanswered prompt the gate runs the transaction against
+    // an executor that fails every call: no relay, no REQUEST line, no second UAC.
+    return withHyperVElevationGate((onAcquisitionSettled) => {
+        const attemptStartedAt = Date.now();
+        let requestedAt: number | null = null;
+        return withElevatedHyperVNetworkExecutor({
+            ...elevation(),
+            // Unguarded on purpose: if this line cannot be written the relay reports request-failed
+            // and never reaches RunAs, so no prompt goes unlogged. The sentence stays at the end of
+            // the line so an existing search for it still matches.
+            onBeforeElevation: () => {
+                const now = Date.now();
+                process.stderr.write(
+                    `REQUEST ${new Date(now).toISOString()} pid=${process.pid} purpose=${purposeLabel} `
+                    + "Windows is asking for Administrator permission via UAC to configure Hyper-V host networking\n",
+                );
+                requestedAt = now;
+            },
+            onAcquisitionSettled: (settlement) => {
+                // Timed from the REQUEST line, or from the start of the attempt when the relay
+                // settled before it asked. A null code on an unready relay means the scope closed
+                // before the relay reported anything.
+                const settledAt = Date.now();
+                const outcome = settlement.ready
+                    ? "ready"
+                    : settlement.code ?? "hyper-v-network-elevation-scope-closed";
+                const elapsedMs = Math.max(0, settledAt - (requestedAt ?? attemptStartedAt));
+                writeHyperVElevationLogLine(
+                    `ELEVATION ${new Date(settledAt).toISOString()} outcome=${outcome} elapsedMs=${elapsedMs}`,
+                );
+                onAcquisitionSettled(settlement);
+            },
+        }, operation);
+    }, (executor) => {
+        writeHyperVElevationLogLine(
+            `SUPPRESSED ${new Date().toISOString()} purpose=${purposeLabel} code=hyper-v-network-elevation-suppressed`,
+        );
+        return operation(executor);
+    });
+}
+
+export const withHyperVAdministratorExecutorForTest = withHyperVAdministratorExecutor;
+
 function hyperVNetworkRuntime(
     normalized: NormalizedBrokerOptions,
     deadlineAt = Number.POSITIVE_INFINITY,
@@ -9726,14 +9827,11 @@ function hyperVNetworkRuntime(
                 }),
                 withAdministratorClient: async <Result>(operation: (
                     client: ReturnType<typeof createHyperVWindowsNetworkClient>,
-                ) => Result | Promise<Result>) => normalized.usesDefaultCommandRunner
-                    ? withElevatedHyperVNetworkExecutor({
+                ) => Result | Promise<Result>, purpose?: DeviceLabHyperVAdministratorPurpose) => normalized.usesDefaultCommandRunner
+                    ? withHyperVAdministratorExecutor(purpose, () => ({
                         executable: hyperVElevationExecutable(powershell),
                         deadlineUnixMilliseconds: typedDeadline(),
-                        onBeforeElevation: () => process.stderr.write(
-                            "REQUEST Windows is asking for Administrator permission via UAC to configure Hyper-V host networking\n",
-                        ),
-                    }, (executor) => operation(createHyperVWindowsNetworkClient(executor)))
+                    }), (executor) => operation(createHyperVWindowsNetworkClient(executor)))
                     : operation(createDeviceLabHyperVWindowsNetworkClient({
                         executable: powershell,
                         timeoutMilliseconds: () => hyperVRemainingTimeout(deadlineAt, 120_000),
@@ -9881,7 +9979,7 @@ function reconcileHyperVLinuxSshHostIdentity(
 
 async function reconcileHyperVCreateResidue(ownerId: string, backend: string, deviceId: string, normalized: NormalizedBrokerOptions, deadlineAt = Number.POSITIVE_INFINITY, incarnationId?: string | null): Promise<
     | { ok: true; recoveredVm: boolean; removedDisk: boolean; releasedAddress: boolean }
-    | { ok: false; status: number; error: string; detail?: string }> {
+    | { ok: false; status: number; error: string; detail?: string; stage?: "network-release" }> {
     const powershell = providerExecutable("powershell.exe", normalized) || providerExecutable("pwsh", normalized) || providerExecutable("powershell", normalized);
     if (!powershell) return { ok: false, status: 503, error: "missing-provider-command", detail: "powershell" };
     if (!isHyperVBackend(backend)) return { ok: false, status: 400, error: "hyper-v-backend-invalid" };
@@ -9911,6 +10009,7 @@ async function reconcileHyperVCreateResidue(ownerId: string, backend: string, de
                 ok: false,
                 status: 502,
                 error: "hyper-v-recovery-cleanup-failed",
+                stage: "network-release",
                 detail: typeof allocation.error === "string"
                     && /^hyper-v-[a-z0-9-]{3,128}$/.test(allocation.error)
                     ? allocation.error
@@ -9940,27 +10039,43 @@ async function reconcileHyperVCreateResidue(ownerId: string, backend: string, de
             ok: false,
             status: 502,
             error: "hyper-v-recovery-failed",
-            detail: hyperVBoundedErrorCode(
+            detail: hyperVTypedErrorCode(
                 error,
                 "hyper-v-recovery-failed",
             ),
         };
     }
-    const allocation = await releaseHyperVNetworkAllocationAndCleanup(ownerId, deviceId, expectedIncarnationId, normalized, deadlineAt);
-    const artifacts = allocation.ok
-        ? cleanupHyperVDeviceArtifacts(ownerId, backend, deviceId)
-        : { ok: false, removed: false, error: "network-allocation-cleanup-failed" };
-    if (!artifacts.ok || !allocation.ok) {
+    // Create compensation keeps the shared fabric. The incarnation-less branch above stays
+    // destructive: preservation there would only turn into an incarnation conflict.
+    const allocation = await releaseHyperVNetworkAllocationAndCleanup(
+        ownerId,
+        deviceId,
+        expectedIncarnationId,
+        normalized,
+        deadlineAt,
+        { preserveManagedFabric: true },
+    );
+    // A failed release leaves the artifacts untouched, so it is reported as itself: the network
+    // code, named by its stage, rather than an artifact cleanup that was never attempted.
+    if (!allocation.ok) {
         return {
             ok: false,
             status: 502,
             error: "hyper-v-recovery-cleanup-failed",
-            detail: !artifacts.ok
-                ? "hyper-v-artifact-cleanup-failed"
-                : typeof allocation.error === "string"
-                    && /^hyper-v-[a-z0-9-]{3,128}$/.test(allocation.error)
-                    ? allocation.error
-                    : "hyper-v-network-cleanup-failed",
+            stage: "network-release",
+            detail: typeof allocation.error === "string"
+                && /^hyper-v-[a-z0-9-]{3,128}$/.test(allocation.error)
+                ? allocation.error
+                : "hyper-v-network-cleanup-failed",
+        };
+    }
+    const artifacts = cleanupHyperVDeviceArtifacts(ownerId, backend, deviceId);
+    if (!artifacts.ok) {
+        return {
+            ok: false,
+            status: 502,
+            error: "hyper-v-recovery-cleanup-failed",
+            detail: "hyper-v-artifact-cleanup-failed",
         };
     }
     return { ok: true, recoveredVm: observation.recoveredVm, removedDisk: observation.removedDisk, releasedAddress: allocation.released };
@@ -10363,7 +10478,10 @@ async function runTypedHyperVCreate(
                 },
             });
         }
-        const code = hyperVBoundedErrorCode(error, "hyper-v-vm-create-failed");
+        // The typed code and the primitive that raised it. The category alone (what
+        // hyperVBoundedErrorCode keeps) left a failed Windows create undiagnosable.
+        const code = hyperVTypedErrorCode(error, "hyper-v-vm-create-failed");
+        const typedCreateOperation = hyperVTypedErrorOperation(error);
         const typedCreateInvalidResult = typedVhdInvalidResult
             || (!primaryTypedCommandFailed && error instanceof HyperVWindowsError && error.category === "protocol")
             || [
@@ -10373,7 +10491,10 @@ async function runTypedHyperVCreate(
                 "hyper-v-managed-network-adapter-unavailable",
                 "hyper-v-bootstrap-network-adapter-unavailable",
             ].includes(code);
-        return { mode: "exec", provider: "hyper-v", status: 1, stdout: "", stderr: "", error: code, typedCreateInvalidResult };
+        return {
+            mode: "exec", provider: "hyper-v", status: 1, stdout: "", stderr: "", error: code, typedCreateInvalidResult,
+            ...(typedCreateOperation ? { typedCreateOperation } : {}),
+        };
     }
 }
 
@@ -13250,6 +13371,10 @@ async function lifecycleCommandInvokeUnlocked(
                             ? "hyper-v-create-invalid-result"
                             : "provider-command-failed",
                         detail: hyperVExecution?.diagnosticCode || providerFailureDetail(execution),
+                        // The typed primitive behind the detail, from the library's closed list.
+                        ...(isHyperVBackend(parsed.backend) && execution.typedCreateOperation
+                            ? { operation: execution.typedCreateOperation }
+                            : {}),
                         ...(rollback ? { rollback } : {}),
                         ...(androidRollback ? { rollback: androidRollback } : {}),
                         result: {
@@ -15291,13 +15416,15 @@ async function lifecycleHyperVCommandInvokeLocked(
                 }
             }
         }
+        // Only an explicit device_delete may tear the shared fabric down. Replaying a pending
+        // delete journal ahead of any other command is compensation and keeps it.
         const reconciliation = await reconcileHyperVOperation(
             ownerId,
             parsed.backend,
             parsed.deviceId,
             normalized,
             deadlineAt,
-            parsed.preserveNetwork === true,
+            parsed.command === "device_delete" ? parsed.preserveNetwork === true : true,
         );
         if (!reconciliation.ok) return { status: reconciliation.status, payload: { ok: false, error: reconciliation.error, ownerId, backend: parsed.backend, deviceId: parsed.deviceId, ...(reconciliation.detail ? { detail: reconciliation.detail } : {}) } };
         if (reconciliation.reconciled && parsed.command === "device_delete"
@@ -15377,7 +15504,8 @@ async function lifecycleHyperVCommandInvokeLocked(
     }
     if (!parsed.dryRun && (existing.some((candidate) => candidate && typeof candidate === "object" && (candidate as { id?: unknown }).id === parsed.deviceId)
         || existsSync(hyperVOperationJournalPath(ownerId, parsed.backend, parsed.deviceId)))) {
-        const operationReconciliation = await reconcileHyperVOperation(ownerId, parsed.backend, parsed.deviceId, normalized, deadlineAt);
+        // Journal replay ahead of a create is compensation, so it keeps the shared fabric.
+        const operationReconciliation = await reconcileHyperVOperation(ownerId, parsed.backend, parsed.deviceId, normalized, deadlineAt, true);
         if (!operationReconciliation.ok) return { status: operationReconciliation.status, payload: { ok: false, error: operationReconciliation.error, ownerId, backend: parsed.backend, deviceId: parsed.deviceId, ...(operationReconciliation.detail ? { detail: operationReconciliation.detail } : {}) } };
         existing = readOwnerDevices(ownerId, parsed.stateKey);
     }
@@ -15403,7 +15531,7 @@ async function lifecycleHyperVCommandInvokeLocked(
     try {
         if (!parsed.dryRun) {
             const recovery = await reconcileHyperVCreateResidue(ownerId, parsed.backend, parsed.deviceId, normalized, deadlineAt);
-            if (!recovery.ok) return { status: recovery.status, payload: { ok: false, error: recovery.error, ownerId, backend: parsed.backend, deviceId: parsed.deviceId, ...(recovery.detail ? { detail: recovery.detail } : {}) } };
+            if (!recovery.ok) return { status: recovery.status, payload: { ok: false, error: recovery.error, ownerId, backend: parsed.backend, deviceId: parsed.deviceId, ...(recovery.detail ? { detail: recovery.detail } : {}), ...(recovery.stage ? { stage: recovery.stage } : {}) } };
         }
         const image = await resolveHyperVImageForCreate(ownerId, parsed, params, normalized, deadlineAt);
         if (!image.ok) {
@@ -15501,6 +15629,7 @@ async function lifecycleHyperVCommandInvokeLocked(
                         backend: resolved.backend,
                         deviceId: resolved.deviceId,
                         detail: reconciliation.detail || reconciliation.error,
+                        ...(reconciliation.stage ? { stage: reconciliation.stage } : {}),
                         lifecycleFailure: result.payload,
                     },
                 };

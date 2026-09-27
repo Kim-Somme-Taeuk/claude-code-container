@@ -122,7 +122,7 @@ fixed `-Command` bootstrap and bounded stdin-envelope helper. It never reopens
 that source with `-File`, so the production consumer and standalone proof share
 the same check/use-safe transport contract.
 
-The broker capability `hyper-v-windows-library-v15` is the current compatibility
+The broker capability `hyper-v-windows-library-v17` is the current compatibility
 fence. Version 8 introduced the exact `Get-VM` no-match confirmation semantics
 above. Version 7 was already advertised when those
 asset bytes and their digest changed, so a same-package-version v7 broker could
@@ -157,6 +157,16 @@ fence replaces any v14 process before testing the stronger create contract. New
 create journals mark exact-ID confirmation as required before mutation, then
 store the returned ID before observation. Reconciliation preserves unknown or
 absent outcomes and cannot adopt a different same-name checkpoint.
+Version 16 shipped the typed library for the remaining broker paths (status,
+lifecycle, delete and orphan cleanup, guest PowerShell Direct, image
+preparation, and VM console input); the operation asset and its pinned digest
+changed, so a v15 process is replaced before it rejects the new asset. Version
+17 gives the batch exact-name `Get-VM` read the selector's absence rule: the
+`InvalidParameter`/`InvalidArgument` no-match pair is accepted, and either
+no-match pair is proven only by a successful host-wide inventory read. The
+2026-09-27 Level 3 run showed that a v16 process rejects a missing orphan VM
+name as a native error, which blocks every networked create at allocation
+reconciliation; the v17 fence replaces it along with its stale asset digest.
 
 Any later behavior-affecting change to the pinned asset or its production adapter after
 the current capability is advertised must advance the library capability in
@@ -274,6 +284,45 @@ Slice 2B (done) moved the two bootstrap commands the roadmap names. Slice 2C
 setup. Image acquisition and the Linux SSH/cloud-init paths remain in
 host-control: they are not Hyper-V primitives and are not part of any slice 2
 claim.
+
+### Broker elevation gate
+
+Every broker administrator transaction opens its own callback-scoped executor,
+and each scope makes one RunAs attempt. Nothing remembered a declined or
+unanswered prompt, so each later administrator need in the same broker asked
+again; an unattended host has nobody to answer. The broker now holds an
+elevation gate (`src/device-lab/broker/hyper-v/elevation-gate.ts`) with two
+states, `never-asked` and `refused{code,at}`:
+
+- A refusal sticks when the scope raised a prompt and the relay never became
+  ready. `request-failed`, `launch-failed`, `relay-spawn-failed`, and
+  `executable-rejected` settle before any prompt and stay retryable. A prompt
+  whose relay reports nothing before the scope closes records `scope-closed`.
+- An approval is not recorded; the next administrator need asks again.
+- While refused, no relay starts and no REQUEST line is written. The
+  transaction runs against an executor that fails every call with
+  `hyper-v-network-elevation-suppressed`. That code is in the adapter's
+  proven-not-started set, so it never makes a mutation indeterminate, and a
+  relay that reports it is read as `protocol-invalid`.
+- Attempts are serialized, so a second transaction waits for the first one's
+  verdict instead of raising its own prompt.
+- The gate can only deny. It lives in memory in one broker process, is never
+  persisted or shared, and no RPC or parameter re-enables elevation. The broker
+  `/status` reports it as `hyperVElevationGate`; the Level 3 broker preflight
+  prints it and, while it is `refused`, stops the run before any step starts,
+  the non-Hyper-V Level 3 steps included.
+  Restarting the broker clears it; `ccc devices setup hyper-v --confirm` runs in
+  its own process with its own gate.
+
+The broker log records each attempt as a timestamped `REQUEST` line with its
+purpose (`ensure`, `cleanup`, or `unspecified` when a caller names none), its
+outcome as an `ELEVATION` line, and each suppressed transaction as `SUPPRESSED`;
+the lines carry bounded enums only, no paths or host text.
+Together with keeping the shared fabric when a failed create is compensated
+(`doc/device-lab/REQ__hyper-v-network-teardown-identity.md`), this bounds an
+unattended run to no prompt when the fabric exists and at most one when it does
+not. A reusable elevated-session lease was rejected: it would widen the elevated
+surface without improving that bound.
 
 ### What slice 3A settled
 
@@ -1059,7 +1108,12 @@ every session failure surfaces as the generic fallback `diagnosticCode`. That is
 exactly what makes the two transports' payloads identical, which is a property
 worth having — but it also means an operator reading a public payload cannot tell
 a session timeout from a one-shot timeout. The two goals are in tension and the
-current resolution favours payload identity.
+current resolution favours payload identity. The typed paths are the exception:
+a session code the typed network client forwards is reported as
+`hyper-v-windows-transport-session-<reason>` in the create 502 and in network
+setup, cleanup and reconciliation details
+(`hyper-v-network-failure-diagnostics-v11`), because a failed create has to name
+what failed. A recorded execution still cannot report one.
 
 ### The reviewer's recommendation: measure, then probably replace this
 

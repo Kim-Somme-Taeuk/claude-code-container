@@ -98,6 +98,7 @@ export const HYPER_V_ELEVATED_NETWORK_SHUTDOWN_LADDER = Object.freeze({
     relayCompletionGraceMilliseconds: RELAY_COMPLETION_GRACE_MILLISECONDS,
 });
 const TERMINATION_UNCONFIRMED_CODE = "hyper-v-network-elevation-termination-unconfirmed";
+const SUPPRESSED_CODE = "hyper-v-network-elevation-suppressed";
 
 export const HYPER_V_ELEVATED_NETWORK_ERROR_CODES = Object.freeze([
     "hyper-v-network-elevation-cancelled",
@@ -116,6 +117,9 @@ export const HYPER_V_ELEVATED_NETWORK_ERROR_CODES = Object.freeze([
     "hyper-v-network-elevation-request-failed",
     TERMINATION_UNCONFIRMED_CODE,
     "hyper-v-network-elevation-scope-closed",
+    // The broker's elevation gate refused to ask again after a declined or unanswered prompt, so
+    // no relay was started. Minted in this process only; a relay that reports it is rejected.
+    SUPPRESSED_CODE,
 ] as const);
 
 export type HyperVElevatedNetworkErrorCode = typeof HYPER_V_ELEVATED_NETWORK_ERROR_CODES[number];
@@ -543,11 +547,28 @@ export type HyperVElevatedNetworkRelaySpawn = (
     request: HyperVElevatedNetworkRelaySpawnRequest,
 ) => HyperVElevatedNetworkRelayProcess | Promise<HyperVElevatedNetworkRelayProcess>;
 
+/**
+ * How a scope's one relay acquisition ended. `prompted` means the relay asked for approval and
+ * `onBeforeElevation` ran, which is the step immediately before RunAs; it does not prove Windows
+ * showed a prompt. `ready` means the relay announced readiness, which it only does after an
+ * elevated child authenticated. `code` is the failure on record when it settled, if any — null
+ * when it is ready, or when the scope closed before the relay reported anything.
+ */
+export type HyperVElevatedNetworkAcquisitionSettlement = {
+    readonly prompted: boolean;
+    readonly ready: boolean;
+    readonly code: HyperVElevatedNetworkErrorCode | null;
+};
+
 export type WithElevatedHyperVNetworkExecutorOptions = {
     readonly executable: string;
     readonly deadlineUnixMilliseconds: number;
     readonly signal?: AbortSignal;
     readonly onBeforeElevation?: () => void;
+    // Called at most once per scope, when its relay acquisition settles or, if that is still
+    // pending, when the scope closes — always before the scope returns. Never called for a scope
+    // whose callback performed no administrator operation. A throwing listener is ignored.
+    readonly onAcquisitionSettled?: (settlement: HyperVElevatedNetworkAcquisitionSettlement) => void;
     readonly operationAsset?: HyperVWindowsPowerShellOperationAsset;
     readonly spawnRelay?: HyperVElevatedNetworkRelaySpawn;
 };
@@ -674,7 +695,11 @@ export const HYPER_V_ELEVATED_NETWORK_RELAY_BOOTSTRAP = [
 function parseElevationFailure(line: string): HyperVElevatedNetworkErrorCode | null {
     if (!line.startsWith(ELEVATION_FAILURE_PREFIX)) return null;
     const code = line.slice(ELEVATION_FAILURE_PREFIX.length);
-    return isElevationErrorCode(code) ? code : "hyper-v-network-elevation-protocol-invalid";
+    // The suppression code is proven-not-started, and only the gate in this process may claim it:
+    // accepted from the relay, it would widen what the relay can say about a mutation.
+    return isElevationErrorCode(code) && code !== SUPPRESSED_CODE
+        ? code
+        : "hyper-v-network-elevation-protocol-invalid";
 }
 
 function defaultSpawnRelay(request: HyperVElevatedNetworkRelaySpawnRequest): HyperVElevatedNetworkRelayProcess {
@@ -1224,10 +1249,27 @@ export async function withElevatedHyperVNetworkExecutor<T>(
     // wait is bounded by the relay's own deadline and by the abort signals, and the elevation
     // deadline is re-checked after it, so no primitive gains budget.
     let relayAcquisition: Promise<void> | null = null;
+    let relayReadinessSettled = false;
     let settleRelayReadiness = () => undefined as void;
     const relayReadiness = new Promise<void>((resolve) => {
-        settleRelayReadiness = resolve;
+        settleRelayReadiness = () => {
+            relayReadinessSettled = true;
+            resolve();
+        };
     });
+    // What `onAcquisitionSettled` reports. `ready` is only true when the relay reported readiness
+    // before anything else settled the gate — a start failure, relay completion or the scope
+    // closing — and a readiness that arrives after that cannot rewrite it.
+    let elevationPrompted = false;
+    let relayBecameReady = false;
+    const settleRelayReadinessAsReady = () => {
+        // A relay's `ready` also settles when it can never become ready, and in that case the relay
+        // has recorded why first. The failure on record is what tells the two apart.
+        if (!relayReadinessSettled) {
+            relayBecameReady = startupFailure === null && safeRelayFailureCode(relayFailureCode) === null;
+        }
+        settleRelayReadiness();
+    };
     const adoptRelayReadiness = (spawnedRelay: HyperVElevatedNetworkRelayProcess) => {
         let readiness: unknown;
         try {
@@ -1236,16 +1278,32 @@ export async function withElevatedHyperVNetworkExecutor<T>(
             readiness = undefined;
         }
         if (readiness === undefined) {
-            settleRelayReadiness();
+            settleRelayReadinessAsReady();
             return;
         }
         try {
             Promise.resolve(readiness).then(
-                () => settleRelayReadiness(),
+                () => settleRelayReadinessAsReady(),
                 () => settleRelayReadiness(),
             );
         } catch {
             settleRelayReadiness();
+        }
+    };
+    let acquisitionReported = false;
+    const reportAcquisitionSettled = () => {
+        if (acquisitionReported) return;
+        acquisitionReported = true;
+        const listener = options.onAcquisitionSettled;
+        if (!listener) return;
+        try {
+            listener({
+                prompted: elevationPrompted,
+                ready: relayBecameReady,
+                code: relayBecameReady ? null : startupFailure ?? safeRelayFailureCode(relayFailureCode),
+            });
+        } catch {
+            // An observer cannot change how this scope ends.
         }
     };
     const acquireRelay = async () => {
@@ -1257,6 +1315,7 @@ export async function withElevatedHyperVNetworkExecutor<T>(
         }
         if (!started) settleRelayReadiness();
         await relayReadiness;
+        reportAcquisitionSettled();
     };
     const awaitRelayAcquisition = async (context: HyperVWindowsExecutionContext) => {
         relayAcquisition ??= acquireRelay();
@@ -1284,7 +1343,15 @@ export async function withElevatedHyperVNetworkExecutor<T>(
                     executable: options.executable,
                     sessionBootstrap,
                     deadlineUnixMilliseconds: options.deadlineUnixMilliseconds,
-                    onBeforeElevation: options.onBeforeElevation ?? (() => undefined),
+                    onBeforeElevation: () => {
+                        // A scope that has ended, and so has already reported its settlement,
+                        // never approves a prompt: the relay reports request-failed instead.
+                        if (!active) throw new HyperVElevatedNetworkSessionError("hyper-v-network-elevation-scope-closed");
+                        // Recorded before the caller's hook runs: if that hook throws, the relay
+                        // reports request-failed and never reaches RunAs.
+                        elevationPrompted = true;
+                        options.onBeforeElevation?.();
+                    },
                 });
                 relay = spawnedRelay;
                 adoptRelayReadiness(spawnedRelay);
@@ -1401,6 +1468,9 @@ export async function withElevatedHyperVNetworkExecutor<T>(
         activeExecutionsAtClose = activeExecutions;
         pendingExecutionsAtClose = session.outstanding().pendingRequests;
         settleRelayReadiness();
+        // An acquisition whose relay is still starting reports now, so the verdict is on record
+        // before this scope returns; a relay that turns up later cannot rewrite it.
+        if (relayAcquisition) reportAcquisitionSettled();
         session.close();
     }
 

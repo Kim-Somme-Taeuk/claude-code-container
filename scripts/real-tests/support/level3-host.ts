@@ -4,7 +4,7 @@ import { join } from "path";
 
 export const HYPER_V_LEVEL3_WINDOWS_UNATTEND_OOBE_SCHEMA_CONTRACT = "hyper-v-windows-unattend-oobe-schema-v3";
 export const HYPER_V_LEVEL3_POWERSHELL_DIRECT_BOUNDED_PROBE_CONTRACT = "hyper-v-powershell-direct-bounded-probe-v1";
-export const HYPER_V_LEVEL3_WINDOWS_LIBRARY_CONTRACT = "hyper-v-windows-library-v16";
+export const HYPER_V_LEVEL3_WINDOWS_LIBRARY_CONTRACT = "hyper-v-windows-library-v17";
 // Every contract that is also exported standalone is declared above the required list and then
 // referenced by it, never re-spelled inside it. Two reasons: the array is evaluated at module load,
 // so a forward reference hits the temporal dead zone; and a duplicated literal is free to drift, so
@@ -12,8 +12,8 @@ export const HYPER_V_LEVEL3_WINDOWS_LIBRARY_CONTRACT = "hyper-v-windows-library-
 export const HYPER_V_LEVEL3_GUEST_DIAGNOSTICS_CONTRACT = "hyper-v-guest-readiness-diagnostics-v24";
 export const HYPER_V_LEVEL3_PROVIDER_CONTRACT = "hyper-v-provider-image-finalization-v40";
 export const HYPER_V_LEVEL3_LINUX_X11_TYPE_CONTRACT = "hyper-v-linux-x11-type-v2";
-export const HYPER_V_LEVEL3_NETWORK_OWNERSHIP_CONTRACT = "hyper-v-setup-network-v10";
-export const HYPER_V_LEVEL3_NETWORK_DIAGNOSTICS_CONTRACT = "hyper-v-network-failure-diagnostics-v10";
+export const HYPER_V_LEVEL3_NETWORK_OWNERSHIP_CONTRACT = "hyper-v-setup-network-v11";
+export const HYPER_V_LEVEL3_NETWORK_DIAGNOSTICS_CONTRACT = "hyper-v-network-failure-diagnostics-v11";
 export const HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES = [
     "hyper-v-vm-managed-auto-images-v20",
     HYPER_V_LEVEL3_NETWORK_OWNERSHIP_CONTRACT,
@@ -33,6 +33,30 @@ const HOST_BROKER_STATUS_MAX_BYTES = 256 * 1024;
 const HOST_BROKER_STATUS_TIMEOUT_MS = 5000;
 const HOST_BROKER_REPAIR_TIMEOUT_MS = 180000;
 const HOST_BROKER_ATTESTATION_MAX_ATTEMPTS = 3;
+// The broker's /status reports its elevation gate: whether this broker process already had a UAC
+// prompt declined or left unanswered, after which it never asks again. Only the closed state, a code
+// from the elevation family and an ISO instant are echoed, so a malformed status cannot put
+// arbitrary text into the Level 3 log.
+const HOST_BROKER_ELEVATION_GATE_CODE = /^hyper-v-network-elevation-[a-z0-9-]{1,64}$/;
+const HOST_BROKER_ELEVATION_GATE_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+
+function hostBrokerElevationGate(value: any) {
+    // A broker from before the gate existed has no field. The capabilities Level 3 requires shipped
+    // with the gate, so only an in-between development build lacks it: reported, not failed.
+    if (value === undefined) return { state: "unreported" };
+    if (value?.state === "never-asked") return { state: "never-asked" };
+    if (value?.state !== "refused") return { state: "unrecognized" };
+    return {
+        state: "refused",
+        code: typeof value.code === "string" && HOST_BROKER_ELEVATION_GATE_CODE.test(value.code)
+            ? value.code
+            : "invalid",
+        at: typeof value.at === "string" && HOST_BROKER_ELEVATION_GATE_INSTANT.test(value.at)
+            && Number.isFinite(Date.parse(value.at))
+            ? value.at
+            : "invalid",
+    };
+}
 
 export function buildLevel3Artifacts(repoRoot, options: any = {}) {
     const spawn = options.spawn || spawnSync;
@@ -137,7 +161,13 @@ export async function probeHostBrokerCapabilities(port: number, options: any = {
         const pid = Number(parsed?.broker?.process?.pid);
         const startedAt = typeof parsed?.broker?.startedAt === "string" ? parsed.broker.startedAt : "";
         return implemented.length > 0 && Number.isInteger(pid) && pid > 0 && startedAt
-            ? { ok: true, capabilities: implemented, pid, startedAt }
+            ? {
+                ok: true,
+                capabilities: implemented,
+                pid,
+                startedAt,
+                elevationGate: hostBrokerElevationGate(parsed.broker.hyperVElevationGate),
+            }
             : { ok: false, error: "invalid-status-response", capabilities: [] };
     } catch (error: any) {
         return { ok: false, error: error?.name === "AbortError" ? "timeout" : "fetch-failed", capabilities: [] };
@@ -266,6 +296,23 @@ export async function ensureHostBrokerReady(repoRoot, options: any = {}) {
             && verifiedStartedAt === observed.startedAt
             && confirmed.startedAt === observed.startedAt) {
             process.stdout.write(`ATTEST Hyper-V broker pid=${observed.pid} startedAt=${observed.startedAt}\n`);
+            // The gate belongs to the process just attested, and within one process it only moves
+            // from never-asked to refused, so the confirmation read is the latest word on it. A
+            // refused gate outlives the run that caused it: every Hyper-V step that needs
+            // Administrator would fail hours in with hyper-v-network-elevation-suppressed, so the
+            // run stops here instead, with the remedy. This preflight gates the whole run, so a
+            // Level 3 run starts none of its other providers either.
+            const gate = confirmed.elevationGate || { state: "unreported" };
+            if (gate.state === "refused") {
+                process.stderr.write([
+                    `CCC host broker Hyper-V elevation gate refused; pid=${observed.pid}; code=${gate.code}; at=${gate.at}`,
+                    "Run not started, including any non-Hyper-V Level 3 steps: this broker already had a UAC prompt declined or left unanswered and will not ask again, so every Hyper-V step that needs Administrator would fail with hyper-v-network-elevation-suppressed.",
+                    `Remedy: restart the broker to clear the refusal. Stop process ${observed.pid}; the next Level 3 run or 'ccc devices broker status' starts a fresh one.`,
+                    "If nobody will be there to approve a prompt, first run an attended 'ccc devices setup hyper-v --confirm' so the CCC Hyper-V network exists and the run needs none.",
+                ].join("\n") + "\n");
+                return 1;
+            }
+            process.stdout.write(`ATTEST Hyper-V elevation gate state=${String(gate.state)}\n`);
             return 0;
         }
         const canRetry = attempt < HOST_BROKER_ATTESTATION_MAX_ATTEMPTS && Date.now() < deadlineAt;

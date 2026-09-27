@@ -8,7 +8,7 @@ import { assertDeviceLabPathWithinRoot } from "../../src/device-lab-state-file.t
 import { hyperVReadinessCommand, parseHyperVReadiness } from "../../src/host-control/hyper-v/index.ts";
 import { isHyperVWindowsEvaluationReceipt } from "../../src/device-lab/hyper-v-image-contracts.ts";
 import { hiddenSpawnSync, repoRoot } from "./helpers.ts";
-import { formatBrokerToolFailure, lifecycleDevice, parseToolPayload, withDeviceLabMcp } from "./device-lab-mcp-client.ts";
+import { brokerRollbackSummary, formatBrokerToolFailure, lifecycleDevice, parseToolPayload, withDeviceLabMcp } from "./device-lab-mcp-client.ts";
 import { providerMcpSessionOptions } from "./provider-mcp-matrix.ts";
 import { cachedImageManifests, selectHyperVWindowsProfile } from "./select-windows-profile.ts";
 import { captureHyperVWindowsConsole, type HyperVWindowsConsoleCaptureResult } from "./hyper-v-windows-console-capture.ts";
@@ -102,13 +102,16 @@ function readHyperVWindowsEvaluationReceipt(setupRoot = join(homedir(), ".ccc", 
         return null;
     }
 }
-function payload(result: any) {
+export function hyperVWindowsToolPayload(result: any) {
     const value = parseToolPayload(result);
     if (value?.ok === false) {
-        throw new Error(formatBrokerToolFailure(value, "Hyper-V broker operation failed"));
+        const error = new Error(formatBrokerToolFailure(value, "Hyper-V broker operation failed"));
+        Object.defineProperty(error, "brokerPayload", { value });
+        throw error;
     }
     return value;
 }
+const payload = hyperVWindowsToolPayload;
 
 function resultValue(value: any) {
     return value?.result && typeof value.result === "object" ? value.result : value;
@@ -133,7 +136,12 @@ export async function hyperVWindowsFailureReason(input: {
     allowSetupDiagnosticsElevation?: boolean;
 }): Promise<string> {
     const profileTag = `profile=${input.profile}${input.sourceImage ? " sourceImage=set" : ""}`;
-    const originalReason = `${input.step}: ${(input.error as any)?.message || String(input.error)}`;
+    const message = `${input.step}: ${(input.error as any)?.message || String(input.error)}`;
+    // A failed create never sets `created`, so every create failure returns just below. Its
+    // rollback is what says whether the failure left a VM or an allocation behind. The broker
+    // message normally carries it; when that message lost it (cut at its cap), it comes back here.
+    const rollback = brokerRollbackSummary((input.error as any)?.brokerPayload);
+    const originalReason = rollback && !message.includes(rollback) ? `${message}; ${rollback}` : message;
     if (!input.created || !input.incarnationId) return `${profileTag}; ${originalReason}`;
     let capture: HyperVWindowsConsoleCaptureResult;
     try {

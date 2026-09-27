@@ -684,20 +684,31 @@ describe("device-lab Hyper-V broker", () => {
             const second = await invoke();
             expect(second.status).toBe(502);
             const secondBody = await second.json();
-            expect(secondBody).toEqual(expect.objectContaining({ error: "provider-command-failed", detail: "hyper-v-provider-command-failed" }));
+            expect(secondBody).toEqual(expect.objectContaining({
+                error: "provider-command-failed",
+                detail: "hyper-v-windows-protocol-response-malformed",
+                operation: "New-VM",
+            }));
+            expect(JSON.stringify(secondBody)).not.toContain("stop after network setup");
             expect(secondBody.result.execution).not.toHaveProperty("command");
             expect(JSON.stringify(secondBody)).not.toContain('"privateRoot"');
             expect(JSON.stringify(secondBody)).not.toContain("-EncodedCommand");
             expect(networkScripts).toEqual([]);
             expect(typedNetworkMutationAttempts).toBe(2);
             expect(existsSync(intentPath)).toBe(false);
-            expect(existsSync(join(
+            // The failed create's rollback releases its allocation but keeps the shared fabric.
+            expect(JSON.parse(readFileSync(join(
                 process.env.HOME!,
                 ".ccc",
                 "device-broker-private",
                 "network",
                 "hyper-v.json",
-            ))).toBe(false);
+            ), "utf8"))).toMatchObject({
+                managedSwitch: true,
+                managedGateway: true,
+                managedNat: true,
+                allocations: [],
+            });
         } finally {
             await close(server);
             cleanupOwner(ownerId);
@@ -1069,7 +1080,12 @@ describe("device-lab Hyper-V broker", () => {
             expect(recoveryCalls).toBe(0);
             expect(existsSync(join(process.env.HOME!, ".ccc", "devices", "owners", ownerId, "linux-vm", "deadline-e2e"))).toBe(false);
             const networkStatePath = join(process.env.HOME!, ".ccc", "device-broker-private", "network", "hyper-v.json");
-            expect(existsSync(networkStatePath)).toBe(false);
+            expect(JSON.parse(readFileSync(networkStatePath, "utf8"))).toMatchObject({
+                managedSwitch: true,
+                managedGateway: true,
+                managedNat: true,
+                allocations: [],
+            });
         } finally {
             nowSpy.mockRestore();
             await close(server);
@@ -1162,7 +1178,12 @@ describe("device-lab Hyper-V broker", () => {
             expect(commandRunner.mock.calls.some(([command]) => providerScript(command).includes("$CreatedVm = New-VM"))).toBe(false);
             expect(recoveryCalls).toBe(0);
             const networkStatePath = join(process.env.HOME!, ".ccc", "device-broker-private", "network", "hyper-v.json");
-            expect(existsSync(networkStatePath)).toBe(false);
+            expect(JSON.parse(readFileSync(networkStatePath, "utf8"))).toMatchObject({
+                managedSwitch: true,
+                managedGateway: true,
+                managedNat: true,
+                allocations: [],
+            });
         } finally {
             nowSpy.mockRestore();
             await close(server);
@@ -1922,7 +1943,7 @@ describe("device-lab Hyper-V broker", () => {
             });
             const body = await response.json();
             expect(response.status, JSON.stringify(body)).toBe(502);
-            expect(body).toEqual(expect.objectContaining({ error: "hyper-v-recovery-cleanup-failed", detail: expect.stringContaining("hyper-v-network-allocation-incarnation-conflict") }));
+            expect(body).toEqual(expect.objectContaining({ error: "hyper-v-recovery-cleanup-failed", stage: "network-release", detail: expect.stringContaining("hyper-v-network-allocation-incarnation-conflict") }));
             expect(commandRunner).not.toHaveBeenCalled();
             expect(JSON.parse(readFileSync(networkStatePath, "utf8")).allocations).toEqual([
                 expect.objectContaining({ ownerId, deviceId, incarnationId: staleIncarnationId }),

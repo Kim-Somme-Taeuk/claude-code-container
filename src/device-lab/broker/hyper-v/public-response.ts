@@ -1,3 +1,11 @@
+import {
+    HYPER_V_WINDOWS_OPERATIONS,
+    HYPER_V_WINDOWS_SESSION_ERROR_CODES,
+    HyperVWindowsError,
+    type HyperVWindowsOperation,
+} from "../../../hyper-v-windows/low-level/index.js";
+import { HYPER_V_ELEVATED_NETWORK_ERROR_CODES } from "./elevated-network-session.js";
+
 type ProviderExecution = {
     mode: string;
     provider: string;
@@ -94,6 +102,7 @@ const REDACTED_PROVIDER_DIAGNOSTIC_CODES = new Set([
     "hyper-v-network-elevation-cancelled",
     "hyper-v-network-elevation-failed",
     "hyper-v-network-elevation-required",
+    "hyper-v-network-elevation-suppressed",
     "hyper-v-network-gateway-conflict",
     "hyper-v-network-gateway-invalid",
     "hyper-v-network-marker-invalid",
@@ -275,7 +284,56 @@ const REDACTED_PROVIDER_DIAGNOSTIC_CODES = new Set([
     "hyper-v-powershell-contract-invalid",
     "hyper-v-powershell-contract-version-unsupported",
     "hyper-v-state-reconciliation-failed",
+    // Typed create-path codes (runTypedHyperVCreate and the modules it drives). Without them a
+    // failed create reported only hyper-v-provider-command-failed, whatever had actually failed.
+    "hyper-v-base-image-copy-short-read",
+    "hyper-v-base-image-copy-short-write",
+    "hyper-v-base-image-identity-changed",
+    "hyper-v-base-image-invalid",
+    "hyper-v-create-bootstrap-mac-address-not-derivable",
+    "hyper-v-create-compensation-failed",
+    "hyper-v-create-invalid-result",
+    "hyper-v-create-plan-invalid",
+    "hyper-v-created-disk-short-read",
+    "hyper-v-disk-identity-changed",
+    "hyper-v-operation-deadline-exceeded",
+    // cloneHyperVBaseImage's path assertions append these to their hyper-v-base-image,
+    // hyper-v-device-root and hyper-v-disk labels, so a symlinked or junctioned ancestor, or a
+    // path swapped during the clone, names itself instead of reading as a command failure.
+    "hyper-v-base-image-path-invalid",
+    "hyper-v-base-image-path-outside-root",
+    "hyper-v-base-image-path-symlink-rejected",
+    "hyper-v-device-root-path-symlink-rejected",
+    "hyper-v-disk-path-invalid",
+    "hyper-v-disk-path-outside-root",
+    "hyper-v-disk-path-symlink-rejected",
+    // The operation asset's own native codes that hyperVTypedErrorCode passes through unchanged.
+    // Its trusted module resolution runs ahead of every typed operation, New-VM included.
+    "hyper-v-module-missing",
+    "hyper-v-module-path-invalid",
+    // The closed elevation union the typed network client forwards verbatim as transport codes.
+    // Spread from its single source so a code added there is admitted here rather than flattened.
+    // The session codes it also forwards stay out: a session failure's redacted payload has to
+    // match the one-shot transport's, which has no such code to report. On the typed paths
+    // hyperVTypedErrorCode re-homes them into the transport family instead.
+    ...HYPER_V_ELEVATED_NETWORK_ERROR_CODES,
 ]);
+
+// The bounded families hyperVTypedErrorCode mints from a typed library failure. Unlike the
+// literals above these are patterns, so they are admitted only as the entire `error` field — the
+// broker's own projection on the typed paths — and never as a token found inside stderr or a
+// longer message, where host text could happen to spell one.
+const HYPER_V_TYPED_ERROR_FAMILY_PATTERN =
+    /^(?:hyper-v-ps(?:-[a-z0-9]+)+|hyper-v-windows-(?:native|transport|protocol|validation)(?:-[a-z0-9]+)*)$/;
+const HYPER_V_TYPED_ERROR_CATEGORIES: ReadonlySet<string> = new Set([
+    "native",
+    "transport",
+    "protocol",
+    "validation",
+]);
+const HYPER_V_WINDOWS_SESSION_ERROR_SET: ReadonlySet<string> = new Set(HYPER_V_WINDOWS_SESSION_ERROR_CODES);
+// The client's bounded diagnostic pattern is /^[a-z0-9-]{1,80}$/; a longer code is dropped there.
+const HYPER_V_DIAGNOSTIC_CODE_MAX_LENGTH = 80;
 
 // Every non-`hyper-v-` reason hyperVGuestReadinessFailureCode can return, for both guest lanes.
 // Kept as literals rather than a pattern: a pattern over `powershell-direct-*` / `ssh-*` would
@@ -313,6 +371,63 @@ export function hyperVBoundedErrorCode(
     return match?.[1] || fallback;
 }
 
+function boundedHyperVDiagnosticCode(prefix: string, value: string): string {
+    const segment = value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    return (segment ? `${prefix}-${segment}` : prefix)
+        .slice(0, HYPER_V_DIAGNOSTIC_CODE_MAX_LENGTH)
+        .replace(/-+$/, "");
+}
+
+/**
+ * The bounded code for a failure on a typed Hyper-V path, keeping what hyperVBoundedErrorCode
+ * throws away. A HyperVWindowsError's message is `hyper-v-windows-<category>:<operation>:<code>`,
+ * and cutting it at the first colon left only the category, so every native New-VM failure read
+ * as hyper-v-windows-native. Here a session code the typed network client forwarded becomes
+ * `hyper-v-windows-transport-session-<reason>`, which the 502 detail admits through the transport
+ * family; any other code the library already bounded as `hyper-v-*` (a forwarded elevation code,
+ * or the asset's own) passes through; a native code, which the asset only ever reports as a
+ * normalized FullyQualifiedErrorId or one of its bounded tokens, becomes `hyper-v-ps-<code>` like
+ * boundedPowerShellErrorId; the library's own transport, protocol and validation codes become
+ * `hyper-v-windows-<category>-<code>`. Everything minted is [a-z0-9-] and at most 80 characters.
+ * Any other error keeps the hyperVBoundedErrorCode projection.
+ */
+export function hyperVTypedErrorCode(error: unknown, fallback: string): string {
+    if (error instanceof HyperVWindowsError) {
+        const code = String(error.code);
+        if (error.category === "transport" && HYPER_V_WINDOWS_SESSION_ERROR_SET.has(code)) {
+            return boundedHyperVDiagnosticCode("hyper-v-windows-transport", code.slice("hyper-v-windows-".length));
+        }
+        if (/^hyper-v-[a-z0-9-]{3,72}$/.test(code)) return code;
+        if (!HYPER_V_TYPED_ERROR_CATEGORIES.has(error.category)) return fallback;
+        return error.category === "native" && /[a-z0-9]/i.test(code)
+            ? boundedHyperVDiagnosticCode("hyper-v-ps", code)
+            : boundedHyperVDiagnosticCode(`hyper-v-windows-${error.category}`, code);
+    }
+    const code = hyperVBoundedErrorCode(error, fallback);
+    return code.length <= HYPER_V_DIAGNOSTIC_CODE_MAX_LENGTH ? code : fallback;
+}
+
+/**
+ * The typed primitive that failed, admitted only from the library's closed operation list. A stage
+ * error that wraps a typed failure as its `cause` (hyperVCreateVhdReadError) names it too.
+ */
+export function hyperVTypedErrorOperation(error: unknown): HyperVWindowsOperation | undefined {
+    const typed = error instanceof HyperVWindowsError
+        ? error
+        : error instanceof Error && error.cause instanceof HyperVWindowsError ? error.cause : null;
+    return typed && (HYPER_V_WINDOWS_OPERATIONS as readonly string[]).includes(typed.operation)
+        ? typed.operation
+        : undefined;
+}
+
+function hyperVTypedErrorFamilyCode(error: unknown): string | undefined {
+    return typeof error === "string"
+        && error.length <= HYPER_V_DIAGNOSTIC_CODE_MAX_LENGTH
+        && HYPER_V_TYPED_ERROR_FAMILY_PATTERN.test(error)
+        ? error
+        : undefined;
+}
+
 export function hyperVBoundedErrorDetail(
     error: unknown,
     fallback: string,
@@ -346,6 +461,7 @@ export function hyperVProviderDiagnosticCode(
         .at(-1);
     return specificReportedDiagnosticCode
         || stageDiagnosticCode
+        || hyperVTypedErrorFamilyCode(result.error)
         || boundedPowerShellErrorId(result.error, result.stderr)
         || reportedDiagnosticCodes.at(-1)
         || fallbackDiagnosticCode;

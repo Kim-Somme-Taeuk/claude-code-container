@@ -41,6 +41,7 @@ import { assertHyperVOperationDeadline, hyperVRemainingTimeout } from "./deadlin
 import {
     hyperVBoundedErrorCode,
     hyperVProviderDiagnosticCode,
+    hyperVTypedErrorCode,
     redactProviderCommandInput,
 } from "./public-response.js";
 import { validHyperVIncarnationId } from "./state.js";
@@ -656,13 +657,11 @@ function typedHostNetworkSpec(switchName: string, natName: string): HyperVHostNe
     });
 }
 
+// The shared typed projection, so a network failure reads the same here as at reconciliation and
+// in a create rollback: only a native code becomes hyper-v-ps-*; a transport or protocol code keeps
+// its category.
 function typedNetworkDiagnosticCode(error: unknown, fallback: string): string {
-    if (error instanceof HyperVWindowsError) {
-        if (/^hyper-v-[a-z0-9-]{3,128}$/.test(error.code)) return error.code;
-        const normalized = error.code.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-        return normalized ? `hyper-v-ps-${normalized}`.slice(0, 80).replace(/-+$/, "") : fallback;
-    }
-    return hyperVBoundedErrorCode(error, fallback);
+    return hyperVTypedErrorCode(error, fallback);
 }
 
 function typedNetworkExecutionDiagnostic(error: unknown, fallback: string): Record<string, unknown> {
@@ -1202,7 +1201,9 @@ async function ensureHyperVNetwork(
             ok: false,
             status: 409,
             error: "hyper-v-network-allocation-reconciliation-failed",
-            detail: hyperVBoundedErrorCode(error, "hyper-v-network-allocation-reconciliation-failed"),
+            // The typed inventory read's own code, not the bare category its message starts with:
+            // an unconfirmed absence has to say which native error left the allocation in place.
+            detail: hyperVTypedErrorCode(error, "hyper-v-network-allocation-reconciliation-failed"),
             preserveEvidence: true,
         };
     }

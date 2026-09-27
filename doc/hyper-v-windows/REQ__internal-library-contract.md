@@ -106,6 +106,14 @@ existing VM may be inaccessible. Missing cmdlets/modules, host-service
 failures, permission errors, and all other native errors MUST propagate as
 failure; they MUST NOT be converted to VM absence.
 
+The bounded exact-name inventory read (`Get-VM -Name` with 1–32 distinct names)
+follows the same absence rule. Each missing name MAY be reported by either
+exact no-match pair above. If any such record appears, the transport MUST make
+one confirming host-wide `Get-VM -ErrorAction Stop` read, filter it by
+case-sensitive exact name, and return only that result; an error from that read
+MUST propagate. Every other error record MUST propagate. `TargetObject` is not
+evidence of absence.
+
 The trusted Hyper-V module manifest MAY be installed directly at the protected
 System32 `Modules\Hyper-V` root or beneath a numeric version directory such as
 `2.0.0.0`. Resolution MUST remain inside that exact system root, accept only a

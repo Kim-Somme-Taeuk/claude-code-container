@@ -305,6 +305,86 @@ describe("Hyper-V Level 3 launcher", () => {
         expect(probe).toHaveBeenCalledTimes(2);
     });
 
+    it("prints the attested broker's elevation gate state", async () => {
+        let output = "";
+        const originalWrite = process.stdout.write;
+        process.stdout.write = ((chunk: any) => {
+            output += String(chunk);
+            return true;
+        }) as typeof process.stdout.write;
+        try {
+            for (const elevationGate of [{ state: "never-asked" }, undefined]) {
+                const status = await ensureHostBrokerReady("/repo", {
+                    spawn: () => ({ status: 0, stdout: brokerStatusOutput(), stderr: "" }),
+                    probeHostBrokerCapabilitiesImpl: async () => ({
+                        ok: true,
+                        capabilities: HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
+                        pid: verifiedBrokerPid,
+                        startedAt: verifiedBrokerStartedAt,
+                        ...(elevationGate ? { elevationGate } : {}),
+                    }),
+                });
+                expect(status).toBe(0);
+            }
+        } finally {
+            process.stdout.write = originalWrite;
+        }
+
+        expect(output).toContain("ATTEST Hyper-V elevation gate state=never-asked\n");
+        expect(output).toContain("ATTEST Hyper-V elevation gate state=unreported\n");
+    });
+
+    it("stops before any Hyper-V step when the broker's elevation gate has refused", async () => {
+        let diagnostic = "";
+        let output = "";
+        const originalStderrWrite = process.stderr.write;
+        const originalStdoutWrite = process.stdout.write;
+        process.stderr.write = ((chunk: any) => {
+            diagnostic += String(chunk);
+            return true;
+        }) as typeof process.stderr.write;
+        process.stdout.write = ((chunk: any) => {
+            output += String(chunk);
+            return true;
+        }) as typeof process.stdout.write;
+        const spawn = vi.fn(() => ({ status: 0, stdout: brokerStatusOutput(), stderr: "" }));
+        let probeCalls = 0;
+        try {
+            const status = await ensureHostBrokerReady("/repo", {
+                spawn,
+                probeHostBrokerCapabilitiesImpl: async () => {
+                    probeCalls += 1;
+                    return {
+                        ok: true,
+                        capabilities: HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
+                        pid: verifiedBrokerPid,
+                        startedAt: verifiedBrokerStartedAt,
+                        // Only the confirmation read has seen the refusal: the later read decides.
+                        elevationGate: probeCalls === 1
+                            ? { state: "never-asked" }
+                            : { state: "refused", code: "hyper-v-network-elevation-cancelled", at: "2026-09-27T09:16:02.123Z" },
+                    };
+                },
+            });
+
+            expect(status).toBe(1);
+        } finally {
+            process.stderr.write = originalStderrWrite;
+            process.stdout.write = originalStdoutWrite;
+        }
+
+        // No repair and no retry: restarting the broker is the operator's call, since a fresh
+        // broker may prompt again.
+        expect(spawn).toHaveBeenCalledTimes(1);
+        expect(probeCalls).toBe(2);
+        expect(diagnostic).toContain(`elevation gate refused; pid=${verifiedBrokerPid}; code=hyper-v-network-elevation-cancelled; at=2026-09-27T09:16:02.123Z`);
+        expect(diagnostic).toContain("Run not started, including any non-Hyper-V Level 3 steps");
+        expect(diagnostic).toContain("hyper-v-network-elevation-suppressed");
+        expect(diagnostic).toContain(`restart the broker to clear the refusal. Stop process ${verifiedBrokerPid}`);
+        expect(diagnostic).toContain("'ccc devices setup hyper-v --confirm'");
+        expect(output).not.toContain("ATTEST Hyper-V elevation gate");
+    });
+
     it("bounds the complete Windows broker repair and preserves spawn failures after partial output", async () => {
         let diagnostic = "";
         const observedTimeouts: number[] = [];
@@ -570,7 +650,42 @@ describe("Hyper-V Level 3 launcher", () => {
             capabilities,
             pid: verifiedBrokerPid,
             startedAt: verifiedBrokerStartedAt,
+            elevationGate: { state: "unreported" },
         });
+    });
+
+    it("reads the elevation gate from the running broker and echoes only bounded values", async () => {
+        const observe = (hyperVElevationGate: unknown) => probeHostBrokerCapabilities(17373, {
+            fetchImpl: async () => new Response(JSON.stringify({
+                ok: true,
+                broker: {
+                    implemented: HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
+                    process: { pid: verifiedBrokerPid },
+                    startedAt: verifiedBrokerStartedAt,
+                    hyperVElevationGate,
+                },
+            }), { status: 200 }),
+        });
+
+        expect((await observe({ state: "never-asked" })).elevationGate).toEqual({ state: "never-asked" });
+        expect((await observe({
+            state: "refused",
+            code: "hyper-v-network-elevation-cancelled",
+            at: "2026-09-27T09:16:02.123Z",
+        })).elevationGate).toEqual({
+            state: "refused",
+            code: "hyper-v-network-elevation-cancelled",
+            at: "2026-09-27T09:16:02.123Z",
+        });
+        // Still refused — the state is what stops the run — but no host text reaches the log.
+        expect((await observe({
+            state: "refused",
+            code: "C:\\Users\\secret\\hyper-v.json",
+            at: "yesterday; rm -rf",
+        })).elevationGate).toEqual({ state: "refused", code: "invalid", at: "invalid" });
+        expect((await observe({ state: "leased", code: "hyper-v-network-elevation-cancelled" })).elevationGate)
+            .toEqual({ state: "unrecognized" });
+        expect((await observe(null)).elevationGate).toEqual({ state: "unrecognized" });
     });
 
     it("rejects an oversized direct broker status response before reading it", async () => {
