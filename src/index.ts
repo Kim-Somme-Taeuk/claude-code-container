@@ -1731,7 +1731,7 @@ TOOLS:
     ccc codex               Run Codex
     ccc opencode            Run OpenCode
 
-PROFILES (separate claude credential directories):
+PROFILES (separate Claude and Codex logins; "default" is used without CCC_PROFILE):
     CCC_PROFILE=<name> ccc      Run with profile
     ccc profile list            List all profiles
     ccc profile add <name>      Create profile
