@@ -795,6 +795,12 @@ Broker contract status:
   but incompatible, host `ccc` terminates that broker process and starts a new
   one instead of letting the container fall back to stale direct-provider
   diagnostics.
+- Capability checks match versioned families forward. A broker advertising
+  `family-vM` satisfies a required `family-vN` when `M >= N`, so an older
+  container image keeps working against a newer host broker. The in-container
+  MCP accepts a `ccc-host` broker reached over loopback that is forwarded out of
+  the container with cross-host trust; the exact listener rules live in
+  `doc/device-lab/REQ__container-broker-discovery.md`.
 - Broker owner RPC uses a zero-configuration per-owner random secret stored at
   `~/.ccc/devices/broker/auth/<owner-id>.json` with 0600 permissions. Both the
   in-container MCP client and host broker derive `x-ccc-device-token` from the

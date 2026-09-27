@@ -691,6 +691,8 @@ export interface DockerRunArgsOptions {
      * left unset on docker-native and rootful podman where it does.
      */
     proxyEnabled?: boolean;
+    /** The runtime keeps containers in a VM (Docker Desktop, podman machine), independent of the proxy opt-out. */
+    containerHostRemote?: boolean;
 }
 
 export interface LabRunnerRunConfig {
@@ -821,6 +823,12 @@ export function buildDockerRunArgs(opts: DockerRunArgsOptions): string[] {
     args.push("-e", `MISE_TRUSTED_CONFIG_PATHS=${opts.projectMountPath}`);
     if (opts.proxyEnabled) {
         args.push("-e", "CCC_PROXY_ENABLED=1");
+    }
+    // Fixed at creation, unlike per-session env: the device-lab MCP uses it to know the container's
+    // loopback is shared through a VM even when CCC_DISABLE_PROXY turned the proxy off
+    // (doc/device-lab/REQ__container-broker-discovery.md).
+    if (opts.containerHostRemote) {
+        args.push("-e", "CCC_CONTAINER_HOST_REMOTE=1");
     }
 
     if (opts.labRunner) {
@@ -2850,6 +2858,7 @@ export function startProjectContainer(
             // heuristics get it wrong (exotic VPN/networking setups, mirrored
             // mode we failed to recognize, etc).
             proxyEnabled: (process.platform !== "linux" || isContainerHostRemote()) && process.env.CCC_DISABLE_PROXY !== "1",
+            containerHostRemote: process.platform !== "linux" || isContainerHostRemote(),
         });
 
         assertPreparedProjectMountSources();

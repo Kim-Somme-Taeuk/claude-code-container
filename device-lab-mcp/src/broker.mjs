@@ -5,6 +5,7 @@ import { request as httpRequest } from "http";
 import { homedir } from "os";
 import { delimiter, dirname, join, resolve } from "path";
 import { ownerBasis, ownerId, PACKAGE_ROOT, projectMountPath } from "./context.mjs";
+import { missingBrokerCapabilities } from "./contracts/broker-capabilities.mjs";
 import { writeJsonFileAtomically } from "./state/shared-mutation-lock.mjs";
 import { readDeviceLabStateFile } from "./state/state-file.mjs";
 import { canonicalWindowsPowerShellPath, canonicalWindowsSystemExecutablePath, hiddenWindowsPowerShellArgs, terminateWindowsProcessByStartToken } from "./state/windows-system-powershell.mjs";
@@ -788,7 +789,8 @@ async function probeCccHostBrokerCapabilities(host, port, timeoutMs) {
         const parsed = await readBrokerHttpJson(response, BROKER_CONTROL_RESPONSE_LIMIT_BYTES);
         const body = parsed.body;
         const implemented = Array.isArray(body?.broker?.implemented) ? body.broker.implemented.map(String) : [];
-        const missingCapabilities = REQUIRED_CCC_HOST_BROKER_CAPABILITIES.filter((capability) => !implemented.includes(capability));
+        // Versioned families match forward: a newer host broker (-v10) satisfies this client's -v9.
+        const missingCapabilities = missingBrokerCapabilities(REQUIRED_CCC_HOST_BROKER_CAPABILITIES, implemented);
         return {
             ok: parsed.ok && response.ok && body?.ok === true && missingCapabilities.length === 0,
             endpoint,
@@ -812,6 +814,8 @@ async function probeCccHostBrokerCapabilities(host, port, timeoutMs) {
         clearTimeout(timer);
     }
 }
+
+export const probeCccHostBrokerCapabilitiesForTest = probeCccHostBrokerCapabilities;
 
 async function waitForBrokerHealth({ host, port, timeoutMs }) {
     const deadline = Date.now() + timeoutMs;
@@ -1158,6 +1162,202 @@ function verifiedOwnedLegacyBrokerProcess(runtime, port, statusBroker, portProce
     return observed;
 }
 
+function isLoopbackBrokerHost(host) {
+    const normalizedHost = String(host || "").trim().toLowerCase();
+    return normalizedHost === "127.0.0.1" || normalizedHost === "localhost" || normalizedHost === "::1";
+}
+
+function linuxProcessIsDefunct(procRoot, pid) {
+    let state;
+    try {
+        const stat = readFileSync(`${procRoot}/${pid}/stat`, "utf8");
+        state = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
+    } catch (error) {
+        // A process that vanished between the directory listing and this read holds nothing.
+        return error?.code === "ENOENT" || error?.code === "ESRCH";
+    }
+    if (state !== "Z" && state !== "X") return false;
+    // A leader thread that exited reports Z while its other threads keep running and keep every
+    // descriptor open, so Z alone proves nothing. Only a process whose task list holds no thread but
+    // the leader has released its descriptors; anything else, or an unreadable list, is not defunct.
+    try {
+        return readdirSync(`${procRoot}/${pid}/task`).every((task) => task === String(pid));
+    } catch (error) {
+        return error?.code === "ENOENT" || error?.code === "ESRCH";
+    }
+}
+
+// Who, if anyone in this container, answers a TCP connection to 127.0.0.1:<port>? The answer is one
+// of five states. "outside-pid-namespace" is best-effort evidence against a local listener that is
+// not trying to hide; a process in the container that deliberately shuffles its socket between
+// descriptors or processes can evade it. That is acceptable only because such a process already
+// holds the owner secret and passwordless sudo. Only two states widen trust:
+//   absent                 no LISTEN socket on the port in this network namespace, so a loopback
+//                          connection that succeeded was carried out of it (Docker Desktop's
+//                          iptables REDIRECT to ccc-proxy, WSL2 mirrored loopback, ...).
+//   outside-pid-namespace  a LISTEN socket exists, but no process in this PID namespace holds it
+//                          and every live process here was inspected (native-Linux --network host:
+//                          the host broker's socket is in the shared netns, its PID is not).
+//   visible-owner          a process in this PID namespace holds the socket: a local listener.
+//   indeterminate          a LISTEN socket exists, no inspected process holds it, but some live
+//                          process's fd table was unreadable, so it may be the owner.
+//   unavailable            procfs could not answer (non-Linux client, hidden /proc/net).
+// The last three never widen trust; callers fall back to strict local process verification.
+function inspectLocalLoopbackListener(port, options = {}) {
+    const platform = options.platform ?? process.platform;
+    const procRoot = options.procRoot ?? "/proc";
+    const expectedPort = Number(port);
+    if (platform !== "linux") return { state: "unavailable", port: expectedPort, reason: "unsupported-platform" };
+    if (!Number.isInteger(expectedPort) || expectedPort < 1 || expectedPort > 65535) {
+        return { state: "unavailable", port: expectedPort, reason: "invalid-port" };
+    }
+    const portHex = expectedPort.toString(16).toUpperCase().padStart(4, "0");
+    const inodes = new Set();
+    let tablesRead = 0;
+    for (const table of ["tcp", "tcp6"]) {
+        let text;
+        try {
+            text = readFileSync(`${procRoot}/net/${table}`, "utf8");
+        } catch (error) {
+            // tcp6 is legitimately missing when IPv6 is disabled; anything else is not an answer.
+            if (error?.code === "ENOENT") continue;
+            return { state: "unavailable", port: expectedPort, reason: `proc-net-${table}-unreadable` };
+        }
+        tablesRead += 1;
+        for (const line of text.trim().split(/\n/).slice(1)) {
+            const fields = line.trim().split(/\s+/);
+            if (fields[3] === "0A" && (fields[1] || "").split(":").pop() === portHex && fields[9]) inodes.add(fields[9]);
+        }
+    }
+    if (tablesRead === 0) return { state: "unavailable", port: expectedPort, reason: "proc-net-tcp-missing" };
+    if (inodes.size === 0) return { state: "absent", port: expectedPort };
+    const listenerInodes = [...inodes];
+    const listPids = options.listPids || (() => readdirSync(procRoot).filter((entry) => /^\d+$/.test(entry)));
+    // Re-list /proc until a round turns up no pid that was not already scanned, so a holder that
+    // keeps handing the socket to freshly forked children cannot live only in the gap between the
+    // listing and the scan. A list that never settles proves nothing.
+    const scanned = new Set();
+    const uninspectablePids = [];
+    for (let round = 0; round < LOCAL_LISTENER_SCAN_ROUNDS; round += 1) {
+        let pids;
+        try {
+            pids = listPids();
+        } catch {
+            return { state: "unavailable", port: expectedPort, reason: "proc-unreadable", inodes: listenerInodes };
+        }
+        const fresh = pids.filter((pid) => !scanned.has(pid));
+        if (fresh.length === 0) {
+            return uninspectablePids.length > 0
+                ? { state: "indeterminate", port: expectedPort, inodes: listenerInodes, uninspectablePids: uninspectablePids.slice(0, 8) }
+                : { state: "outside-pid-namespace", port: expectedPort, inodes: listenerInodes };
+        }
+        for (const pidText of fresh) {
+            scanned.add(pidText);
+            const scan = scanLinuxProcessForSockets(procRoot, pidText, inodes);
+            if (scan.owner) return { state: "visible-owner", port: expectedPort, pid: Number(pidText), inodes: listenerInodes };
+            if (scan.uninspectable) uninspectablePids.push(Number(pidText));
+        }
+    }
+    return {
+        state: "indeterminate",
+        port: expectedPort,
+        inodes: listenerInodes,
+        reason: "pid-list-unsettled",
+        uninspectablePids: uninspectablePids.slice(0, 8),
+    };
+}
+
+const LOCAL_LISTENER_SCAN_ROUNDS = 8;
+
+// Does this process hold one of the listening socket inodes? Every thread's fd table is read, not
+// just the leader's: a thread that unshared CLONE_FILES keeps its descriptors only under
+// /proc/<pid>/task/<tid>/fd. A table or link that cannot be read (other than a race with exit)
+// leaves the process uninspected, unless it is a zombie that has released everything.
+function scanLinuxProcessForSockets(procRoot, pidText, inodes) {
+    const fdDirs = [`${procRoot}/${pidText}/fd`];
+    try {
+        for (const task of readdirSync(`${procRoot}/${pidText}/task`)) {
+            if (/^\d+$/.test(task) && task !== pidText) fdDirs.push(`${procRoot}/${pidText}/task/${task}/fd`);
+        }
+    } catch (error) {
+        if (error?.code === "ENOENT" || error?.code === "ESRCH") {
+            // The process exited after the listing, or (fake procfs) has no task list: the leader's
+            // table below is still read, and an exited process simply yields nothing.
+        } else {
+            return { owner: false, uninspectable: !linuxProcessIsDefunct(procRoot, pidText) };
+        }
+    }
+    let uninspectable = false;
+    for (const dir of fdDirs) {
+        let fds;
+        try {
+            fds = readdirSync(dir);
+        } catch (error) {
+            if (error?.code !== "ENOENT" && error?.code !== "ESRCH") uninspectable = true;
+            continue;
+        }
+        for (const fd of fds) {
+            let target = "";
+            try {
+                target = readlinkSync(`${dir}/${fd}`);
+            } catch (error) {
+                // A descriptor closed after the listing holds nothing; any other failure (a denied
+                // ptrace read, an LSM refusal) means this table was not inspected.
+                if (error?.code === "ENOENT" || error?.code === "ESRCH") continue;
+                uninspectable = true;
+                break;
+            }
+            const match = /^socket:\[(\d+)\]$/.exec(target);
+            if (match && inodes.has(match[1])) return { owner: true, uninspectable: false };
+        }
+    }
+    // Zombies keep their /proc entry but have already released every descriptor.
+    return { owner: false, uninspectable: uninspectable && !linuxProcessIsDefunct(procRoot, pidText) };
+}
+
+export const inspectLocalLoopbackListenerForTest = inspectLocalLoopbackListener;
+
+// A loopback broker endpoint seen from inside a ccc container is not necessarily a local process.
+// On Docker Desktop (Windows/macOS) the container's 127.0.0.1 traffic is REDIRECTed to ccc-proxy,
+// which connects to 127.0.0.1:<port> in this netns first and otherwise to host.docker.internal, so
+// http://127.0.0.1:17373 reaches the Windows host broker. Its PID lives on another OS, and strict
+// local port-process verification (keyed on THIS process's platform) can never succeed for it.
+//
+// The decision is driven by the listener table, not by platform strings. Platform is neither
+// necessary nor sufficient: native-Linux --network host puts a linux host broker behind the same
+// loopback (same platform, still outside our PID namespace), and a win32 claim in the host-written
+// runtime file says nothing about who answers 127.0.0.1 here. If a process in this container holds
+// the port, ccc-proxy routes to it before the host, so a visible local listener always falls back
+// to strict verification regardless of what platform the runtime or /status reports.
+//
+// Accepted endpoints get exactly the cross-host-container-boundary trust: the runtime must be the
+// host CLI's (managedBy "ccc-host"), and authenticated RPCs are still bound to that runtime's
+// pid/start token/startedAt by verifyAuthenticatedBrokerGeneration.
+//
+// When ccc-proxy carries this container's loopback (CCC_PROXY_ENABLED=1, Docker Desktop), the host
+// broker lives on another OS and never appears in this netns. A listener that is here but outside
+// our PID namespace belongs to another container on the same VM, and ccc-proxy would route to it
+// before the host, so only "absent" proves the endpoint is the host.
+function loopbackForwardedContainerBoundary(runtime, port, options = {}) {
+    const containerBoundary = options.containerBoundary ?? existsSync("/.dockerenv");
+    if (runtime?.managedBy !== "ccc-host" || !containerBoundary) return { ok: false, applicable: false };
+    const inspector = options.localListenerInspector || inspectLocalLoopbackListener;
+    const listener = inspector(Number(port)) || { state: "unavailable", port: Number(port), reason: "no-inspection" };
+    // CCC_CONTAINER_HOST_REMOTE is fixed at container creation on VM-backed runtimes, whatever the
+    // proxy opt-out; CCC_PROXY_ENABLED covers containers created before it existed, and
+    // CCC_DISABLE_PROXY (forwarded per session) the opt-out on those older containers. Any of them
+    // means this netns is a VM's, shared with other containers, so only "absent" proves the host.
+    const proxied = (options.loopbackProxyEnabled
+        ?? (process.env.CCC_CONTAINER_HOST_REMOTE === "1"
+            || process.env.CCC_PROXY_ENABLED === "1"
+            || process.env.CCC_DISABLE_PROXY === "1")) === true;
+    return {
+        ok: listener.state === "absent" || (!proxied && listener.state === "outside-pid-namespace"),
+        applicable: true,
+        listener,
+    };
+}
+
 function reusableBrokerProcessVerification(runtime, port, host, options = {}) {
     const nodeEnv = options.nodeEnv ?? process.env.NODE_ENV;
     const testEscape = options.testEscape ?? process.env.CCC_DEVICE_LAB_TEST_ALLOW_UNVERIFIED_BROKER;
@@ -1165,7 +1365,7 @@ function reusableBrokerProcessVerification(runtime, port, host, options = {}) {
         return { ok: true, source: "explicit-test-fixture" };
     }
     const normalizedHost = String(host || "").trim().toLowerCase();
-    const loopback = normalizedHost === "127.0.0.1" || normalizedHost === "localhost" || normalizedHost === "::1";
+    const loopback = isLoopbackBrokerHost(normalizedHost);
     const containerBoundary = options.containerBoundary ?? existsSync("/.dockerenv");
     if (runtime?.managedBy === "ccc-host"
         && containerBoundary
@@ -1173,11 +1373,19 @@ function reusableBrokerProcessVerification(runtime, port, host, options = {}) {
         && TRUSTED_BROKER_HOSTS.has(normalizedHost)) {
         return { ok: true, source: "cross-host-container-boundary" };
     }
+    let localListener = null;
+    if (loopback) {
+        const forwarded = loopbackForwardedContainerBoundary(runtime, port, { ...options, containerBoundary });
+        if (forwarded.ok) {
+            return { ok: true, source: "loopback-forwarded-container-boundary", localListener: forwarded.listener };
+        }
+        if (forwarded.applicable) localListener = forwarded.listener;
+    }
     const processVerifier = options.processVerifier || verifiedBrokerProcess;
     const verified = processVerifier(runtime, port, options.statusBroker || null);
     return verified
         ? { ok: true, source: verified.source, verified }
-        : { ok: false, source: "unverified-broker-port-process" };
+        : { ok: false, source: "unverified-broker-port-process", ...(localListener ? { localListener } : {}) };
 }
 
 export const reusableBrokerProcessVerificationForTest = reusableBrokerProcessVerification;
@@ -2086,7 +2294,9 @@ export async function brokerRpc(options = {}) {
     return brokerRpcRequest({ ...options, publicTool: true });
 }
 
-async function verifyAuthenticatedBrokerGeneration(host, port, launch, options) {
+// `boundaryOptions` is deliberately separate from `options`: the latter carries caller-supplied RPC
+// options, which must never be able to assert a container boundary or inject a listener inspector.
+async function verifyAuthenticatedBrokerGeneration(host, port, launch, options, boundaryOptions = {}) {
     if (typeof options.verifyBeforeAuthenticatedRequest === "function"
         && options.verifyBeforeAuthenticatedRequest() !== true) {
         return null;
@@ -2112,10 +2322,12 @@ async function verifyAuthenticatedBrokerGeneration(host, port, launch, options) 
         || runtime.processStartToken !== brokerStartToken
         || runtime.startedAt !== brokerStartedAt
     )) return null;
-    const normalizedHost = String(host || "").trim().toLowerCase();
-    const loopback = normalizedHost === "127.0.0.1" || normalizedHost === "localhost" || normalizedHost === "::1";
-    if (!loopback) return runtime;
-    return verifiedBrokerProcess(runtime, Number(port), broker) ? runtime : null;
+    if (!isLoopbackBrokerHost(host)) return runtime;
+    // The generation match above already bound this runtime to the answering broker's identity; a
+    // loopback endpoint forwarded out of the container cannot additionally be port-verified here.
+    if (loopbackForwardedContainerBoundary(runtime, port, boundaryOptions).ok) return runtime;
+    const processVerifier = boundaryOptions.processVerifier || verifiedBrokerProcess;
+    return processVerifier(runtime, Number(port), broker) ? runtime : null;
 }
 
 export const verifyAuthenticatedBrokerGenerationForTest = verifyAuthenticatedBrokerGeneration;

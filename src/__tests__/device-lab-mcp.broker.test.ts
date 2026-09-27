@@ -112,11 +112,15 @@ describe("device-lab MCP", () => {
     it("permits cross-host container brokers without exempting container loopback listeners", () => {
         const runtime = { managedBy: "ccc-host", pid: 4321, port: 17373 };
         const processVerifier = vi.fn(() => null);
+        // A process inside this container holds the loopback port, so ccc-proxy would route to it
+        // rather than to the host. Forwarded loopback is covered in the container-boundary suite.
+        const containerLocalListener = { state: "visible-owner", port: 17373, pid: 77, inodes: ["55555"] };
         const options = {
             nodeEnv: "production",
             testEscape: "0",
             containerBoundary: true,
             processVerifier,
+            localListenerInspector: () => containerLocalListener,
         };
 
         expect(reusableBrokerProcessVerificationForTest(
@@ -136,6 +140,7 @@ describe("device-lab MCP", () => {
         )).toEqual({
             ok: false,
             source: "unverified-broker-port-process",
+            localListener: containerLocalListener,
         });
         expect(processVerifier).toHaveBeenCalledOnce();
     });
@@ -1161,6 +1166,61 @@ describe("device-lab MCP", () => {
             expect(payload.transport.defaultPort).toBe(address.port);
             expect(payload.ownerResolve).toEqual(expect.objectContaining({ ok: true, ownerId: TEST_BROKER_OWNER_ID }));
             expect(payload.launch).toEqual(expect.objectContaining({ ok: true, reused: true, port: address.port }));
+        } finally {
+            rmSync(initialPayload.state.runtimeFile, { force: true });
+            await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+        }
+    });
+
+    it("reuses a newer host broker whose capability families are ahead of this MCP", { timeout: TIMEOUT }, async () => {
+        // A container image is routinely older than the host install. The broker then advertises
+        // the next generation of each family (-v10 where this client requires -v9); exact matching
+        // refused it and no device tool could run until the image was rebuilt.
+        const newerFamilies = REQUIRED_CCC_HOST_BROKER_CAPABILITIES.map((capability: string) =>
+            capability.replace(/-v(\d+)$/, (_match: string, version: string) => `-v${Number(version) + 1}`));
+        const initial = await client.callTool({ name: "device_broker_status", arguments: { probe: false, autolaunch: false } });
+        const initialPayload = JSON.parse(((initial.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
+            state: { runtimeFile: string };
+        };
+        const server = createServer((req, res) => {
+            res.setHeader("content-type", "application/json");
+            if (req.url === "/health") {
+                res.end(JSON.stringify({ ok: true, name: "ccc-device-broker", mode: "host-broker-daemon" }));
+                return;
+            }
+            if (req.url === "/status") {
+                res.end(JSON.stringify({ ok: true, broker: { implemented: newerFamilies } }));
+                return;
+            }
+            if (sendTestOwnerResolve(req, res)) return;
+            res.statusCode = 404;
+            res.end(JSON.stringify({ ok: false, error: "not-found" }));
+        });
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const address = server.address() as AddressInfo;
+        mkdirSync(join(homeDir, ".ccc/devices/broker"), { recursive: true });
+        writeFileSync(initialPayload.state.runtimeFile, JSON.stringify({
+            ownerId: "0000000000000000",
+            pid: process.pid,
+            host: "0.0.0.0",
+            probeHost: "127.0.0.1",
+            hostCandidates: ["127.0.0.1"],
+            port: address.port,
+            managedBy: "ccc-host",
+        }));
+
+        try {
+            const result = await client.callTool({ name: "device_broker_status", arguments: { probe: true } });
+            expect(result.isError).not.toBe(true);
+            const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
+                mode: string;
+                rpcReady: boolean;
+                launch: { ok: boolean; reused: boolean; port: number };
+                warnings: string[];
+            };
+            expect(payload).toEqual(expect.objectContaining({ mode: "host-broker-detected", rpcReady: true }));
+            expect(payload.launch).toEqual(expect.objectContaining({ ok: true, reused: true, port: address.port }));
+            expect(payload.warnings.join(" ")).not.toContain("missing required capabilities");
         } finally {
             rmSync(initialPayload.state.runtimeFile, { force: true });
             await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

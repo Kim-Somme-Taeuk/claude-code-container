@@ -754,6 +754,13 @@ describe("buildDockerRunArgs — CCC_PROXY_ENABLED", () => {
         expect(envs).not.toHaveProperty("CCC_PROXY_ENABLED");
     });
 
+    it("marks VM-backed containers with CCC_CONTAINER_HOST_REMOTE=1 independently of the proxy opt-out", () => {
+        const marked = buildDockerRunArgs(makeOpts({ proxyEnabled: false, containerHostRemote: true }));
+        expect(marked).toContain("CCC_CONTAINER_HOST_REMOTE=1");
+        expect(marked).not.toContain("CCC_PROXY_ENABLED=1");
+        expect(buildDockerRunArgs(makeOpts({ containerHostRemote: false }))).not.toContain("CCC_CONTAINER_HOST_REMOTE=1");
+    });
+
     it("sets CCC_PROXY_ENABLED=1 when proxyEnabled is true", () => {
         const args = buildDockerRunArgs(makeOpts({ proxyEnabled: true }));
         const envs = extractEnvVars(args);

@@ -1,6 +1,7 @@
 import { spawnSync } from "child_process";
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
+import { missingBrokerCapabilities } from "../../../device-lab-mcp/src/contracts/broker-capabilities.mjs";
 
 export const HYPER_V_LEVEL3_WINDOWS_UNATTEND_OOBE_SCHEMA_CONTRACT = "hyper-v-windows-unattend-oobe-schema-v3";
 export const HYPER_V_LEVEL3_POWERSHELL_DIRECT_BOUNDED_PROBE_CONTRACT = "hyper-v-powershell-direct-bounded-probe-v1";
@@ -202,8 +203,9 @@ export async function ensureHostBrokerReady(repoRoot, options: any = {}) {
             ?.split(",")
             .map((capability) => capability.trim())
             .filter(Boolean) || [];
-        const missingCapabilities = HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
-            .filter((capability) => !verifiedCapabilities.includes(capability));
+        // Same family-versioned rule as the CLI whose reuse decision this attests: a newer -vM
+        // satisfies -vN, an older one does not.
+        const missingCapabilities = missingBrokerCapabilities(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES, verifiedCapabilities);
         const verifiedPid = Number(/^brokerVerifiedPid:\s*(\d+)$/m.exec(stdout)?.[1] || "");
         const verifiedStartedAt = /^brokerVerifiedStartedAt:\s*(\S+)$/m.exec(stdout)?.[1] || "";
         if (result.status === 0 && missingCapabilities.length > 0) {
@@ -247,8 +249,7 @@ export async function ensureHostBrokerReady(repoRoot, options: any = {}) {
         const observedCapabilities = Array.isArray(observed?.capabilities)
             ? observed.capabilities.map(String)
             : [];
-        const missingObservedCapabilities = HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
-            .filter((capability) => !observedCapabilities.includes(capability));
+        const missingObservedCapabilities = missingBrokerCapabilities(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES, observedCapabilities);
         if (observed?.ok !== true || missingObservedCapabilities.length > 0) {
             process.stderr.write([
                 "CCC host broker remote capability attestation failed",
@@ -275,8 +276,7 @@ export async function ensureHostBrokerReady(repoRoot, options: any = {}) {
         const confirmedCapabilities = Array.isArray(confirmed?.capabilities)
             ? confirmed.capabilities.map(String)
             : [];
-        const missingConfirmedCapabilities = HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
-            .filter((capability) => !confirmedCapabilities.includes(capability));
+        const missingConfirmedCapabilities = missingBrokerCapabilities(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES, confirmedCapabilities);
         if (confirmed?.ok !== true || missingConfirmedCapabilities.length > 0) {
             process.stderr.write([
                 "CCC host broker remote confirmation attestation failed",

@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "url";
 import { isDeepStrictEqual } from "util";
 import { Worker } from "worker_threads";
 import { androidAvdHome, listOwnedAndroidAvdArtifacts, ownedAndroidAvdName, removeOwnedAndroidAvdArtifacts } from "../device-lab-mcp/src/state/android-avd-storage.mjs";
+import { missingBrokerCapabilities } from "../device-lab-mcp/src/contracts/broker-capabilities.mjs";
 import { deviceLabOwnerFromProjectMountPath, deviceLabOwnerId as canonicalDeviceLabOwnerId, deviceLabProjectMountPath } from "./device-lab-owner.js";
 import { assertOwnerDeviceStateWritable, ownerDeviceStateErrorCode, readOwnerDeviceStateFile } from "./device-lab-owner-state.js";
 import { readPhysicalLeaseStateFile, readWindowsSandboxLockStateFile, validatePhysicalLease, validateWindowsSandboxLock } from "./device-lab-ownership-state.js";
@@ -2160,7 +2161,9 @@ async function probeHostBrokerStatus(host: string, port: number, timeoutMs: numb
             ? (body.broker as { implemented?: unknown }).implemented
             : null;
         const capabilities = Array.isArray(implemented) ? implemented.map(String) : [];
-        const missingCapabilities = DEVICE_BROKER_REQUIRED_CAPABILITIES.filter((capability) => !capabilities.includes(capability));
+        // Family-versioned match: an older -vN still counts as missing, so a stale broker is still
+        // replaced; a same-version broker advertising a newer -vM is reused rather than downgraded.
+        const missingCapabilities = missingBrokerCapabilities(DEVICE_BROKER_REQUIRED_CAPABILITIES, capabilities);
         const broker = parsed.ok && body?.broker && typeof body.broker === "object"
             ? body.broker as { version?: unknown }
             : null;
