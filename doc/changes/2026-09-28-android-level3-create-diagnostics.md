@@ -25,3 +25,21 @@ is still needed to establish overall success after the provider cause is fixed.
 The accompanying Harness maintenance sets manifest version 7 and ignores
 `.claude/worktrees/`. The legacy `.version` marker was already absent/untracked;
 no tracked operational files matched the effective Harness ignores.
+
+## Continued scenario investigation
+
+The destructive Android scenario now tracks successful creation from the
+verified returned device identity rather than requiring a top-level `ok` field,
+which normalized success responses omit. Later failures therefore still trigger
+fixture cleanup. Cleanup validates stop, recording-stop and deletion responses,
+attempts remaining cleanup after errors, and preserves the primary failure.
+Structured `ok: false` responses are rejected with bounded provider diagnostics.
+See [the cleanup requirement](../verification/REQ__android-e2e-cleanup.md).
+
+A full broker-mediated Android run with an explicitly supplied installed image
+passed creation and boot, then failed its app-install result assertion. A direct
+retry of app installation succeeded; that first install failure is not yet
+explained. Its fixture was stopped and deleted through normal guarded APIs.
+This evidence does not establish the original Windows auto-selected image or
+the cause of its earlier `device_create` failure. Windows targeted and complete
+Level 3 verification remain required.

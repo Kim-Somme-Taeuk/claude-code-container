@@ -12,7 +12,10 @@ import { parseToolPayload, withDeviceLabMcp } from "./device-lab-mcp-client.ts";
 import { providerMcpSessionOptions } from "./provider-mcp-matrix.ts";
 
 function parsePayload(result) {
-    return parseToolPayload(result);
+    const payload = parseToolPayload(result);
+    const failure = [payload?.error, payload?.detail].filter(Boolean).join(": ").slice(0, 1200);
+    assert.notStrictEqual(payload?.ok, false, failure || "operation returned ok: false");
+    return payload;
 }
 
 function assertProvider(payload, expected, operation) {
@@ -25,11 +28,12 @@ function assertProvider(payload, expected, operation) {
 }
 
 function assertReportedLocalPath(actual, expected, brokerOnly) {
+    const diagnostic = `Reported local path ${JSON.stringify(String(actual).slice(0, 600))}; expected ${JSON.stringify(String(expected).slice(0, 600))}`;
     if (brokerOnly) {
-        assert.ok(String(actual || "").replace(/\\/g, "/").endsWith(`/${basename(expected)}`));
+        assert.ok(String(actual || "").replace(/\\/g, "/").endsWith(`/${basename(expected)}`), diagnostic);
         return;
     }
-    assert.strictEqual(actual, expected);
+    assert.strictEqual(actual, expected, diagnostic);
 }
 
 const DESTRUCTIVE_ANDROID_CAPABILITIES = new Set([
@@ -219,6 +223,20 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
     let primaryFailure = null;
     let currentStep = "start MCP session";
 
+    const confirmStopped = (payload) => {
+        const device = deviceFromPayload(payload, "device_stop");
+        assert.strictEqual(device.id, deviceId);
+        assert.strictEqual(device.status, "stopped");
+    };
+    const confirmDeleted = (payload) => {
+        assert.strictEqual(payload.deleted, deviceId);
+        assert.strictEqual(payload.avdDeleted, true);
+    };
+    const confirmRecordingStopped = (payload) => {
+        assert.strictEqual(payload.stopped, true);
+        assert.strictEqual(payload.recording?.active, false);
+    };
+
     return withDeviceLabMcp(async ({ callTool: rawCallTool }) => {
         const callTool = async (tool, args) => {
             currentStep = tool;
@@ -232,9 +250,11 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
                 deviceId,
                 systemImage: cap.systemImage.package,
             })));
-            created = createdPayload?.ok === true;
             const createdDevice = deviceFromPayload(createdPayload, "device_create");
             assert.strictEqual(createdDevice.id, deviceId);
+            // The normalized success payload may omit ok. Once identity is
+            // verified, later assertions must still clean up this fixture.
+            created = true;
             assert.ok(Number.isInteger(createdDevice.port));
             assert.strictEqual(createdDevice.provisioned, true);
 
@@ -568,10 +588,9 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             assert.strictEqual(mobileFlow.results.length, 2);
 
             const recordStop = parsePayload(await callTool("device_record_video_stop", { ...direct, deviceId }));
+            confirmRecordingStopped(recordStop);
             recordingActive = false;
             assert.strictEqual(recordStop.provider, "adb-screenrecord");
-            assert.strictEqual(recordStop.stopped, true);
-            assert.strictEqual(recordStop.recording.active, false);
             assertReportedLocalPath(recordStop.recording.localPath, recordingPath, options.brokerOnly);
             assert.ok(existsSync(recordingPath));
             assert.ok(readFileSync(recordingPath).length > 0);
@@ -591,8 +610,8 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             assert.ok(String(screenshot.content[0].data || "").length > 64);
 
             const stoppedPayload = parsePayload(await callTool("device_stop", { ...direct, deviceId }));
+            confirmStopped(stoppedPayload);
             stopped = true;
-            assert.strictEqual(deviceFromPayload(stoppedPayload, "device_stop").status, "stopped");
 
             const deletedPayload = parsePayload(await callTool("device_delete", {
                 ...direct,
@@ -600,9 +619,8 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
                 deleteAvd: true,
                 confirmDestructive: true,
             }));
+            confirmDeleted(deletedPayload);
             deleted = true;
-            assert.strictEqual(deletedPayload.deleted, deviceId);
-            assert.strictEqual(deletedPayload.avdDeleted, true);
 
             const expectedCapabilities = options.destructive === true
                 ? advertisedCapabilities
@@ -631,21 +649,24 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             const cleanupErrors = [];
             if (recordingActive) {
                 try {
-                    await callTool("device_record_video_stop", { ...direct, deviceId });
+                    confirmRecordingStopped(parsePayload(await callTool("device_record_video_stop", { ...direct, deviceId })));
+                    recordingActive = false;
                 } catch (error) {
                     cleanupErrors.push(`recording stop: ${error.message}`);
                 }
             }
             if (created && !stopped) {
                 try {
-                    await callTool("device_stop", { ...direct, deviceId });
+                    confirmStopped(parsePayload(await callTool("device_stop", { ...direct, deviceId })));
+                    stopped = true;
                 } catch (error) {
                     cleanupErrors.push(`device stop: ${error.message}`);
                 }
             }
             if (created && !deleted) {
                 try {
-                    await callTool("device_delete", { ...direct, deviceId, force: true, deleteAvd: true, confirmDestructive: true });
+                    confirmDeleted(parsePayload(await callTool("device_delete", { ...direct, deviceId, force: true, deleteAvd: true, confirmDestructive: true })));
+                    deleted = true;
                 } catch (error) {
                     cleanupErrors.push(`device/AVD delete: ${error.message}`);
                 }
