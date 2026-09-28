@@ -5,6 +5,10 @@ acknowledged the kill command. Before persisting stopped state or clearing
 runtime metadata, it must observe both the owned serial absent from a successful
 ADB inventory and the owned AVD process inactive. An unrelated unavailable
 emulator must not prevent confirming this target's stop.
+Existing AVDs registered without provisioning remain stoppable using their
+validated recorded name and serial. The CCC owner-prefix requirement still
+applies to artifact deletion; stopping a registered device does not grant
+authority to delete its external AVD storage.
 
 All observations share a bounded deadline and each subprocess receives no more
 than the remaining time. Failed observations and deadline exhaustion are errors,

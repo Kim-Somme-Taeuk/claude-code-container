@@ -6644,10 +6644,11 @@ function approvedAndroidAvdRoot(recordedRoot: unknown, platform: NodeJS.Platform
     return normalize(approved) === normalize(recorded) ? approved : null;
 }
 
-function androidAvdProcessState(avdName: string, normalized: NormalizedBrokerOptions, timeoutMs = 10000):
+function androidAvdProcessState(avdName: string, normalized: NormalizedBrokerOptions, timeoutMs = 10000, registeredName = false):
     | { ok: true; active: boolean }
     | { ok: false; status: number; error: string; detail: string } {
-    if (!ownedAndroidAvdName(avdName, avdName.slice(4, 20))) {
+    if (!/^[A-Za-z0-9._-]+$/.test(avdName)
+        || (!registeredName && !ownedAndroidAvdName(avdName, avdName.slice(4, 20)))) {
         return { ok: false, status: 409, error: "android-avd-identity-unavailable", detail: "invalid-avd-name" };
     }
     const command: ProviderCommand = normalized.platform === "win32"
@@ -6695,11 +6696,11 @@ function androidAvdIsInactiveForBroker(avdName: string, normalized: NormalizedBr
     return processState.ok && !processState.active;
 }
 
-function waitForBrokerAndroidEmulatorStop(ownerId: string, device: unknown, normalized: NormalizedBrokerOptions): string | null {
+function waitForBrokerAndroidEmulatorStop(device: unknown, normalized: NormalizedBrokerOptions): string | null {
     const serial = androidSerial(device);
     const avdName = field(device, "avdName");
     const adb = executableFor("adb", normalized);
-    if (!serial || !avdName || !ownedAndroidAvdName(avdName, ownerId) || !adb) return "identity-unavailable";
+    if (!serial || !avdName || !/^[A-Za-z0-9._-]+$/.test(avdName) || !adb) return "identity-unavailable";
     const deadline = Date.now() + 30000;
     while (Date.now() < deadline) {
         let serialPresent: boolean;
@@ -6722,7 +6723,9 @@ function waitForBrokerAndroidEmulatorStop(ownerId: string, device: unknown, norm
         const remaining = deadline - Date.now();
         if (remaining <= 0) break;
         try {
-            const processState = androidAvdProcessState(avdName, normalized, Math.min(10000, remaining));
+            // Registered external AVDs can be stopped, but artifact deletion keeps
+            // the process probe's default requirement for an owner-prefixed name.
+            const processState = androidAvdProcessState(avdName, normalized, Math.min(10000, remaining), true);
             if (!processState.ok) return "process-inventory-unavailable";
             if (Date.now() >= deadline) break;
             if (!serialPresent && !processState.active) return null;
@@ -14219,7 +14222,7 @@ async function lifecycleCommandInvokeUnlocked(
         execution = { ...execution, error: "hyper-v-operation-deadline-exceeded" };
     }
     if (success && parsed.backend === "android-emulator" && parsed.command === "device_stop") {
-        const stopFailure = waitForBrokerAndroidEmulatorStop(ownerId, payload.result?.device, normalized);
+        const stopFailure = waitForBrokerAndroidEmulatorStop(payload.result?.device, normalized);
         if (stopFailure) {
             return {
                 status: 502,

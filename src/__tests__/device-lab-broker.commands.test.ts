@@ -6544,6 +6544,65 @@ describe("device-lab host broker lifecycle commands", () => {
         }
     });
 
+    it("confirms stop of a registered non-prefixed AVD while still refusing artifact deletion", async () => {
+        const cwd = "/project/android-stop-registered-avd";
+        const ownerId = deviceLabOwnerId(cwd);
+        const deviceId = "android-registered-pixel";
+        const avdName = "Pixel_User";
+        const artifact = join(process.env.HOME!, ".android", "avd", `${avdName}.avd`);
+        mkdirSync(artifact, { recursive: true });
+        writeFileSync(join(artifact, "userdata-qemu.img"), "registered external AVD must survive");
+        let killed = false;
+        let serialChecks = 0;
+        let processChecks = 0;
+        const commandRunner = vi.fn((command) => {
+            const result = { ...command, status: 0, stdout: "", stderr: "" };
+            if (command.provider === "adb" && command.args?.at(-1) === "kill") {
+                expect(killed).toBe(false);
+                killed = true;
+            } else if (command.provider === "adb" && command.args?.[0] === "devices") {
+                if (killed) serialChecks++;
+                result.stdout = `List of devices attached\n${killed && serialChecks === 1 ? "emulator-5586\tdevice\n" : ""}`;
+            } else if (command.provider === "process-inventory") {
+                processChecks++;
+                result.stdout = processChecks === 1 ? "emulator -avd Pixel_User -port 5586\n" : "";
+            }
+            return result;
+        });
+        const server = createDeviceBrokerServer({ cwd, host: "127.0.0.1", port: 0,
+            providerPaths: { adb: "/fake/adb", avdmanager: "/fake/avdmanager" }, commandRunner });
+        const baseUrl = await listen(server);
+        const invoke = (command: string, extra: Record<string, unknown> = {}) => fetch(ownerRpcEndpoint(baseUrl, ownerId), {
+            method: "POST", headers: ownerRpcHeaders(ownerId),
+            body: JSON.stringify({ method: "broker.command.invoke", params: {
+                backend: "android-emulator", command, deviceId, ...extra,
+            } }),
+        });
+        try {
+            const created = await invoke("device_create", { name: "Registered Pixel", avdName, createAvd: false, port: 5586 });
+            expect(created.status).toBe(200);
+            expect(await created.json()).toEqual(expect.objectContaining({ ok: true,
+                result: expect.objectContaining({ device: expect.objectContaining({ avdName, provisioned: false }) }) }));
+            const stopped = await invoke("device_stop");
+            const stopBody = await stopped.json();
+            expect(stopped.status, JSON.stringify(stopBody)).toBe(200);
+            expect(stopBody).toEqual(expect.objectContaining({ ok: true,
+                result: expect.objectContaining({ device: expect.objectContaining({ id: deviceId, status: "stopped" }) }) }));
+            expect(serialChecks).toBeGreaterThan(1);
+            expect(processChecks).toBeGreaterThan(1);
+            expect(commandRunner.mock.calls.filter(([command]) => command.args?.at(-1) === "kill")).toHaveLength(1);
+            const deleted = await invoke("device_delete", { deleteAvd: true });
+            expect(deleted.status).toBe(400);
+            expect(await deleted.json()).toEqual(expect.objectContaining({ ok: false, error: "android-avd-name-not-owner-scoped" }));
+            expect(existsSync(artifact)).toBe(true);
+            expect(commandRunner.mock.calls.some(([command]) => command.provider === "avdmanager")).toBe(false);
+        } finally {
+            await close(server);
+            cleanupOwner(ownerId);
+            rmSync(artifact, { recursive: true, force: true });
+        }
+    });
+
     it("reports observed Android status and clears auxiliary runtime on stop", async () => {
         const ownerId = deviceLabOwnerId("/project/broker-android-observed-status-test");
         const androidRoot = writeBrokerDevices(ownerId, "android", [{
