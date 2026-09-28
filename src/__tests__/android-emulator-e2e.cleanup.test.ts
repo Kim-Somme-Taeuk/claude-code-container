@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -107,6 +107,70 @@ describe("Android real E2E fixture cleanup", () => {
         expect(failure).toContain("cleanup failed");
         expect(failure).toContain("device stop");
         expect(failure).toContain("device/AVD delete");
+        assertOwnedCleanup();
+    });
+
+    it.each(["mcp-error", "structured-error"])("continues fixture cleanup after %s recording-stop failure", async kind => {
+        const normal = fixture.callTool.getMockImplementation()!;
+        let uploaded = Buffer.alloc(0);
+        fixture.callTool.mockImplementation(async (tool: string, args: Record<string, any>) => {
+            if (["device_create", "device_stop", "device_delete"].includes(tool)) return normal(tool, args);
+            if (tool === "device_inventory") return payload({ devices: [{ id: createdId }] });
+            if (tool === "device_start") return payload({ device: { id: createdId, status: "running" }, boot: { ready: true } });
+            if (tool === "device_status") return payload({ device: { id: createdId, status: "running" } });
+            if (tool === "device_exec") return payload({ stdout: "ccc-adb-e2e-ok" });
+            if (tool === "device_upload") {
+                uploaded = readFileSync(args.localPath);
+                return payload({ provider: "adb", uploaded: { localPath: args.localPath, remotePath: args.remotePath } });
+            }
+            if (tool === "device_download") {
+                writeFileSync(args.localPath, uploaded);
+                return payload({ provider: "adb", downloaded: { localPath: args.localPath, remotePath: args.remotePath } });
+            }
+            if (tool === "mobile_session_status") return payload({ authority: "host-broker", device: { id: createdId } });
+            if (tool === "mobile_dump_ui") return payload({ provider: "adb-uiautomator", source: '<node text="Fixture"/>' });
+            if (tool === "mobile_wait_for_text") return payload({ provider: "adb-uiautomator", text: args.text, found: true });
+            if (tool === "device_record_video_start") return payload({ recording: { provider: "adb-screenrecord", active: true } });
+            if (tool === "device_record_video_status") throw new Error("primary-recording-status-failure");
+            if (tool === "device_record_video_stop") return {
+                ...payload({ ok: false, error: "recording-stop-failed" }),
+                ...(kind === "mcp-error" ? { isError: true } : {}),
+            };
+
+            const successes: Record<string, unknown> = {
+                mobile_home: { status: 0 }, mobile_tap: { status: 0 },
+                mobile_double_tap: { doubleTapped: { x: args.x, y: args.y } },
+                mobile_long_press: { longPressed: { x: args.x, y: args.y, durationMs: args.durationMs } },
+                mobile_swipe: { swiped: { x1: args.x1, y1: args.y1, x2: args.x2, y2: args.y2, durationMs: args.durationMs } },
+                mobile_drag: { dragged: { x1: args.x1, y1: args.y1, x2: args.x2, y2: args.y2, durationMs: args.durationMs } },
+                mobile_type_text: { typed: true }, mobile_key: { status: 0 },
+                mobile_back: { back: true }, mobile_forward: { forward: true }, mobile_recents: { recents: true },
+                mobile_lock: { locked: true }, mobile_unlock: { unlocked: true },
+                mobile_rotate_left: { orientation: "landscape" }, mobile_rotate_right: { orientation: "reverse-landscape" },
+                mobile_set_orientation: { orientation: args.orientation }, mobile_open_url: { openedUrl: args.url },
+                mobile_set_location: { provider: "adb-emulator", location: { latitude: args.latitude, longitude: args.longitude, altitude: args.altitude } },
+                mobile_set_battery: { battery: { level: args.level, status: args.status, charging: args.charging } },
+                device_install_app: { installed: args.path }, mobile_install_app: { installed: args.path },
+                device_launch_app: { launched: args.packageName }, mobile_launch_app: { launched: args.packageName },
+                mobile_wait_for_app: { packageName: args.packageName, running: true, pid: "1234" },
+                mobile_grant_permission: { permission: { packageName: args.packageName, permission: args.permission, action: "grant" } },
+                mobile_revoke_permission: { permission: { packageName: args.packageName, permission: args.permission, action: "revoke" } },
+                mobile_stop_app: { stopped: args.packageName }, device_reset: { reset: { packageName: args.packageName } },
+                mobile_clear_app_data: { reset: { packageName: args.packageName } }, mobile_uninstall_app: { uninstalled: args.packageName },
+            };
+            if (!(tool in successes)) throw new Error(`unexpected tool before recording: ${tool}`);
+            return payload({ provider: "adb", ...(successes[tool] as object) });
+        });
+        const failure = await run().then(() => "unexpected success", error => String(error));
+        expect(failure).toContain("device_record_video_status: primary-recording-status-failure");
+        expect(failure).toContain("recording stop");
+        expect(failure).toContain("recording-stop-failed");
+        expect(fixture.callTool.mock.calls.slice(-4).map(([tool]) => tool)).toEqual([
+            "device_record_video_status", "device_record_video_stop", "device_stop", "device_delete",
+        ]);
+        expect(fixture.callTool).toHaveBeenCalledWith("device_record_video_stop", {
+            backend: "android-emulator", deviceId: createdId,
+        });
         assertOwnedCleanup();
     });
 });
