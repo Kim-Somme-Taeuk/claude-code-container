@@ -6,6 +6,23 @@ export type HyperVProviderCommand = {
     input?: string;
 };
 
+// Authenticode status names as the readiness probe reports them for qemu-img, plus
+// two probe verdicts: a Valid signature from someone other than Google LLC, and a
+// check that could not complete. Exception text is never reported.
+export const HYPER_V_QEMU_IMG_SIGNATURE_STATUSES = [
+    "Valid",
+    "NotSigned",
+    "HashMismatch",
+    "NotTrusted",
+    "UnknownError",
+    "NotSupportedFileFormat",
+    "Incompatible",
+    "signer-mismatch",
+    "check-failed",
+] as const;
+
+export type HyperVQemuImgSignatureStatus = typeof HYPER_V_QEMU_IMG_SIGNATURE_STATUSES[number];
+
 export type HyperVReadiness = {
     ok: boolean;
     available: boolean;
@@ -23,6 +40,7 @@ export type HyperVReadiness = {
     sessionRefreshRequired?: boolean;
     qemuImgAvailable?: boolean;
     qemuImgTrusted?: boolean;
+    qemuImgSignatureStatus?: HyperVQemuImgSignatureStatus;
     linuxImageMissing?: string[];
     detail?: string;
 };

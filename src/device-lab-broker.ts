@@ -23,10 +23,12 @@ import {
     assertNoSymlinkPathComponents,
     hyperVImageProfile,
     hyperVImageRoot as hyperVImageStoreRoot,
+    inspectHyperVUbuntuImageCache,
     readHyperVImageManifestMetadata as readHyperVImageManifestMetadataFromStore,
     resolveHyperVImageForCreate as resolveHyperVImageForCreateFromStore,
     type HyperVImageProfile,
 } from "./device-lab/broker/hyper-v/image-store.js";
+import { hyperVLinuxImageBlockers } from "./device-lab/hyper-v-linux-image-readiness.js";
 import {
     cachedHyperVOwnerDevicesReader,
     ensureHyperVHostNetworkFabric as ensureHyperVHostNetworkFabricWithRuntime,
@@ -4006,9 +4008,14 @@ async function hostBackends(ownerId: string, normalized: NormalizedBrokerOptions
             : hyperVReadiness
                 ? hyperVReadiness.missing
                 : ["hyper-v-readiness"];
+    // qemu-img blocks linux-vm only when create would have to acquire the ubuntu-lts image; the
+    // cache is read from the private root and owner create uses.
+    const hyperVLinuxImage = normalized.platform === "win32"
+        ? hyperVLinuxImageBlockers(hyperVReadiness, inspectHyperVUbuntuImageCache(brokerPrivateRoot(), ownerId))
+        : null;
     const hyperVLinuxMissing = [
         ...hyperVMissing,
-        ...(hyperVReadiness?.linuxImageMissing || []),
+        ...(hyperVLinuxImage?.blockers || []),
         ...(ssh ? [] : ["ssh"]),
         ...(scp ? [] : ["scp"]),
     ];
@@ -4094,7 +4101,7 @@ async function hostBackends(ownerId: string, normalized: NormalizedBrokerOptions
                 readiness: hyperVReadiness,
                 capabilities: HYPER_V_VM_CAPABILITIES,
             },
-            ...(normalized.platform === "win32" ? [{
+            ...(hyperVLinuxImage ? [{
                 name: "linux-vm",
                 host: "windows-host",
                 creatable: true,
@@ -4106,6 +4113,8 @@ async function hostBackends(ownerId: string, normalized: NormalizedBrokerOptions
                 guestTransport: "ssh",
                 tools: { powershell, ssh, scp },
                 readiness: hyperVReadiness,
+                baseImage: hyperVLinuxImage.baseImage,
+                imageAcquisition: hyperVLinuxImage.imageAcquisition,
                 capabilities: HYPER_V_LINUX_VM_CAPABILITIES,
             }] : []),
             {

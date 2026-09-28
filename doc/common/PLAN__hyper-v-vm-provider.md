@@ -594,6 +594,8 @@ Readiness is intentionally staged. The non-mutating
 - pending reboot state
 - VMMS service state
 - available CPU and memory observations
+- linux-vm base image cache state and the qemu-img trust state used only for
+  image acquisition
 
 The setup diagnostic does not claim to prove Windows edition eligibility or
 firmware virtualization, SLAT, and DEP independently once the Windows
@@ -602,8 +604,45 @@ and firmware support before enabling Hyper-V. Disk capacity is fenced against
 the actual image/device root during image import and VM creation. The
 CCC-managed virtual switch and NAT are validated or created transactionally
 during network provisioning, where the concrete switch, prefix, and ownership
-marker are known. `ccc devices backends` is executable discovery only;
-`ccc devices smoke --real-provider` runs the provider readiness diagnostic.
+marker are known. `ccc devices backends` is local executable discovery only.
+`ccc devices smoke` and the MCP `device_backends` tool run the bounded,
+non-mutating readiness probe; neither starts a VM.
+
+linux-vm readiness also requires SSH, SCP, and the ubuntu-lts base image. A
+cached base image whose owner or global manifest metadata validates is enough;
+readiness does not hash it. qemu-img is then not a readiness requirement: it is
+needed only to acquire or re-acquire the image, and its state is reported as an
+advisory. Without a valid cache, readiness requires the fixed-path Android
+Emulator `qemu-img.exe` with a `Valid` Authenticode signature from
+`O=Google LLC`, and otherwise reports `hyper-v-qemu-img-unavailable` or
+`hyper-v-qemu-img-untrusted` (skip category `provider-prerequisite`). The
+fixed path must not pass through a junction or symbolic link in any component;
+such a path reports `hyper-v-qemu-img-unavailable`, as acquisition would refuse
+it. An invalid global manifest that is not a restorable prior-catalog image, a
+`base.vhdx` without a manifest, or leftover partial or acquire-work artifacts
+block readiness with `hyper-v-base-image-profile-conflict`,
+`hyper-v-base-image-unmanaged-existing`, or
+`hyper-v-base-image-artifact-owner-unknown`. An unsafe or unreadable profile
+root, and prior-catalog retirement backups that VM creation cannot restore,
+also report `hyper-v-base-image-profile-conflict`, even beside a valid owner
+image, because creation restores those backups before it reads any cache. A
+retirement that creation can restore needs acquisition like a prior-catalog
+image in place. Partial and acquire-work artifacts also exist while a create is
+still acquiring the image, so readiness reports that conflict until the
+acquisition finishes. These conflicts stay in skip category `other` so
+validation fails until the operator resolves them. Readiness is advisory: VM
+creation still verifies the cached image's full SHA-256 and fails closed.
+
+The MCP `device_backends` linux-vm entry keeps its `readiness` observation and
+adds `baseImage: {state, source}` (`valid` from the `owner` or `global` cache,
+`acquisition-required`, or `conflict`, with `source` null unless valid) and
+`imageAcquisition: {available, missing}`, which says whether a fresh
+acquisition could run and lists the qemu-img codes. `imageAcquisition` is null
+when the readiness probe gave no answer; linux-vm is then unavailable with
+`hyper-v-readiness` or `powershell` in `missing`. A missing hypervisor
+(`missing hypervisor` or `Hyper-V unavailable: hypervisor`) is skip category
+`host-virtualization`, like a missing `/dev/kvm`; a failed probe's raw error
+text stays `other`.
 
 An explicit `ccc devices setup hyper-v --confirm` command may request elevation
 and enable required Windows features. The same bounded elevated child adds the

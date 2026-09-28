@@ -143,9 +143,18 @@ MCP tool coverage (`scriptedPublicTools`, `calledPublicTools`,
 `device_broker_appium:action=start`, per-call outcomes, unexpected MCP
 `error-result` records, and skip categories. The summary separates missing
 provider prerequisites (`provider-prerequisite`), incompatible host platforms
-(`host-platform`), missing virtualization (`host-virtualization`), unproven
+(`host-platform`), missing host permissions such as Hyper-V management access
+(`host-permission`), missing virtualization (`host-virtualization`), unproven
 tool surfaces, unproven action variants, and incomplete MCP call results
-without requiring anyone to scan long terminal logs.
+without requiring anyone to scan long terminal logs. On Windows, a missing or
+untrusted Android Emulator `qemu-img.exe` (`hyper-v-qemu-img-unavailable` or
+`hyper-v-qemu-img-untrusted`) skips linux-vm as `provider-prerequisite` only
+when no validated cached ubuntu-lts base image exists. Missing PowerShell, SSH,
+or SCP tools (including the macOS VM SSH bridge), the Hyper-V PowerShell
+module, and the VMMS service are also `provider-prerequisite`; a missing
+hypervisor is `host-virtualization`. Hyper-V base-image conflicts
+(`hyper-v-base-image-*`) and unknown reasons stay in `other`, which fails
+validation until the operator resolves them.
 
 On a container or host without Android SDK/ADB, Xcode/iOS, Windows Sandbox,
 macOS VM, KVM, or leased hardware prerequisites, a platform result records
@@ -154,10 +163,10 @@ The final matrix, rather than an impossible single-host zero-skip run, rejects
 any provider evidence still missing across the collected hosts.
 `--assert-json` exits non-zero for real test failures, tool coverage gaps,
 incomplete or unexpected MCP call outcomes, or
-skip categories outside `provider-prerequisite`, `host-platform`, and
-`host-virtualization`. Override those allowed categories with
-`CCC_REAL_DEVICE_LAB_ALLOWED_SKIP_CATEGORIES` when a stricter CI lane requires
-`skip=0`.
+skip categories outside `provider-prerequisite`, `host-platform`,
+`host-permission`, and `host-virtualization`. Override those allowed
+categories with `CCC_REAL_DEVICE_LAB_ALLOWED_SKIP_CATEGORIES` when a stricter
+CI lane requires `skip=0`.
 Inside a CCC project container, `ccc devices broker status`,
 `ccc devices backends`, and `ccc devices smoke` also validate the device-lab
 container wiring. If the container was created by an older CCC build, these

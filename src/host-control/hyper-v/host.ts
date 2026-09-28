@@ -15,6 +15,17 @@ import {
     ownedVmPrelude,
 } from "./core.js";
 
+/**
+ * Probe host readiness in the caller's inherited environment.
+ *
+ * The script keeps PSModulePath as inherited, because resetting it would break
+ * Hyper-V module discovery when the broker falls back to pwsh. The qemu-img
+ * trust check is the one place that must not depend on that environment: it
+ * imports Microsoft.PowerShell.Security by manifest path under $PSHOME and
+ * calls the cmdlet module-qualified, so a foreign module earlier on the path
+ * cannot turn into a false "untrusted". The reported signature status is a
+ * closed set of names; exception text never leaves the host.
+ */
 export function hyperVReadinessCommand(executable: string): HyperVProviderCommand {
     const script = [
         "$ModuleAvailable = [bool](Get-Module -ListAvailable -Name Hyper-V | Select-Object -First 1)",
@@ -32,10 +43,39 @@ export function hyperVReadinessCommand(executable: string): HyperVProviderComman
         "$SessionRefreshRequired = $HyperVAdministratorsMember -and -not $ManagementAccess",
         "$LocalAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)",
         "$QemuImg = if ($LocalAppData) { Join-Path $LocalAppData 'Android\\Sdk\\emulator\\qemu-img.exe' } else { $null }",
+        // Same walk as Assert-NoReparsePath in acquisition, but it answers instead of throwing.
+        "function Test-CccNoReparsePath([string]$Path) {",
+        "  try {",
+        "    $FullPath = [IO.Path]::GetFullPath($Path)",
+        "    $PathRoot = [IO.Path]::GetPathRoot($FullPath)",
+        "    if (-not $PathRoot) { return $false }",
+        "    $Current = $PathRoot",
+        "    foreach ($Segment in @($FullPath.Substring($PathRoot.Length) -split '[\\\\/]' | Where-Object { $_ })) {",
+        "      $Current = Join-Path $Current $Segment",
+        "      if (Test-Path -LiteralPath $Current) {",
+        "        $Item = Get-Item -LiteralPath $Current -Force -ErrorAction Stop",
+        "        if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }",
+        "      }",
+        "    }",
+        "    return $true",
+        "  } catch { return $false }",
+        "}",
         "$QemuImgAvailable = $false",
-        "if ($QemuImg -and (Test-Path -LiteralPath $QemuImg -PathType Leaf)) { try { $QemuItem = Get-Item -LiteralPath $QemuImg -Force -ErrorAction Stop; $QemuImgAvailable = -not $QemuItem.PSIsContainer -and ($QemuItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and [long]$QemuItem.Length -gt 0 } catch { $QemuImgAvailable = $false } }",
+        "if ($QemuImg -and (Test-CccNoReparsePath $QemuImg) -and (Test-Path -LiteralPath $QemuImg -PathType Leaf)) { try { $QemuItem = Get-Item -LiteralPath $QemuImg -Force -ErrorAction Stop; $QemuImgAvailable = -not $QemuItem.PSIsContainer -and ($QemuItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and [long]$QemuItem.Length -gt 0 } catch { $QemuImgAvailable = $false } }",
         "$QemuImgTrusted = $false",
-        "if ($QemuImgAvailable) { try { $QemuSignature = Get-AuthenticodeSignature -LiteralPath $QemuImg -ErrorAction Stop; $QemuImgTrusted = [string]$QemuSignature.Status -eq 'Valid' -and $QemuSignature.SignerCertificate -and [string]$QemuSignature.SignerCertificate.Subject -match '(^|, )O=Google LLC(,|$)' } catch { $QemuImgTrusted = $false } }",
+        "$QemuImgSignatureStatus = $null",
+        "$QemuSignatureStatusNames = @('NotSigned', 'HashMismatch', 'NotTrusted', 'UnknownError', 'NotSupportedFileFormat', 'Incompatible')",
+        "if ($QemuImgAvailable) {",
+        "  $QemuImgSignatureStatus = 'check-failed'",
+        "  try {",
+        "    $SecurityModuleManifest = Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1'",
+        "    Microsoft.PowerShell.Core\\Import-Module -Name $SecurityModuleManifest -ErrorAction Stop",
+        "    $QemuSignature = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $QemuImg -ErrorAction Stop",
+        "    $QemuSignatureStatusName = [string]$QemuSignature.Status",
+        "    $QemuImgTrusted = [string]$QemuSignature.Status -eq 'Valid' -and $QemuSignature.SignerCertificate -and [string]$QemuSignature.SignerCertificate.Subject -match '(^|, )O=Google LLC(,|$)'",
+        "    $QemuImgSignatureStatus = if ($QemuImgTrusted) { 'Valid' } elseif ($QemuSignatureStatusName -ceq 'Valid') { 'signer-mismatch' } elseif ($QemuSignatureStatusNames -ccontains $QemuSignatureStatusName) { $QemuSignatureStatusName } else { 'check-failed' }",
+        "  } catch { $QemuImgTrusted = $false; $QemuImgSignatureStatus = 'check-failed' }",
+        "}",
         "$LinuxImageMissing = @()",
         "if (-not $QemuImgAvailable) { $LinuxImageMissing += 'hyper-v-qemu-img-unavailable' } elseif (-not $QemuImgTrusted) { $LinuxImageMissing += 'hyper-v-qemu-img-untrusted' }",
         "$RebootPending = (Test-Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Component Based Servicing\\RebootPending') -or (Test-Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate\\Auto Update\\RebootRequired')",
@@ -47,7 +87,7 @@ export function hyperVReadinessCommand(executable: string): HyperVProviderComman
         "$TotalMemoryMb = if ($ComputerInfo) { [Math]::Floor([double]$ComputerInfo.TotalPhysicalMemory / 1MB) } else { 0 }",
         "$FreeMemoryMb = if ($OperatingSystem) { [Math]::Floor([double]$OperatingSystem.FreePhysicalMemory / 1KB) } else { 0 }",
         "$LogicalProcessors = if ($ComputerInfo) { [int]$ComputerInfo.NumberOfLogicalProcessors } else { 0 }",
-        "$Result = [ordered]@{ ok = $true; available = ($Missing.Count -eq 0); platform = 'win32'; moduleAvailable = $ModuleAvailable; hypervisorPresent = $HypervisorPresent; vmmsRunning = $VmmsRunning; rebootPending = [bool]$RebootPending; totalMemoryMb = [long]$TotalMemoryMb; freeMemoryMb = [long]$FreeMemoryMb; logicalProcessors = $LogicalProcessors; missing = $Missing; hyperVAdministratorsMember = [bool]$HyperVAdministratorsMember; managementAccess = [bool]$ManagementAccess; sessionRefreshRequired = [bool]$SessionRefreshRequired; qemuImgAvailable = [bool]$QemuImgAvailable; qemuImgTrusted = [bool]$QemuImgTrusted; linuxImageMissing = $LinuxImageMissing }",
+        "$Result = [ordered]@{ ok = $true; available = ($Missing.Count -eq 0); platform = 'win32'; moduleAvailable = $ModuleAvailable; hypervisorPresent = $HypervisorPresent; vmmsRunning = $VmmsRunning; rebootPending = [bool]$RebootPending; totalMemoryMb = [long]$TotalMemoryMb; freeMemoryMb = [long]$FreeMemoryMb; logicalProcessors = $LogicalProcessors; missing = $Missing; hyperVAdministratorsMember = [bool]$HyperVAdministratorsMember; managementAccess = [bool]$ManagementAccess; sessionRefreshRequired = [bool]$SessionRefreshRequired; qemuImgAvailable = [bool]$QemuImgAvailable; qemuImgTrusted = [bool]$QemuImgTrusted; qemuImgSignatureStatus = $QemuImgSignatureStatus; linuxImageMissing = $LinuxImageMissing }",
         "$Result | ConvertTo-Json -Compress -Depth 5",
     ].join("\n");
     return command(executable, script);

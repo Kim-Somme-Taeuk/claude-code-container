@@ -2948,6 +2948,89 @@ describe("test level runner", () => {
         }
     });
 
+    it("classifies Hyper-V readiness skips and keeps base-image conflicts in other", () => {
+        // The macOS VM real-provider smoke reports a missing SSH bridge with the same reason shape;
+        // it is a genuine macos-vm prerequisite, so it also explains that backend's coverage gap.
+        const macosBridgeSkip = "SKIP - missing ssh, scp";
+        const expectedCategories: Record<string, string> = {
+            "missing hyper-v-qemu-img-untrusted": "provider-prerequisite",
+            "missing hyper-v-qemu-img-unavailable": "provider-prerequisite",
+            "SKIP - missing hyper-v-qemu-img-untrusted": "provider-prerequisite",
+            // The shapes the smoke and the Linux E2E gate emit, with the probe's closed signature status.
+            "missing hyper-v-qemu-img-untrusted (qemu-img signature NotTrusted)": "provider-prerequisite",
+            "missing hyper-v-qemu-img-untrusted (qemu-img signature check-failed)": "provider-prerequisite",
+            "SKIP - missing hyper-v-qemu-img-untrusted (qemu-img signature check-failed)": "provider-prerequisite",
+            "missing powershell.exe, ssh, scp": "provider-prerequisite",
+            [macosBridgeSkip]: "provider-prerequisite",
+            "missing ssh, scp": "provider-prerequisite",
+            "missing scp": "provider-prerequisite",
+            "missing powershell": "provider-prerequisite",
+            "missing PowerShell": "provider-prerequisite",
+            "missing hyper-v-powershell-module, hypervisor, vmms-service": "provider-prerequisite",
+            "missing vmms-service": "provider-prerequisite",
+            "Hyper-V unavailable: hyper-v-powershell-module, hypervisor, vmms-service": "provider-prerequisite",
+            "Hyper-V unavailable: vmms-service": "provider-prerequisite",
+            "missing hypervisor": "host-virtualization",
+            "SKIP - missing hypervisor": "host-virtualization",
+            "Hyper-V unavailable: hypervisor": "host-virtualization",
+            // A failed probe's raw stderr is not a readiness token list, whatever it mentions.
+            "FAIL - The hypervisor is not running": "other",
+            "missing hyper-v-management-permission": "host-permission",
+            "missing hypervisor, hyper-v-management-permission": "host-permission",
+            "missing hyper-v-base-image-profile-conflict": "other",
+            "missing hyper-v-base-image-unmanaged-existing": "other",
+            "missing hyper-v-base-image-artifact-owner-unknown": "other",
+            "missing hyper-v-base-image-profile-conflict, hyper-v-qemu-img-untrusted": "other",
+            "Hyper-V unavailable": "other",
+        };
+        const reasons = Object.keys(expectedCategories);
+        const categoryByReason = (groups: Array<{ category: string; records: Array<{ reason?: string }> }>) => Object.fromEntries(
+            groups.flatMap((group) => group.records.map((record) => [record.reason, group.category])),
+        );
+        const tempDir = mkdtempSync(join(tmpdir(), "ccc-real-test-hyper-v-readiness-"));
+        try {
+            const skipFile = join(tempDir, "hyper-v-readiness-skip.mjs");
+            const summaryFile = join(tempDir, "summary.json");
+            const recordsFile = join(tempDir, "records.json");
+            const steps = reasons.map((reason, index) => ({
+                name: reason === macosBridgeSkip ? "macOS VM real integration slot" : `Hyper-V readiness ${index}`,
+                status: "SKIP",
+                reason,
+            }));
+            writeFileSync(skipFile, [
+                "export const name='level 1 Hyper-V readiness';",
+                `export async function run(){ return { status: 'SKIP', steps: ${JSON.stringify(steps)} }; }`,
+                "",
+            ].join("\n"));
+
+            const collected = spawnSync(process.execPath, [
+                join(repoRoot, "scripts", "real-tests", "run.ts"),
+                "--json-summary-file",
+                summaryFile,
+                skipFile,
+            ], {
+                cwd: repoRoot,
+                encoding: "utf-8",
+            });
+            expect(collected.status).toBe(0);
+            const summary = JSON.parse(readFileSync(summaryFile, "utf-8"));
+            expect(categoryByReason(summary.skipCategories)).toEqual(expectedCategories);
+            expect(summary.toolCoverage.explainedProviderValues).toEqual(["backend=macos-vm"]);
+
+            writeFileSync(recordsFile, JSON.stringify({
+                records: reasons.map((reason) => ({ test: "level 1 Hyper-V readiness", status: "SKIP", reason })),
+            }));
+            const summarized = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "summarize-json.ts"), recordsFile], {
+                cwd: repoRoot,
+                encoding: "utf-8",
+            });
+            expect(summarized.status).toBe(0);
+            expect(categoryByReason(JSON.parse(summarized.stdout).skippedCategories)).toEqual(expectedCategories);
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true });
+        }
+    });
+
     it("can summarize real-test JSON artifacts by skip and failure reason", () => {
         const tempDir = mkdtempSync(join(tmpdir(), "ccc-real-test-summary-"));
         try {

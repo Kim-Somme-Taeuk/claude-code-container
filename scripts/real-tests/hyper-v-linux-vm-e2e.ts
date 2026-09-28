@@ -1,7 +1,11 @@
 import assert from "assert";
 import { randomBytes } from "crypto";
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+import { homedir } from "os";
 import { join } from "path";
+import { ownerId as deviceLabOwnerId } from "../../device-lab-mcp/src/context.mjs";
+import { inspectHyperVUbuntuImageCache } from "../../src/device-lab/broker/hyper-v/image-store.ts";
+import { hyperVLinuxImageBlockers, hyperVLinuxImageSkipReason } from "../../src/device-lab/hyper-v-linux-image-readiness.ts";
 import { hyperVReadinessCommand, parseHyperVReadiness } from "../../src/host-control/hyper-v/index.ts";
 import { hiddenSpawnSync, repoRoot } from "./helpers.ts";
 import { brokerToolFailureEvidence, formatBrokerToolFailure, lifecycleDevice, parseToolPayload, parseToolResult, withDeviceLabMcp } from "./device-lab-mcp-client.ts";
@@ -172,6 +176,17 @@ export function hyperVLinuxVmE2ECapability(options: any = {}) {
     const scp = commandAvailable("scp", options);
     if (!ssh || !scp) return { available: false, reason: `missing ${[!ssh && "ssh", !scp && "scp"].filter(Boolean).join(", ")}` };
     const sourceImage = String(options.sourceImage || process.env.CCC_REAL_HYPER_V_LINUX_SOURCE_IMAGE || "").trim();
+    // An imported source VHDX never runs qemu-img. Otherwise create reuses the cached ubuntu-lts image
+    // or acquires it, so ask the readiness question the smoke and device_backends ask, against the
+    // broker's private root and the owner the MCP session resolves.
+    if (!sourceImage) {
+        const cache = (options.inspectImageCache || inspectHyperVUbuntuImageCache)(
+            options.privateRoot || join(homedir(), ".ccc", "device-broker-private"),
+            String(options.ownerId || deviceLabOwnerId(process.env, repoRoot)),
+        );
+        const image = hyperVLinuxImageBlockers(readiness, cache);
+        if (image.blockers.length > 0) return { available: false, reason: hyperVLinuxImageSkipReason(readiness, image) };
+    }
     return { available: true, powershell, ssh, scp, sourceImage };
 }
 

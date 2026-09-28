@@ -36,6 +36,7 @@ import {
     verifiedHostBrokerIdentityForTest,
 } from "../device-lab-broker.js";
 import { deviceLabOwnerFromProjectMountPath, deviceLabOwnerId, deviceLabProjectMountPath } from "../device-lab-owner.js";
+import { HYPER_V_IMAGE_CATALOG } from "../device-lab/hyper-v-images.js";
 import { readDeviceRuntimeProcessStartToken } from "../device-lab-process-identity.js";
 import { CLI_VERSION } from "../utils.js";
 import { cleanupOwner, close, listen, ownerRpcHeaders, writeBrokerDevices } from "./helpers/host-broker-test-fixture.js";
@@ -888,6 +889,8 @@ describe("device-lab host broker daemon", () => {
             expect(body.result.backends.find((backend) => backend.name === "linux-vm")).toEqual(expect.objectContaining({
                 available: false,
                 missing: ["hyper-v-qemu-img-unavailable"],
+                baseImage: { state: "acquisition-required", source: null },
+                imageAcquisition: { available: false, missing: ["hyper-v-qemu-img-unavailable"] },
             }));
             expect(body.result.backends.find((backend) => backend.name === "macos-vm")).toEqual(expect.objectContaining({
                 available: false,
@@ -896,6 +899,160 @@ describe("device-lab host broker daemon", () => {
         } finally {
             await close(server);
         }
+    });
+
+    describe("Hyper-V linux-vm readiness against the ubuntu-lts image cache", () => {
+        const cachedImage = Buffer.from("cached-ubuntu-lts-image");
+        let originalUserProfile: string | undefined;
+
+        // These write a cache under homedir(), and the broker reads its private root from there.
+        // os.homedir() follows USERPROFILE rather than HOME on Windows, so point both at the temp
+        // home; otherwise a Windows run would overwrite the operator's real ubuntu-lts cache.
+        beforeEach(() => {
+            originalUserProfile = process.env.USERPROFILE;
+            process.env.USERPROFILE = process.env.HOME;
+            expect(homedir()).toBe(process.env.HOME);
+            expect(homedir()).toContain("ccc-device-broker-test-home-");
+        });
+
+        afterEach(() => {
+            if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+            else process.env.USERPROFILE = originalUserProfile;
+        });
+
+        function writeUbuntuCache(profileRoot: string, userProvided = false) {
+            const catalog = HYPER_V_IMAGE_CATALOG["ubuntu-lts"];
+            mkdirSync(profileRoot, { recursive: true });
+            writeFileSync(join(profileRoot, "base.vhdx"), cachedImage);
+            writeFileSync(join(profileRoot, "manifest.json"), JSON.stringify({
+                version: 3,
+                profile: "ubuntu-lts",
+                catalogId: userProvided ? "user-provided-vhdx" : catalog.catalogId,
+                sourceUrl: userProvided ? null : catalog.sourceUrl,
+                sourceFormat: userProvided ? "vhdx" : catalog.sourceFormat,
+                sourceSha256: userProvided ? null : catalog.sourceSha256,
+                licenseId: userProvided ? null : catalog.licenseId,
+                generation: catalog.generation,
+                secureBootTemplate: catalog.secureBootTemplate,
+                preparationVersion: 1,
+                imagePath: join(profileRoot, "base.vhdx"),
+                sha256: createHash("sha256").update(cachedImage).digest("hex"),
+                sizeBytes: cachedImage.length,
+                virtualSizeBytes: catalog.virtualSizeBytes,
+                vhdType: "Dynamic",
+                preparedAt: new Date().toISOString(),
+            }));
+        }
+
+        async function linuxVmBackend(cwd: string, readiness: Record<string, unknown>) {
+            const ownerId = deviceLabOwnerId(cwd);
+            const server = createDeviceBrokerServer({
+                cwd,
+                host: "127.0.0.1",
+                port: 0,
+                platform: "win32",
+                providerPaths: {
+                    "powershell.exe": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                    "ssh.exe": "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
+                    "scp.exe": "C:\\Windows\\System32\\OpenSSH\\scp.exe",
+                },
+                commandRunner: vi.fn((command) => ({
+                    ...command,
+                    status: 0,
+                    stdout: JSON.stringify({
+                        ok: true,
+                        available: true,
+                        platform: "win32",
+                        moduleAvailable: true,
+                        hypervisorPresent: true,
+                        vmmsRunning: true,
+                        rebootPending: false,
+                        totalMemoryMb: 32768,
+                        freeMemoryMb: 16384,
+                        logicalProcessors: 16,
+                        missing: [],
+                        ...readiness,
+                    }),
+                    stderr: "",
+                })),
+            });
+            try {
+                const baseUrl = await listen(server);
+                const response = await fetch(`${baseUrl}/v1/owners/${ownerId}/rpc`, {
+                    method: "POST",
+                    headers: ownerRpcHeaders(ownerId),
+                    body: JSON.stringify({ ownerId, method: "broker.backends", params: {} }),
+                });
+                expect(response.status).toBe(200);
+                const body = await response.json() as { result: { backends: Array<Record<string, any>> } };
+                return body.result.backends.find((backend) => backend.name === "linux-vm");
+            } finally {
+                await close(server);
+            }
+        }
+
+        const untrustedQemuImg = {
+            qemuImgAvailable: true,
+            qemuImgTrusted: false,
+            qemuImgSignatureStatus: "NotSigned",
+            linuxImageMissing: ["hyper-v-qemu-img-untrusted"],
+        };
+
+        it("reports linux-vm available on a cached image with untrusted qemu-img as an acquisition advisory", async () => {
+            writeUbuntuCache(join(homedir(), ".ccc", "device-broker-private", "images", "hyper-v", "ubuntu-lts"));
+
+            const linuxVm = await linuxVmBackend("/project/broker-linux-cache-test", untrustedQemuImg);
+
+            expect(linuxVm).toEqual(expect.objectContaining({
+                available: true,
+                status: "available",
+                missing: [],
+                baseImage: { state: "valid", source: "global" },
+                imageAcquisition: { available: false, missing: ["hyper-v-qemu-img-untrusted"] },
+                readiness: expect.objectContaining({
+                    qemuImgTrusted: false,
+                    qemuImgSignatureStatus: "NotSigned",
+                    linuxImageMissing: ["hyper-v-qemu-img-untrusted"],
+                }),
+            }));
+        });
+
+        it("reads the owner cache of the authenticated owner, as create does", async () => {
+            const cwd = "/project/broker-linux-owner-cache-test";
+            writeUbuntuCache(join(homedir(), ".ccc", "device-broker-private", "owners", deviceLabOwnerId(cwd), "images", "hyper-v", "ubuntu-lts"), true);
+
+            expect(await linuxVmBackend(cwd, { qemuImgAvailable: false, qemuImgTrusted: false, linuxImageMissing: ["hyper-v-qemu-img-unavailable"] })).toEqual(expect.objectContaining({
+                available: true,
+                missing: [],
+                baseImage: { state: "valid", source: "owner" },
+                imageAcquisition: { available: false, missing: ["hyper-v-qemu-img-unavailable"] },
+            }));
+            // Another owner's imported image is not this owner's cache.
+            expect(await linuxVmBackend("/project/broker-linux-other-owner-test", untrustedQemuImg)).toEqual(expect.objectContaining({
+                available: false,
+                missing: ["hyper-v-qemu-img-untrusted"],
+                baseImage: { state: "acquisition-required", source: null },
+            }));
+        });
+
+        it("blocks linux-vm on a cache conflict even when qemu-img is trusted", async () => {
+            const profileRoot = join(homedir(), ".ccc", "device-broker-private", "images", "hyper-v", "ubuntu-lts");
+            mkdirSync(profileRoot, { recursive: true });
+            writeFileSync(join(profileRoot, "base.vhdx"), cachedImage);
+
+            expect(await linuxVmBackend("/project/broker-linux-conflict-test", {
+                qemuImgAvailable: true,
+                qemuImgTrusted: true,
+                qemuImgSignatureStatus: "Valid",
+                linuxImageMissing: [],
+            })).toEqual(expect.objectContaining({
+                available: false,
+                status: "missing-prerequisites",
+                missing: ["hyper-v-base-image-unmanaged-existing"],
+                baseImage: { state: "conflict", source: null },
+                imageAcquisition: { available: true, missing: [] },
+            }));
+        });
     });
 
     it.runIf(process.platform !== "win32")("keeps health responsive while Hyper-V backend readiness is pending", async () => {

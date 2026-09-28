@@ -1,21 +1,37 @@
 import { createHash } from "crypto";
-import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "fs";
+import { existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
     cleanupIncompleteHyperVImageArtifacts,
     hyperVImageProfile,
     hyperVImageProfileRoot,
     hyperVImageRoot,
     hyperVOwnerImageProfileRoot,
+    inspectHyperVUbuntuImageCache,
     readHyperVImageManifestMetadata,
     resolveHyperVImageForCreate,
     type HyperVImageCommandResult,
     type HyperVImageStoreRuntime,
+    type HyperVUbuntuImageCacheInspection,
 } from "../device-lab/broker/hyper-v/image-store.js";
 import { HYPER_V_IMAGE_CATALOG } from "../device-lab/hyper-v-images.js";
 import { HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP, type HyperVWindowsExecutionRequest } from "../hyper-v-windows/index.js";
+
+// Pass-through record of every hash the image store starts, so the readiness cache inspection
+// can prove it never hashes the multi-gigabyte base image.
+const hashing = vi.hoisted(() => ({ algorithms: [] as string[] }));
+vi.mock("crypto", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("crypto")>();
+    return {
+        ...actual,
+        createHash: (...args: Parameters<typeof actual.createHash>) => {
+            hashing.algorithms.push(args[0]);
+            return actual.createHash(...args);
+        },
+    };
+});
 
 function automaticUbuntuStep(
     command: Parameters<HyperVImageStoreRuntime["run"]>[0],
@@ -461,4 +477,356 @@ describe("Hyper-V image store module", () => {
             rmSync(privateRoot, { recursive: true, force: true });
         }
     });
+});
+
+describe("Hyper-V ubuntu-lts image cache inspection", () => {
+    const ownerId = "0123456789abcdef";
+    const catalog = HYPER_V_IMAGE_CATALOG["ubuntu-lts"];
+    const image = Buffer.from("cached-ubuntu-lts-image");
+    const imageSha256 = createHash("sha256").update(image).digest("hex");
+    const priorCatalogId = "canonical-ubuntu-24.04-lts-server-cloudimg-qcow2-native-vhdx-20260725-v1";
+
+    function automaticManifest(profileRoot: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+        return {
+            version: 3,
+            profile: "ubuntu-lts",
+            catalogId: catalog.catalogId,
+            sourceUrl: catalog.sourceUrl,
+            sourceFormat: catalog.sourceFormat,
+            sourceSha256: catalog.sourceSha256,
+            licenseId: catalog.licenseId,
+            generation: catalog.generation,
+            secureBootTemplate: catalog.secureBootTemplate,
+            preparationVersion: 1,
+            imagePath: join(profileRoot, "base.vhdx"),
+            sha256: imageSha256,
+            sizeBytes: image.length,
+            virtualSizeBytes: catalog.virtualSizeBytes,
+            vhdType: "Dynamic",
+            preparedAt: new Date().toISOString(),
+            ...overrides,
+        };
+    }
+
+    function userProvidedManifest(profileRoot: string): Record<string, unknown> {
+        return automaticManifest(profileRoot, {
+            catalogId: "user-provided-vhdx", sourceUrl: null, sourceFormat: "vhdx", sourceSha256: null, licenseId: null,
+        });
+    }
+
+    function writeCache(profileRoot: string, manifest: Record<string, unknown> | string | null, imageBytes: Buffer | null = image): void {
+        mkdirSync(profileRoot, { recursive: true });
+        if (imageBytes) writeFileSync(join(profileRoot, "base.vhdx"), imageBytes);
+        if (manifest !== null) writeFileSync(join(profileRoot, "manifest.json"), typeof manifest === "string" ? manifest : JSON.stringify(manifest));
+    }
+
+    function treeSnapshot(root: string): Array<[string, string]> {
+        if (!existsSync(root)) return [];
+        return readdirSync(root, { recursive: true }).map(String).sort().map((name) => {
+            const stat = lstatSync(join(root, name));
+            const kind = stat.isSymbolicLink() ? "link" : stat.isDirectory() ? "dir" : "file";
+            const content = kind === "file" ? readFileSync(join(root, name)).toString("base64") : "";
+            return [name, `${kind}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${content}`];
+        });
+    }
+
+    function inspectWithoutSideEffects(privateRoot: string, owner = ownerId): HyperVUbuntuImageCacheInspection {
+        const before = treeSnapshot(privateRoot);
+        const existed = existsSync(privateRoot);
+        hashing.algorithms.length = 0;
+        const result = inspectHyperVUbuntuImageCache(privateRoot, owner);
+        expect(hashing.algorithms).toEqual([]);
+        expect(existsSync(privateRoot)).toBe(existed);
+        expect(treeSnapshot(privateRoot)).toEqual(before);
+        return result;
+    }
+
+    // What create itself decides for the same state, run after the inspection because create mutates:
+    // "valid", "acquisition-required" once it starts the first acquisition command, else its detail.
+    async function createDecision(privateRoot: string): Promise<string> {
+        let acquisitionStarted = false;
+        const created = await resolveHyperVImageForCreate(
+            ownerId,
+            { backend: "linux-vm", create: { profile: "ubuntu-lts" } },
+            {},
+            {
+                cwd: privateRoot,
+                privateRoot,
+                resolveExecutable: () => "powershell.exe",
+                run: async (command) => {
+                    acquisitionStarted = true;
+                    return { ...command, status: 1, stdout: "", stderr: "" };
+                },
+                limits: { acquireTimeoutMs: 60_000, prepareTimeoutMs: 60_000, lockWaitMs: 60_000, commandOutputBytes: 64 * 1024 },
+            },
+        );
+        if (acquisitionStarted) return "acquisition-required";
+        return created.ok ? "valid" : String(created.detail);
+    }
+
+    function withPrivateRoot(label: string, run: (privateRoot: string) => void | Promise<void>): () => Promise<void> {
+        return async () => {
+            const privateRoot = join(tmpdir(), `ccc-hyper-v-cache-inspection-${label}-${process.pid}-${Date.now()}`);
+            try {
+                await run(privateRoot);
+            } finally {
+                rmSync(privateRoot, { recursive: true, force: true });
+            }
+        };
+    }
+
+    it("reports a metadata-valid shared automatic image as a global cache hit", withPrivateRoot("global", (privateRoot) => {
+        const profileRoot = hyperVImageProfileRoot(privateRoot, "ubuntu-lts");
+        writeCache(profileRoot, automaticManifest(profileRoot));
+
+        expect(inspectWithoutSideEffects(privateRoot)).toEqual({ state: "valid", source: "global" });
+    }));
+
+    it("prefers the owner's user-provided image, as create does, even beside a shared-cache conflict", withPrivateRoot("owner", async (privateRoot) => {
+        const ownerRoot = hyperVOwnerImageProfileRoot(privateRoot, ownerId, "ubuntu-lts");
+        writeCache(ownerRoot, userProvidedManifest(ownerRoot));
+        writeCache(hyperVImageProfileRoot(privateRoot, "ubuntu-lts"), null);
+
+        expect(inspectWithoutSideEffects(privateRoot)).toEqual({ state: "valid", source: "owner" });
+        expect(await createDecision(privateRoot)).toBe("valid");
+    }));
+
+    it("does not let an owner image hide a prior-catalog pair create cannot restore first", withPrivateRoot("owner-recovery", async (privateRoot) => {
+        const ownerRoot = hyperVOwnerImageProfileRoot(privateRoot, ownerId, "ubuntu-lts");
+        const profileRoot = hyperVImageProfileRoot(privateRoot, "ubuntu-lts");
+        writeCache(ownerRoot, userProvidedManifest(ownerRoot));
+        writeCache(profileRoot, null, null);
+        writeFileSync(join(profileRoot, ".manifest-prior-recovery.json"), JSON.stringify(automaticManifest(profileRoot, { catalogId: priorCatalogId })));
+
+        expect(inspectWithoutSideEffects(privateRoot)).toEqual({ state: "conflict", code: "hyper-v-base-image-profile-conflict" });
+        expect(await createDecision(privateRoot)).toBe("hyper-v-base-image-profile-conflict");
+    }));
+
+    it("keeps a valid current pair valid beside backups a finished retirement retained", withPrivateRoot("retained", async (privateRoot) => {
+        const profileRoot = hyperVImageProfileRoot(privateRoot, "ubuntu-lts");
+        writeCache(profileRoot, automaticManifest(profileRoot));
+        writeFileSync(join(profileRoot, ".manifest-prior-recovery.json"), JSON.stringify(automaticManifest(profileRoot, { catalogId: priorCatalogId })));
+        writeFileSync(join(profileRoot, ".base-prior-recovery.vhdx"), image);
+
+        expect(inspectWithoutSideEffects(privateRoot)).toEqual({ state: "valid", source: "global" });
+        expect(await createDecision(privateRoot)).toBe("valid");
+    }));
+
+    it("ignores an owner cache for an owner id the broker could not have issued", withPrivateRoot("owner-id", (privateRoot) => {
+        const ownerRoot = hyperVOwnerImageProfileRoot(privateRoot, "not-a-broker-owner", "ubuntu-lts");
+        writeCache(ownerRoot, userProvidedManifest(ownerRoot));
+
+        expect(inspectWithoutSideEffects(privateRoot, "not-a-broker-owner")).toEqual({ state: "acquisition-required" });
+    }));
+
+    it("leaves the full-hash check to create instead of reading the cached image", withPrivateRoot("hash", async (privateRoot) => {
+        const profileRoot = hyperVImageProfileRoot(privateRoot, "ubuntu-lts");
+        writeCache(profileRoot, automaticManifest(profileRoot, { sha256: "0".repeat(64) }));
+
+        expect(inspectWithoutSideEffects(privateRoot)).toEqual({ state: "valid", source: "global" });
+        const created = await resolveHyperVImageForCreate(
+            ownerId,
+            { backend: "linux-vm", dryRun: true, create: { profile: "ubuntu-lts" } },
+            {},
+            {
+                cwd: privateRoot,
+                privateRoot,
+                resolveExecutable: () => null,
+                run: async () => { throw new Error("unexpected provider command"); },
+                limits: { acquireTimeoutMs: 60_000, prepareTimeoutMs: 60_000, lockWaitMs: 60_000, commandOutputBytes: 64 * 1024 },
+            },
+        );
+        expect(created).toEqual(expect.objectContaining({ ok: false, detail: "hyper-v-base-image-hash-mismatch" }));
+        // The recorder sees the store's own hashing, so its silence during inspection is meaningful.
+        expect(hashing.algorithms).toContain("sha256");
+    }));
+
+    // Create retires and reacquires only the immediately previous catalog, restoring an interrupted
+    // retirement first (recoverPriorAutomaticImage), so these states must reach acquisition.
+    const acquisitionRequired: Array<{ name: string; setup: (privateRoot: string) => void }> = [
+        { name: "no private root", setup: () => undefined },
+        { name: "an empty profile root", setup: (privateRoot) => { mkdirSync(hyperVImageProfileRoot(privateRoot, "ubuntu-lts"), { recursive: true }); } },
+        {
+            name: "a prior-catalog manifest",
+            setup: (privateRoot) => {
+                const profileRoot = hyperVImageProfileRoot(privateRoot, "ubuntu-lts");
+                writeCache(profileRoot, automaticManifest(profileRoot, { catalogId: priorCatalogId }));
+            },
+        },
+        {
+            name: "a prior-catalog retirement interrupted after its manifest moved",
+            setup: (privateRoot) => {
+                const profileRoot = hyperVImageProfileRoot(privateRoot, "ubuntu-lts");
+                writeCache(profileRoot, null);
+                writeFileSync(join(profileRoot, ".manifest-prior-recovery.json"), JSON.stringify(automaticManifest(profileRoot, { catalogId: priorCatalogId })));
+            },
+        },
+        {
+            name: "a fully retired prior-catalog pair awaiting recovery",
+            setup: (privateRoot) => {
+                const profileRoot = hyperVImageProfileRoot(privateRoot, "ubuntu-lts");
+                writeCache(profileRoot, null, null);
+                writeFileSync(join(profileRoot, ".manifest-prior-recovery.json"), JSON.stringify(automaticManifest(profileRoot, { catalogId: priorCatalogId })));
+                writeFileSync(join(profileRoot, ".base-prior-recovery.vhdx"), image);
+            },
+        },
+        {
+            name: "only a retained source download",
+            setup: (privateRoot) => {
+                const profileRoot = hyperVImageProfileRoot(privateRoot, "ubuntu-lts");
+                writeCache(profileRoot, null, null);
+                writeFileSync(join(profileRoot, "source.qcow2"), "verified-source");
+            },
+        },
+        {
+            name: "an invalid owner manifest and no shared cache",
+            setup: (privateRoot) => {
+                const ownerRoot = hyperVOwnerImageProfileRoot(privateRoot, ownerId, "ubuntu-lts");
+                writeCache(ownerRoot, userProvidedManifest(ownerRoot), Buffer.from("different-size"));
+            },
+        },
+    ];
+
+    it.each(acquisitionRequired)("requires acquisition with $name", ({ setup }) => withPrivateRoot("acquire", async (privateRoot) => {
+        setup(privateRoot);
+
+        expect(inspectWithoutSideEffects(privateRoot)).toEqual({ state: "acquisition-required" });
+        expect(await createDecision(privateRoot)).toBe("acquisition-required");
+    })());
+
+    // Create refuses each of these before acquisition; createDetail is its detail where it differs from code.
+    const conflicts: Array<{ name: string; code: string; createDetail?: string; setup: (profileRoot: string) => void }> = [
+        {
+            name: "a manifest from another catalog",
+            code: "hyper-v-base-image-profile-conflict",
+            setup: (profileRoot) => writeCache(profileRoot, automaticManifest(profileRoot, { catalogId: "canonical-ubuntu-22.04-lts-server-cloudimg" })),
+        },
+        {
+            name: "a current-catalog manifest with another source checksum",
+            code: "hyper-v-base-image-profile-conflict",
+            setup: (profileRoot) => writeCache(profileRoot, automaticManifest(profileRoot, { sourceSha256: "f".repeat(64) })),
+        },
+        {
+            name: "a current-catalog manifest whose image size differs",
+            code: "hyper-v-base-image-profile-conflict",
+            setup: (profileRoot) => writeCache(profileRoot, automaticManifest(profileRoot), Buffer.from("resized")),
+        },
+        {
+            name: "a user-provided manifest in the shared cache",
+            code: "hyper-v-base-image-profile-conflict",
+            setup: (profileRoot) => writeCache(profileRoot, userProvidedManifest(profileRoot)),
+        },
+        {
+            name: "an unparseable manifest",
+            code: "hyper-v-base-image-profile-conflict",
+            setup: (profileRoot) => writeCache(profileRoot, "{not json"),
+        },
+        {
+            name: "base.vhdx without a manifest",
+            code: "hyper-v-base-image-unmanaged-existing",
+            setup: (profileRoot) => writeCache(profileRoot, null),
+        },
+        {
+            name: "a partial image",
+            code: "hyper-v-base-image-artifact-owner-unknown",
+            setup: (profileRoot) => {
+                writeCache(profileRoot, null, null);
+                writeFileSync(join(profileRoot, "base.partial.vhdx"), "partial-image");
+            },
+        },
+        {
+            name: "acquire work",
+            code: "hyper-v-base-image-artifact-owner-unknown",
+            setup: (profileRoot) => {
+                mkdirSync(join(profileRoot, ".acquire-work"), { recursive: true });
+                writeFileSync(join(profileRoot, ".acquire-work", "converted.normalized.fixed.vhd"), "temporary");
+            },
+        },
+        {
+            name: "a prior-catalog manifest beside a partial image",
+            code: "hyper-v-base-image-artifact-owner-unknown",
+            setup: (profileRoot) => {
+                writeCache(profileRoot, automaticManifest(profileRoot, { catalogId: priorCatalogId }));
+                writeFileSync(join(profileRoot, "base.partial.vhdx"), "partial-image");
+            },
+        },
+        {
+            name: "a restorable prior-catalog retirement beside a partial image",
+            code: "hyper-v-base-image-artifact-owner-unknown",
+            setup: (profileRoot) => {
+                writeCache(profileRoot, null);
+                writeFileSync(join(profileRoot, ".manifest-prior-recovery.json"), JSON.stringify(automaticManifest(profileRoot, { catalogId: priorCatalogId })));
+                writeFileSync(join(profileRoot, "base.partial.vhdx"), "partial-image");
+            },
+        },
+        {
+            name: "a prior-catalog manifest without its image",
+            code: "hyper-v-base-image-profile-conflict",
+            setup: (profileRoot) => writeCache(profileRoot, automaticManifest(profileRoot, { catalogId: priorCatalogId }), null),
+        },
+        {
+            name: "a prior-catalog manifest whose image size differs",
+            code: "hyper-v-base-image-profile-conflict",
+            setup: (profileRoot) => writeCache(profileRoot, automaticManifest(profileRoot, { catalogId: priorCatalogId }), Buffer.from("resized")),
+        },
+        {
+            name: "a prior-catalog pair beside backups of an earlier retirement",
+            code: "hyper-v-base-image-profile-conflict",
+            setup: (profileRoot) => {
+                writeCache(profileRoot, automaticManifest(profileRoot, { catalogId: priorCatalogId }));
+                writeFileSync(join(profileRoot, ".manifest-prior-recovery.json"), JSON.stringify(automaticManifest(profileRoot, { catalogId: priorCatalogId })));
+            },
+        },
+        {
+            name: "only a stale prior-recovery manifest",
+            code: "hyper-v-base-image-profile-conflict",
+            setup: (profileRoot) => {
+                writeCache(profileRoot, null, null);
+                writeFileSync(join(profileRoot, ".manifest-prior-recovery.json"), JSON.stringify(automaticManifest(profileRoot, { catalogId: priorCatalogId })));
+            },
+        },
+        {
+            name: "a prior-recovery manifest of another catalog",
+            code: "hyper-v-base-image-profile-conflict",
+            setup: (profileRoot) => {
+                writeCache(profileRoot, null);
+                writeFileSync(join(profileRoot, ".manifest-prior-recovery.json"), JSON.stringify(automaticManifest(profileRoot, { catalogId: "canonical-ubuntu-22.04-lts-server-cloudimg" })));
+            },
+        },
+        {
+            name: "a prior-recovery manifest beside a manifest without its image",
+            code: "hyper-v-base-image-profile-conflict",
+            setup: (profileRoot) => {
+                writeCache(profileRoot, automaticManifest(profileRoot), null);
+                writeFileSync(join(profileRoot, ".manifest-prior-recovery.json"), JSON.stringify(automaticManifest(profileRoot, { catalogId: priorCatalogId })));
+                writeFileSync(join(profileRoot, ".base-prior-recovery.vhdx"), image);
+            },
+        },
+        {
+            name: "a profile root that is not a directory",
+            code: "hyper-v-base-image-profile-conflict",
+            createDetail: "hyper-v-base-image-prepare-failed",
+            setup: (profileRoot) => {
+                mkdirSync(dirname(profileRoot), { recursive: true });
+                writeFileSync(profileRoot, "not-a-directory");
+            },
+        },
+        ...(process.platform === "win32" ? [] : [{
+            name: "a symlinked profile root",
+            code: "hyper-v-base-image-profile-conflict",
+            createDetail: "hyper-v-base-image-preparation-path-symlink-rejected",
+            setup: (profileRoot: string) => {
+                const target = join(dirname(profileRoot), "linked-cache");
+                writeCache(target, automaticManifest(profileRoot));
+                symlinkSync(target, profileRoot);
+            },
+        }]),
+    ];
+
+    it.each(conflicts)("reports $code for $name", ({ code, createDetail, setup }) => withPrivateRoot("conflict", async (privateRoot) => {
+        setup(hyperVImageProfileRoot(privateRoot, "ubuntu-lts"));
+
+        expect(inspectWithoutSideEffects(privateRoot)).toEqual({ state: "conflict", code });
+        expect(await createDecision(privateRoot)).toBe(createDetail ?? code);
+    })());
 });

@@ -5,10 +5,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { devicesCliAsync, setupHyperVHost, spawnableWindowsExecutablePath } from "../device-lab-admin.js";
 import { hyperVSetupCommand } from "../host-control/hyper-v/index.js";
 import {
+    HYPER_V_IMAGE_CATALOG,
     HYPER_V_WINDOWS_EVALUATION_LICENSE_ID,
     HYPER_V_WINDOWS_EVALUATION_LICENSE_URL,
     readHyperVWindowsEvaluationReceipt,
 } from "../device-lab/hyper-v-images.js";
+import { deviceLabOwnerId } from "../device-lab-owner.js";
 
 describe("Hyper-V host setup CLI", () => {
     const roots: string[] = [];
@@ -65,10 +67,11 @@ describe("Hyper-V host setup CLI", () => {
             stderr: "",
         }));
 
+        // The image cache is read beside the setup root, so keep both inside this test's own root.
         const result = await setupHyperVHost(false, {
             platform: "win32",
             powershell: "powershell.exe",
-            stateRoot: root,
+            stateRoot: join(root, "setup"),
             commandRunner: runner,
         });
 
@@ -81,8 +84,145 @@ describe("Hyper-V host setup CLI", () => {
         expect(result.text).toContain("qemuImgAvailable: false");
         expect(result.text).toContain("linuxImageMissing: hyper-v-qemu-img-unavailable");
         expect(result.text).toContain("Android SDK Emulator package from Google");
+        // The probe rejects a junction or symlink anywhere on the fixed path, as acquisition does.
+        expect(result.text).toContain("qemu-img.exe is available for Hyper-V Linux images at that exact path, with no junction or symbolic link in any path component");
+        expect(result.text).toContain("linuxBaseImage: acquisition-required");
+        expect(result.text).not.toContain("SDK Manager");
         const encodedScript = Buffer.from(runner.mock.calls[0][1].at(-1), "base64").toString("utf16le");
         expect(encodedScript).not.toContain("Enable-WindowsOptionalFeature");
+    });
+
+    describe("Hyper-V Linux image remedies", () => {
+        const cachedImage = Buffer.from("cached-ubuntu-lts-image");
+
+        function readyRunner(qemuImg: Record<string, unknown>) {
+            return vi.fn(() => ({
+                command: "powershell.exe",
+                status: 0,
+                stdout: JSON.stringify({
+                    ok: true,
+                    available: true,
+                    platform: "win32",
+                    moduleAvailable: true,
+                    hypervisorPresent: true,
+                    vmmsRunning: true,
+                    rebootPending: false,
+                    totalMemoryMb: 32768,
+                    freeMemoryMb: 16384,
+                    logicalProcessors: 16,
+                    missing: [],
+                    ...qemuImg,
+                }),
+                stderr: "",
+            }));
+        }
+
+        const untrusted = {
+            qemuImgAvailable: true,
+            qemuImgTrusted: false,
+            qemuImgSignatureStatus: "HashMismatch",
+            linuxImageMissing: ["hyper-v-qemu-img-untrusted"],
+        };
+
+        // Setup state sits in <private root>/setup, the same private root create reads images from.
+        function privateRoot(label: string) {
+            const root = join(tmpdir(), `ccc-hyper-v-linux-image-${label}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+            roots.push(root);
+            return root;
+        }
+
+        function writeUbuntuCache(profileRoot: string, userProvided = false) {
+            const catalog = HYPER_V_IMAGE_CATALOG["ubuntu-lts"];
+            mkdirSync(profileRoot, { recursive: true });
+            writeFileSync(join(profileRoot, "base.vhdx"), cachedImage);
+            writeFileSync(join(profileRoot, "manifest.json"), JSON.stringify({
+                version: 3,
+                profile: "ubuntu-lts",
+                catalogId: userProvided ? "user-provided-vhdx" : catalog.catalogId,
+                sourceUrl: userProvided ? null : catalog.sourceUrl,
+                sourceFormat: userProvided ? "vhdx" : catalog.sourceFormat,
+                sourceSha256: userProvided ? null : catalog.sourceSha256,
+                licenseId: userProvided ? null : catalog.licenseId,
+                generation: catalog.generation,
+                secureBootTemplate: catalog.secureBootTemplate,
+                preparationVersion: 1,
+                imagePath: join(profileRoot, "base.vhdx"),
+                sha256: "0".repeat(64),
+                sizeBytes: cachedImage.length,
+                virtualSizeBytes: catalog.virtualSizeBytes,
+                vhdType: "Dynamic",
+                preparedAt: new Date().toISOString(),
+            }));
+        }
+
+        it("tells an untrusted qemu-img to be reinstalled through the SDK Manager when the image must be acquired", async () => {
+            const root = privateRoot("untrusted");
+
+            const result = await setupHyperVHost(false, { platform: "win32", powershell: "powershell.exe", stateRoot: join(root, "setup"), commandRunner: readyRunner(untrusted) });
+
+            expect(result.ok).toBe(true);
+            expect(result.text).toContain("qemuImgSignatureStatus: HashMismatch");
+            expect(result.text).toContain("linuxBaseImage: acquisition-required");
+            expect(result.text).toContain("action: reinstall or update the Android Emulator through the Android SDK Manager");
+            expect(result.text).toContain("signature status: HashMismatch");
+            expect(result.text).toContain("never substitute a qemu-img from another source");
+            expect(result.text).not.toContain("Android SDK Emulator package from Google");
+            expect(result.text).not.toContain("advisory:");
+        });
+
+        it("reports qemu-img as not needed until re-acquisition when the shared cache is valid", async () => {
+            const root = privateRoot("cached");
+            writeUbuntuCache(join(root, "images", "hyper-v", "ubuntu-lts"));
+
+            const result = await setupHyperVHost(false, { platform: "win32", powershell: "powershell.exe", stateRoot: join(root, "setup"), commandRunner: readyRunner(untrusted) });
+
+            expect(result.text).toContain("linuxBaseImage: valid (global)");
+            expect(result.text).toContain("advisory: qemu-img is not needed until the ubuntu-lts image must be re-acquired; before then, reinstall or update the Android Emulator through the Android SDK Manager");
+            expect(result.text).not.toMatch(/^action: .*qemu-img/m);
+        });
+
+        it("reads the owner's imported image for the owner the CLI resolves", async () => {
+            const root = privateRoot("owner");
+            const ownerId = deviceLabOwnerId("/project/setup-owner-image-test");
+            writeUbuntuCache(join(root, "owners", ownerId, "images", "hyper-v", "ubuntu-lts"), true);
+            const runner = readyRunner({ qemuImgAvailable: false, qemuImgTrusted: false, linuxImageMissing: ["hyper-v-qemu-img-unavailable"] });
+
+            const owned = await setupHyperVHost(false, { platform: "win32", powershell: "powershell.exe", stateRoot: join(root, "setup"), commandRunner: runner, ownerId });
+            expect(owned.text).toContain("linuxBaseImage: valid (owner)");
+            expect(owned.text).toContain("advisory: qemu-img is not needed until the ubuntu-lts image must be re-acquired; before then, install the Android SDK Emulator package from Google");
+
+            const other = await setupHyperVHost(false, { platform: "win32", powershell: "powershell.exe", stateRoot: join(root, "setup"), commandRunner: runner, ownerId: deviceLabOwnerId("/project/setup-other-owner-test") });
+            expect(other.text).toContain("linuxBaseImage: acquisition-required");
+            expect(other.text).toContain("action: install the Android SDK Emulator package from Google");
+        });
+
+        it("names a cache conflict as an action for the operator", async () => {
+            const root = privateRoot("conflict");
+            const profileRoot = join(root, "images", "hyper-v", "ubuntu-lts");
+            mkdirSync(profileRoot, { recursive: true });
+            writeFileSync(join(profileRoot, "base.partial.vhdx"), cachedImage);
+
+            const diagnose = () => setupHyperVHost(false, {
+                platform: "win32",
+                powershell: "powershell.exe",
+                stateRoot: join(root, "setup"),
+                commandRunner: readyRunner({ qemuImgAvailable: true, qemuImgTrusted: true, qemuImgSignatureStatus: "Valid", linuxImageMissing: [] }),
+            });
+            const result = await diagnose();
+
+            expect(result.text).toContain("linuxBaseImage: conflict");
+            expect(result.text).toContain("action: resolve hyper-v-base-image-artifact-owner-unknown in the ubuntu-lts base image cache");
+            // Those artifacts can belong to an acquisition that is still running.
+            expect(result.text).toContain("a Hyper-V Linux VM create that is still acquiring the image also leaves these artifacts, so first let any such create finish and rerun this diagnostic");
+            expect(result.text).not.toContain("SDK Manager");
+            expect(result.text).not.toContain("advisory:");
+
+            rmSync(join(profileRoot, "base.partial.vhdx"));
+            writeFileSync(join(profileRoot, "base.vhdx"), cachedImage);
+            const unmanaged = await diagnose();
+            expect(unmanaged.text).toContain("action: resolve hyper-v-base-image-unmanaged-existing in the ubuntu-lts base image cache");
+            expect(unmanaged.text).not.toContain("still acquiring the image");
+        });
     });
 
     it("records explicit Windows evaluation license acceptance and reports it later", async () => {
@@ -583,11 +723,12 @@ describe("Hyper-V host setup CLI", () => {
         const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
         expect(await devicesCliAsync(["setup", "hyper-v", "--confirm"], "/project/setup-test", undefined, { setupHyperV })).toBe(0);
-        expect(setupHyperV).toHaveBeenCalledWith(true, { acceptWindowsEvaluationLicense: false });
+        const ownerId = deviceLabOwnerId("/project/setup-test");
+        expect(setupHyperV).toHaveBeenCalledWith(true, { acceptWindowsEvaluationLicense: false, ownerId });
         expect(log).toHaveBeenCalledWith("setup-ok");
 
         expect(await devicesCliAsync(["setup", "hyper-v", "--confirm", "--accept-windows-evaluation-license"], "/project/setup-test", undefined, { setupHyperV })).toBe(0);
-        expect(setupHyperV).toHaveBeenLastCalledWith(true, { acceptWindowsEvaluationLicense: true });
+        expect(setupHyperV).toHaveBeenLastCalledWith(true, { acceptWindowsEvaluationLicense: true, ownerId });
 
         expect(await devicesCliAsync(["setup", "hyper-v", "--force"], "/project/setup-test", undefined, { setupHyperV })).toBe(1);
         expect(await devicesCliAsync(["setup", "hyper-v", "--accept-windows-evaluation-license"], "/project/setup-test", undefined, { setupHyperV })).toBe(1);

@@ -1,4 +1,6 @@
 import {
+    HYPER_V_QEMU_IMG_SIGNATURE_STATUSES,
+    type HyperVQemuImgSignatureStatus,
     type HyperVReadiness,
     type HyperVSetupObservation,
     type HyperVVmObservation,
@@ -54,6 +56,10 @@ function parseMarkedJsonObject(stdout: string): Record<string, unknown> | null {
     }
 }
 
+function isHyperVQemuImgSignatureStatus(value: unknown): value is HyperVQemuImgSignatureStatus {
+    return typeof value === "string" && (HYPER_V_QEMU_IMG_SIGNATURE_STATUSES as readonly string[]).includes(value);
+}
+
 export function parseHyperVReadiness(stdout: string): HyperVReadiness | null {
     const parsed = parseLastJsonObject(stdout);
     if (!parsed || typeof parsed.available !== "boolean"
@@ -77,6 +83,8 @@ export function parseHyperVReadiness(stdout: string): HyperVReadiness | null {
         ...(typeof parsed.sessionRefreshRequired === "boolean" ? { sessionRefreshRequired: parsed.sessionRefreshRequired } : {}),
         ...(typeof parsed.qemuImgAvailable === "boolean" ? { qemuImgAvailable: parsed.qemuImgAvailable } : {}),
         ...(typeof parsed.qemuImgTrusted === "boolean" ? { qemuImgTrusted: parsed.qemuImgTrusted } : {}),
+        // Older probes did not report a status; anything outside the closed set is dropped, not echoed.
+        ...(isHyperVQemuImgSignatureStatus(parsed.qemuImgSignatureStatus) ? { qemuImgSignatureStatus: parsed.qemuImgSignatureStatus } : {}),
         ...(Array.isArray(parsed.linuxImageMissing) ? {
             linuxImageMissing: parsed.linuxImageMissing.filter((item): item is string => typeof item === "string"),
         } : {}),

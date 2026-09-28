@@ -62,6 +62,7 @@ import {
 } from "../host-control/hyper-v/index.js";
 import { hyperVProviderDiagnosticCode } from "../device-lab/broker/hyper-v/public-response.js";
 import { isoWriterLines } from "../host-control/hyper-v/core.js";
+import { HYPER_V_QEMU_IMG_SIGNATURE_STATUSES } from "../host-control/hyper-v/contracts.js";
 import { hyperVPowerShellAssetPath } from "../host-control/hyper-v/powershell-assets.js";
 
 const ownerId = "0123456789abcdef";
@@ -85,6 +86,34 @@ function scriptOf(command: { args: string[]; input?: string }): string {
         return Buffer.from(command.input, "base64").toString("utf8");
     }
     return decoded;
+}
+
+// Parses a generated program with the host's Windows PowerShell 5.1 parser, without running it.
+function parseWithWindowsPowerShell(program: string) {
+    const parser = [
+        "$Encoded = [Console]::In.ReadToEnd().Trim()",
+        "$Program = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Encoded))",
+        "$Tokens = $null; $Errors = $null",
+        "[Management.Automation.Language.Parser]::ParseInput($Program, [ref]$Tokens, [ref]$Errors) | Out-Null",
+        "if (@($Errors).Count -gt 0) { [Console]::Error.WriteLine((@($Errors | ForEach-Object { $_.Message }) -join [Environment]::NewLine)); exit 1 }",
+    ].join("\n");
+    return spawnSync("powershell.exe", [
+        "-WindowStyle",
+        "Hidden",
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-EncodedCommand",
+        Buffer.from(parser, "utf16le").toString("base64"),
+    ], {
+        input: Buffer.from(program, "utf8").toString("base64"),
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 30_000,
+        maxBuffer: 1024 * 1024,
+    });
 }
 
 function loaderOf(command: { args: string[] }): string {
@@ -892,30 +921,7 @@ describe("Hyper-V provider adapter", () => {
             imageRoot: "C:\\ccc-hyper-v-parser-probe",
             expectedGeneration: 2,
         });
-        const parser = [
-            "$Encoded = [Console]::In.ReadToEnd().Trim()",
-            "$Program = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Encoded))",
-            "$Tokens = $null; $Errors = $null",
-            "[Management.Automation.Language.Parser]::ParseInput($Program, [ref]$Tokens, [ref]$Errors) | Out-Null",
-            "if (@($Errors).Count -gt 0) { [Console]::Error.WriteLine((@($Errors | ForEach-Object { $_.Message }) -join [Environment]::NewLine)); exit 1 }",
-        ].join("\n");
-        const result = spawnSync("powershell.exe", [
-            "-WindowStyle",
-            "Hidden",
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-EncodedCommand",
-            Buffer.from(parser, "utf16le").toString("base64"),
-        ], {
-            input: Buffer.from(scriptOf(command), "utf8").toString("base64"),
-            encoding: "utf8",
-            windowsHide: true,
-            timeout: 30_000,
-            maxBuffer: 1024 * 1024,
-        });
+        const result = parseWithWindowsPowerShell(scriptOf(command));
 
         expect(result.status, result.stderr || result.error?.message).toBe(0);
     });
@@ -2926,6 +2932,15 @@ describe("Hyper-V provider adapter", () => {
         expect(parseHyperVReadiness(`noise\n${JSON.stringify({ ok: true, available: true, platform: "win32", moduleAvailable: true, hypervisorPresent: true, vmmsRunning: true, rebootPending: false, totalMemoryMb: 65536, freeMemoryMb: 32768, logicalProcessors: 16, missing: [], qemuImgAvailable: true, qemuImgTrusted: true, linuxImageMissing: [] })}\n`))
             .toEqual({ ok: true, available: true, platform: "win32", moduleAvailable: true, hypervisorPresent: true, vmmsRunning: true, rebootPending: false, totalMemoryMb: 65536, freeMemoryMb: 32768, logicalProcessors: 16, missing: [], qemuImgAvailable: true, qemuImgTrusted: true, linuxImageMissing: [] });
         expect(parseHyperVReadiness(JSON.stringify({ ok: true, available: true, missing: [] }))).toBeNull();
+        const readinessBase = { ok: true, available: true, platform: "win32", moduleAvailable: true, hypervisorPresent: true, vmmsRunning: true, rebootPending: false, totalMemoryMb: 65536, freeMemoryMb: 32768, logicalProcessors: 16, missing: [], qemuImgAvailable: true, qemuImgTrusted: false, linuxImageMissing: ["hyper-v-qemu-img-untrusted"] };
+        for (const status of HYPER_V_QEMU_IMG_SIGNATURE_STATUSES) {
+            expect(parseHyperVReadiness(JSON.stringify({ ...readinessBase, qemuImgSignatureStatus: status }))?.qemuImgSignatureStatus).toBe(status);
+        }
+        for (const status of [null, "", "valid", "Exception calling \"GetSignature\": access denied", 3, ["Valid"]]) {
+            const parsed = parseHyperVReadiness(JSON.stringify({ ...readinessBase, qemuImgSignatureStatus: status }));
+            expect(parsed).toEqual(readinessBase);
+            expect(parsed).not.toHaveProperty("qemuImgSignatureStatus");
+        }
         expect(parseHyperVVmObservation(JSON.stringify({ ok: true, vmId: vmId.toUpperCase(), vmName: hyperVVmName(ownerId, deviceId, incarnationId), state: "Running", status: "Operating normally", uptimeMs: 42 })))
             .toMatchObject({ ok: true, vmId, state: "Running", uptimeMs: 42 });
         expect(parseHyperVVmObservation('{"ok":true,"vmId":"not-a-guid","vmName":"x"}')).toBeNull();
@@ -2933,5 +2948,56 @@ describe("Hyper-V provider adapter", () => {
             .toMatchObject({ ok: true, vmId, deleted: true, diskPath: "/state/root.vhdx" });
         expect(parseHyperVDeleteObservation(JSON.stringify({ ok: true, vmId, vmName: hyperVVmName(ownerId, deviceId, incarnationId), deleted: false }))).toBeNull();
         expect(parseHyperVDeleteObservation(JSON.stringify({ ok: true, vmId, vmName: hyperVVmName(ownerId, deviceId, incarnationId) }))).toBeNull();
+    });
+
+    it("checks the qemu-img signature through the trusted Security module and reports a closed status", () => {
+        const command = hyperVReadinessCommand("powershell.exe");
+        // Streaming would run the probe under the loader's Stop preference and change its semantics.
+        expect(command.input).toBeUndefined();
+        const script = scriptOf(command);
+        const lines = script.split("\n");
+        const importIndex = lines.findIndex((line) => line.includes("Import-Module -Name $SecurityModuleManifest"));
+        const signatureIndex = lines.findIndex((line) => line.includes("Get-AuthenticodeSignature"));
+
+        expect(script).toContain("$SecurityModuleManifest = Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1'");
+        expect(lines[importIndex]?.trim()).toBe("Microsoft.PowerShell.Core\\Import-Module -Name $SecurityModuleManifest -ErrorAction Stop");
+        expect(lines[signatureIndex]?.trim()).toBe("$QemuSignature = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $QemuImg -ErrorAction Stop");
+        expect(importIndex).toBeGreaterThan(0);
+        expect(signatureIndex).toBeGreaterThan(importIndex);
+        expect(script.match(/Get-AuthenticodeSignature/g)).toHaveLength(1);
+        // The inherited module path stays, so Hyper-V discovery still works under the pwsh fallback.
+        expect(script).not.toMatch(/\$env:PSModulePath\s*=/);
+
+        // The trust predicate and the fixed location are unchanged.
+        expect(script).toContain("$QemuImg = if ($LocalAppData) { Join-Path $LocalAppData 'Android\\Sdk\\emulator\\qemu-img.exe' } else { $null }");
+        expect(script).toContain("$QemuImgTrusted = [string]$QemuSignature.Status -eq 'Valid' -and $QemuSignature.SignerCertificate -and [string]$QemuSignature.SignerCertificate.Subject -match '(^|, )O=Google LLC(,|$)'");
+        expect(script).not.toMatch(/\$env:PATH|Get-Command|where\.exe|scoop|mise|chocolatey|\bchoco\b/i);
+
+        // Every path component is checked for a reparse point before the file is trusted as available.
+        expect(script).toContain("function Test-CccNoReparsePath([string]$Path) {");
+        expect(script).toContain("foreach ($Segment in @($FullPath.Substring($PathRoot.Length) -split '[\\\\/]' | Where-Object { $_ })) {");
+        expect(script).toContain("if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }");
+        expect(script).toContain("if ($QemuImg -and (Test-CccNoReparsePath $QemuImg) -and (Test-Path -LiteralPath $QemuImg -PathType Leaf)) {");
+
+        // The reported status is one of the contract's names; a throw becomes check-failed, never its message.
+        const reported = new Set<string>([
+            ...Array.from(script.matchAll(/\$QemuImgSignatureStatus = '([A-Za-z-]+)'/g), (match) => match[1]!),
+            ...Array.from(script.matchAll(/\{ '([A-Za-z-]+)' \}/g), (match) => match[1]!),
+            ...(/\$QemuSignatureStatusNames = @\(([^)]*)\)/.exec(script)?.[1] ?? "").split(",").map((name) => name.trim().replace(/^'|'$/g, "")),
+        ]);
+        expect([...reported].sort()).toEqual([...HYPER_V_QEMU_IMG_SIGNATURE_STATUSES].sort());
+        expect(script).toContain("} catch { $QemuImgTrusted = $false; $QemuImgSignatureStatus = 'check-failed' }");
+        expect(script).toContain("elseif ($QemuSignatureStatusName -ceq 'Valid') { 'signer-mismatch' }");
+        expect(script).toContain("qemuImgSignatureStatus = $QemuImgSignatureStatus;");
+        expect(script).not.toMatch(/Exception\.Message|\$_\.Exception|StatusMessage/);
+        expect(script).not.toMatch(WINDOWS_POWERSHELL_UNSUPPORTED_ACCELERATOR);
+    });
+
+    // String checks cannot see an unbalanced brace or a 5.1-only parse error in the readiness probe,
+    // which the smoke, device_backends and the setup diagnostic all run under Windows PowerShell.
+    it.skipIf(process.platform !== "win32")("parses the generated readiness probe with Windows PowerShell", () => {
+        const result = parseWithWindowsPowerShell(scriptOf(hyperVReadinessCommand("powershell.exe")));
+
+        expect(result.status, result.stderr || result.error?.message).toBe(0);
     });
 });

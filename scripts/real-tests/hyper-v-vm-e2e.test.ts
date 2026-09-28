@@ -19,6 +19,8 @@ import {
 } from "./hyper-v-windows-vm-e2e.ts";
 import { captureHyperVWindowsSetupDiagnostics } from "./hyper-v-windows-setup-diagnostics.ts";
 import { brokerRollbackSummary, brokerToolFailureEvidence, formatBrokerToolFailure } from "./device-lab-mcp-client.ts";
+import { repoRoot } from "./helpers.ts";
+import { ownerId as mcpOwnerId } from "../../device-lab-mcp/src/context.mjs";
 import {
     HYPER_V_WINDOWS_EVALUATION_LICENSE_ID,
     HYPER_V_WINDOWS_EVALUATION_LICENSE_URL,
@@ -329,7 +331,59 @@ describe("Hyper-V E2E zero-config image selection", () => {
             ssh: "ssh.exe",
             scp: "scp.exe",
             spawnSyncImpl: spawnReady,
+            inspectImageCache: () => ({ state: "acquisition-required" }),
         })).toMatchObject({ available: true, sourceImage: "" });
+    });
+
+    describe("Linux E2E image gate", () => {
+        const untrustedReadiness = JSON.stringify({
+            ...JSON.parse(readiness),
+            qemuImgAvailable: true,
+            qemuImgTrusted: false,
+            qemuImgSignatureStatus: "NotTrusted",
+            linuxImageMissing: ["hyper-v-qemu-img-untrusted"],
+        });
+        const spawnUntrusted = (_command: string, args: string[]) => (
+            args[0] === "ssh.exe" || args[0] === "scp.exe" ? { status: 0, stdout: `${args[0]}\n` } : { status: 0, stdout: untrustedReadiness }
+        );
+        const capability = (inspectImageCache: (privateRoot: string, ownerId: string) => unknown, extra: Record<string, unknown> = {}) => hyperVLinuxVmE2ECapability({
+            platform: "win32",
+            powershell: "powershell.exe",
+            ssh: "ssh.exe",
+            scp: "scp.exe",
+            spawnSyncImpl: spawnUntrusted,
+            inspectImageCache,
+            ...extra,
+        });
+
+        it("runs on a cached ubuntu-lts image even though qemu-img is untrusted", () => {
+            expect(capability(() => ({ state: "valid", source: "global" }))).toMatchObject({ available: true, sourceImage: "" });
+        });
+
+        it("skips with the categorized qemu-img reason when the image would have to be acquired", () => {
+            expect(capability(() => ({ state: "acquisition-required" }))).toEqual({
+                available: false,
+                reason: "missing hyper-v-qemu-img-untrusted (qemu-img signature NotTrusted)",
+            });
+        });
+
+        it("skips with the conflict code so validation leaves it for the operator", () => {
+            expect(capability(() => ({ state: "conflict", code: "hyper-v-base-image-unmanaged-existing" }))).toEqual({
+                available: false,
+                reason: "missing hyper-v-base-image-unmanaged-existing",
+            });
+        });
+
+        it("reads the broker's private root for the owner the MCP session resolves", () => {
+            const calls: Array<[string, string]> = [];
+            capability((root, owner) => { calls.push([root, owner]); return { state: "valid", source: "global" }; });
+            expect(calls).toEqual([[join(homedir(), ".ccc", "device-broker-private"), mcpOwnerId(process.env, repoRoot)]]);
+        });
+
+        it("does not consult the cache for an imported source image, which never runs qemu-img", () => {
+            const inspect = () => { throw new Error("cache inspected"); };
+            expect(capability(inspect, { sourceImage: "C:\\images\\ubuntu.vhdx" })).toMatchObject({ available: true, sourceImage: "C:\\images\\ubuntu.vhdx" });
+        });
     });
 
     it("pre-creates the Linux E2E download destination without replacing an existing path", () => {

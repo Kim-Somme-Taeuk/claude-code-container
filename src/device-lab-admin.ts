@@ -31,6 +31,8 @@ import {
     HYPER_V_WINDOWS_EVALUATION_LICENSE_URL,
     readHyperVWindowsEvaluationReceipt,
 } from "./device-lab/hyper-v-images.js";
+import { inspectHyperVUbuntuImageCache } from "./device-lab/broker/hyper-v/image-store.js";
+import { hyperVLinuxImageBlockers, hyperVLinuxSmokeImageResult } from "./device-lab/hyper-v-linux-image-readiness.js";
 import {
     hyperVReadinessCommand,
     hyperVSetupCommand,
@@ -88,6 +90,7 @@ type HyperVSetupHostOptions = {
     commandRunner?: (command: string, args: string[], timeoutMs: number, input?: string) => CommandResult | null;
     acceptWindowsEvaluationLicense?: boolean;
     ensureHostNetwork?: typeof ensureHyperVHostNetworkForSetup;
+    ownerId?: string;
 };
 export type HyperVSetupHostResult = { ok: boolean; text: string };
 
@@ -677,6 +680,28 @@ export async function setupHyperVHost(confirm: boolean, options: HyperVSetupHost
                 ? "action: sign out of Windows and sign in once to activate Hyper-V Administrators membership, then rerun this diagnostic"
                 : "action: grant the current user Hyper-V management access with 'ccc devices setup hyper-v --confirm', then rerun this diagnostic");
         }
+        // Setup state lives in <private root>/setup, where create also reads the evaluation receipt,
+        // so the image cache is read from the same private root create resolves images from.
+        const linuxImage = hyperVLinuxImageBlockers(readiness, inspectHyperVUbuntuImageCache(dirname(setupRoot), options.ownerId || ""));
+        const qemuImgMissing = readiness.linuxImageMissing || [];
+        const qemuImgRemedy = qemuImgMissing.includes("hyper-v-qemu-img-unavailable")
+            ? "install the Android SDK Emulator package from Google so %LOCALAPPDATA%\\Android\\Sdk\\emulator\\qemu-img.exe is available for Hyper-V Linux images at that exact path, with no junction or symbolic link in any path component"
+            : qemuImgMissing.includes("hyper-v-qemu-img-untrusted")
+                ? `reinstall or update the Android Emulator through the Android SDK Manager until %LOCALAPPDATA%\\Android\\Sdk\\emulator\\qemu-img.exe has a Valid Google LLC signature (signature status: ${readiness.qemuImgSignatureStatus ?? "unknown"}); never substitute a qemu-img from another source`
+                : null;
+        const linuxImageActions: string[] = [];
+        if (linuxImage.baseImage.state === "conflict") {
+            // Partial and acquire-work artifacts also exist while a create is still acquiring the image.
+            const acquisitionMayBeRunning = linuxImage.blockers.includes("hyper-v-base-image-artifact-owner-unknown")
+                ? "; a Hyper-V Linux VM create that is still acquiring the image also leaves these artifacts, so first let any such create finish and rerun this diagnostic"
+                : "";
+            linuxImageActions.push(`action: resolve ${linuxImage.blockers.join(", ")} in the ubuntu-lts base image cache under %USERPROFILE%\\.ccc\\device-broker-private\\images\\hyper-v\\ubuntu-lts before creating a Hyper-V Linux VM; CCC does not repair or replace it automatically${acquisitionMayBeRunning}`);
+        }
+        if (qemuImgRemedy) {
+            linuxImageActions.push(linuxImage.baseImage.state === "valid"
+                ? `advisory: qemu-img is not needed until the ubuntu-lts image must be re-acquired; before then, ${qemuImgRemedy}`
+                : `action: ${qemuImgRemedy}`);
+        }
         return {
             ok: true,
             text: [
@@ -694,12 +719,12 @@ export async function setupHyperVHost(confirm: boolean, options: HyperVSetupHost
                 `missing: ${readiness.missing.join(", ")}`,
                 `qemuImgAvailable: ${readiness.qemuImgAvailable ?? false}`,
                 `qemuImgTrusted: ${readiness.qemuImgTrusted ?? false}`,
+                `qemuImgSignatureStatus: ${readiness.qemuImgSignatureStatus ?? "unknown"}`,
                 `linuxImageMissing: ${(readiness.linuxImageMissing || []).join(", ")}`,
+                `linuxBaseImage: ${linuxImage.baseImage.state}${linuxImage.baseImage.source ? ` (${linuxImage.baseImage.source})` : ""}`,
                 `windowsEvaluationLicenseAccepted: ${licenseAccepted}`,
                 ...(!licenseAccepted ? ["action: accept the Windows Server evaluation terms once with 'ccc devices setup hyper-v --confirm --accept-windows-evaluation-license'"] : []),
-                ...((readiness.linuxImageMissing || []).length > 0
-                    ? ["action: install the Android SDK Emulator package from Google so %LOCALAPPDATA%\\Android\\Sdk\\emulator\\qemu-img.exe is available for Hyper-V Linux images"]
-                    : []),
+                ...linuxImageActions,
                 ...actions,
             ].join("\n"),
         };
@@ -805,7 +830,7 @@ function hyperVSmokeResult(tools: Record<string, string | null>, timeoutMs: numb
     return { backend: "windows-vm", status: "PASS", detail: "Hyper-V module, hypervisor, and VMMS service are ready; no VM started", commands };
 }
 
-function hyperVLinuxSmokeResult(tools: Record<string, string | null>, timeoutMs: number): SmokeResult {
+function hyperVLinuxSmokeResult(tools: Record<string, string | null>, timeoutMs: number, ownerId: string): SmokeResult {
     if (process.platform !== "win32") return { backend: "linux-vm", status: "SKIP", detail: "not a Windows host" };
     const missing = ["powershell.exe", "ssh", "scp"].filter((tool) => !tools[tool]);
     if (missing.length > 0) return { backend: "linux-vm", status: "SKIP", detail: `missing ${missing.join(", ")}` };
@@ -816,8 +841,9 @@ function hyperVLinuxSmokeResult(tools: Record<string, string | null>, timeoutMs:
     const readiness = parseHyperVReadiness(result.stdout || "");
     if (!readiness) return { backend: "linux-vm", status: "FAIL", detail: "invalid Hyper-V readiness response", commands };
     if (!readiness.available) return { backend: "linux-vm", status: "SKIP", detail: `missing ${readiness.missing.join(", ") || "Hyper-V prerequisites"}`, commands };
-    if ((readiness.linuxImageMissing || []).length > 0) return { backend: "linux-vm", status: "SKIP", detail: `missing ${readiness.linuxImageMissing!.join(", ")}`, commands };
-    return { backend: "linux-vm", status: "PASS", detail: "Hyper-V, trusted qemu-img, SSH, and SCP are ready; no VM started", commands };
+    // The broker's private root and this owner, as create resolves the ubuntu-lts image.
+    const cache = inspectHyperVUbuntuImageCache(join(homedir(), ".ccc/device-broker-private"), ownerId);
+    return { backend: "linux-vm", ...hyperVLinuxSmokeImageResult(readiness, cache), commands };
 }
 
 export function deviceLabSmoke(cwd = process.cwd(), timeoutMs = 5000, profile?: string, options: SmokeOptions = {}): { ownerId: string; mode: SmokeMode; results: SmokeResult[] } {
@@ -857,7 +883,7 @@ export function deviceLabSmoke(cwd = process.cwd(), timeoutMs = 5000, profile?: 
     }
 
     results.push(hyperVSmokeResult(tools, timeoutMs));
-    results.push(hyperVLinuxSmokeResult(tools, timeoutMs));
+    results.push(hyperVLinuxSmokeResult(tools, timeoutMs, ownerId));
 
     results.push(macosSmokeResult(tools, mode, timeoutMs));
 
@@ -2345,6 +2371,7 @@ export async function devicesCliAsync(
         const setup = hooks.setupHyperV || setupHyperVHost;
         const result = await setup(setupArgs.includes("--confirm"), {
             acceptWindowsEvaluationLicense: setupArgs.includes("--accept-windows-evaluation-license"),
+            ownerId: deviceLabOwnerId(cwd, profile),
         });
         (result.ok ? console.log : console.error)(result.text);
         return result.ok ? 0 : 1;

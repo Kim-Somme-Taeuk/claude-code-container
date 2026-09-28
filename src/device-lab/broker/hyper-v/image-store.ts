@@ -36,6 +36,7 @@ const HYPER_V_IMPORTED_IMAGE_LIMIT_BYTES = 64 * 1024 * 1024 * 1024;
 const HYPER_V_AUTOMATIC_SOURCE_CACHE_LIMIT_BYTES = 6 * 1024 * 1024 * 1024;
 const HYPER_V_IMAGE_LOCK_STALE_MS = 2 * 60 * 60 * 1000;
 const HYPER_V_PRIOR_UBUNTU_CATALOG_ID = "canonical-ubuntu-24.04-lts-server-cloudimg-qcow2-native-vhdx-20260725-v1";
+const HYPER_V_IMAGE_OWNER_ID_PATTERN = /^[a-f0-9]{16}$/;
 
 export type HyperVImageProfile = "windows-11" | "windows-server" | "ubuntu-lts";
 
@@ -92,6 +93,16 @@ export type HyperVImageCreateRequest = {
     dryRun: boolean;
     create?: Record<string, unknown>;
 };
+
+export type HyperVUbuntuImageCacheConflictCode =
+    | "hyper-v-base-image-profile-conflict"
+    | "hyper-v-base-image-unmanaged-existing"
+    | "hyper-v-base-image-artifact-owner-unknown";
+
+export type HyperVUbuntuImageCacheInspection =
+    | { state: "valid"; source: "owner" | "global"; code?: undefined }
+    | { state: "acquisition-required"; source?: undefined; code?: undefined }
+    | { state: "conflict"; source?: undefined; code: HyperVUbuntuImageCacheConflictCode };
 
 export function hyperVImageProfile(value: unknown): HyperVImageProfile | null {
     return value === "windows-11" || value === "windows-server" || value === "ubuntu-lts" ? value : null;
@@ -197,6 +208,26 @@ function quarantineUncertainAutomaticArtifact(profileRoot: string, path: string,
     return true;
 }
 
+// The exact manifest of the immediately previous automatic ubuntu-lts catalog, or null. Throws when
+// the file cannot be read; callers treat that as not the prior catalog.
+function readKnownPriorAutomaticManifest(profileRoot: string, manifestPath: string): { sha256: string; sizeBytes: number } | null {
+    const raw = readDeviceLabStateFile(manifestPath, (value) => value, "hyper-v-base-image-prior-manifest", HYPER_V_IMAGE_MANIFEST_LIMIT_BYTES);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const prior = raw as Record<string, unknown>;
+    const catalog = HYPER_V_IMAGE_CATALOG["ubuntu-lts"];
+    if (prior.version !== 3 || prior.profile !== "ubuntu-lts"
+        || prior.catalogId !== HYPER_V_PRIOR_UBUNTU_CATALOG_ID
+        || prior.sourceUrl !== catalog.sourceUrl || prior.sourceSha256 !== catalog.sourceSha256
+        || prior.sourceFormat !== catalog.sourceFormat || prior.generation !== catalog.generation
+        || prior.licenseId !== catalog.licenseId || prior.secureBootTemplate !== catalog.secureBootTemplate
+        || prior.preparationVersion !== 1 || prior.imagePath !== join(profileRoot, "base.vhdx")
+        || typeof prior.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(prior.sha256)
+        || typeof prior.sizeBytes !== "number" || !Number.isSafeInteger(prior.sizeBytes) || prior.sizeBytes <= 0
+        || prior.virtualSizeBytes !== catalog.virtualSizeBytes || prior.vhdType !== "Dynamic"
+        || typeof prior.preparedAt !== "string" || !Number.isFinite(Date.parse(prior.preparedAt))) return null;
+    return { sha256: prior.sha256, sizeBytes: prior.sizeBytes };
+}
+
 async function isKnownPriorAutomaticImage(
     profile: "windows-server" | "ubuntu-lts",
     profileRoot: string,
@@ -205,22 +236,9 @@ async function isKnownPriorAutomaticImage(
     imageFile = join(profileRoot, "base.vhdx"),
 ): Promise<{ manifestBytes: Buffer; imageSha256: string; imageSize: number } | null> {
     if (profile !== "ubuntu-lts") return null;
-    const imagePath = join(profileRoot, "base.vhdx");
     try {
-        const raw = readDeviceLabStateFile(manifestPath, (value) => value, "hyper-v-base-image-prior-manifest", HYPER_V_IMAGE_MANIFEST_LIMIT_BYTES);
-        if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-        const prior = raw as Record<string, unknown>;
-        const catalog = HYPER_V_IMAGE_CATALOG["ubuntu-lts"];
-        if (prior.version !== 3 || prior.profile !== profile
-            || prior.catalogId !== HYPER_V_PRIOR_UBUNTU_CATALOG_ID
-            || prior.sourceUrl !== catalog.sourceUrl || prior.sourceSha256 !== catalog.sourceSha256
-            || prior.sourceFormat !== catalog.sourceFormat || prior.generation !== catalog.generation
-            || prior.licenseId !== catalog.licenseId || prior.secureBootTemplate !== catalog.secureBootTemplate
-            || prior.preparationVersion !== 1 || prior.imagePath !== imagePath
-            || typeof prior.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(prior.sha256)
-            || typeof prior.sizeBytes !== "number" || !Number.isSafeInteger(prior.sizeBytes) || prior.sizeBytes <= 0
-            || prior.virtualSizeBytes !== catalog.virtualSizeBytes || prior.vhdType !== "Dynamic"
-            || typeof prior.preparedAt !== "string" || !Number.isFinite(Date.parse(prior.preparedAt))) return null;
+        const prior = readKnownPriorAutomaticManifest(profileRoot, manifestPath);
+        if (!prior) return null;
         const image = inspectLargeRegularFile(profileRoot, imageFile, "hyper-v-base-image-prior");
         if (image.size !== prior.sizeBytes
             || await sha256LargeRegularFile(profileRoot, imageFile, "hyper-v-base-image-prior", deadlineAt) !== prior.sha256) return null;
@@ -940,6 +958,99 @@ async function acquireAutomaticHyperVImage(
         }
         if (hyperVOperationDeadlineExpired(acquireDeadlineAt)) throw new HyperVOperationDeadlineError();
         throw error;
+    }
+}
+
+function hyperVImageEntryPresent(path: string): boolean {
+    try {
+        lstatSync(path);
+        return true;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
+        throw error;
+    }
+}
+
+// isKnownPriorAutomaticImage without the hash: the prior-catalog manifest and an image file of its size.
+function knownPriorAutomaticImageMetadata(profileRoot: string, manifestPath: string, imageFile: string): boolean {
+    try {
+        const prior = readKnownPriorAutomaticManifest(profileRoot, manifestPath);
+        return !!prior && inspectLargeRegularFile(profileRoot, imageFile, "hyper-v-base-image-prior").size === prior.sizeBytes;
+    } catch {
+        return false;
+    }
+}
+
+// Readiness view of the ubuntu-lts cache decision that resolveHyperVImageForCreate makes before
+// acquisition. It reads manifests and file metadata only: nothing is hashed, written, locked,
+// cleaned up or recovered, so it fits the smoke and device_backends budgets. Create remains the
+// trust gate and hashes base.vhdx before use, so an image that passes here can still fail there.
+export function inspectHyperVUbuntuImageCache(privateRoot: string, ownerId: string): HyperVUbuntuImageCacheInspection {
+    const profileConflict = { state: "conflict", code: "hyper-v-base-image-profile-conflict" } as const;
+    const globalProfileRoot = hyperVImageProfileRoot(privateRoot, "ubuntu-lts");
+    const manifestPath = join(globalProfileRoot, "manifest.json");
+    const imagePath = join(globalProfileRoot, "base.vhdx");
+    const backup = priorRecoveryPaths(globalProfileRoot);
+    let backupPresent: boolean;
+    let priorRestorable = false;
+    try {
+        // Create prepares into the shared root and, before it reads any cache, restores a prior-catalog
+        // pair whose retirement was interrupted. An unsafe root or a pair it cannot restore stops create
+        // even when the owner has a valid image; recoverPriorAutomaticImage decides the same way.
+        assertNoSymlinkPathComponents(globalProfileRoot, "hyper-v-base-image-cache-inspection");
+        if (hyperVImageEntryPresent(globalProfileRoot) && !lstatSync(globalProfileRoot).isDirectory()) return profileConflict;
+        backupPresent = hyperVImageEntryPresent(backup.manifest) || hyperVImageEntryPresent(backup.image);
+        if (backupPresent && !(hyperVImageEntryPresent(manifestPath) && hyperVImageEntryPresent(imagePath))) {
+            const manifestFile = hyperVImageEntryPresent(backup.manifest) ? backup.manifest : manifestPath;
+            const imageFile = hyperVImageEntryPresent(backup.image) ? backup.image : imagePath;
+            if ((manifestFile === backup.manifest && hyperVImageEntryPresent(manifestPath))
+                || !knownPriorAutomaticImageMetadata(globalProfileRoot, manifestFile, imageFile)) return profileConflict;
+            priorRestorable = true;
+        }
+    } catch {
+        return profileConflict;
+    }
+    if (HYPER_V_IMAGE_OWNER_ID_PATTERN.test(ownerId)) {
+        try {
+            readHyperVImageManifestMetadata(privateRoot, "ubuntu-lts", hyperVOwnerImageProfileRoot(privateRoot, ownerId, "ubuntu-lts"), true);
+            return { state: "valid", source: "owner" };
+        } catch { /* create falls back to the shared automatic cache */ }
+    }
+    // A restorable prior pair is retired and reacquired, like a prior-catalog manifest in place.
+    if (priorRestorable) {
+        try {
+            return hyperVImageEntryPresent(join(globalProfileRoot, "base.partial.vhdx"))
+                || hyperVImageEntryPresent(join(globalProfileRoot, ".acquire-work"))
+                ? { state: "conflict", code: "hyper-v-base-image-artifact-owner-unknown" }
+                : { state: "acquisition-required" };
+        } catch {
+            return profileConflict;
+        }
+    }
+    try {
+        readHyperVImageManifestMetadata(privateRoot, "ubuntu-lts", globalProfileRoot, false);
+        return { state: "valid", source: "global" };
+    } catch { /* classify what create would do without a usable cache */ }
+    try {
+        let priorCatalog = false;
+        if (hyperVImageEntryPresent(manifestPath)) {
+            // Only the immediately previous catalog, with its image in place, is retired and
+            // reacquired; any other manifest that failed validation is left for the operator.
+            if (!knownPriorAutomaticImageMetadata(globalProfileRoot, manifestPath, imagePath)) return profileConflict;
+            priorCatalog = true;
+        } else if (hyperVImageEntryPresent(imagePath)) {
+            return { state: "conflict", code: "hyper-v-base-image-unmanaged-existing" };
+        }
+        if (hyperVImageEntryPresent(join(globalProfileRoot, "base.partial.vhdx"))
+            || hyperVImageEntryPresent(join(globalProfileRoot, ".acquire-work"))) {
+            return { state: "conflict", code: "hyper-v-base-image-artifact-owner-unknown" };
+        }
+        // Retirement refuses to overwrite the backups an earlier retirement left beside a complete pair.
+        if (priorCatalog && backupPresent) return profileConflict;
+        return { state: "acquisition-required" };
+    } catch {
+        // An unreadable image root is one create cannot prepare into either.
+        return profileConflict;
     }
 }
 
