@@ -19,6 +19,22 @@ bubblewrap 0.9.0. Focused regressions cover credential precedence, invalid
 credentials failing closed, delayed discovery, explicit RPC timeout overrides,
 and existing-container dependency installation and failures.
 
+## Continued Android cleanup investigation
+
+The cleanup blocker was reproduced without changing the running emulator.
+Its host console returns a valid AVD name, but the normal ADB console query
+succeeds with empty output when the console has no authentication handshake.
+The shared identity lookup now retries this specific successful-empty response
+once with two fixed read-only name queries. A real ADB invocation recovered the
+same name observed directly from the console. Both the broker and direct
+provider use this lookup; malformed, conflicting, failed and still-empty
+responses remain failures, and all ownership and process liveness checks remain.
+See [the identity requirement](../device-lab/REQ__android-avd-identity.md).
+
+The host and MCP require `android-avd-console-identity-v1`, allowing host CCC's
+existing verified replacement path to replace an older same-version broker.
+Updating files does not reload the currently running Windows broker.
+
 ## Known ceiling
 
 The original Windows Level 3 failure is not proven resolved: the supplied
@@ -28,10 +44,10 @@ next run. The guessed Android 36 package was rejected; the installed Android
 37.1 package succeeded. This does not establish the original failure's cause.
 
 Cleanup of the stopped task-owned `ccc-runtime-repair-0928` AVD was refused by
-the host's liveness guard because a different emulator (`emulator-5638`) returned
-no AVD name. The guard was retained and no existing user emulator was stopped.
-The fixture remains stopped until that identity can be verified and normal
-`device_delete` with `deleteAvd: true` succeeds.
+the old host broker because of the empty ADB response for `emulator-5638`.
+The source correction recovered that emulator's identity in a live read-only
+probe. Guarded host cleanup still needs verification after the Windows broker
+loads the update. No existing user emulator was stopped.
 
 A running MCP process retains its loaded code. Reopening CCC after installing
 the updated host package applies generated configuration and starts the updated
