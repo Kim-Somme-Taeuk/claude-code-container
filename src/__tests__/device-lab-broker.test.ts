@@ -77,6 +77,9 @@ describe("device-lab host broker daemon", () => {
     it("advertises every capability its consumers require", () => {
         const advertised = new Set<string>(DEVICE_BROKER_IMPLEMENTED_CAPABILITIES);
         expect(advertised.has("android-avd-console-identity-v1")).toBe(true);
+        expect(advertised.has("android-emulator-stop-completion-v1")).toBe(true);
+        expect(DEVICE_BROKER_REQUIRED_CAPABILITIES).toContain("android-emulator-stop-completion-v1");
+        expect(REQUIRED_CCC_HOST_BROKER_CAPABILITIES).toContain("android-emulator-stop-completion-v1");
         expect(DEVICE_BROKER_REQUIRED_CAPABILITIES).toContain("android-avd-console-identity-v1");
         expect(REQUIRED_CCC_HOST_BROKER_CAPABILITIES).toContain("android-avd-console-identity-v1");
         expect(DEVICE_BROKER_REQUIRED_CAPABILITIES.filter((capability) => !advertised.has(capability)))
@@ -1529,6 +1532,7 @@ describe("device-lab host broker daemon", () => {
         ["persisted Hyper-V network identity repair", "hyper-v-setup-network-v11", "hyper-v-setup-network-v10"],
         ["hidden elevated PowerShell children", "windows-hidden-provider-children-v7", "windows-hidden-provider-children-v6"],
         ["Android console AVD identity", "android-avd-console-identity-v1", null],
+        ["Android emulator stop completion", "android-emulator-stop-completion-v1", null],
     ])("replaces a same-version broker missing the %s contract", async (_label, missingCapability, previousCapability) => {
         const ownerId = "2222222222222222";
         const currentCapabilities = deviceBrokerStatus({ ownerId }).implemented;
@@ -1693,6 +1697,7 @@ describe("device-lab host broker daemon", () => {
         const implemented = [
             "hyper-v-windows-library-v17",
             "android-avd-console-identity-v1",
+            "android-emulator-stop-completion-v1",
             "http-host-backend-readiness-api",
             "http-lifecycle-device-create-command",
             "http-desktop-device-tool-proxy",
@@ -1864,6 +1869,7 @@ describe("device-lab host broker daemon", () => {
         const implemented = [
             "hyper-v-windows-library-v17",
             "android-avd-console-identity-v1",
+            "android-emulator-stop-completion-v1",
             "http-host-backend-readiness-api",
             "http-lifecycle-device-create-command",
             "http-desktop-device-tool-proxy",
@@ -2111,6 +2117,7 @@ describe("device-lab host broker daemon", () => {
         const implemented = [
             "hyper-v-windows-library-v17",
             "android-avd-console-identity-v1",
+            "android-emulator-stop-completion-v1",
             "http-host-backend-readiness-api",
             "http-lifecycle-device-create-command",
             "http-desktop-device-tool-proxy",
@@ -2473,6 +2480,7 @@ describe("device-lab host broker daemon", () => {
         const implemented = [
             "hyper-v-windows-library-v17",
             "android-avd-console-identity-v1",
+            "android-emulator-stop-completion-v1",
             "http-host-backend-readiness-api",
             "http-lifecycle-device-create-command",
             "http-desktop-device-tool-proxy",

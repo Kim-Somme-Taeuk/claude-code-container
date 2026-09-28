@@ -6437,13 +6437,120 @@ describe("device-lab host broker lifecycle commands", () => {
         }
     });
 
+    it.each(["serial-delayed", "process-delayed", "both-delayed", "unrelated-offline", "serial-stays", "process-stays", "adb-fails", "process-fails", "budget-exhausted", "malformed-inventory"])(
+        "confirms Android stop completion with %s observations", async scenario => {
+        const cwd = `/project/android-stop-completion-${scenario}`;
+        const ownerId = deviceLabOwnerId(cwd);
+        const deviceId = "android-stop-proof";
+        const avdName = `ccc-${ownerId}-stop-proof`;
+        const serial = "emulator-5586";
+        const avdRoot = join(process.env.HOME!, ".android", "avd");
+        const artifact = join(avdRoot, `${avdName}.avd`);
+        mkdirSync(artifact, { recursive: true });
+        writeFileSync(join(artifact, "userdata-qemu.img"), "owned fixture");
+        const stateRoot = writeBrokerDevices(ownerId, "android", [{
+            id: deviceId, backend: "android-emulator", status: "running", avdName, avdRoot,
+            port: 5586, serial, bootReady: true, lastBootCheck: { ready: true },
+        }]);
+        const state = () => JSON.parse(readFileSync(join(stateRoot, "devices.json"), "utf8")).devices[0];
+        const realNow = Date.now.bind(Date);
+        let clockOffset = 0;
+        const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + clockOffset);
+        let deleting = false;
+        let killed = false;
+        let serialChecks = 0;
+        let processChecks = 0;
+        const commandRunner = vi.fn((command, options) => {
+            const result = { ...command, status: 0, stdout: "", stderr: "" };
+            if (command.provider === "adb" && command.args?.at(-1) === "kill") {
+                expect(killed).toBe(false);
+                killed = true;
+                return result;
+            }
+            if (command.provider === "adb" && command.args?.[0] === "devices") {
+                serialChecks++;
+                if (!deleting) {
+                    expect(killed).toBe(true);
+                    expect(state().status).toBe("running");
+                    expect(options.timeoutMs).toBeGreaterThan(0);
+                    expect(options.timeoutMs).toBeLessThanOrEqual(30000);
+                    if (scenario === "adb-fails") return { ...result, status: 1, stderr: "inventory unavailable" };
+                    if (scenario === "malformed-inventory") return { ...result, stdout: "not an inventory" };
+                    if (scenario === "budget-exhausted") clockOffset += 29000;
+                    if (scenario === "serial-stays") clockOffset += 60000;
+                }
+                const active = !deleting && (scenario === "serial-stays"
+                    || (["serial-delayed", "both-delayed"].includes(scenario) && serialChecks === 1));
+                return { ...result, stdout: `List of devices attached\n${active ? `${serial}\tdevice\n` : ""}${!deleting && scenario === "unrelated-offline" ? "emulator-5666\toffline\n" : ""}` };
+            }
+            if (command.provider === "process-inventory") {
+                processChecks++;
+                if (!deleting) {
+                    expect(state().status).toBe("running");
+                    expect(options.timeoutMs).toBeGreaterThan(0);
+                    expect(options.timeoutMs).toBeLessThanOrEqual(30000);
+                    if (scenario === "process-fails") return { ...result, status: 1, stderr: "process observation unavailable" };
+                    if (scenario === "budget-exhausted") {
+                        expect(options.timeoutMs).toBeLessThanOrEqual(1000);
+                        clockOffset += 2000;
+                    }
+                    if (scenario === "process-stays") clockOffset += 60000;
+                }
+                const active = !deleting && (scenario === "process-stays"
+                    || (["process-delayed", "both-delayed"].includes(scenario) && processChecks === 1));
+                return { ...result, stdout: active ? `emulator -avd ${avdName} -port 5586\n` : "" };
+            }
+            return result;
+        });
+        const server = createDeviceBrokerServer({ cwd, host: "127.0.0.1", port: 0,
+            providerPaths: { adb: "/fake/adb", avdmanager: "/fake/avdmanager" }, commandRunner });
+        const baseUrl = await listen(server);
+        const invoke = (command: string) => fetch(ownerRpcEndpoint(baseUrl, ownerId), {
+            method: "POST", headers: ownerRpcHeaders(ownerId),
+            body: JSON.stringify({ method: "broker.command.invoke", params: {
+                backend: "android-emulator", command, deviceId, deleteAvd: true,
+            } }),
+        });
+        try {
+            const response = await invoke("device_stop");
+            const body = await response.json();
+            const fails = ["serial-stays", "process-stays", "adb-fails", "process-fails", "budget-exhausted", "malformed-inventory"].includes(scenario);
+            if (fails) {
+                expect(response.status).toBe(502);
+                expect(body).toEqual(expect.objectContaining({ ok: false, error: "android-emulator-stop-unconfirmed" }));
+                if (scenario === "budget-exhausted") expect(processChecks).toBe(1);
+                expect(state()).toEqual(expect.objectContaining({ status: "running", bootReady: true, lastBootCheck: { ready: true } }));
+                expect(existsSync(artifact)).toBe(true);
+            } else {
+                expect(response.status, JSON.stringify(body)).toBe(200);
+                expect(body.ok).toBe(true);
+                expect(serialChecks).toBeGreaterThan(0);
+                expect(processChecks).toBeGreaterThan(0);
+                if (scenario.includes("serial") || scenario === "both-delayed") expect(serialChecks).toBeGreaterThan(1);
+                if (scenario.includes("process") || scenario === "both-delayed") expect(processChecks).toBeGreaterThan(1);
+                expect(state().status).toBe("stopped");
+                deleting = true;
+                const deleted = await invoke("device_delete");
+                expect(deleted.status).toBe(200);
+                expect((await deleted.json()).ok).toBe(true);
+                expect(existsSync(artifact)).toBe(false);
+            }
+            expect(commandRunner.mock.calls.filter(([command]) => command.provider === "adb" && command.args?.at(-1) === "kill")).toHaveLength(1);
+        } finally {
+            clock.mockRestore();
+            await close(server);
+            cleanupOwner(ownerId);
+            rmSync(artifact, { recursive: true, force: true });
+        }
+    });
+
     it("reports observed Android status and clears auxiliary runtime on stop", async () => {
         const ownerId = deviceLabOwnerId("/project/broker-android-observed-status-test");
         const androidRoot = writeBrokerDevices(ownerId, "android", [{
             id: "android-observed-runtime",
             backend: "android-emulator",
             status: "stopped",
-            avdName: "ccc-observed-runtime",
+            avdName: `ccc-${ownerId}-observed-runtime`,
             port: 5586,
             appium: { processOwner: "host-broker", serverPid: 99999991, port: 27111 },
             bootReady: true,
@@ -6462,7 +6569,8 @@ describe("device-lab host broker lifecycle commands", () => {
             executable: command.executable,
             args: command.args,
             status: 0,
-            stdout: command.args?.includes("get-state") ? "device\n" : "",
+            stdout: command.args?.includes("get-state") ? "device\n"
+                : command.provider === "adb" && command.args?.[0] === "devices" ? "List of devices attached\n" : "",
             stderr: "",
         }));
         const server = createDeviceBrokerServer({

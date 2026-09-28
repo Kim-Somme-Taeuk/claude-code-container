@@ -1511,6 +1511,7 @@ describe("device-lab MCP", () => {
         ["Hyper-V PowerShell stage propagation contract", "hyper-v-powershell-stage-propagation-v1"],
         ["Hyper-V provider-bound automatic image finalization contract", "hyper-v-provider-image-finalization-v40"],
         ["Hyper-V redacted network failure diagnostics", "hyper-v-network-failure-diagnostics-v11"],
+        ["Android emulator stop completion", "android-emulator-stop-completion-v1"],
     ])("rejects a same-version broker without %s", async (_label, missingCapability) => {
         const server = createServer((req, res) => {
             res.setHeader("content-type", "application/json");
