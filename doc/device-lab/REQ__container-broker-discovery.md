@@ -127,3 +127,25 @@ status: current
   the RPC generation check, and the procfs inspector against a fake and the live `/proc`.
 - `src/__tests__/device-lab-mcp.broker.test.ts`: `device_broker_status` end to end reuses
   a broker one generation ahead. The container-local listener case is still rejected.
+# Isolated owner credential discovery
+
+Managed Device Lab MCP configuration explicitly supplies the fixed read-only
+owner credential path. If an MCP launcher omits the environment variable, the
+client discovers `/run/ccc-device-broker-auth/owner.json` directly. An explicit
+path has precedence; legacy storage is considered only if the conventional
+isolated credential is absent. Present invalid or inaccessible isolated files
+fail closed. Owner matching, nofollow, single-link, bounded-read and file
+identity checks remain mandatory. No secret is embedded in MCP configuration.
+
+Readiness must not report RPC readiness when the resolved owner's credential
+cannot be read and validated. Health success alone does not establish working
+authenticated backend/inventory calls.
+
+## Backend discovery timeout
+
+Backend discovery RPCs use a separate 30-second default execution budget for
+`device_backends` and implicit Hyper-V provider selection. The short health
+probe timeout remains unchanged; a reachable broker may need longer to inspect
+its host providers. An explicit `rpcTimeoutMs` overrides the discovery default
+within the existing RPC timeout limit. `timeoutMs` continues to control probing
+and does not shorten the default backend discovery RPC budget.
