@@ -9,6 +9,7 @@ import { validateGuestPath, validateLocalOutputPath } from "../policy/files.mjs"
 import { fail, jsonResult, textResult } from "../responses.mjs";
 import { resolveAndroidEmulatorPort, validAndroidEmulatorPort, withAndroidEmulatorPortAllocation } from "../state/android-emulator-port-allocation.mjs";
 import { androidAvdHome, listOwnedAndroidAvdArtifacts, removeOwnedAndroidAvdArtifacts } from "../state/android-avd-storage.mjs";
+import { readAndroidAvdIdentity } from "../state/android-avd-identity.mjs";
 import { claimAndroidDevice, findAndroidDevice, mutateAndroidDevices, readAndroidDevices, transitionAndroidDevice, updateAndroidDevice } from "../state/android-state.mjs";
 import { withOwnerDeviceOperation } from "../state/device-store.mjs";
 import { requiresOwnerDeviceOperation } from "../state/device-operation-policy.mjs";
@@ -250,15 +251,11 @@ function liveAndroidAvdNames(discovery) {
     for (const line of emulatorLines) {
         const serial = /^(emulator-\d+)/.exec(line)?.[1];
         if (!serial) return { ok: false, error: "android-emulator-runtime-identity-unavailable" };
-        const result = run(discovery.adb, ["-s", serial, "emu", "avd", "name"]);
-        if (result.status !== 0) {
+        const identity = readAndroidAvdIdentity(serial, args => run(discovery.adb, args));
+        if (!identity.ok) {
             return { ok: false, error: "android-emulator-runtime-identity-unavailable" };
         }
-        const name = String(result.stdout || "").split(/\r?\n/)
-            .map((value) => value.trim())
-            .find((value) => value && value !== "OK");
-        if (!name) return { ok: false, error: "android-emulator-runtime-identity-unavailable" };
-        names.add(name);
+        names.add(identity.name);
     }
     return { ok: true, names };
 }

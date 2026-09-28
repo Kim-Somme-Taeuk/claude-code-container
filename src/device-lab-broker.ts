@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "url";
 import { isDeepStrictEqual } from "util";
 import { Worker } from "worker_threads";
 import { androidAvdHome, listOwnedAndroidAvdArtifacts, ownedAndroidAvdName, removeOwnedAndroidAvdArtifacts } from "../device-lab-mcp/src/state/android-avd-storage.mjs";
+import { readAndroidAvdIdentity } from "../device-lab-mcp/src/state/android-avd-identity.mjs";
 import { missingBrokerCapabilities } from "../device-lab-mcp/src/contracts/broker-capabilities.mjs";
 import { deviceLabOwnerFromProjectMountPath, deviceLabOwnerId as canonicalDeviceLabOwnerId, deviceLabProjectMountPath } from "./device-lab-owner.js";
 import { assertOwnerDeviceStateWritable, ownerDeviceStateErrorCode, readOwnerDeviceStateFile } from "./device-lab-owner-state.js";
@@ -249,6 +250,7 @@ const DEVICE_BROKER_CAPABILITY_DIRECT_APPIUM_PROCESS_IDENTITY = "direct-appium-p
 const DEVICE_BROKER_CAPABILITY_OWNER_DEVICE_STATE_VALIDATION = "owner-device-state-validation-v1";
 const DEVICE_BROKER_CAPABILITY_OWNERSHIP_STATE_VALIDATION = "shared-device-ownership-state-validation-v1";
 const DEVICE_BROKER_CAPABILITY_ANDROID_PORT_ALLOCATION_FENCING = "android-emulator-port-allocation-fencing-v1";
+const DEVICE_BROKER_CAPABILITY_ANDROID_AVD_CONSOLE_IDENTITY = "android-avd-console-identity-v1";
 const DEVICE_BROKER_CAPABILITY_BOUNDED_ERROR_RESPONSES = "bounded-error-responses-v1";
 const DEVICE_BROKER_CAPABILITY_PHYSICAL_LEASE_DIRECTORY_FENCING = "physical-lease-directory-fencing-v1";
 const DEVICE_BROKER_CAPABILITY_OWNER_AUTH_DIRECTORY_FENCING = "owner-auth-directory-fencing-v1";
@@ -510,6 +512,7 @@ export const DEVICE_BROKER_IMPLEMENTED_CAPABILITIES = [
     DEVICE_BROKER_CAPABILITY_OWNER_DEVICE_STATE_VALIDATION,
     DEVICE_BROKER_CAPABILITY_OWNERSHIP_STATE_VALIDATION,
     DEVICE_BROKER_CAPABILITY_ANDROID_PORT_ALLOCATION_FENCING,
+    DEVICE_BROKER_CAPABILITY_ANDROID_AVD_CONSOLE_IDENTITY,
     DEVICE_BROKER_CAPABILITY_BOUNDED_ERROR_RESPONSES,
     DEVICE_BROKER_CAPABILITY_PHYSICAL_LEASE_DIRECTORY_FENCING,
     DEVICE_BROKER_CAPABILITY_OWNER_AUTH_DIRECTORY_FENCING,
@@ -568,6 +571,7 @@ export const DEVICE_BROKER_REQUIRED_CAPABILITIES = [
     DEVICE_BROKER_CAPABILITY_OWNER_DEVICE_STATE_VALIDATION,
     DEVICE_BROKER_CAPABILITY_OWNERSHIP_STATE_VALIDATION,
     DEVICE_BROKER_CAPABILITY_ANDROID_PORT_ALLOCATION_FENCING,
+    DEVICE_BROKER_CAPABILITY_ANDROID_AVD_CONSOLE_IDENTITY,
     DEVICE_BROKER_CAPABILITY_BOUNDED_ERROR_RESPONSES,
     DEVICE_BROKER_CAPABILITY_PHYSICAL_LEASE_DIRECTORY_FENCING,
     DEVICE_BROKER_CAPABILITY_OWNER_AUTH_DIRECTORY_FENCING,
@@ -6607,35 +6611,24 @@ function liveAndroidAvdNames(normalized: NormalizedBrokerOptions):
                 detail: "invalid-emulator-serial",
             };
         }
-        const result = normalized.commandRunner({
+        const identity = readAndroidAvdIdentity(serial, args => normalized.commandRunner({
             mode: "exec",
             provider: "adb",
             executable: adb,
-            args: ["-s", serial, "emu", "avd", "name"],
+            args,
         }, {
             timeoutMs: 10000,
             outputLimit: DEVICE_BROKER_COMMAND_OUTPUT_LIMIT,
-        });
-        if (!commandSucceeded(result)) {
+        }));
+        if (!identity.ok) {
             return {
                 ok: false,
                 status: 503,
                 error: "android-emulator-runtime-identity-unavailable",
-                detail: result.stderr || result.stdout || result.error || `adb-exit-${result.status ?? "unknown"}`,
+                detail: identity.detail,
             };
         }
-        const name = String(result.stdout || "").split(/\r?\n/)
-            .map((value) => value.trim())
-            .find((value) => value && value !== "OK");
-        if (!name) {
-            return {
-                ok: false,
-                status: 503,
-                error: "android-emulator-runtime-identity-unavailable",
-                detail: `missing-avd-name-for-${serial}`,
-            };
-        }
-        names.add(name);
+        names.add(identity.name);
     }
     return { ok: true, names };
 }

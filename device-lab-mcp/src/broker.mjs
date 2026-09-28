@@ -57,6 +57,7 @@ export const REQUIRED_CCC_HOST_BROKER_CAPABILITIES = [
     "owner-generation-hmac-auth-v1",
     "direct-appium-process-identity-v1", "owner-device-state-validation-v1", "shared-device-ownership-state-validation-v1",
     "android-emulator-port-allocation-fencing-v1",
+    "android-avd-console-identity-v1",
     "bounded-error-responses-v1",
     "physical-lease-directory-fencing-v1",
     "owner-auth-directory-fencing-v1",
