@@ -43,3 +43,19 @@ explained. Its fixture was stopped and deleted through normal guarded APIs.
 This evidence does not establish the original Windows auto-selected image or
 the cause of its earlier `device_create` failure. Windows targeted and complete
 Level 3 verification remain required.
+
+Subsequent full broker-mediated runs reproduced an additional stop race: ADB
+acknowledged the kill command before the owned serial disappeared, so immediate
+guarded deletion failed. The host now confirms serial absence and an inactive
+owned AVD process within one 30-second deadline before reporting stopped.
+Unknown or late observations fail without confirming stopped metadata; deletion
+guards remain unchanged. Host and MCP require
+`android-emulator-stop-completion-v1`. See
+[the stop requirement](../device-lab/REQ__android-stop-completion.md).
+
+A later run passed installation, app lifecycle, network changes and recording,
+then failed mobile clipboard setup because the broker-owned Appium process had
+exited. Its startup output was discarded, so that exit cause remains unproven.
+All three diagnostic AVDs were subsequently stopped and removed through guarded
+APIs. The stop-completion source change still requires Windows broker reload
+and live verification; these findings do not establish complete Level 3 success.
