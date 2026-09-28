@@ -251,6 +251,7 @@ const DEVICE_BROKER_CAPABILITY_OWNER_DEVICE_STATE_VALIDATION = "owner-device-sta
 const DEVICE_BROKER_CAPABILITY_OWNERSHIP_STATE_VALIDATION = "shared-device-ownership-state-validation-v1";
 const DEVICE_BROKER_CAPABILITY_ANDROID_PORT_ALLOCATION_FENCING = "android-emulator-port-allocation-fencing-v1";
 const DEVICE_BROKER_CAPABILITY_ANDROID_AVD_CONSOLE_IDENTITY = "android-avd-console-identity-v1";
+const DEVICE_BROKER_CAPABILITY_ANDROID_STOP_COMPLETION = "android-emulator-stop-completion-v1";
 const DEVICE_BROKER_CAPABILITY_BOUNDED_ERROR_RESPONSES = "bounded-error-responses-v1";
 const DEVICE_BROKER_CAPABILITY_PHYSICAL_LEASE_DIRECTORY_FENCING = "physical-lease-directory-fencing-v1";
 const DEVICE_BROKER_CAPABILITY_OWNER_AUTH_DIRECTORY_FENCING = "owner-auth-directory-fencing-v1";
@@ -513,6 +514,7 @@ export const DEVICE_BROKER_IMPLEMENTED_CAPABILITIES = [
     DEVICE_BROKER_CAPABILITY_OWNERSHIP_STATE_VALIDATION,
     DEVICE_BROKER_CAPABILITY_ANDROID_PORT_ALLOCATION_FENCING,
     DEVICE_BROKER_CAPABILITY_ANDROID_AVD_CONSOLE_IDENTITY,
+    DEVICE_BROKER_CAPABILITY_ANDROID_STOP_COMPLETION,
     DEVICE_BROKER_CAPABILITY_BOUNDED_ERROR_RESPONSES,
     DEVICE_BROKER_CAPABILITY_PHYSICAL_LEASE_DIRECTORY_FENCING,
     DEVICE_BROKER_CAPABILITY_OWNER_AUTH_DIRECTORY_FENCING,
@@ -572,6 +574,7 @@ export const DEVICE_BROKER_REQUIRED_CAPABILITIES = [
     DEVICE_BROKER_CAPABILITY_OWNERSHIP_STATE_VALIDATION,
     DEVICE_BROKER_CAPABILITY_ANDROID_PORT_ALLOCATION_FENCING,
     DEVICE_BROKER_CAPABILITY_ANDROID_AVD_CONSOLE_IDENTITY,
+    DEVICE_BROKER_CAPABILITY_ANDROID_STOP_COMPLETION,
     DEVICE_BROKER_CAPABILITY_BOUNDED_ERROR_RESPONSES,
     DEVICE_BROKER_CAPABILITY_PHYSICAL_LEASE_DIRECTORY_FENCING,
     DEVICE_BROKER_CAPABILITY_OWNER_AUTH_DIRECTORY_FENCING,
@@ -6641,7 +6644,7 @@ function approvedAndroidAvdRoot(recordedRoot: unknown, platform: NodeJS.Platform
     return normalize(approved) === normalize(recorded) ? approved : null;
 }
 
-function androidAvdProcessState(avdName: string, normalized: NormalizedBrokerOptions):
+function androidAvdProcessState(avdName: string, normalized: NormalizedBrokerOptions, timeoutMs = 10000):
     | { ok: true; active: boolean }
     | { ok: false; status: number; error: string; detail: string } {
     if (!ownedAndroidAvdName(avdName, avdName.slice(4, 20))) {
@@ -6666,10 +6669,10 @@ function androidAvdProcessState(avdName: string, normalized: NormalizedBrokerOpt
             args: ["-eo", "args="],
         };
     const result = normalized.commandRunner(command, {
-        timeoutMs: 10000,
+        timeoutMs,
         outputLimit: DEVICE_BROKER_COMMAND_OUTPUT_LIMIT,
     });
-    if (!commandSucceeded(result)) {
+    if (!commandSucceeded(result) || result.timedOut || result.outputLimitExceeded) {
         return {
             ok: false,
             status: 503,
@@ -6690,6 +6693,45 @@ function androidAvdIsInactiveForBroker(avdName: string, normalized: NormalizedBr
     if (!live.ok || live.names.has(avdName)) return false;
     const processState = androidAvdProcessState(avdName, normalized);
     return processState.ok && !processState.active;
+}
+
+function waitForBrokerAndroidEmulatorStop(ownerId: string, device: unknown, normalized: NormalizedBrokerOptions): string | null {
+    const serial = androidSerial(device);
+    const avdName = field(device, "avdName");
+    const adb = executableFor("adb", normalized);
+    if (!serial || !avdName || !ownedAndroidAvdName(avdName, ownerId) || !adb) return "identity-unavailable";
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+        let serialPresent: boolean;
+        try {
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) break;
+            const inventory = normalized.commandRunner({
+                mode: "exec", provider: "adb", executable: adb, args: ["devices", "-l"],
+            }, {
+                timeoutMs: Math.min(10000, remaining),
+                outputLimit: DEVICE_BROKER_COMMAND_OUTPUT_LIMIT,
+            });
+            const lines = String(inventory.stdout || "").split(/\r?\n/).map(line => line.trim());
+            if (!commandSucceeded(inventory) || inventory.timedOut || inventory.outputLimitExceeded
+                || !lines.includes("List of devices attached")) return "inventory-unavailable";
+            serialPresent = lines.some(line => line.split(/\s+/)[0] === serial);
+        } catch {
+            return "inventory-unavailable";
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        try {
+            const processState = androidAvdProcessState(avdName, normalized, Math.min(10000, remaining));
+            if (!processState.ok) return "process-inventory-unavailable";
+            if (Date.now() >= deadline) break;
+            if (!serialPresent && !processState.active) return null;
+        } catch {
+            return "process-inventory-unavailable";
+        }
+        sleepSync(Math.min(250, Math.max(0, deadline - Date.now())));
+    }
+    return "deadline-exceeded";
 }
 
 function resolveAndroidEmulatorCreatePortForInvoke(
@@ -14175,6 +14217,29 @@ async function lifecycleCommandInvokeUnlocked(
         || commandToleratesStoppedAndroidEmulatorStatus(parsed, payload.result?.device, execution));
     if (hyperVProviderDeadlineExpired && guestBootstrapMayNeedContainment) {
         execution = { ...execution, error: "hyper-v-operation-deadline-exceeded" };
+    }
+    if (success && parsed.backend === "android-emulator" && parsed.command === "device_stop") {
+        const stopFailure = waitForBrokerAndroidEmulatorStop(ownerId, payload.result?.device, normalized);
+        if (stopFailure) {
+            return {
+                status: 502,
+                payload: {
+                    ok: false,
+                    error: "android-emulator-stop-unconfirmed",
+                    detail: stopFailure,
+                    ownerId,
+                    backend: parsed.backend,
+                    deviceId: parsed.deviceId,
+                    result: {
+                        ...(payload.result || {}),
+                        device: redactBrokerDeviceSecrets(payload.result?.device),
+                        invoked: true,
+                        dryRun: false,
+                        execution: { mode: execution.mode, providerExecution: "executed", mutatesHost: true, command: execution },
+                    },
+                },
+            };
+        }
     }
     if (parsed.backend === "android-emulator" && parsed.command === "device_delete" && parsed.deleteAvd !== false) {
         const avdName = field(payload.result?.device, "avdName");
