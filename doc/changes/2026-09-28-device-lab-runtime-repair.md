@@ -43,11 +43,13 @@ the Windows host. The previous diagnostic fix exposes provider details on the
 next run. The guessed Android 36 package was rejected; the installed Android
 37.1 package succeeded. This does not establish the original failure's cause.
 
-Cleanup of the stopped task-owned `ccc-runtime-repair-0928` AVD was refused by
-the old host broker because of the empty ADB response for `emulator-5638`.
-The source correction recovered that emulator's identity in a live read-only
-probe. Guarded host cleanup still needs verification after the Windows broker
-loads the update. No existing user emulator was stopped.
+The Windows broker was replaced through `node .\dist\index.js devices broker status`
+and advertised `android-avd-console-identity-v1`. A fresh built MCP then deleted
+the stopped task-owned `ccc-runtime-repair-0928` AVD through the normal guarded
+API with explicit destructive confirmation. The response reported `avdDeleted: true`;
+subsequent inventory excluded the fixture and retained all other registered
+devices. The old broker's empty-name cleanup blocker is therefore resolved in
+this live case. No existing user emulator was stopped.
 
 A running MCP process retains its loaded code. Reopening CCC after installing
 the updated host package applies generated configuration and starts the updated
