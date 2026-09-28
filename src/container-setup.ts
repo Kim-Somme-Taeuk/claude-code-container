@@ -892,6 +892,37 @@ export function ensureTools(containerName: string, activeTool: ToolDefinition): 
     if (ready.error || ready.status !== 0) {
         throw new Error(`Requested tool ${activeTool.name} is unavailable after setup`);
     }
+    if (activeTool.name === "codex") ensureCodexBubblewrap(containerName);
+}
+
+function ensureCodexBubblewrap(containerName: string): void {
+    const cli = runtimeCli();
+    const probe = () => spawnSync(cli, [
+        "exec", containerName, "timeout", "-k", "2s", "8s", "sh", "-c",
+        // Distinguish a missing dependency from runtime/probe failures. Run as
+        // the same unprivileged container user that starts Codex.
+        "command -v bwrap >/dev/null 2>&1 || exit 42; exec bwrap --version",
+    ], { stdio: "ignore", timeout: CONTAINER_TOOL_PROBE_TIMEOUT_MS });
+    const existing = probe();
+    if (existing.error || existing.status !== 42) {
+        assertMutationSucceeded(existing, "Codex bubblewrap readiness probe");
+        return;
+    }
+
+    console.log("Installing bubblewrap for Codex...");
+    const update = spawnSync(cli, [
+        "exec", "-u", "root", containerName,
+        "timeout", "-k", "5s", `${CONTAINER_TOOL_MUTATION_INNER_TIMEOUT_SECONDS}s`,
+        "apt-get", "-o", "APT::Update::Error-Mode=any", "update",
+    ], { stdio: "inherit", timeout: CONTAINER_TOOL_MUTATION_TIMEOUT_MS });
+    assertMutationSucceeded(update, "Codex bubblewrap package index update");
+    const install = spawnSync(cli, [
+        "exec", "-u", "root", containerName,
+        "timeout", "-k", "5s", `${CONTAINER_TOOL_MUTATION_INNER_TIMEOUT_SECONDS}s`,
+        "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "--no-install-recommends", "bubblewrap",
+    ], { stdio: "inherit", timeout: CONTAINER_TOOL_MUTATION_TIMEOUT_MS });
+    assertMutationSucceeded(install, "Codex bubblewrap installation");
+    assertMutationSucceeded(probe(), "Codex bubblewrap readiness check after installation");
 }
 
 /**

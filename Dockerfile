@@ -68,6 +68,7 @@ RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y \
     git \
     sudo \
+    bubblewrap \
     unzip \
     wget \
     locales \

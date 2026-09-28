@@ -2157,15 +2157,27 @@ export async function brokerShutdown(options = {}) {
     };
 }
 
-function brokerAuthSecretFile(owner) {
+function isolatedBrokerAuthFile() {
+    const configured = String(process.env.CCC_DEVICE_BROKER_AUTH_FILE || "").trim();
+    if (configured) return resolve(configured);
+    const conventional = "/run/ccc-device-broker-auth/owner.json";
+    try {
+        lstatSync(conventional);
+        return conventional;
+    } catch (error) {
+        // An inaccessible or invalid isolated mount must never expose a legacy
+        // credential. Only an absent mount allows the normal host-side layout.
+        return error?.code === "ENOENT" ? null : conventional;
+    }
+}
+
+function brokerAuthSecretFile(owner, isolatedFile) {
     if (!/^[a-f0-9]{16}$/.test(owner)) throw new Error("invalid-owner-id");
-    const isolatedFile = String(process.env.CCC_DEVICE_BROKER_AUTH_FILE || "").trim();
-    if (isolatedFile) return resolve(isolatedFile);
+    if (isolatedFile) return isolatedFile;
     return join(brokerStateRoot(), "broker", "auth", `${owner}.json`);
 }
 
-function brokerAuthDirectoryValid() {
-    const isolatedFile = String(process.env.CCC_DEVICE_BROKER_AUTH_FILE || "").trim();
+function brokerAuthDirectoryValid(isolatedFile) {
     if (isolatedFile) {
         try {
             const stat = lstatSync(dirname(resolve(isolatedFile)));
@@ -2198,8 +2210,9 @@ function readBoundedUtf8Descriptor(descriptor, limitBytes) {
 }
 
 function existingOwnerSecret(owner) {
-    if (!brokerAuthDirectoryValid()) return null;
-    const file = brokerAuthSecretFile(owner);
+    const isolatedFile = isolatedBrokerAuthFile();
+    if (!brokerAuthDirectoryValid(isolatedFile)) return null;
+    const file = brokerAuthSecretFile(owner, isolatedFile);
     let fd = null;
     try {
         const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
@@ -2957,17 +2970,21 @@ export async function brokerStatus(options = {}) {
     const runtime = readBrokerRuntime();
     const containerContract = brokerContainerContract();
     const launchIncompatible = launch?.error === "host-broker-incompatible";
+    const ownerAuthAvailable = ownerResolve.ok && Boolean(ownerToken(ownerResolve.ownerId || owner));
+    const ownerAuthWarning = ownerResolve.ok && !ownerAuthAvailable
+        ? "host broker is reachable but the resolved owner credential is unavailable"
+        : null;
     const compatibilityWarning = launchIncompatible
         ? `host broker is reachable but missing required capabilities: ${(launch.compatibility?.missingCapabilities || []).join(", ") || "unknown"}`
         : null;
-    const warnings = [...containerContract.warnings, ...(ownerResolveWarning ? [ownerResolveWarning] : []), ...(compatibilityWarning ? [compatibilityWarning] : [])];
-    const remedies = [...containerContract.remedies, ...(ownerResolveRemedy ? [ownerResolveRemedy] : []), ...(compatibilityWarning ? ["Restart or upgrade the host ccc device broker before using host-backed tools."] : [])];
+    const warnings = [...containerContract.warnings, ...(ownerResolveWarning ? [ownerResolveWarning] : []), ...(compatibilityWarning ? [compatibilityWarning] : []), ...(ownerAuthWarning ? [ownerAuthWarning] : [])];
+    const remedies = [...containerContract.remedies, ...(ownerResolveRemedy ? [ownerResolveRemedy] : []), ...(compatibilityWarning ? ["Restart or upgrade the host ccc device broker before using host-backed tools."] : []), ...(ownerAuthWarning ? ["Reopen CCC from the host to restore the isolated owner credential mount."] : [])];
     return {
         ownerId: owner,
         mode: launchIncompatible ? "broker-incompatible" : probe.available ? "host-broker-detected" : "broker-unavailable",
         lazy: true,
         available: probe.available && !launchIncompatible,
-        rpcReady: ownerResolve.ok && !launchIncompatible,
+        rpcReady: ownerResolve.ok && ownerAuthAvailable && !launchIncompatible,
         startupPolicy: "device-lab MCP requires the host broker for host-backed providers; status/backend discovery may start or reuse the broker but never starts devices",
         transport: {
             preferred: "http",

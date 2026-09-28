@@ -236,7 +236,10 @@ export function buildMcpConfig(profile?: string): string[] {
     mcpServers["chrome-devtools"] = CHROME_DEVTOOLS_CONFIG;
 
     // 2. Always include device-lab (ccc-managed, including display_* tools)
-    mcpServers["device-lab"] = managedMcpServerConfig(OPT_DEVICE_LAB_MCP_SERVER);
+    mcpServers["device-lab"] = {
+        ...managedMcpServerConfig(OPT_DEVICE_LAB_MCP_SERVER),
+        env: { CCC_DEVICE_BROKER_AUTH_FILE: "/run/ccc-device-broker-auth/owner.json" },
+    };
 
     // 3. Forward host MCP servers
     const hostServers = readHostMcpServers();

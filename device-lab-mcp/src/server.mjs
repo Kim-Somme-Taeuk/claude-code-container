@@ -104,6 +104,7 @@ const BROKER_PHYSICAL_BACKENDS = new Set(["android-device", "ios-device"]);
 const BROKER_FAST_DEVICE_TOOLS = new Set(["device_record_video_status"]);
 const BROKER_RECORDING_DEVICE_TOOLS = new Set(["device_record_video_start", "device_record_video_stop", "device_record_video_status"]);
 const DEFAULT_BROKER_DEVICE_TOOL_TIMEOUT_MS = 30000;
+const DEFAULT_BROKER_DISCOVERY_RPC_TIMEOUT_MS = 30000;
 export const HYPER_V_LINUX_GUI_TIMEOUT_MS = 17 * 60 * 1000;
 const DEFAULT_BROKER_LIFECYCLE_RPC_TIMEOUT_MS = 120000;
 // Image acquisition may consume the full four-hour provider budget. Reserve
@@ -438,6 +439,12 @@ function wantsBrokerBackends(args) {
     return args?.broker === true || args?.viaBroker === true || args?.autolaunch === true;
 }
 
+function brokerDiscoveryExecutionTimeout(args = {}) {
+    return {
+        rpcTimeoutMs: boundedTimeoutMs(args.rpcTimeoutMs, MAX_DEVICE_TOOL_RPC_TIMEOUT_MS, DEFAULT_BROKER_DISCOVERY_RPC_TIMEOUT_MS),
+    };
+}
+
 async function handleDeviceBackends(args = {}) {
     const directBackends = directBackendList();
     const containerBackends = directBackends.filter((backend) => backend.host === "container");
@@ -456,7 +463,7 @@ async function handleDeviceBackends(args = {}) {
     const probe = explicitBroker ? { ...args, probe: true } : implicitProbe;
     const broker = await brokerStatus(probe ? { ...args, ...probe, probe: true } : { ...args, autolaunch: !brokerOptOut, probe: !brokerOptOut });
     if (probe && broker.available) {
-        const brokerBackends = await brokerRpc({ ...args, ...probe, method: "broker.backends" });
+        const brokerBackends = await brokerRpc({ ...args, ...probe, ...brokerDiscoveryExecutionTimeout(args), method: "broker.backends" });
         if (brokerBackends.ok && Array.isArray(brokerBackends.result?.backends)) {
             const brokerBackendNames = new Set(brokerBackends.result.backends.map((backend) => backend?.name).filter(Boolean));
             return jsonResult({
@@ -1371,7 +1378,7 @@ async function maybeHandleHyperVLinuxVmTool(name, args = {}) {
         : args || {};
     const probe = implicitBrokerProbeOptions(probeArgs);
     if (!probe) return null;
-    const backends = await brokerRpc({ ...probe, method: "broker.backends" });
+    const backends = await brokerRpc({ ...probe, ...brokerDiscoveryExecutionTimeout(args), method: "broker.backends" });
     const advertised = backends.ok && Array.isArray(backends.result?.backends)
         ? backends.result.backends.find((backend) => backend?.name === "linux-vm" && backend?.provider === "hyper-v")
         : null;
