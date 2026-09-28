@@ -1,6 +1,6 @@
 import { spawn } from "child_process";
 import { createHash, createHmac } from "crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { createServer } from "http";
 import { AddressInfo } from "net";
 import { homedir, tmpdir } from "os";
@@ -19,6 +19,22 @@ import { projectMountPath } from "../../device-lab-mcp/src/context.mjs";
 
 const TEST_BROKER_OWNER_ID = "1111111111111111";
 const HOOK_TIMEOUT = Math.max(TIMEOUT, 60000);
+
+const isolatedAuthFixture = vi.hoisted(() => ({ root: "/__ccc_test_auth_mount_absent__" }));
+vi.mock("fs", async () => {
+    const actual = await vi.importActual<typeof import("fs")>("fs");
+    function mapped(path: unknown) {
+        const normalized = String(path).replaceAll("\\", "/").replace(/^[A-Za-z]:/, "");
+        const mount = "/run/ccc-device-broker-auth";
+        return normalized === mount || normalized.startsWith(`${mount}/`)
+            ? isolatedAuthFixture.root + normalized.slice(mount.length) : path;
+    }
+    return { ...actual,
+        existsSync: (path: Parameters<typeof actual.existsSync>[0]) => actual.existsSync(mapped(path) as string),
+        lstatSync: (path: Parameters<typeof actual.lstatSync>[0], ...args: unknown[]) => actual.lstatSync(mapped(path) as string, ...args as []),
+        openSync: (path: Parameters<typeof actual.openSync>[0], ...args: unknown[]) => actual.openSync(mapped(path) as string, ...args as [number]),
+    };
+});
 
 function provisionTestOwnerSecret(ownerId = TEST_BROKER_OWNER_ID) {
     const authRoot = join(homedir(), ".ccc", "devices", "broker", "auth");
@@ -362,10 +378,19 @@ describe("device-lab MCP", () => {
     beforeAll(async () => {
         originalBrokerAuthFile = process.env.CCC_DEVICE_BROKER_AUTH_FILE;
         delete process.env.CCC_DEVICE_BROKER_AUTH_FILE;
-        context = await createDeviceLabMcpTestContext({ defaultImplicitBroker: true });
+        const mcpEnv: Record<string, string> = {};
+        context = await createDeviceLabMcpTestContext({ defaultImplicitBroker: true, env: mcpEnv, setupHome: fixtureHome => {
+            // The real container's mounted credential must never participate in these
+            // synthetic-owner subprocess tests. Preserve ordinary filesystem validation.
+            const preload = join(fixtureHome, "isolate-broker-auth.cjs");
+            const absentMount = join(fixtureHome, "absent-conventional-mount");
+            writeFileSync(preload, `const fs=require('fs');const root=${JSON.stringify(absentMount)};for(const key of ['existsSync','lstatSync','openSync']){const original=fs[key];fs[key]=function(file,...args){const path=String(file).replaceAll('\\\\','/').replace(/^[A-Za-z]:/,'');const mount='/run/ccc-device-broker-auth';return original.call(fs,path===mount||path.startsWith(mount+'/')?root+path.slice(mount.length):file,...args)}}require('module').syncBuiltinESMExports();`);
+            mcpEnv.NODE_OPTIONS = `--require=${JSON.stringify(preload)}`;
+        } });
         client = context.client;
         homeDir = context.homeDir;
         pathDir = context.pathDir;
+        isolatedAuthFixture.root = join(homeDir, "conventional-auth");
     }, HOOK_TIMEOUT);
 
     afterAll(async () => {
@@ -498,6 +523,89 @@ describe("device-lab MCP", () => {
             timeoutMs: 1000,
             autolaunch: true,
         }));
+    });
+
+    describe("isolated owner credential discovery", () => {
+        const owner = "abababababababab";
+        const credential = (secret: string, selectedOwner = owner) => JSON.stringify({ ownerId: selectedOwner, secret: secret.repeat(64), version: 1 });
+
+        async function exercise(kind: string) {
+            const originalAuth = process.env.CCC_DEVICE_BROKER_AUTH_FILE;
+            delete process.env.CCC_DEVICE_BROKER_AUTH_FILE;
+            const root = isolatedAuthFixture.root;
+            const isolated = join(root, "owner.json");
+            const legacy = join(homeDir, ".ccc", "devices", "broker", "auth", `${owner}.json`);
+            const explicit = join(homeDir, "explicit-owner.json");
+            const linked = join(homeDir, "linked-owner.json");
+            mkdirSync(join(homeDir, ".ccc", "devices", "broker", "auth"), { recursive: true });
+            mkdirSync(root, { recursive: true });
+            writeFileSync(legacy, credential("a"), { mode: 0o600 });
+            writeFileSync(isolated, credential("b"), { mode: 0o600 });
+            let expectedSecret: string | null = "b";
+            if (kind === "explicit") {
+                writeFileSync(explicit, credential("c"), { mode: 0o600 });
+                process.env.CCC_DEVICE_BROKER_AUTH_FILE = explicit;
+                expectedSecret = "c";
+            } else if (kind === "absent") {
+                rmSync(isolated);
+                expectedSecret = "a";
+            } else if (kind !== "conventional") {
+                expectedSecret = null;
+                if (kind === "wrong-owner") writeFileSync(isolated, credential("b", "cdcdcdcdcdcdcdcd"));
+                if (kind === "invalid") writeFileSync(isolated, "{bad JSON");
+                if (kind === "oversize") writeFileSync(isolated, " ".repeat(4097));
+                if (kind === "explicit-missing") process.env.CCC_DEVICE_BROKER_AUTH_FILE = explicit;
+                if (kind === "symlink") {
+                    writeFileSync(linked, credential("b"));
+                    rmSync(isolated);
+                    symlinkSync(linked, isolated);
+                }
+                if (kind === "hardlink") linkSync(isolated, linked);
+                if (kind === "missing-all") { rmSync(isolated); rmSync(legacy); }
+            }
+            const requests: { method: string; token: string | undefined }[] = [];
+            const server = createServer((req, res) => {
+                res.setHeader("content-type", "application/json");
+                if (req.url === "/health") { res.end(JSON.stringify({ ok: true, name: "ccc-device-broker", mode: "host-broker-daemon" })); return; }
+                if (sendCurrentBrokerStatus(req, res)) return;
+                if (req.url === "/v1/owner/resolve") { res.end(JSON.stringify({ ok: true, result: { ownerId: owner } })); return; }
+                const chunks: Buffer[] = [];
+                req.on("data", chunk => chunks.push(chunk));
+                req.on("end", () => {
+                    const body = JSON.parse(Buffer.concat(chunks).toString());
+                    requests.push({ method: body.method, token: req.headers["x-ccc-device-token"] as string | undefined });
+                    res.end(JSON.stringify({ ok: true, result: { devices: [], backends: [] } }));
+                });
+            });
+            await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+            const options = { hostCandidates: ["127.0.0.1"], port: (server.address() as AddressInfo).port, timeoutMs: 1000, autolaunch: false };
+            try {
+                const status = await brokerStatus(options);
+                expect(status.available).toBe(true);
+                expect(status.rpcReady).toBe(expectedSecret !== null);
+                for (const method of ["broker.inventory", "broker.backends"]) {
+                    const result = await brokerRpc({ ...options, method });
+                    expect(result.ok).toBe(expectedSecret !== null);
+                    if (!expectedSecret) expect(result.error).toBe("broker-owner-auth-unavailable");
+                }
+                if (expectedSecret) {
+                    const token = createHash("sha256").update(`ccc-device-broker:owner:${owner}:secret:${expectedSecret.repeat(64)}`).digest("hex");
+                    expect(requests).toEqual([
+                        { method: "broker.inventory", token }, { method: "broker.backends", token },
+                    ]);
+                } else expect(requests).toEqual([]);
+            } finally {
+                await new Promise<void>(resolve => server.close(() => resolve()));
+                rmSync(root, { recursive: true, force: true });
+                for (const path of [legacy, explicit, linked]) rmSync(path, { force: true });
+                if (originalAuth === undefined) delete process.env.CCC_DEVICE_BROKER_AUTH_FILE;
+                else process.env.CCC_DEVICE_BROKER_AUTH_FILE = originalAuth;
+            }
+        }
+
+        it.each(["explicit", "conventional", "absent"])("authenticates inventory and backends with %s credential precedence", exercise);
+        it.each(["wrong-owner", "invalid", "oversize", "explicit-missing", "missing-all"])("fails closed with truthful readiness for %s credentials", exercise);
+        it.runIf(process.platform !== "win32").each(["symlink", "hardlink"])("refuses %s isolated credentials without falling back to valid legacy auth", exercise);
     });
 
     it("never creates or replaces owner auth secrets from the MCP client", async () => {
@@ -2700,6 +2808,78 @@ setInterval(() => {}, 1000);
             ]);
         } finally {
             await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+            rmSync(statusPayload.state.runtimeFile, { force: true });
+        }
+    });
+
+    it.each([
+        { label: "default discovery budget", delay: 1400, rpcTimeoutMs: undefined, succeeds: true, tool: "device_backends" },
+        { label: "explicit longer RPC budget", delay: 1400, rpcTimeoutMs: 2500, succeeds: true, tool: "device_backends" },
+        { label: "explicit shorter RPC budget", delay: 250, rpcTimeoutMs: 50, succeeds: false, tool: "device_backends" },
+        { label: "implicit Hyper-V discovery budget", delay: 1400, rpcTimeoutMs: undefined, succeeds: true, tool: "device_inventory" },
+    ])("keeps $label separate from the implicit health probe budget", { timeout: TIMEOUT }, async ({ delay, rpcTimeoutMs, succeeds, tool }) => {
+        const methods: string[] = [];
+        const invocations: unknown[] = [];
+        const timers: ReturnType<typeof setTimeout>[] = [];
+        const server = createServer((req, res) => {
+            res.setHeader("content-type", "application/json");
+            if (req.url === "/health") { res.end(JSON.stringify({ ok: true, name: "ccc-device-broker", mode: "host-broker-daemon" })); return; }
+            if (sendCurrentBrokerStatus(req, res) || sendTestOwnerResolve(req, res)) return;
+            const chunks: Buffer[] = [];
+            req.on("data", chunk => chunks.push(chunk));
+            req.on("end", () => {
+                const body = JSON.parse(Buffer.concat(chunks).toString());
+                methods.push(body.method);
+                if (body.method === "broker.device.tool.invoke") {
+                    invocations.push(body.params);
+                    res.end(JSON.stringify({ ok: true, result: { mcpResult: { content: [{ type: "text", text: JSON.stringify({ discoveryRoute: "hyper-v", devices: [] }) }] } } }));
+                    return;
+                }
+                if (body.method !== "broker.backends") { res.writeHead(400).end(JSON.stringify({ ok: false, error: "unexpected-method" })); return; }
+                timers.push(setTimeout(() => {
+                    if (!res.destroyed) res.end(JSON.stringify({ ok: true, result: {
+                        ownerId: body.ownerId, startsDevices: false,
+                        backends: [{ name: "windows-sandbox", host: "windows-host", available: true, creatable: true },
+                            { name: "linux-vm", provider: "hyper-v", host: "windows-host", available: true }],
+                    } }));
+                }, delay));
+            });
+        });
+        await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+        const status = await client.callTool({ name: "device_broker_status", arguments: { probe: false, autolaunch: false } });
+        const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}"));
+        mkdirSync(join(homeDir, ".ccc/devices/broker"), { recursive: true });
+        writeFileSync(statusPayload.state.runtimeFile, JSON.stringify({
+            ownerId: statusPayload.ownerId, pid: process.pid, host: "0.0.0.0", probeHost: "127.0.0.1",
+            hostCandidates: ["127.0.0.1"], port: (server.address() as AddressInfo).port, managedBy: "ccc-host",
+        }));
+        try {
+            const result = await client.callTool({ name: tool, arguments: {
+                ...(tool === "device_inventory" ? { backend: "linux-vm" } : {}),
+                ...(rpcTimeoutMs === undefined ? {} : { rpcTimeoutMs }),
+            } });
+            const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"));
+            if (tool === "device_inventory") {
+                expect(result.isError).not.toBe(true);
+                expect(methods).toEqual(["broker.backends", "broker.device.tool.invoke"]);
+                expect(invocations).toEqual([expect.objectContaining({ tool: "device_inventory", backend: "linux-vm" })]);
+                expect(payload).toEqual({ discoveryRoute: "hyper-v", devices: [] });
+                return;
+            }
+            expect(methods).toEqual(["broker.backends"]);
+            expect(payload.broker.available).toBe(true);
+            if (succeeds) {
+                expect(result.isError).not.toBe(true);
+                expect(payload.source).toBe("host-broker-provider-discovery");
+                expect(payload.backends).toContainEqual(expect.objectContaining({ name: "windows-sandbox", available: true }));
+            } else {
+                expect(payload.source).toBe("broker-provider-discovery-failed");
+                expect(payload.brokerBackendsError.attempts).toContainEqual(expect.objectContaining({ error: "timeout", timeoutMs: rpcTimeoutMs }));
+            }
+        } finally {
+            timers.forEach(clearTimeout);
+            server.closeAllConnections();
+            await new Promise<void>(resolve => server.close(() => resolve()));
             rmSync(statusPayload.state.runtimeFile, { force: true });
         }
     });

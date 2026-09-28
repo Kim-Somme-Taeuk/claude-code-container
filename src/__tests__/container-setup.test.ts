@@ -330,6 +330,67 @@ describe("container-setup.ts module", () => {
         });
     });
 
+    describe("Codex bubblewrap readiness", () => {
+        const isProbe = (args: string[]) => args.some(arg => arg.includes("bwrap --version"));
+
+        it("reuses a working bubblewrap binary as the normal user without installing packages", () => {
+            spawnSyncMock.mockReturnValue(makeResult(0));
+            ensureTools(container, getToolByName("codex")!);
+            const calls = spawnSyncMock.mock.calls.map(call => call[1] as string[]);
+            const probes = calls.filter(isProbe);
+            expect(probes).toHaveLength(1);
+            expect(probes[0].slice(0, 2)).toEqual(["exec", container]);
+            expect(probes[0]).not.toContain("root");
+            expect(calls.some(args => args.includes("apt-get"))).toBe(false);
+        });
+
+        it("installs missing bubblewrap with bounded root package commands then verifies as normal user", () => {
+            let probes = 0;
+            spawnSyncMock.mockImplementation((_command, rawArgs) => {
+                const args = rawArgs as string[];
+                return makeResult(isProbe(args) && ++probes === 1 ? 42 : 0);
+            });
+            ensureTools(container, getToolByName("codex")!);
+            const calls = spawnSyncMock.mock.calls;
+            const packageCalls = calls.filter(call => (call[1] as string[]).includes("apt-get"));
+            expect(packageCalls).toHaveLength(2);
+            for (const call of packageCalls) {
+                const args = call[1] as string[];
+                expect(args.slice(0, 4)).toEqual(["exec", "-u", "root", container]);
+                expect(args).toContain("timeout");
+                expect(args).not.toContain("sh");
+                expect((call[2] as { timeout: number }).timeout).toBeGreaterThan(0);
+                expect((call[2] as { timeout: number }).timeout).toBeLessThanOrEqual(CONTAINER_TOOL_MUTATION_TIMEOUT_MS);
+            }
+            expect(packageCalls[0][1]).toEqual(expect.arrayContaining(["apt-get", "update"]));
+            expect(packageCalls[1][1]).toEqual(expect.arrayContaining(["DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "bubblewrap"]));
+            const normalProbes = calls.map(call => call[1] as string[]).filter(isProbe);
+            expect(normalProbes).toHaveLength(2);
+            expect(normalProbes[1].slice(0, 2)).toEqual(["exec", container]);
+            expect(calls.at(-1)![1]).toEqual(normalProbes[1]);
+        });
+
+        it.each([1, 124])("fails readiness for probe exit %s instead of installing over a runtime error", status => {
+            spawnSyncMock.mockImplementation((_command, args) => makeResult(isProbe(args as string[]) ? status : 0));
+            expect(() => ensureTools(container, getToolByName("codex")!)).toThrow(/bubblewrap/i);
+            expect(spawnSyncMock.mock.calls.some(call => (call[1] as string[]).includes("apt-get"))).toBe(false);
+        });
+
+        it.each(["update", "install", "verification"])("fails readiness and stops after bubblewrap %s fails", stage => {
+            let probes = 0;
+            spawnSyncMock.mockImplementation((_command, rawArgs) => {
+                const args = rawArgs as string[];
+                if (isProbe(args)) return makeResult(++probes === 1 ? 42 : stage === "verification" ? 1 : 0);
+                if (args.includes("apt-get") && args.includes(stage)) return makeResult(1);
+                return makeResult(0);
+            });
+            expect(() => ensureTools(container, getToolByName("codex")!)).toThrow(/bubblewrap/i);
+            const packageCalls = spawnSyncMock.mock.calls.filter(call => (call[1] as string[]).includes("apt-get"));
+            expect(packageCalls).toHaveLength(stage === "update" ? 1 : 2);
+            expect(probes).toBe(stage === "verification" ? 2 : 1);
+        });
+    });
+
     describe("ensureUvAvailable", () => {
         it("does not install uv when the bounded probe succeeds", () => {
             spawnSyncMock.mockReturnValueOnce(makeResult(0));

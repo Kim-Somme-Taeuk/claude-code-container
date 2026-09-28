@@ -192,6 +192,7 @@ describe("buildMcpConfig", () => {
         expect(servers["device-lab"]).toEqual({
             command: "mise",
             args: ["--no-config", "exec", "node@22", "--", "node", "/opt/ccc/dist/device-lab-mcp/server.mjs"],
+            env: { CCC_DEVICE_BROKER_AUTH_FILE: "/run/ccc-device-broker-auth/owner.json" },
         });
     });
 
@@ -224,6 +225,8 @@ describe("buildMcpConfig", () => {
         expect(codexConfig).not.toContain('"/opt/ccc/x11-mcp/server.mjs"');
         expect(codexConfig).toContain("[mcp_servers.device-lab]");
         expect(codexConfig).toContain('"/opt/ccc/dist/device-lab-mcp/server.mjs"');
+        expect(codexConfig).toContain('CCC_DEVICE_BROKER_AUTH_FILE');
+        expect(codexConfig).toContain('"/run/ccc-device-broker-auth/owner.json"');
         expect(codexConfig).not.toContain("[mcp_servers.lab]");
         expect(codexConfig).not.toContain("/dist/lab-mcp/server.mjs");
         expect(codexConfig).toContain("# ccc-managed-mcp end");
