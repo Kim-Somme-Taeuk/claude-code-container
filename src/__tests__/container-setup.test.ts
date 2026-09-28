@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { SpawnSyncReturns } from "child_process";
+import { readFileSync } from "node:fs";
 
 // Mock child_process before importing
 const spawnSyncMock = vi.fn<(...args: unknown[]) => SpawnSyncReturns<string>>();
@@ -331,6 +332,12 @@ describe("container-setup.ts module", () => {
     });
 
     describe("Codex bubblewrap readiness", () => {
+        it.each(["Dockerfile", "Containerfile"])("%s installs bubblewrap in the shipped image", recipe => {
+            const source = readFileSync(new URL(`../../${recipe}`, import.meta.url), "utf8");
+            const commands = source.replace(/\\\r?\n/g, " ");
+            expect(commands).toMatch(/\bapt-get\s+install\b[^;&\n]*\bbubblewrap\b/);
+        });
+
         const isProbe = (args: string[]) => args.some(arg => arg.includes("bwrap --version"));
 
         it("reuses a working bubblewrap binary as the normal user without installing packages", () => {
