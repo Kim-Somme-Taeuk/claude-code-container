@@ -14,10 +14,12 @@ fi
 
 OUTPUT=0
 INPUT=0
+CLIPBOARD=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --clipboard|-b)
+            CLIPBOARD=1
             shift
             ;;
         --output|-o)
@@ -29,21 +31,34 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         *)
-            shift
+            echo "xsel: unsupported clipboard option" >&2
+            exit 1
             ;;
     esac
 done
 
+[ "$CLIPBOARD" = 1 ] || { echo "xsel: only clipboard selection is supported" >&2; exit 1; }
+[ "$INPUT" = 0 ] || [ "$OUTPUT" = 0 ] || {
+    echo "xsel: conflicting input/output options" >&2
+    exit 1
+}
+
 if [ "$OUTPUT" = "1" ]; then
-    _data=$(curl -sf -H "Authorization: Bearer $CCC_CLIPBOARD_TOKEN" "$CCC_CLIPBOARD_URL/clipboard/text" 2>/dev/null) || { echo "xsel: clipboard server error" >&2; exit 1; }
+    _data=$(curl -sf --connect-timeout 3 --max-time 10 -H "Authorization: Bearer $CCC_CLIPBOARD_TOKEN" "$CCC_CLIPBOARD_URL/clipboard/text" 2>/dev/null) || { echo "xsel: clipboard server error" >&2; exit 1; }
     [ -n "$_data" ] || { echo "xsel: clipboard is empty" >&2; exit 1; }
     printf '%s' "$_data"
     exit 0
 fi
 
-if [ "$INPUT" = "1" ]; then
-    cat > /dev/null
-    exit 0
-fi
-
-exit 0
+_status=$(curl -fs --connect-timeout 3 --max-time 10 \
+    -H "Authorization: Bearer $CCC_CLIPBOARD_TOKEN" \
+    -H "Content-Type: text/plain;charset=utf-8" \
+    --data-binary @- -o /dev/null -w '%{http_code}' \
+    "$CCC_CLIPBOARD_URL/clipboard/text") || {
+    echo "xsel: clipboard server error" >&2
+    exit 1
+}
+case "$_status" in
+    2??) exit 0 ;;
+    *) echo "xsel: clipboard server error" >&2; exit 1 ;;
+esac

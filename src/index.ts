@@ -772,9 +772,6 @@ async function exec(
             progress("Ensuring uv...");
             ensureUvAvailable(readyContainerName);
 
-            progress("Syncing clipboard shims...");
-            syncClipboardShims(readyContainerName, __dirname);
-
             progress("Building MCP config...");
             const forwardedMcp = await buildMcpConfig(profile);
 
@@ -821,6 +818,8 @@ async function exec(
         } else if (commandTool?.name === "codex") {
             prepareCodexConfigForContainer(readyContainerName);
         }
+        progress("Syncing clipboard shims...");
+        syncClipboardShims(readyContainerName, __dirname);
         // Runs for new, restarted, reused and deferred containers alike, on the final ID.
         ensureContainerManagerSocketAccess(readyContainerName);
         return readyContainerName;

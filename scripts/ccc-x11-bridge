@@ -1,98 +1,222 @@
 #!/bin/bash
-# ccc-x11-bridge — runs Xvfb :99 + syncs host clipboard → X11 CLIPBOARD selection.
-#
-# Why this exists: Rust clipboard libraries (e.g. arboard used by codex TUI)
-# talk to an X server directly rather than shelling out to xclip, so the
-# /usr/local/bin/xclip shim does not help them. We run a real X server
-# (Xvfb :99) inside the container and push host clipboard contents into it
-# via the real /usr/bin/xclip so arboard can read them like a normal X app.
-#
-# Idempotent: safe to invoke on every `ccc` exec — skips if already running.
+# Synchronize the host clipboard and the container X11 CLIPBOARD selection.
+# Direct X11 clients (including arboard) bypass the shell clipboard shims.
 
-set -u
+: "${DISPLAY_N:=:99}"
+: "${LOCK_DIR:=/run/ccc-x11-bridge}"
+: "${REAL_XCLIP:=/usr/bin/xclip}"
+: "${CCC_CLIPBOARD_PORT_FILE:=/run/ccc/clipboard.port}"
+BRIDGE_SCRIPT=$(readlink -f "${BASH_SOURCE[0]}")
 
-DISPLAY_N=:99
-LOCK_DIR=/run/ccc-x11-bridge
-LOCK_FILE="$LOCK_DIR/running"
-REAL_XCLIP=/usr/bin/xclip
+bridge_init() {
+    umask 077
+    bridge_tmp=$(mktemp -d "${TMPDIR:-/tmp}/ccc-clipboard.XXXXXXXX") || return 1
+    initialized=0
+    last_host_sig=""
+    last_local_sig=""
+    export DISPLAY="$DISPLAY_N"
+}
 
-mkdir -p "$LOCK_DIR" 2>/dev/null || true
-
-# Bail out quietly if already running.
-if [ -f "$LOCK_FILE" ]; then
-    pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        exit 0
+bridge_cleanup() {
+    if [ -n "${bridge_tmp:-}" ]; then
+        rm -rf -- "$bridge_tmp"
+        bridge_tmp=""
     fi
-fi
-echo $$ > "$LOCK_FILE" 2>/dev/null || true
+}
 
-# Start Xvfb :99 if nothing is listening.
-if ! pgrep -f "Xvfb $DISPLAY_N" >/dev/null 2>&1; then
-    Xvfb "$DISPLAY_N" -screen 0 1024x768x24 -nolisten tcp >/dev/null 2>&1 &
-    # Wait for the server to accept connections (up to ~2s).
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        if DISPLAY="$DISPLAY_N" "$REAL_XCLIP" -selection clipboard -o >/dev/null 2>&1; then break; fi
-        sleep 0.2
-    done
-fi
+bridge_signature() {
+    sha256sum < "$1" | cut -d' ' -f1
+}
 
-export DISPLAY="$DISPLAY_N"
+# Write bounded selection bytes to a private file, never a shell variable.
+# Return 2 for oversized text so host polling cannot destroy that local copy.
+bridge_read_local() {
+    local result=0 target text_target=""
+    # Some X11 owners return their bytes even for an unsupported target. A
+    # successful UTF8_STRING request alone therefore does not prove text.
+    (set -o pipefail; timeout -k 1 2 "$REAL_XCLIP" -selection clipboard -target TARGETS -out 2>/dev/null |
+        head -c 65537 > "$bridge_tmp/local-targets") || return 1
+    [ "$(wc -c < "$bridge_tmp/local-targets")" -le 65536 ] || return 1
+    while IFS= read -r target; do
+        case "$target" in
+            UTF8_STRING) text_target=$target; break ;;
+            text/plain|text/plain\;charset=utf-8|text/plain\;charset=UTF-8) text_target=$target ;;
+        esac
+    done < "$bridge_tmp/local-targets"
+    [ -n "$text_target" ] || return 1
+    (set -o pipefail; timeout -k 1 2 "$REAL_XCLIP" -selection clipboard -target "$text_target" -out 2>/dev/null |
+        head -c 1048577 > "$bridge_tmp/local") || result=1
+    [ "$(wc -c < "$bridge_tmp/local")" -le 1048576 ] || return 2
+    return "$result"
+}
 
-# Sync loop: poll host clipboard every ~400ms; when content changes, take
-# CLIPBOARD selection ownership with the real xclip so X clients see it.
+bridge_http_get() {
+    local endpoint=$1 destination=$2
+    shift 2
+    http_status=$(curl -fs --connect-timeout 2 --max-time 5 "$@" \
+        -H "Authorization: Bearer $token" -o "$destination" -w '%{http_code}' \
+        "$url/clipboard/$endpoint") || return 1
+    case "$http_status" in 200|204) return 0 ;; *) return 1 ;; esac
+}
+
+bridge_read_host() {
+    bridge_http_get image/png "$bridge_tmp/host-image" || return 1
+    if [ "$http_status" = 200 ] && [ -s "$bridge_tmp/host-image" ]; then
+        host_mode=image/png
+        host_file="$bridge_tmp/host-image"
+        host_sig="img:$(bridge_signature "$host_file")"
+    else
+        bridge_http_get text "$bridge_tmp/host-text" --max-filesize 1048576 || return 1
+        [ "$(wc -c < "$bridge_tmp/host-text")" -le 1048576 ] || return 1
+        host_mode=UTF8_STRING
+        host_file="$bridge_tmp/host-text"
+        host_sig="txt:$(bridge_signature "$host_file")"
+    fi
+}
+
+bridge_apply_host() {
+    timeout -k 1 2 "$REAL_XCLIP" -selection clipboard -target "$host_mode" -in \
+        < "$host_file" >/dev/null 2>&1 || return 1
+    last_host_sig=$host_sig
+    if [ "$host_mode" = UTF8_STRING ]; then
+        last_local_sig=$host_sig
+    else
+        last_local_sig=unavailable
+    fi
+}
+
+bridge_cycle() {
+    local local_result=0 local_sig status
+    url=${CCC_CLIPBOARD_URL:-}
+    token=${CCC_CLIPBOARD_TOKEN:-}
+    if [ -f "$CCC_CLIPBOARD_PORT_FILE" ]; then
+        token=$(cut -d: -f2- "$CCC_CLIPBOARD_PORT_FILE")
+    fi
+    [ -n "$url" ] || return 1
+
+    if [ "$initialized" = 0 ]; then
+        # A restarted container must not publish its stale X11 selection.
+        bridge_read_host && bridge_apply_host || return 1
+        initialized=1
+        return 0
+    fi
+
+    bridge_read_local || local_result=$?
+    [ "$local_result" != 2 ] || return 1
+    if [ "$local_result" = 0 ]; then
+        local_sig="txt:$(bridge_signature "$bridge_tmp/local")"
+        if [ "$local_sig" != "$last_local_sig" ]; then
+            status=$(curl -fs --connect-timeout 2 --max-time 10 \
+                -H "Authorization: Bearer $token" \
+                -H 'Content-Type: text/plain;charset=utf-8' \
+                --data-binary @"$bridge_tmp/local" -o /dev/null -w '%{http_code}' \
+                "$url/clipboard/text") || return 1
+            case "$status" in 2??) ;; *) return 1 ;; esac
+            # Advance both baselines; do not echo this upload into X11.
+            last_local_sig=$local_sig
+            last_host_sig=$local_sig
+            return 0
+        fi
+    fi
+
+    bridge_read_host || return 1
+    if [ "$host_sig" != "$last_host_sig" ]; then
+        # Host polling can take seconds. Keep a local copy made during that
+        # request for publication on the next cycle instead of overwriting it.
+        local_result=0
+        bridge_read_local || local_result=$?
+        [ "$local_result" != 2 ] || return 1
+        if [ "$local_result" = 0 ]; then
+            local_sig="txt:$(bridge_signature "$bridge_tmp/local")"
+            [ "$local_sig" = "$last_local_sig" ] || return 1
+        fi
+        bridge_apply_host || return 1
+    fi
+}
+
 sync_loop() {
-    last_sig=""
-    img_tmp=/tmp/.ccc-clip-new.png
-    img_current=/tmp/.ccc-clip.png
-    xclip_pid=""
-
+    bridge_init || return 1
     while :; do
-        url="${CCC_CLIPBOARD_URL:-}"
-        token="${CCC_CLIPBOARD_TOKEN:-}"
-        if [ -z "$url" ]; then
-            sleep 1
-            continue
-        fi
-
-        sig=""
-        mode=""
-
-        # Prefer image when the host clipboard holds one.
-        if curl -sf --max-time 2 \
-                -H "Authorization: Bearer $token" \
-                -o "$img_tmp" \
-                "$url/clipboard/image/png" 2>/dev/null \
-            && [ -s "$img_tmp" ]; then
-            sig="img:$(md5sum < "$img_tmp" | cut -d' ' -f1)"
-            mode=img
-        else
-            text=$(curl -sf --max-time 2 \
-                -H "Authorization: Bearer $token" \
-                "$url/clipboard/text" 2>/dev/null || printf '')
-            if [ -n "$text" ]; then
-                sig="txt:$(printf '%s' "$text" | md5sum | cut -d' ' -f1)"
-                mode=txt
-            fi
-        fi
-
-        if [ -n "$sig" ] && [ "$sig" != "$last_sig" ]; then
-            # Drop previous owner, if any.
-            if [ -n "$xclip_pid" ] && kill -0 "$xclip_pid" 2>/dev/null; then
-                kill "$xclip_pid" 2>/dev/null || true
-            fi
-            if [ "$mode" = img ]; then
-                mv -f "$img_tmp" "$img_current"
-                "$REAL_XCLIP" -selection clipboard -t image/png -i "$img_current" >/dev/null 2>&1 &
-            else
-                printf '%s' "$text" | "$REAL_XCLIP" -selection clipboard -i >/dev/null 2>&1 &
-            fi
-            xclip_pid=$!
-            last_sig=$sig
-        fi
-
+        bridge_cycle || true
         sleep 0.4
     done
 }
 
-sync_loop
+# Only a bash process executing this exact script path can own the PID file.
+# The /proc start-time token additionally detects PID reuse.
+bridge_process_start() {
+    local pid=$1 stat
+    local -a argv fields
+    [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] || return 1
+    [ -r "/proc/$pid/cmdline" ] || return 1
+    mapfile -d '' -t argv < "/proc/$pid/cmdline"
+    [ "${#argv[@]}" -ge 2 ] || return 1
+    case "${argv[0]}" in bash|/bin/bash|/usr/bin/bash) ;; *) return 1 ;; esac
+    [ "$(readlink -f "${argv[1]}")" = "$BRIDGE_SCRIPT" ] || return 1
+    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    read -r -a fields <<< "${stat##*) }"
+    [ "${#fields[@]}" -ge 20 ] || return 1
+    printf '%s' "${fields[19]}"
+}
+
+bridge_exit() {
+    bridge_cleanup
+    # A replacement may already own the record; never remove its state.
+    if [ -f "$LOCK_DIR/running" ] && [ "$(head -n 1 "$LOCK_DIR/running")" = "$$" ]; then
+        rm -f -- "$LOCK_DIR/running"
+    fi
+}
+
+bridge_main() {
+    local generation pid start observed i
+    local -a state=()
+    umask 077
+    mkdir -p "$LOCK_DIR" || return 1
+    chmod 700 "$LOCK_DIR" || return 1
+    # Serialize startup/replacement, but release before spawning child owners.
+    exec 9>"$LOCK_DIR/startup.lock" || return 1
+    flock -w 10 9 || return 1
+    generation=$(sha256sum < "$BRIDGE_SCRIPT" | cut -d' ' -f1)
+    if [ -f "$LOCK_DIR/running" ]; then
+        mapfile -t state < "$LOCK_DIR/running"
+        pid=${state[0]:-}
+        if observed=$(bridge_process_start "$pid"); then
+            start=${state[1]:-$observed}
+            if [ "$observed" = "$start" ]; then
+                if [ "${state[2]:-}" = "$generation" ] && [ "${state[3]:-}" = "${CCC_CLIPBOARD_URL:-}" ]; then
+                    exec 9>&-
+                    return 0
+                fi
+                # Recheck identity immediately before signaling, never just kill
+                # an arbitrary live PID found in a stale lock file.
+                [ "$(bridge_process_start "$pid")" = "$start" ] || return 1
+                kill -TERM "$pid" 2>/dev/null || return 1
+                for ((i=0; i<120; i++)); do
+                    [ "$(bridge_process_start "$pid")" = "$start" ] || break
+                    sleep 0.1
+                done
+                [ "$(bridge_process_start "$pid")" != "$start" ] || return 1
+            fi
+        fi
+    fi
+    start=$(bridge_process_start "$$") || return 1
+    printf '%s\n' "$$" "$start" "$generation" "${CCC_CLIPBOARD_URL:-}" > "$LOCK_DIR/running.new"
+    mv -f "$LOCK_DIR/running.new" "$LOCK_DIR/running"
+    trap bridge_exit EXIT
+    trap 'exit 0' TERM INT
+
+    # Reuse an existing X server, including one started by the previous bridge.
+    if [ ! -S "/tmp/.X11-unix/X${DISPLAY_N#:}" ]; then
+        Xvfb "$DISPLAY_N" -screen 0 1024x768x24 -nolisten tcp 9>&- >/dev/null 2>&1 &
+        for ((i=0; i<20; i++)); do
+            [ -S "/tmp/.X11-unix/X${DISPLAY_N#:}" ] && break
+            sleep 0.1
+        done
+    fi
+    exec 9>&-
+    sync_loop
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    bridge_main
+fi

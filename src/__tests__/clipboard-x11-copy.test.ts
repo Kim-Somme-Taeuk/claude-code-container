@@ -1,0 +1,289 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { spawn, execFile, type ChildProcess } from "child_process";
+import { createServer, type Server } from "http";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync, readdirSync, statSync, mkdirSync, renameSync } from "fs";
+import { tmpdir } from "os";
+import { resolve, join } from "path";
+import { createInterface } from "readline";
+import { once } from "events";
+
+const script = resolve("scripts/ccc-x11-bridge");
+const available = existsSync("/usr/bin/Xvfb") && existsSync("/usr/bin/xclip");
+let dir: string;
+let display: string;
+let env: NodeJS.ProcessEnv;
+let server: Server;
+let hostText: Buffer;
+let hostImage: Buffer | null;
+let token: string;
+let failPosts: boolean;
+let deferTextRead: boolean;
+let releaseTextRead: (() => void) | undefined;
+let posts: Buffer[];
+let requests: { method: string; path: string; auth: string | undefined }[];
+let procs: ChildProcess[];
+let control: ChildProcess;
+let lines: string[];
+let stderr: string;
+
+async function waitFor(check: () => boolean, timeout = 4000) {
+    const end = Date.now() + timeout;
+    while (!check()) {
+        if (Date.now() > end) throw new Error(`Condition timed out. Bridge stderr: ${stderr}`);
+        await new Promise(resolve => setTimeout(resolve, 20));
+    }
+}
+
+function command(executable: string, args: string[]): Promise<Buffer> {
+    return new Promise((resolve, reject) => execFile(executable, args, { env, encoding: "buffer", timeout: 3000, maxBuffer: 2 * 1048576 },
+        (error, stdout) => error ? reject(error) : resolve(stdout)));
+}
+
+async function own(text: Buffer, target = "UTF8_STRING") {
+    const proc = spawn("/usr/bin/xclip", ["-selection", "clipboard", "-t", target, "-i", "-quiet"], { env, stdio: ["pipe", "ignore", "ignore"] });
+    procs.push(proc);
+    proc.stdin!.end(text);
+    await new Promise(resolve => setTimeout(resolve, 40));
+}
+
+const read = (target = "UTF8_STRING") => command("/usr/bin/xclip", ["-selection", "clipboard", "-t", target, "-o"]);
+
+async function startControl() {
+    control = spawn("bash", ["-c", 'source "$1"; bridge_init; echo READY; while IFS= read -r action; do if [ "$action" = cycle ]; then bridge_cycle; echo "DONE:$?"; else bridge_cleanup; exit; fi; done', "test-bridge", script], { env, stdio: ["pipe", "pipe", "pipe"] });
+    procs.push(control);
+    createInterface({ input: control.stdout! }).on("line", line => lines.push(line));
+    control.stderr!.on("data", chunk => { stderr += chunk; });
+    await waitFor(() => lines.includes("READY"));
+}
+
+async function cycle() {
+    const before = lines.filter(line => line.startsWith("DONE:")).length;
+    control.stdin!.write("cycle\n");
+    await waitFor(() => lines.filter(line => line.startsWith("DONE:")).length > before, 10000);
+    return lines.filter(line => line.startsWith("DONE:")).at(-1);
+}
+
+describe.skipIf(!available)("real isolated X11 clipboard bridge", () => {
+    beforeEach(async () => {
+        dir = mkdtempSync(join(tmpdir(), "ccc-x11-copy-test-"));
+        procs = [];
+        posts = [];
+        requests = [];
+        lines = [];
+        stderr = "";
+        hostText = Buffer.from("host baseline\n\n");
+        hostImage = null;
+        token = "first-token";
+        failPosts = false;
+        deferTextRead = false;
+        releaseTextRead = undefined;
+        const xvfb = spawn("/usr/bin/Xvfb", ["-displayfd", "1", "-screen", "0", "640x480x24", "-nolisten", "tcp"], { stdio: ["ignore", "pipe", "ignore"] });
+        procs.push(xvfb);
+        const [number] = await once(xvfb.stdout!, "data");
+        display = `:${String(number).trim()}`;
+        server = createServer((req, res) => {
+            requests.push({ method: req.method!, path: req.url!, auth: req.headers.authorization });
+            if (req.headers.authorization !== `Bearer ${token}`) { res.writeHead(401).end(); return; }
+            if (req.method === "POST" && req.url === "/clipboard/text") {
+                const chunks: Buffer[] = [];
+                req.on("data", chunk => chunks.push(chunk));
+                req.on("end", () => {
+                    const body = Buffer.concat(chunks);
+                    posts.push(body);
+                    if (failPosts) { res.writeHead(503).end(); return; }
+                    hostText = body;
+                    hostImage = null;
+                    res.writeHead(204).end();
+                });
+            } else if (req.url === "/clipboard/image/png") {
+                res.writeHead(hostImage ? 200 : 204).end(hostImage ?? undefined);
+            } else if (req.url === "/clipboard/text") {
+                const snapshot = hostText;
+                const send = () => res.writeHead(snapshot.length ? 200 : 204).end(snapshot);
+                if (deferTextRead) releaseTextRead = send;
+                else send();
+            } else res.writeHead(404).end();
+        });
+        await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+        const port = (server.address() as { port: number }).port;
+        writeFileSync(join(dir, "port"), `${port}:${token}`);
+        env = { ...process.env, DISPLAY: display, DISPLAY_N: display,
+            LOCK_DIR: join(dir, "state"), TMPDIR: dir, REAL_XCLIP: "/usr/bin/xclip",
+            CCC_CLIPBOARD_URL: `http://127.0.0.1:${port}`, CCC_CLIPBOARD_TOKEN: token,
+            CCC_CLIPBOARD_PORT_FILE: join(dir, "port") };
+    });
+
+    afterEach(async () => {
+        if (control?.exitCode === null) {
+            control.stdin!.write("stop\n");
+            await Promise.race([once(control, "exit"), new Promise(resolve => setTimeout(resolve, 500))]);
+        }
+        for (const proc of procs.reverse()) if (proc.exitCode === null) proc.kill("SIGKILL");
+        server?.closeAllConnections();
+        if (server) await new Promise<void>(resolve => server.close(() => resolve()));
+        rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("adopts host startup data before stale local data and never echoes incoming text", async () => {
+        await own(Buffer.from("stale local"));
+        await startControl();
+        await cycle();
+        expect(await read()).toEqual(hostText);
+        await cycle();
+        expect(posts).toEqual([]);
+        hostText = Buffer.from("new host 한글 😀\r\n\n");
+        await cycle();
+        expect(await read()).toEqual(hostText);
+        await cycle();
+        expect(posts).toEqual([]);
+    });
+
+    it("publishes exact UTF-8 bytes and empty clear before host polling, without echo", async () => {
+        await startControl();
+        await cycle();
+        const text = Buffer.from("  한글 😀 ' \"\r\nlast\n\n");
+        await own(text);
+        requests = [];
+        await cycle();
+        expect(posts).toEqual([text]);
+        expect(requests[0].method).toBe("POST");
+        expect(hostText).toEqual(text);
+        await cycle();
+        expect(posts).toHaveLength(1);
+        await own(Buffer.alloc(0));
+        await cycle();
+        expect(posts).toEqual([text, Buffer.alloc(0)]);
+        expect(await read()).toEqual(Buffer.alloc(0));
+    });
+
+    it("retains failed local copies for retry even when host changes", async () => {
+        await startControl();
+        await cycle();
+        const local = Buffer.from("retry me\n\n");
+        await own(local);
+        failPosts = true;
+        hostText = Buffer.from("competing host");
+        await cycle();
+        expect(await read()).toEqual(local);
+        expect(posts).toEqual([local]);
+        failPosts = false;
+        await cycle();
+        expect(posts).toEqual([local, local]);
+        expect(hostText).toEqual(local);
+        await cycle();
+        expect(posts).toHaveLength(2);
+    });
+
+    it("preserves incoming image bytes and avoids uploading failed text reads", async () => {
+        hostImage = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=", "base64");
+        await startControl();
+        await cycle();
+        expect(await read("image/png")).toEqual(hostImage);
+        await cycle();
+        expect(posts).toEqual([]);
+        const local = Buffer.from("replace image with text");
+        await own(local);
+        await cycle();
+        expect(hostText).toEqual(local);
+        expect(posts).toEqual([local]);
+    });
+
+    it("refreshes the mounted bearer token before publishing", async () => {
+        await startControl();
+        await cycle();
+        token = "rotated-token";
+        const port = (server.address() as { port: number }).port;
+        writeFileSync(join(dir, "port"), `${port}:${token}`);
+        await own(Buffer.from("rotated"));
+        requests = [];
+        await cycle();
+        expect(posts).toEqual([Buffer.from("rotated")]);
+        expect(requests.every(req => req.auth === `Bearer ${token}`)).toBe(true);
+    });
+
+    it("uses private temporary files and cleans them on normal exit", async () => {
+        await startControl();
+        await cycle();
+        const privateDirs = readdirSync(dir).filter(name => statSync(join(dir, name)).isDirectory());
+        expect(privateDirs.length).toBeGreaterThan(0);
+        for (const name of privateDirs) expect(statSync(join(dir, name)).mode & 0o077).toBe(0);
+        control.stdin!.write("stop\n");
+        await once(control, "exit");
+        for (const name of privateDirs) {
+            const path = join(dir, name);
+            if (existsSync(path)) expect(readdirSync(path)).toEqual([]);
+        }
+    });
+
+    it("does not publish oversized local text or overwrite it from the host", async () => {
+        await startControl();
+        await cycle();
+        const oversized = Buffer.alloc(1048577, "a");
+        await own(oversized);
+        await cycle();
+        expect(posts).toEqual([]);
+        expect(await read()).toEqual(oversized);
+    });
+
+    it("preserves a local copy made while a host read is in flight", async () => {
+        await startControl();
+        await cycle();
+        hostText = Buffer.from("late host response");
+        deferTextRead = true;
+        const pending = cycle();
+        await waitFor(() => releaseTextRead !== undefined);
+        const local = Buffer.from("copy during host poll\n");
+        await own(local);
+        deferTextRead = false;
+        releaseTextRead!();
+        await pending;
+        expect(await read()).toEqual(local);
+        await cycle();
+        expect(posts).toEqual([local]);
+    });
+
+    it("keeps one bridge, replaces changed code, and never kills an unrelated lock PID", async () => {
+        const privateScript = join(dir, "ccc-x11-bridge");
+        writeFileSync(privateScript, readFileSync(script), { mode: 0o700 });
+        const state = join(dir, "state");
+        mkdirSync(state, { mode: 0o700 });
+        const unrelated = spawn("sleep", ["60"], { stdio: "ignore" });
+        procs.push(unrelated);
+        const unrelatedStat = readFileSync(`/proc/${unrelated.pid}/stat`, "utf8");
+        const startToken = unrelatedStat.slice(unrelatedStat.lastIndexOf(")") + 2).split(" ")[19];
+        const lock = join(state, "running");
+        writeFileSync(lock, `${unrelated.pid}\n${startToken}\nold-generation\n${env.CCC_CLIPBOARD_URL}\n`);
+        const launch = () => {
+            const proc = spawn("bash", [privateScript], { env, stdio: ["ignore", "ignore", "pipe"] });
+            proc.stderr!.on("data", chunk => { stderr += chunk; });
+            procs.push(proc);
+            return proc;
+        };
+        const first = launch();
+        await waitFor(() => existsSync(lock) && readFileSync(lock, "utf8").split("\n")[0] === String(first.pid));
+        expect(unrelated.exitCode).toBeNull();
+        const duplicate = launch();
+        await waitFor(() => duplicate.exitCode !== null);
+        expect(duplicate.exitCode).toBe(0);
+        expect(readFileSync(lock, "utf8").split("\n")[0]).toBe(String(first.pid));
+        writeFileSync(`${privateScript}.new`, `${readFileSync(script, "utf8")}\n# new deployed generation\n`, { mode: 0o700 });
+        renameSync(`${privateScript}.new`, privateScript);
+        const replacement = launch();
+        await waitFor(() => existsSync(lock) && readFileSync(lock, "utf8").split("\n")[0] === String(replacement.pid), 8000);
+        await waitFor(() => first.exitCode !== null || first.signalCode !== null);
+        expect(unrelated.exitCode).toBeNull();
+        expect(unrelated.signalCode).toBeNull();
+        expect(procs[0].exitCode).toBeNull(); // The pre-existing isolated X server survives replacement.
+        env.CCC_CLIPBOARD_URL = `${env.CCC_CLIPBOARD_URL}/changed`;
+        const movedEndpoint = launch();
+        await waitFor(() => existsSync(lock) && readFileSync(lock, "utf8").split("\n")[0] === String(movedEndpoint.pid), 8000);
+        await waitFor(() => replacement.exitCode !== null || replacement.signalCode !== null);
+        expect(unrelated.signalCode).toBeNull();
+    }, 15000);
+});
+
+it("includes the bridge in the published package files", () => {
+    const pkg = JSON.parse(readFileSync(resolve("package.json"), "utf8"));
+    expect(pkg.files).toContain("scripts/ccc-x11-bridge");
+    expect(readFileSync(script, "utf8")).toMatch(/^#!\/bin\/bash/);
+});

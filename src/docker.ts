@@ -1563,18 +1563,45 @@ const CLIPBOARD_SHIMS = ["xclip", "xsel", "wl-paste", "wl-copy", "pbpaste"];
 
 export function syncClipboardShims(containerName: string, distDir: string): void {
     const shimsDir = join(distDir, "..", "scripts", "clipboard-shims");
-    if (!existsSync(shimsDir)) return;
     const copied: string[] = [];
     const cli = runtimeCli();
     for (const shim of CLIPBOARD_SHIMS) {
         const src = join(shimsDir, shim);
         if (existsSync(src)) {
-            spawnSync(cli, ["cp", src, `${containerName}:/usr/local/bin/${shim}`]);
-            copied.push(`/usr/local/bin/${shim}`);
+            const result = spawnSync(cli, ["cp", src, `${containerName}:/usr/local/bin/${shim}`]);
+            if (!result.error && result.status === 0) copied.push(`/usr/local/bin/${shim}`);
         }
     }
+    const bridgeSource = join(distDir, "..", "scripts", "ccc-x11-bridge");
+    const bridgeStage = `/usr/local/bin/ccc-x11-bridge.${randomBytes(8).toString("hex")}.new`;
+    let bridgeCopied = false;
+    if (existsSync(bridgeSource)) {
+        // Rename after normalization so a running bash never reads a partially
+        // replaced script. The next normal bridge invocation checks generation
+        // and safely replaces its previous daemon with the current session URL.
+        const result = spawnSync(cli, ["cp", bridgeSource, `${containerName}:${bridgeStage}`]);
+        bridgeCopied = !result.error && result.status === 0;
+        if (bridgeCopied) copied.push(bridgeStage);
+    }
     if (copied.length > 0) {
-        spawnSync(cli, ["exec", containerName, "chmod", "+x", ...copied]);
+        try {
+            const normalized = spawnSync(cli, ["exec", "-u", "root", containerName, "sed", "-i", "s/\r$//", ...copied]);
+            if (normalized.error || normalized.status !== 0) return;
+            const executable = spawnSync(cli, ["exec", "-u", "root", containerName, "chmod", "+x", ...copied]);
+            if (executable.error || executable.status !== 0) return;
+            if (bridgeCopied) {
+                // Installation needs root for /usr/local/bin and /run, but the
+                // bridge itself remains the normal unprivileged ccc process.
+                const stateDirectory = spawnSync(cli, [
+                    "exec", "-u", "root", containerName,
+                    "install", "-d", "-m", "700", "-o", "ccc", "-g", "ccc", "/run/ccc-x11-bridge",
+                ]);
+                if (stateDirectory.error || stateDirectory.status !== 0) return;
+                spawnSync(cli, ["exec", "-u", "root", containerName, "mv", "-f", bridgeStage, "/usr/local/bin/ccc-x11-bridge"]);
+            }
+        } finally {
+            if (bridgeCopied) spawnSync(cli, ["exec", "-u", "root", containerName, "rm", "-f", bridgeStage]);
+        }
     }
 }
 

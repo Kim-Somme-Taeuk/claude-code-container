@@ -1561,11 +1561,12 @@ describe("docker.ts module exports", () => {
             const cpCalls = spawnSyncMock.mock.calls.filter(
                 (c: unknown[]) => c[0] === "docker" && (c[1] as string[])[0] === "cp"
             );
-            expect(cpCalls).toHaveLength(5);
+            expect(cpCalls).toHaveLength(6);
             const shims = cpCalls.map((c: unknown[]) => (c[1] as string[])[2]);
             expect(shims).toContain("ccc-test-abc123:/usr/local/bin/xclip");
             expect(shims).toContain("ccc-test-abc123:/usr/local/bin/wl-paste");
             expect(shims).toContain("ccc-test-abc123:/usr/local/bin/pbpaste");
+            expect(shims).toEqual(expect.arrayContaining([expect.stringMatching(/^ccc-test-abc123:\/usr\/local\/bin\/ccc-x11-bridge\.[a-f0-9]+\.new$/)]));
 
             // Should also chmod +x all copied shims
             const chmodCalls = spawnSyncMock.mock.calls.filter(
@@ -1604,6 +1605,59 @@ describe("docker.ts module exports", () => {
                 (c: unknown[]) => c[0] === "docker" && (c[1] as string[])[0] === "cp"
             );
             expect(cpCalls).toHaveLength(2);
+        });
+
+        it("stages the bridge, normalizes CRLF, and atomically installs it for existing containers", () => {
+            mockExistsSync.mockReturnValue(true);
+            spawnSyncMock.mockReturnValue(makeResult(0));
+
+            syncClipboardShims("ccc-test-abc123", "/fake/dist");
+
+            const calls = spawnSyncMock.mock.calls.map(call => call[1] as string[]);
+            const bridgeSource = join("/fake", "scripts", "ccc-x11-bridge");
+            const bridgeCopy = calls.find(args => args[0] === "cp" && args[1] === bridgeSource);
+            expect(bridgeCopy).toEqual(["cp", bridgeSource, expect.stringMatching(/^ccc-test-abc123:\/usr\/local\/bin\/ccc-x11-bridge\.[a-f0-9]+\.new$/)]);
+            const execText = calls.filter(args => args[0] === "exec").map(args => args.join(" ")).join("\n");
+            expect(execText).toContain("sed");
+            expect(execText).toMatch(/\\r|\r/);
+            expect(execText).toContain("chmod");
+            expect(execText).toMatch(/mv[^\n]*\/usr\/local\/bin\/ccc-x11-bridge\.[a-f0-9]+\.new[^\n]*\/usr\/local\/bin\/ccc-x11-bridge/);
+        });
+
+        it("installs as root and provisions private bridge state owned by the normal container user", () => {
+            mockExistsSync.mockReturnValue(true);
+            spawnSyncMock.mockReturnValue(makeResult(0));
+
+            syncClipboardShims("ccc-test-abc123", "/fake/dist");
+
+            const execCalls = spawnSyncMock.mock.calls.map(call => call[1] as string[]).filter(args => args[0] === "exec");
+            expect(execCalls.length).toBeGreaterThan(0);
+            for (const args of execCalls) expect(args.slice(0, 4)).toEqual(["exec", "-u", "root", "ccc-test-abc123"]);
+            const provision = execCalls.find(args => args[4] === "install");
+            expect(provision).toBeDefined();
+            expect(provision).toEqual(expect.arrayContaining(["-d", "-o", "ccc", "-g", "/run/ccc-x11-bridge"]));
+            expect(provision![provision!.indexOf("-o") + 1]).toBe("ccc");
+            expect(provision![provision!.indexOf("-g") + 1]).toBe("ccc");
+            expect(provision!.includes("-m700") || provision![provision!.indexOf("-m") + 1] === "700").toBe(true);
+            // Provisioning installs permissions; the long-running bridge is not launched as root here.
+            expect(execCalls.some(args => args[4] === "/usr/local/bin/ccc-x11-bridge")).toBe(false);
+        });
+
+        it.each(["sed", "chmod", "install", "mv"])("cleans the unique staged bridge when %s fails", failingCommand => {
+            mockExistsSync.mockReturnValue(true);
+            spawnSyncMock.mockImplementation((_executable, rawArgs) => {
+                const args = rawArgs as string[];
+                return makeResult(args[0] === "exec" && args.includes(failingCommand) ? 1 : 0);
+            });
+
+            syncClipboardShims("ccc-test-abc123", "/fake/dist");
+
+            const calls = spawnSyncMock.mock.calls.map(call => call[1] as string[]);
+            const copy = calls.find(args => args[0] === "cp" && args[1] === join("/fake", "scripts", "ccc-x11-bridge"))!;
+            expect(copy).toBeDefined();
+            const stage = copy[2].slice("ccc-test-abc123:".length);
+            expect(calls).toContainEqual(["exec", "-u", "root", "ccc-test-abc123", "rm", "-f", stage]);
+            if (failingCommand !== "mv") expect(calls.some(args => args[0] === "exec" && args.includes("mv"))).toBe(false);
         });
     });
 

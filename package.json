@@ -24,6 +24,7 @@
     "scripts/host-control/hyper-v/",
     "scripts/install.js",
     "scripts/clipboard-shims/",
+    "scripts/ccc-x11-bridge",
     "scripts/clipboard-helper-darwin.m",
     "README.md",
     "doc/hyper-v-windows/GUIDE__typed-library-support.md"

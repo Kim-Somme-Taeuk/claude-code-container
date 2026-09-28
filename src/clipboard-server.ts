@@ -4,7 +4,7 @@
 // 1. Standalone entry point: when spawned as detached process, starts HTTP server
 // 2. Library: exports ensureClipboardServer() and stopClipboardServerIfLast() for index.ts
 
-import { createServer, request as httpRequest, type Server } from "http";
+import { createServer, request as httpRequest, type IncomingMessage, type Server } from "http";
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from "child_process";
 import { randomBytes, createHash, timingSafeEqual } from "crypto";
 import {
@@ -46,15 +46,18 @@ const HEALTH_CHECK_TIMEOUT_MS = 2000;
 const STARTUP_POLL_INTERVAL_MS = 100;
 const STARTUP_POLL_TIMEOUT_MS = 5000;
 const PS_MARKER = "<<<CCC_CB_DONE>>>";
+export const MAX_CLIPBOARD_TEXT_BYTES = 1048576;
+const CLIPBOARD_WRITE_TIMEOUT_MS = 5000;
 
 // === Security Helpers ===
 function safeCompare(a: string, b: string): boolean {
-    if (a.length !== b.length) return false;
-    return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+    const left = Buffer.from(a);
+    const right = Buffer.from(b);
+    return left.length === right.length && timingSafeEqual(left, right);
 }
 
 // === Platform Detection ===
-type ClipboardPlatform = "darwin" | "linux-x11" | "linux-wayland" | "wsl" | "windows" | "unsupported";
+export type ClipboardPlatform = "darwin" | "linux-x11" | "linux-wayland" | "wsl" | "windows" | "unsupported";
 
 function detectPlatform(): ClipboardPlatform {
     const plat = platform();
@@ -109,6 +112,133 @@ function canRunPowerShellExe(): boolean {
     } catch {
         return false;
     }
+}
+
+/** Write text as stdin data, never as shell or PowerShell source. */
+export async function writeClipboardText(text: string, plat: ClipboardPlatform): Promise<void> {
+    const bytes = Buffer.from(text, "utf8");
+    if (bytes.length > MAX_CLIPBOARD_TEXT_BYTES || text.includes("\0") || bytes.toString("utf8") !== text) {
+        throw new Error("Invalid clipboard text");
+    }
+    let command: string;
+    let args: string[];
+    let input = bytes;
+    switch (plat) {
+        case "darwin":
+            command = "pbcopy";
+            args = [];
+            break;
+        case "linux-x11":
+            command = "xclip";
+            args = ["-selection", "clipboard", "-in", "-target", "UTF8_STRING"];
+            break;
+        case "linux-wayland":
+            command = "wl-copy";
+            args = ["--type", "text/plain;charset=utf-8"];
+            break;
+        case "windows":
+        case "wsl": {
+            const powershell = clipboardPowerShellPath();
+            if (!powershell) throw new Error("Clipboard writer unavailable");
+            command = powershell;
+            args = hiddenWindowsPowerShellArgs([
+                "-STA", "-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference = 'Stop'; try { " +
+                "Add-Type -AssemblyName System.Windows.Forms; " +
+                "$text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())); " +
+                "if ($text.Length -eq 0) { [Windows.Forms.Clipboard]::Clear() } " +
+                "else { [Windows.Forms.Clipboard]::SetText($text) }; exit 0 " +
+                "} catch { exit 1 }",
+            ]);
+            input = Buffer.from(bytes.toString("base64"), "ascii");
+            break;
+        }
+        default:
+            throw new Error("Clipboard writer unavailable");
+    }
+
+    invalidateClipboardCache();
+    try {
+        await new Promise<void>((resolve, reject) => {
+            const child = spawn(command, args, {
+                stdio: ["pipe", "ignore", "ignore"],
+                windowsHide: true,
+                ...(plat === "darwin" ? { env: { ...process.env, LC_CTYPE: "UTF-8" } } : {}),
+            });
+            let settled = false;
+            const finish = (success: boolean) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                if (success) resolve();
+                else reject(new Error("Clipboard write failed"));
+            };
+            const timer = setTimeout(() => {
+                child.kill("SIGKILL");
+                finish(false);
+            }, CLIPBOARD_WRITE_TIMEOUT_MS);
+            child.once("error", () => finish(false));
+            // Clipboard tools fork a selection owner; inherited pipes must not
+            // keep a completed upload waiting for that owner to exit.
+            child.once("exit", (code) => finish(code === 0));
+            child.stdin!.on("error", () => {
+                child.kill("SIGKILL");
+                finish(false);
+            });
+            child.stdin!.end(input);
+        });
+    } finally {
+        // Also discard reads started while the native command was running.
+        invalidateClipboardCache();
+    }
+}
+
+class ClipboardUploadError extends Error {
+    constructor(readonly status: number) {
+        super("Invalid clipboard upload");
+    }
+}
+
+function readClipboardUpload(req: IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        let settled = false;
+        const finish = (error?: ClipboardUploadError, text?: string) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            req.removeListener("data", onData);
+            req.removeListener("end", onEnd);
+            req.removeListener("aborted", onAbort);
+            if (error) {
+                req.pause();
+                reject(error);
+            } else resolve(text!);
+        };
+        const onData = (chunk: Buffer) => {
+            size += chunk.length;
+            if (size > MAX_CLIPBOARD_TEXT_BYTES) finish(new ClipboardUploadError(413));
+            else chunks.push(chunk);
+        };
+        const onEnd = () => {
+            if (!req.complete) return finish(new ClipboardUploadError(400));
+            try {
+                // Preserve an initial UTF-8 BOM as well as all whitespace.
+                const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks));
+                if (text.includes("\0")) return finish(new ClipboardUploadError(400));
+                finish(undefined, text);
+            } catch {
+                finish(new ClipboardUploadError(400));
+            }
+        };
+        const onAbort = () => finish(new ClipboardUploadError(400));
+        const timer = setTimeout(() => finish(new ClipboardUploadError(408)), CLIPBOARD_WRITE_TIMEOUT_MS);
+        req.on("data", onData);
+        req.once("end", onEnd);
+        req.once("aborted", onAbort);
+        req.once("error", onAbort);
+    });
 }
 
 // === AppleScript Data Parsing ===
@@ -489,6 +619,12 @@ interface ClipboardSnapshot {
     imageBmp: Buffer | null;
 }
 let clipboardCache: ClipboardSnapshot | null = null;
+let clipboardCacheGeneration = 0;
+
+function invalidateClipboardCache(): void {
+    clipboardCacheGeneration += 1;
+    clipboardCache = null;
+}
 
 export function shouldReuseClipboardCache(
     cache: Pick<ClipboardSnapshot, "timestamp" | "marker"> | null,
@@ -942,6 +1078,18 @@ function readLinuxClipboardImageFileFallback(plat: ClipboardPlatform, targets: s
 }
 
 async function getCachedClipboard(plat: ClipboardPlatform, forceRefresh = false): Promise<ClipboardSnapshot> {
+    // A native read can finish after a successful POST. Never publish its old
+    // snapshot into the cache or return it to a waiting HTTP reader.
+    while (true) {
+        const generation = clipboardCacheGeneration;
+        const snapshot = await readClipboardSnapshot(plat, forceRefresh);
+        if (generation !== clipboardCacheGeneration) continue;
+        clipboardCache = snapshot;
+        return snapshot;
+    }
+}
+
+async function readClipboardSnapshot(plat: ClipboardPlatform, forceRefresh: boolean): Promise<ClipboardSnapshot> {
     const now = Date.now();
     const marker = forceRefresh ? null : await readClipboardChangeMarker(plat);
     const cached = clipboardCache;
@@ -952,15 +1100,13 @@ async function getCachedClipboard(plat: ClipboardPlatform, forceRefresh = false)
     // Windows/WSL: persistent PowerShell process
     if (plat === "windows" || plat === "wsl") {
         const snapshot = await readAllClipboardWindows();
-        clipboardCache = { timestamp: now, ...snapshot, marker: snapshot.marker ?? marker };
-        return clipboardCache;
+        return { timestamp: now, ...snapshot, marker: snapshot.marker ?? marker };
     }
 
     // macOS: parallel reads (skip clipboard info, infer targets from actual data)
     if (plat === "darwin") {
         const snapshot = await readAllClipboardDarwin();
-        clipboardCache = { timestamp: now, ...snapshot, marker: snapshot.marker ?? marker };
-        return clipboardCache;
+        return { timestamp: now, ...snapshot, marker: snapshot.marker ?? marker };
     }
 
     // Linux: individual calls
@@ -974,12 +1120,11 @@ async function getCachedClipboard(plat: ClipboardPlatform, forceRefresh = false)
     if (!imagePng && !imageBmp) {
         const fileFallback = readLinuxClipboardImageFileFallback(plat, targets);
         if (fileFallback.targets.length > 0) {
-            clipboardCache = {
+            return {
                 timestamp: now,
                 marker: null,
                 ...fileFallback,
             };
-            return clipboardCache;
         }
 
         if (text) {
@@ -987,12 +1132,11 @@ async function getCachedClipboard(plat: ClipboardPlatform, forceRefresh = false)
                 parseClipboardImagePathText(text.toString("utf-8")),
             );
             if (textPathFallback.targets.length > 0) {
-                clipboardCache = {
+                return {
                     timestamp: now,
                     marker: null,
                     ...textPathFallback,
                 };
-                return clipboardCache;
             }
         }
     }
@@ -1005,7 +1149,7 @@ async function getCachedClipboard(plat: ClipboardPlatform, forceRefresh = false)
         return true;
     });
 
-    clipboardCache = {
+    return {
         timestamp: now,
         marker: null,
         targets: filteredTargets,
@@ -1013,7 +1157,6 @@ async function getCachedClipboard(plat: ClipboardPlatform, forceRefresh = false)
         imagePng,
         imageBmp,
     };
-    return clipboardCache;
 }
 
 function readClipboardTargets(plat: ClipboardPlatform): string[] {
@@ -1127,7 +1270,7 @@ export function clipboardServerOrphanWatchdogState(
 
 // === HTTP Server ===
 
-function createClipboardServer(token: string, plat: ClipboardPlatform): { server: Server; start: (bindAddr: string) => Promise<number> } {
+export function createClipboardServer(token: string, plat: ClipboardPlatform): { server: Server; start: (bindAddr: string) => Promise<number> } {
     let noActiveSessionsSince: number | null = null;
     let idleTimer: ReturnType<typeof setInterval>;
 
@@ -1164,6 +1307,34 @@ function createClipboardServer(token: string, plat: ClipboardPlatform): { server
                 res.writeHead(200, { "Content-Type": "text/plain" });
                 res.end("shutting down");
                 gracefulShutdown(server, idleTimer);
+                return;
+            }
+
+            if (method === "POST" && url === "/clipboard/text") {
+                // Close rejected uploads rather than draining unbounded bodies.
+                const rejectUpload = (status: number) => {
+                    res.writeHead(status, { "Content-Type": "text/plain", "Connection": "close" });
+                    res.end("Clipboard upload failed");
+                    res.once("finish", () => req.destroy());
+                };
+                const contentType = req.headers["content-type"] ?? "";
+                if (!/^text\/plain(?:\s*;\s*charset\s*=\s*(?:utf-8|"utf-8"))?\s*$/i.test(contentType)) {
+                    rejectUpload(415);
+                    return;
+                }
+                const length = req.headers["content-length"];
+                if (length !== undefined && Number(length) > MAX_CLIPBOARD_TEXT_BYTES) {
+                    rejectUpload(413);
+                    return;
+                }
+                try {
+                    const text = await readClipboardUpload(req);
+                    await writeClipboardText(text, plat);
+                    res.writeHead(204);
+                    res.end();
+                } catch (error) {
+                    rejectUpload(error instanceof ClipboardUploadError ? error.status : 500);
+                }
                 return;
             }
 
@@ -1230,6 +1401,7 @@ function createClipboardServer(token: string, plat: ClipboardPlatform): { server
         noActiveSessionsSince = state.noActiveSessionsSince;
         if (state.shouldShutdown) gracefulShutdown(server, idleTimer);
     }, CLIPBOARD_SERVER_ORPHAN_CHECK_INTERVAL_MS);
+    server.once("close", () => clearInterval(idleTimer));
 
     const start = (bindAddr: string): Promise<number> => {
         return new Promise((resolve, reject) => {
