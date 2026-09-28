@@ -9,9 +9,9 @@ while preserving successful device extraction and existing launch diagnostics.
 Regression coverage lives in `src/__tests__/test-level-runner.test.ts`.
 
 The saved report cannot reveal the underlying Windows provisioning cause because
-that detail was discarded. This change improves diagnosis; it does not establish
-that provisioning is fixed. With the updated checkout and the already built MCP
-bundle, rerun only the destructive provider scenario from Windows PowerShell:
+that detail was discarded. The initial assertion change improved diagnosis but
+did not by itself establish successful provisioning. The targeted Windows run
+documented below now passes. To reproduce that scenario from Windows PowerShell:
 
 ```powershell
 $env:CCC_TEST_LEVEL = '3'
@@ -20,8 +20,8 @@ node --import tsx scripts/real-tests/run.ts scripts/real-tests/level3-real-destr
 
 This invokes the same disposable Android scenario, including destructive controls
 if creation succeeds. macOS is skipped on Windows. Capture the expanded failure
-before changing SDK images, Java, or emulator configuration. A full Level 3 rerun
-is still needed to establish overall success after the provider cause is fixed.
+before changing SDK images, Java, or emulator configuration if a failure recurs.
+A full Level 3 rerun is still needed to establish overall suite success.
 
 The accompanying Harness maintenance sets manifest version 7 and ignores
 `.claude/worktrees/`. The legacy `.version` marker was already absent/untracked;
@@ -42,8 +42,8 @@ passed creation and boot, then failed its app-install result assertion. A direct
 retry of app installation succeeded; that first install failure is not yet
 explained. Its fixture was stopped and deleted through normal guarded APIs.
 This evidence does not establish the original Windows auto-selected image or
-the cause of its earlier `device_create` failure. Windows targeted and complete
-Level 3 verification remain required.
+the cause of its earlier `device_create` failure. The later targeted Windows
+verification below passed; complete Level 3 verification remains outstanding.
 
 Subsequent full broker-mediated runs reproduced an additional stop race: ADB
 acknowledged the kill command before the owned serial disappeared, so immediate
@@ -58,8 +58,8 @@ A later run passed installation, app lifecycle, network changes and recording,
 then failed mobile clipboard setup because the broker-owned Appium process had
 exited. Its startup output was discarded, so that exit cause remains unproven.
 All three diagnostic AVDs were subsequently stopped and removed through guarded
-APIs. The stop-completion source change still requires Windows broker reload
-and live verification; these findings do not establish complete Level 3 success.
+APIs. The later Windows run below verified broker reload and the stop-completion
+change live; complete Level 3 success remains unverified.
 
 For this investigation, the temporary helper
 `results/.tmp/ccc-windows-level3-diagnose.mts` collects broker refresh output,
