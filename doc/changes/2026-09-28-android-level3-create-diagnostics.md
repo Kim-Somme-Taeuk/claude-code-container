@@ -14,6 +14,7 @@ that provisioning is fixed. With the updated checkout and the already built MCP
 bundle, rerun only the destructive provider scenario from Windows PowerShell:
 
 ```powershell
+$env:CCC_TEST_LEVEL = '3'
 node --import tsx scripts/real-tests/run.ts scripts/real-tests/level3-real-destructive.ts
 ```
 
@@ -59,3 +60,12 @@ exited. Its startup output was discarded, so that exit cause remains unproven.
 All three diagnostic AVDs were subsequently stopped and removed through guarded
 APIs. The stop-completion source change still requires Windows broker reload
 and live verification; these findings do not establish complete Level 3 success.
+
+For this investigation, the temporary helper
+`results/.tmp/ccc-windows-level3-diagnose.mts` collects broker refresh output,
+Windows image selection, Appium version and bounded loopback startup output,
+then runs that same level-3 scenario. Run it with `node --import tsx` from
+Windows; results are retained locally in `results/windows-level3-diagnostic.json`.
+The helper sets level 3 explicitly. A healthy diagnostic Appium server is
+stopped after 15 seconds, so that diagnostic's timeout alone is not a failure.
+This temporary helper is not a committed package entry point.
