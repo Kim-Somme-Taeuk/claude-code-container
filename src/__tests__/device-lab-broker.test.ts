@@ -76,6 +76,9 @@ describe("device-lab host broker daemon", () => {
     // because that list is what the CLI demands of a remote broker, not what this one answers with.
     it("advertises every capability its consumers require", () => {
         const advertised = new Set<string>(DEVICE_BROKER_IMPLEMENTED_CAPABILITIES);
+        expect(advertised.has("android-avd-console-identity-v1")).toBe(true);
+        expect(DEVICE_BROKER_REQUIRED_CAPABILITIES).toContain("android-avd-console-identity-v1");
+        expect(REQUIRED_CCC_HOST_BROKER_CAPABILITIES).toContain("android-avd-console-identity-v1");
         expect(DEVICE_BROKER_REQUIRED_CAPABILITIES.filter((capability) => !advertised.has(capability)))
             .toEqual([]);
         expect(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES.filter((capability) => !advertised.has(capability)))
@@ -1525,7 +1528,8 @@ describe("device-lab host broker daemon", () => {
         ["redacted Hyper-V network stage diagnostics", "hyper-v-network-failure-diagnostics-v11", "hyper-v-network-failure-diagnostics-v10"],
         ["persisted Hyper-V network identity repair", "hyper-v-setup-network-v11", "hyper-v-setup-network-v10"],
         ["hidden elevated PowerShell children", "windows-hidden-provider-children-v7", "windows-hidden-provider-children-v6"],
-    ])("replaces a same-version broker missing the Hyper-V %s contract", async (_label, missingCapability, previousCapability) => {
+        ["Android console AVD identity", "android-avd-console-identity-v1", null],
+    ])("replaces a same-version broker missing the %s contract", async (_label, missingCapability, previousCapability) => {
         const ownerId = "2222222222222222";
         const currentCapabilities = deviceBrokerStatus({ ownerId }).implemented;
         const stalePid = 43210;
@@ -1688,6 +1692,7 @@ describe("device-lab host broker daemon", () => {
         const staleProcess = fakeBrokerPortProcess(stalePid, "node /opt/ccc/dist/index.js devices broker serve");
         const implemented = [
             "hyper-v-windows-library-v17",
+            "android-avd-console-identity-v1",
             "http-host-backend-readiness-api",
             "http-lifecycle-device-create-command",
             "http-desktop-device-tool-proxy",
@@ -1858,6 +1863,7 @@ describe("device-lab host broker daemon", () => {
         const staleProcess = fakeBrokerPortProcess(stalePid, "node /opt/ccc/dist/index.js devices broker serve");
         const implemented = [
             "hyper-v-windows-library-v17",
+            "android-avd-console-identity-v1",
             "http-host-backend-readiness-api",
             "http-lifecycle-device-create-command",
             "http-desktop-device-tool-proxy",
@@ -2104,6 +2110,7 @@ describe("device-lab host broker daemon", () => {
         const stalePid = 22334;
         const implemented = [
             "hyper-v-windows-library-v17",
+            "android-avd-console-identity-v1",
             "http-host-backend-readiness-api",
             "http-lifecycle-device-create-command",
             "http-desktop-device-tool-proxy",
@@ -2465,6 +2472,7 @@ describe("device-lab host broker daemon", () => {
         const stalePid = 11223;
         const implemented = [
             "hyper-v-windows-library-v17",
+            "android-avd-console-identity-v1",
             "http-host-backend-readiness-api",
             "http-lifecycle-device-create-command",
             "http-desktop-device-tool-proxy",
@@ -3304,6 +3312,9 @@ describe("device-lab host broker daemon", () => {
                 && key !== "CCC_DEVICE_BROKER_AUTH_FILE"),
         ) as NodeJS.ProcessEnv;
 
+        // Resolve provisions this initially absent test-owned secret. Do not
+        // discover a real container's conventional isolated credential mount.
+        env.CCC_DEVICE_BROKER_AUTH_FILE = secretFile;
         expect(existsSync(secretFile)).toBe(false);
         const clients = Array.from({ length: 12 }, () => new Promise<string>((resolve, reject) => {
             const child = spawn(process.execPath, ["--input-type=module", "-e", script], {

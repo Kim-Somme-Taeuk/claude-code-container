@@ -4167,7 +4167,7 @@ describe("device-lab host broker lifecycle commands", () => {
             cwd: "/project/broker-android-create-test",
             host: "127.0.0.1",
             port: 0,
-            providerPaths: { avdmanager: "C:\\Android\\Sdk\\cmdline-tools\\latest\\bin\\avdmanager.bat" },
+            providerPaths: { adb: "/fake/adb", avdmanager: "C:\\Android\\Sdk\\cmdline-tools\\latest\\bin\\avdmanager.bat" },
             commandRunner,
         });
         const baseUrl = await listen(server);
@@ -4217,6 +4217,9 @@ describe("device-lab host broker lifecycle commands", () => {
                 }),
             }));
             expect(commandRunner).toHaveBeenNthCalledWith(1, expect.objectContaining({
+                provider: "adb", args: ["devices", "-l"],
+            }), expect.objectContaining({ timeoutMs: 10000 }));
+            expect(commandRunner).toHaveBeenNthCalledWith(2, expect.objectContaining({
                 mode: "exec",
                 provider: "avdmanager",
                 input: "no\n",
@@ -4594,6 +4597,60 @@ describe("device-lab host broker lifecycle commands", () => {
         }
     });
 
+    it("keeps broker AVD deletion fail-closed across the empty console identity retry", async () => {
+        const cwd = "/project/broker-android-console-retry";
+        const ownerId = deviceLabOwnerId(cwd);
+        const avdName = `ccc-${ownerId}-retry`;
+        const avdRoot = process.env.ANDROID_AVD_HOME || join(process.env.HOME!, ".android", "avd");
+        const artifact = join(avdRoot, `${avdName}.avd`);
+        mkdirSync(artifact, { recursive: true });
+        writeFileSync(join(artifact, "userdata-qemu.img"), "retain until identity verified");
+        writeBrokerDevices(ownerId, "android", [{ id: "android-retry", backend: "android-emulator", status: "stopped", avdName, avdRoot, port: 5582 }]);
+        let retryOutput = "";
+        const commandRunner = vi.fn((command) => ({
+            ...command, status: 0, stderr: "",
+            stdout: command.provider !== "adb" ? ""
+                : command.args?.[0] === "devices" ? "List of devices attached\nemulator-5584\tdevice\n"
+                    : command.args?.at(-1) === "avd name\navd name" ? retryOutput : "",
+        }));
+        const server = createDeviceBrokerServer({ cwd, host: "127.0.0.1", port: 0,
+            providerPaths: { adb: "/fake/adb", avdmanager: "/fake/avdmanager" }, commandRunner });
+        const baseUrl = await listen(server);
+        const remove = () => fetch(ownerRpcEndpoint(baseUrl, ownerId), {
+            method: "POST", headers: ownerRpcHeaders(ownerId),
+            body: JSON.stringify({ method: "broker.command.invoke", params: {
+                backend: "android-emulator", command: "device_delete", deviceId: "android-retry", deleteAvd: true,
+            } }),
+        });
+        try {
+            for (const [output, status, error] of [
+                ["", 503, "android-avd-liveness-unverified"],
+                ["Other_Avd\nConflicting_Avd\nOK\n", 503, "android-avd-liveness-unverified"],
+                [`${avdName}\n${avdName}\nOK\n`, 409, "android-avd-active"],
+            ] as const) {
+                retryOutput = output;
+                const response = await remove();
+                expect(response.status).toBe(status);
+                expect(await response.json()).toEqual(expect.objectContaining({ ok: false, error }));
+                expect(existsSync(artifact)).toBe(true);
+                expect(commandRunner.mock.calls.some(([command]) => command.provider === "avdmanager")).toBe(false);
+            }
+            retryOutput = "Other_Owners_Avd\nOther_Owners_Avd\nOK\n";
+            const response = await remove();
+            expect(response.status).toBe(200);
+            expect((await response.json()).ok).toBe(true);
+            expect(existsSync(artifact)).toBe(false);
+            expect(commandRunner).toHaveBeenCalledWith(expect.objectContaining({
+                provider: "adb", args: ["-s", "emulator-5584", "emu", "avd name\navd name"],
+            }), expect.any(Object));
+            expect(commandRunner.mock.calls.some(([command]) => command.provider === "process-inventory")).toBe(true);
+        } finally {
+            await close(server);
+            cleanupOwner(ownerId);
+            rmSync(artifact, { recursive: true, force: true });
+        }
+    });
+
     it("rejects an explicitly requested Android emulator port allocated to another project", async () => {
         const ownerId = deviceLabOwnerId("/project/broker-android-port-conflict-test");
         const foreignOwnerId = "6364656667686970";
@@ -4825,14 +4882,14 @@ describe("device-lab host broker lifecycle commands", () => {
             args: command.args || [],
             input: command.input,
             status: 0,
-            stdout: "created avd",
+            stdout: command.provider === "adb" ? "List of devices attached\n" : "created avd",
             stderr: "",
         }));
         const server = createDeviceBrokerServer({
             cwd: "/project/broker-android-port-lock-test",
             host: "127.0.0.1",
             port: 0,
-            providerPaths: { avdmanager: "/fake/avdmanager" },
+            providerPaths: { adb: "/fake/adb", avdmanager: "/fake/avdmanager" },
             commandRunner,
         });
         const baseUrl = await listen(server);
@@ -4881,7 +4938,13 @@ describe("device-lab host broker lifecycle commands", () => {
                     device: expect.objectContaining({ id: "android-serialized-pixel", port: expect.any(Number) }),
                 }),
             }));
-            expect(commandRunner).toHaveBeenCalledTimes(1);
+            expect(commandRunner).toHaveBeenCalledTimes(2);
+            expect(commandRunner).toHaveBeenNthCalledWith(1, expect.objectContaining({
+                provider: "adb", args: ["devices", "-l"],
+            }), expect.any(Object));
+            expect(commandRunner).toHaveBeenNthCalledWith(2, expect.objectContaining({
+                provider: "avdmanager", args: expect.arrayContaining(["create", "avd"]),
+            }), expect.any(Object));
         } finally {
             releaseLock();
             await lockHolder;

@@ -1293,6 +1293,71 @@ exec "${realAdbPath}" "$@"
         }
     });
 
+    it("verifies direct AVD deletion identity through the empty console reply retry", { timeout: TIMEOUT }, async () => {
+        const inventory = await client.callTool({ name: "device_inventory", arguments: { backend: "android-emulator" } });
+        const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
+        const deviceId = "android-console-retry";
+        const avdName = `ccc-${ownerId}-console-retry`;
+        const artifact = join(homeDir, ".android", "avd", `${avdName}.avd`);
+        const adbPath = join(binDir, "adb");
+        const originalAdb = readFileSync(adbPath, "utf8");
+        const savedAdb = join(binDir, "adb-console-retry-original");
+        const replyPath = join(homeDir, "console-retry-response");
+        const retriesPath = join(homeDir, "console-retry-calls");
+        const create = await client.callTool({ name: "device_create", arguments: {
+            backend: "android-emulator", name: "Console Retry", deviceId, avdName, port: 5672,
+            systemImage: "system-images;android-35;google_apis;x86_64", createAvd: true,
+        } });
+        expect(create.isError).not.toBe(true);
+        mkdirSync(artifact, { recursive: true });
+        writeFileSync(join(artifact, "userdata-qemu.img"), "must survive unknown or active identity");
+        writeFileSync(savedAdb, originalAdb, { mode: 0o755 });
+        writeFileSync(adbPath, `#!/bin/sh
+if [ "$1" = "devices" ]; then
+  printf 'List of devices attached\\nemulator-5674\\tdevice\\n'
+  exit 0
+fi
+if [ "$1" = "-s" ] && [ "$2" = "emulator-5674" ] && [ "$3" = "emu" ]; then
+  if [ "$#" = 5 ] && [ "$4" = "avd" ] && [ "$5" = "name" ]; then exit 0; fi
+  expected='avd name
+avd name'
+  if [ "$#" = 4 ] && [ "$4" = "$expected" ]; then
+    printf 'retry\\n' >> "$HOME/console-retry-calls"
+    /bin/cat "$HOME/console-retry-response"
+    exit 0
+  fi
+  exit 19
+fi
+exec "${savedAdb}" "$@"
+`);
+        chmodSync(adbPath, 0o755);
+        const remove = () => client.callTool({ name: "device_delete", arguments: {
+            deviceId, deleteAvd: true, confirmDestructive: true,
+        } });
+        try {
+            for (const output of ["", "Other_Avd\nConflicting_Avd\n", `${avdName}\n${avdName}\nOK\n`]) {
+                writeFileSync(replyPath, output);
+                const blocked = await remove();
+                expect(blocked.isError).toBe(true);
+                expect((blocked.content as Array<{ text?: string }>)[0]?.text)
+                    .toContain("android-avd-active-or-liveness-unverified");
+                expect(existsSync(artifact)).toBe(true);
+            }
+            writeFileSync(replyPath, "Other_Owners_Avd\nOther_Owners_Avd\nOK\n");
+            const deleted = await remove();
+            expect(deleted.isError, JSON.stringify(deleted)).not.toBe(true);
+            expect(parseToolJson(deleted)).toEqual(expect.objectContaining({ deleted: deviceId }));
+            expect(existsSync(artifact)).toBe(false);
+            // Successful removal rechecks liveness inside its artifact-deletion guard.
+            expect(readFileSync(retriesPath, "utf8").trim().split("\n")).toHaveLength(5);
+        } finally {
+            writeFileSync(adbPath, originalAdb);
+            chmodSync(adbPath, 0o755);
+            for (const path of [savedAdb, replyPath, retriesPath]) rmSync(path, { force: true });
+            await remove();
+        }
+    });
+
     it("preserves running state and the AVD when force-delete cannot terminate the owned process", { timeout: TIMEOUT }, async () => {
         const inventory = await client.callTool({ name: "device_inventory", arguments: { backend: "android-emulator" } });
         const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
