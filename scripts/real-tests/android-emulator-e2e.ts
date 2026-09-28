@@ -38,11 +38,12 @@ const DESTRUCTIVE_ANDROID_CAPABILITIES = new Set([
     "mobile_toggle_airplane_mode",
 ]);
 
-function deviceFromPayload(payload, operation) {
+export function deviceFromPayload(payload, operation) {
     const launch = payload?.launch;
     const lastAttempt = Array.isArray(payload?.attempts) ? payload.attempts.at(-1) : null;
     const diagnostic = [
         payload?.error,
+        payload?.detail,
         launch?.error,
         launch?.detail,
         launch?.command,

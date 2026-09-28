@@ -41,3 +41,4 @@ doc/harness/quality-trend.jsonl
 doc/harness/.maintain-last-run
 doc/harness/.maintain-observe.log
 doc/harness/.maintain-pending.json
+.claude/worktrees/

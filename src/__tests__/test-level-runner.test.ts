@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 import { DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES, evaluateDestructivePolicy } from "../../device-lab-mcp/src/policy/destructive.mjs";
 import { LINUX_VM_CAPABILITIES } from "../../device-lab-mcp/src/backends/linux-vm.mjs";
 import { androidDeviceE2EPrerequisites, prepareAndroidDeviceApp } from "../../scripts/real-tests/android-device-e2e.ts";
-import { androidEmulatorAppSelection, androidEmulatorCreateRequest } from "../../scripts/real-tests/android-emulator-e2e.ts";
+import { androidEmulatorAppSelection, androidEmulatorCreateRequest, deviceFromPayload } from "../../scripts/real-tests/android-emulator-e2e.ts";
 import { currentDisplayPrerequisiteResult } from "../../scripts/real-tests/level1-display-e2e.ts";
 import { startWindowsSandboxE2EDevice } from "../../scripts/real-tests/windows-sandbox-e2e.ts";
 import {
@@ -1848,6 +1848,27 @@ describe("test level runner", () => {
 
         const emulatorText = readFileSync(join(repoRoot, "scripts", "real-tests", "android-emulator-e2e.ts"), "utf-8");
         expect(emulatorText.indexOf("androidEmulatorAppSelection()")).toBeLessThan(emulatorText.indexOf("mkdtempSync("));
+    });
+
+    it("preserves broker command failure details in Android real-test assertions", () => {
+        expect(() => deviceFromPayload({
+            ok: false,
+            error: "provider-command-failed",
+            detail: "stderr: Error: Package path is not valid. Valid system image paths are:",
+        }, "device_create")).toThrow(
+            "device_create returned no device: provider-command-failed: stderr: Error: Package path is not valid. Valid system image paths are:",
+        );
+    });
+
+    it("preserves Android real-test device extraction and legacy diagnostics", () => {
+        const device = { id: "android-real-test" };
+        expect(deviceFromPayload({ device }, "device_create")).toBe(device);
+        expect(() => deviceFromPayload({
+            launch: { error: "launch-failed", detail: "emulator exited", command: "emulator" },
+            attempts: [{ error: "boot-timeout" }],
+        }, "device_start")).toThrow("device_start returned no device: launch-failed: emulator exited: emulator: boot-timeout");
+        expect(() => deviceFromPayload({}, "device_create")).toThrow("device_create returned no device (keys: none)");
+        expect(() => deviceFromPayload({ ok: false }, "device_create")).toThrow("device_create returned no device (keys: ok)");
     });
 
     it("delegates real Android emulator port allocation to the broker", () => {
