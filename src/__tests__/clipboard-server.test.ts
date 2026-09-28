@@ -867,14 +867,10 @@ describe("clipboard-server", () => {
                 expect(result!.imageBmp).toBeNull();
             });
 
-            it("should parse MARK-only JSON with changeCount", () => {
+            it("rejects MARK-only JSON as an incomplete READ snapshot", () => {
                 const result = parseDarwinHelperOutput(JSON.stringify({ changeCount: "456" }));
 
-                expect(result).not.toBeNull();
-                expect(result!.marker).toBe("456");
-                expect(result!.targets).toEqual([]);
-                expect(result!.text).toBeNull();
-                expect(result!.imagePng).toBeNull();
+                expect(result).toBeNull();
             });
 
             it("should parse JSON with text only", () => {
@@ -900,10 +896,12 @@ describe("clipboard-server", () => {
             });
 
             it("should handle scalar targets (single-element array serialization)", () => {
-                const json = JSON.stringify({ targets: "image/png", imagePng: "iVBOR" });
+                const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+                const json = JSON.stringify({ targets: "image/png", imagePng: pngBytes.toString("base64") });
                 const result = parseDarwinHelperOutput(json);
                 expect(result).not.toBeNull();
                 expect(result!.targets).toEqual(["image/png"]);
+                expect(result!.imagePng).toEqual(pngBytes);
             });
 
             it("orders advertised alternate image MIME types after preferred PNG", () => {

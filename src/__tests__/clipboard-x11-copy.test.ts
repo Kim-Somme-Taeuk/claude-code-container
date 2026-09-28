@@ -17,6 +17,7 @@ let hostText: Buffer;
 let hostImage: Buffer | null;
 let token: string;
 let failPosts: boolean;
+let failHostReads: boolean;
 let deferTextRead: boolean;
 let releaseTextRead: (() => void) | undefined;
 let posts: Buffer[];
@@ -75,6 +76,7 @@ describe.skipIf(!available)("real isolated X11 clipboard bridge", () => {
         hostImage = null;
         token = "first-token";
         failPosts = false;
+        failHostReads = false;
         deferTextRead = false;
         releaseTextRead = undefined;
         const xvfb = spawn("/usr/bin/Xvfb", ["-displayfd", "1", "-screen", "0", "640x480x24", "-nolisten", "tcp"], { stdio: ["ignore", "pipe", "ignore"] });
@@ -84,6 +86,7 @@ describe.skipIf(!available)("real isolated X11 clipboard bridge", () => {
         server = createServer((req, res) => {
             requests.push({ method: req.method!, path: req.url!, auth: req.headers.authorization });
             if (req.headers.authorization !== `Bearer ${token}`) { res.writeHead(401).end(); return; }
+            if (req.method === "GET" && failHostReads) { res.writeHead(503).end("Clipboard read failed"); return; }
             if (req.method === "POST" && req.url === "/clipboard/text") {
                 const chunks: Buffer[] = [];
                 req.on("data", chunk => chunks.push(chunk));
@@ -186,6 +189,33 @@ describe.skipIf(!available)("real isolated X11 clipboard bridge", () => {
         await cycle();
         expect(hostText).toEqual(local);
         expect(posts).toEqual([local]);
+    });
+
+    it("retains image on host 503 and observes image to text to empty to identical image", async () => {
+        const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=", "base64");
+        hostImage = image;
+        await startControl();
+        await cycle();
+        expect(await read("image/png")).toEqual(image);
+        failHostReads = true;
+        hostImage = null;
+        hostText = Buffer.from("recovered plain text");
+        await cycle();
+        expect(await read("image/png")).toEqual(image);
+        expect(posts).toEqual([]);
+        failHostReads = false;
+        await cycle();
+        expect(await read()).toEqual(hostText);
+        expect((await read("TARGETS")).toString()).not.toContain("image/png");
+        hostText = Buffer.alloc(0);
+        await cycle();
+        expect(await read()).toEqual(Buffer.alloc(0));
+        hostImage = image;
+        await cycle();
+        expect(await read("image/png")).toEqual(image);
+        expect((await read("TARGETS")).toString()).toContain("image/png");
+        await cycle();
+        expect(posts).toEqual([]);
     });
 
     it("refreshes the mounted bearer token before publishing", async () => {

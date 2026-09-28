@@ -6,6 +6,10 @@ status: accepted
 Codex image paste through CCC must survive host clipboard image type variation and present an attachable image to the containerized Codex command.
 
 ## Observable Behavior
+- Concurrent clipboard consumers (Claude target checks, Codex image reads and the X11 bridge) must receive their own complete native responses. Persistent native helper operations must not cross-consume marker and snapshot frames. A delimiter occurring inside clipboard text is data, not a response terminator.
+- For Windows/WSL and macOS persistent helpers, an unavailable, malformed, interrupted or timed-out native read is an HTTP error, not an empty clipboard. Only a successfully read empty snapshot returns 204. Failed reads must not create marker-backed negative cache entries; a subsequent request must recover even when the host clipboard marker has not changed. Image targets must agree with captured nonempty image bytes.
+- Native snapshots must be coherent with the clipboard change marker. Changes during a read require bounded retry instead of caching mixed or stale content. Empty/no-image cache reuse must be short and bounded so delayed image rendering can recover even under an unchanged marker. Image → text → empty → the same image must remain observable to all consumers.
+- The X11 bridge preserves its last successfully synchronized selection on host read errors and adopts the next successfully read host state. Windows clipboard reader processes use STA mode and discard incomplete responses on native failure.
 - When CCC launches Codex with clipboard image attachment enabled, the host clipboard server exposes a stable `/clipboard/image/png` endpoint and the Codex wrapper writes the returned bytes under `.omx/clipboard-images/clipboard-<timestamp>.png` before injecting `--image`. The host bridge must treat common image clipboard targets such as `image/png`, `image/jpeg`, `image/jpg`, `image/gif`, `image/webp`, `image/bmp`, macOS PNG, macOS TIFF, Windows `Clipboard.GetImage()`, Windows Explorer image file-copy/file-drop payloads, and other `NSImage`-loadable pasteboard data as image candidates instead of failing only because the exact PNG clipboard type is unavailable.
 - When a Windows image file-copy/file-drop payload can be converted to PNG, the clipboard snapshot must expose image targets and suppress the plain local path text so containerized Codex or Claude paste consumes the image rather than pasting `C:\...` path text.
 - When Windows clipboard data advertises image content through raw `PNG`/`image/png` formats or `Clipboard.GetImage()`, CCC must expose `image/png` only after non-empty bytes have been captured. It must not advertise `image/png` targets with an empty `/clipboard/image/png` response.
@@ -32,7 +36,10 @@ Codex image paste through CCC must survive host clipboard image type variation a
 
 ## Non-Goals
 - This requirement does not add image editing, arbitrary binary clipboard support, or a new Codex CLI image API.
+- Linux command adapters retain their existing absence behavior: a failed target query (including an unavailable display) can produce an empty response. The persistent-helper error distinction above does not claim to distinguish every Linux command failure from a genuinely unowned selection.
 
 ## Source
+- Windows marker semantics: [GetClipboardSequenceNumber](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getclipboardsequencenumber). A zero marker does not establish cache validity; delayed rendering can postpone sequence changes.
+- Windows native threading: [Clipboard STA requirement](https://learn.microsoft.com/en-us/dotnet/api/system.windows.forms.clipboard.clear). Clipboard operations must run in STA mode.
 - created: 2026-06-07
 - source: task: TASK__fix-codex-image-paste-clipboard-type-stall
