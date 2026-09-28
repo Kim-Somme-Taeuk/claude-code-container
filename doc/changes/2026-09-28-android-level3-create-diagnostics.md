@@ -69,3 +69,20 @@ Windows; results are retained locally in `results/windows-level3-diagnostic.json
 The helper sets level 3 explicitly. A healthy diagnostic Appium server is
 stopped after 15 seconds, so that diagnostic's timeout alone is not a failure.
 This temporary helper is not a committed package entry point.
+
+## Windows verification after broker refresh
+
+The Windows diagnostic completed at `2026-09-28T15:14:13.341Z` with exit 0
+for the complete Android destructive scenario. Automatic SDK discovery selected
+`system-images;android-37.1;google_apis_playstore_ps16k;x86_64` (one installed
+image). Broker PID 52636 advertised `android-emulator-stop-completion-v1`.
+Appium 3.5.2 started successfully, and the Android scenario passed through its
+clipboard, stop and guarded AVD deletion checks. macOS was skipped because the
+host is Windows. The diagnostic Appium timeout was its deliberate 15-second
+shutdown, not a startup failure.
+
+This clears the targeted Windows reproduction and verifies the new stop path
+in that scenario. The original generic creation error and earlier intermittent
+installation/Appium exits have no established historical cause; they did not
+recur in this Windows run. A fresh `npm run test:level3` result is still required
+to claim success for the entire suite.
