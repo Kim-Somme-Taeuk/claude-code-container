@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import { AsyncLocalStorage } from "async_hooks";
+import { existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { isDeepStrictEqual } from "util";
@@ -94,11 +95,17 @@ export function writeOwnerDevices(backend, devices) {
 export function mutateOwnerDevices(backend, updater) {
     return withSharedMutationLock(ownerStateMutationLockFile(backend), () => {
         const current = readOwnerDevices(backend);
+        const before = JSON.stringify(current);
+        const existed = existsSync(ownerStateFile(backend));
         const next = updater(current);
         if (!Array.isArray(next)) throw new TypeError("Owner device mutation must return an array");
         assertUniqueOwnerDeviceIds(next);
         assertOwnerDeviceStateWritable(next);
-        writeJsonFileAtomically(ownerStateFile(backend), { devices: next });
+        // Validate even a no-op, and compare a snapshot taken before an updater
+        // that may mutate its input. Preserve creation of an initially absent file.
+        if (!existed || JSON.stringify(next) !== before) {
+            writeJsonFileAtomically(ownerStateFile(backend), { devices: next });
+        }
         return next;
     });
 }

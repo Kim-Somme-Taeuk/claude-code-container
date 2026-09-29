@@ -48,10 +48,12 @@ keeps the mise cache on `ccc-mise-cache`.
    supported interactive launches (including `resume` and `fork`), a bounded
    check may invoke the installed CLI's bounded `app-server daemon start`
    when the daemon executable is positively confirmed missing. The original
-   command, session arguments and environment are preserved; ccc never inserts
-   `--no-daemon` automatically. Explicit remote/no-daemon invocations and
+   command, session arguments and environment are preserved. If start itself
+   reports the exact missing managed executable error and installed root help
+   explicitly supports `--no-daemon`, ccc adds that flag for this launch and
+   reports the fallback. It does not replace shared packages or replay a TUI. Explicit remote/no-daemon invocations and
    noninteractive commands are left unchanged. Uncertain probes leave the
-   original invocation unchanged. Failed initialization stops before the TUI
+   original invocation unchanged. Other initialization failures stop before the TUI
    while retaining normal cleanup. ccc never force-updates packages, restarts
    an existing daemon or deletes history as recovery. Supported configuration
    overrides are forwarded as arguments; unsupported profile selection must
@@ -96,3 +98,9 @@ keeps the mise cache on `ccc-mise-cache`.
   `resume`/`fork` session arguments and history.
 - An unrelated Codex failure exits once, without npm updates, automatic replay,
   or a state deletion question.
+
+- An incomplete package (broken current link or missing executable inside current)
+  must not trap resume in a repeated daemon-start failure. The supported local
+  no-daemon fallback preserves history and executes the user command once. It
+  does not certify cross-version rollout compatibility; report any independent
+  resume protocol failure instead of deleting state or retrying indefinitely.

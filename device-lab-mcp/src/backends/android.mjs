@@ -135,17 +135,15 @@ export function androidScreenshotResult(result) {
     return { content: [{ type: "image", data: stdout.toString("base64"), mimeType: "image/png" }] };
 }
 
-export function appiumDiscovery() {
+export function appiumDiscovery(android = { adb: findAndroidTool("adb") }) {
     const appium = localBinPath("appium") || commandPath("appium");
-    const android = androidDiscovery();
     const missing = [];
     if (!appium) missing.push("appium");
     if (!android.adb) missing.push("adb");
     return { appium, adb: android.adb, available: missing.length === 0, missing };
 }
 
-export function androidBackend() {
-    const discovery = androidDiscovery();
+export function androidBackend(discovery = androidDiscovery()) {
     return {
         name: "android-emulator",
         host: "host-or-container",
@@ -182,8 +180,8 @@ export function androidBackend() {
     };
 }
 
-function appiumBackendStatus() {
-    const discovery = appiumDiscovery();
+function appiumBackendStatus(android) {
+    const discovery = appiumDiscovery(android);
     return {
         available: discovery.available,
         missing: discovery.missing,
@@ -221,8 +219,7 @@ export function androidEmulatorPortsFromAdbDevices(output) {
     return ports;
 }
 
-function liveAndroidEmulatorPortsForAllocation() {
-    const discovery = androidDiscovery();
+function liveAndroidEmulatorPortsForAllocation(discovery = androidDiscovery()) {
     if (!discovery.adb) return { ok: true, ports: new Set() };
     const result = run(discovery.adb, ["devices", "-l"]);
     if (result.status !== 0) {
@@ -1041,7 +1038,8 @@ async function handleAndroidToolUnlocked(name, args) {
             const { deviceId } = args;
             const device = findAndroidDevice(deviceId);
             if (!device) return undefined;
-            return jsonResult({ device: publicAndroidDevice(device), backend: androidBackend(), appium: appiumBackendStatus() });
+            const discovery = androidDiscovery();
+            return jsonResult({ device: publicAndroidDevice(device), backend: androidBackend(discovery), appium: appiumBackendStatus(discovery) });
         }
 
         case "device_start": {
@@ -1057,7 +1055,7 @@ async function handleAndroidToolUnlocked(name, args) {
                 return textResult(false, `Refusing to start non-owned Android AVD name: ${device.avdName}`);
             }
 
-            const livePorts = liveAndroidEmulatorPortsForAllocation();
+            const livePorts = liveAndroidEmulatorPortsForAllocation(discovery);
             if (!livePorts.ok) return textResult(false, `${livePorts.error}: ${livePorts.detail}`);
             if (device.port && livePorts.ports.has(device.port)) {
                 return textResult(false, `android-emulator-port-conflict: port-${device.port}-already-in-use`);

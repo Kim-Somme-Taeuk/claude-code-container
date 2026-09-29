@@ -25,7 +25,7 @@ function internalStatus(value) {
         && !/(?:Path|Dir|Script|Root)$/.test(key)));
 }
 
-function target(value) {
+function target(value, options = {}) {
     if (!object(value) || failed(value)) return value;
     const result = omit(value, ["ownerId", "stateRoot", "ownerRoot", "stateDir", "metadataPath", "runtimeFile", "avdRoot", "createdAt", "updatedAt", "pid", "appiumPort", "capabilities"]);
     // Remove only values also represented at the target's top level.
@@ -42,6 +42,14 @@ function target(value) {
             if (object(result.sessionState[key])) result.sessionState[key] = internalStatus(result.sessionState[key]);
         }
         if (result.sessionState.state === "none" && Object.keys(result.sessionState).length === 1) delete result.sessionState;
+    }
+    if (options.compactPlan === true && object(result.providerPlan) && !failed(result.providerPlan)) {
+        result.providerPlan = omit(result.providerPlan, ["providerCommand", "workspaceDir", "startCommand", "stopCommand", "deleteCommand", "implemented"]);
+        if (object(result.providerPlan.helper)) result.providerPlan.helper = internalStatus(result.providerPlan.helper);
+        for (const key of ["image", "memoryMb", "cpus", "providerInstance"]) {
+            if (JSON.stringify(result.providerPlan[key]) === JSON.stringify(result[key])) delete result.providerPlan[key];
+        }
+        if (Array.isArray(result.providerPlan.deferred) && !result.providerPlan.deferred.length) delete result.providerPlan.deferred;
     }
     if (result.leaseState?.state === "not-required") delete result.leaseState;
     if (result.runtimeState === result.status || result.runtimeState === result.lifecycle) delete result.runtimeState;
@@ -122,6 +130,84 @@ function brokerStatus(value) {
     return result;
 }
 
+const TEXT_ACTIONS = new Set(["display_type", "device_type", "mobile_type_text"]);
+const HELPER_ACTIONS = new Set([
+    "device_click", "device_double_click", "device_key", "device_type", "device_scroll",
+    "device_cursor_position", "device_window_list", "device_accessibility_snapshot",
+    "device_upload", "device_download", "device_record_video_start", "device_record_video_stop",
+    "device_record_video_status",
+]);
+const HELPER_ECHO_KEYS = new Set(["id", "type", "ok", "provider", "createdAt", "completedAt", "durationMs"]);
+
+function withoutEcho(value, result) {
+    const remaining = {};
+    for (const [key, item] of Object.entries(value)) {
+        if (HELPER_ECHO_KEYS.has(key) || item === null) continue;
+        if (key in result && JSON.stringify(item) === JSON.stringify(result[key])) continue;
+        remaining[key] = item;
+    }
+    return remaining;
+}
+
+function operationResult(name, value) {
+    const result = { ...value };
+    // These are command diagnostics, not guest command output (device_exec is
+    // excluded by project). Nonempty unique diagnostics remain available.
+    if (result.stdout === "") delete result.stdout;
+    if (result.stderr === "") delete result.stderr;
+    if (result.status === 0) delete result.status;
+    const helper = HELPER_ACTIONS.has(name)
+        && (object(result.response) || typeof result.remoteScriptPath === "string");
+    if (helper) {
+        if (typeof result.stdout === "string") {
+            try {
+                const parsed = JSON.parse(result.stdout);
+                if (object(parsed) && !failed(parsed)
+                    && (JSON.stringify(parsed) === JSON.stringify(result.response)
+                        || Object.keys(withoutEcho(parsed, result)).length === 0)) delete result.stdout;
+            } catch { /* Keep non-JSON command diagnostics. */ }
+        }
+        if (object(result.response) && !failed(result.response)) {
+            const remaining = withoutEcho(result.response, result);
+            if (Object.keys(remaining).length) result.response = remaining;
+            else delete result.response;
+        }
+        delete result.remoteScriptPath;
+    }
+    if (TEXT_ACTIONS.has(name)) {
+        const text = typeof result.typed?.text === "string" ? result.typed.text
+            : typeof result.text === "string" ? result.text : null;
+        if (text !== null) {
+            result.typed = true;
+            result.length = text.length;
+            delete result.text;
+            delete result.keys;
+        }
+    }
+    if (name === "mobile_session_status") {
+        delete result.lazy;
+        if (object(result.appium) && !failed(result.appium)) result.appium = omit(result.appium, ["appium", "adb", "xcrun", "xcodebuild", "xcuitestDriver", "tools"]);
+        if (object(result.session)) result.session = internalStatus(result.session);
+    }
+    if (name === "mobile_wait_for_text") delete result.source;
+    if (name === "mobile_dump_ui" && typeof result.source === "string") {
+        delete result.remotePath;
+        delete result.serverUrl;
+    }
+    if (name === "mobile_set_battery" && Array.isArray(result.results)) {
+        // Each command can fail independently; retain all nonempty diagnostics.
+        const commands = result.results.map((entry) => object(entry) && !failed(entry)
+            ? Object.fromEntries(Object.entries(entry).filter(([key, item]) =>
+                !((key === "stdout" || key === "stderr") && item === "") && !(key === "status" && item === 0)))
+            : entry);
+        if (commands.every((entry) => object(entry) && !Object.keys(entry).length)) delete result.results;
+        else result.results = commands;
+    }
+    if (["display_cursor_position", "device_cursor_position"].includes(name)
+        && ("x" in result || object(result.cursor))) delete result.raw;
+    return result;
+}
+
 function project(name, value) {
     if (!object(value) || !TOOL_NAMES.has(name) || name === "device_exec") return value;
     if (name === "device_run_flow" || name === "mobile_run_flow") {
@@ -135,15 +221,17 @@ function project(name, value) {
     // Explicit raw transport diagnostics are opaque, including their result keys.
     if (name?.startsWith("device_broker_") && name !== "device_broker_status") return value;
     if (name === "device_broker_status") return brokerStatus(value);
-    if (!name?.startsWith("device_") && !name?.startsWith("mobile_")) return value;
+    if (!name?.startsWith("device_") && !name?.startsWith("mobile_") && !name?.startsWith("display_")) return value;
     // Keep complete failure and containment evidence, including nested provider errors.
     if (failed(value)) {
         const brokerFailure = typeof value.method === "string"
             && ("selected" in value || Array.isArray(value.attempts) || object(value.launch));
         return brokerFailure ? transportFailure(value) : omit(value, ["routedBy"]);
     }
+    value = operationResult(name, value);
+    if (name === "display_current") return target(value);
     const known = "routedBy" in value || "device" in value || "devices" in value
-        || "targetStatus" in value || (["device_backends", "device_inventory"].includes(name) && Array.isArray(value.backends))
+        || "targetStatus" in value || Array.isArray(value.targets) || (["device_backends", "device_inventory"].includes(name) && Array.isArray(value.backends))
         || (name === "device_status" && typeof value.id === "string")
         || (value.provider === "broker-appium" && object(value.broker));
     if (!known) return value;
@@ -155,9 +243,21 @@ function project(name, value) {
         if (Array.isArray(value.backends)) result.backends = value.backends.map(backend);
         if (object(value.broker)) result.broker = brokerStatus(value.broker);
     }
-    if (object(value.device)) result.device = target(value.device);
-    if (Array.isArray(value.devices)) result.devices = value.devices.map(target);
-    if (object(value.targetStatus) || (name === "device_status" && typeof value.id === "string")) result = target(result);
+    if (object(value.device)) {
+        result.device = target(value.device, { compactPlan: name === "device_status" });
+        // The Linux adapter adds device fields to the same public lab value.
+        // Remove the alias only when every lab field is represented exactly.
+        if (object(value.lab) && Object.entries(value.lab).every(([key, item]) =>
+            JSON.stringify(item) === JSON.stringify(value.device[key]))) delete result.lab;
+    }
+    if (Array.isArray(value.devices)) {
+        result.devices = value.devices.map((device) => target(device, { compactPlan: name === "device_list" }));
+        if (Array.isArray(value.labs) && value.labs.length === value.devices.length
+            && value.labs.every((lab, index) => object(lab) && object(value.devices[index])
+                && Object.entries(lab).every(([key, item]) => JSON.stringify(item) === JSON.stringify(value.devices[index][key])))) delete result.labs;
+    }
+    if (Array.isArray(value.targets)) result.targets = value.targets.map(target);
+    if (object(value.targetStatus) || (name === "device_status" && typeof value.id === "string")) result = target(result, { compactPlan: name === "device_status" });
     if (object(value.backend)) result.backend = backend(value.backend);
     if (name === "device_inventory" && object(value.discovery)) {
         result.discovery = omit(value.discovery, ["adb", "emulator", "avdmanager", "xcrun", "xcodebuild", "powershell", "ssh", "scp"]);

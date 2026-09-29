@@ -1,0 +1,168 @@
+import { chmodSync, readFileSync, writeFileSync } from "fs";
+import { join } from "path";
+import { describe, expect, it, vi } from "vitest";
+import * as commands from "../../device-lab-mcp/src/commands.mjs";
+import { handleAndroidTool, appiumDiscovery } from "../../device-lab-mcp/src/backends/android.mjs";
+import { handleMacosTool, listMacosDevices } from "../../device-lab-mcp/src/backends/macos-vm.mjs";
+import { handleIosTool, listIosDevices } from "../../device-lab-mcp/src/backends/ios-simulator.mjs";
+import { handleIosRealTool } from "../../device-lab-mcp/src/backends/ios-device.mjs";
+import { cleanupDeviceLabMcpTestContext, createDeviceLabMcpTestContext } from "./helpers/device-lab-mcp-fixture.js";
+import { freePort } from "./helpers/fake-broker-mcp-fixture.js";
+import { cleanupFakeMacosMcpContext, createFakeMacosMcpContext } from "./helpers/fake-macos-mcp-fixture.js";
+
+function json(result: any) { return JSON.parse(result.content[0].text); }
+
+describe("provider discovery is shared only inside one inventory operation", () => {
+    it("macOS lists three devices with one provider lookup round and refreshes the next call", async () => {
+        const context = createFakeMacosMcpContext();
+        const commandPath = vi.spyOn(commands, "commandPath");
+        try {
+            for (let index = 0; index < 3; index++) {
+                const result = await handleMacosTool("device_create", { backend: "macos-vm", name: `Audit ${index}`, deviceId: `macos-audit-${index}`, provider: "tart" });
+                expect(result?.isError).not.toBe(true);
+            }
+            commandPath.mockClear();
+            expect(listMacosDevices()).toHaveLength(3);
+            expect(commandPath.mock.calls.map(([name]) => name)).toEqual(["tart", "vz", "utmctl"]);
+            commandPath.mockClear();
+            expect(listMacosDevices()).toHaveLength(3);
+            expect(commandPath.mock.calls.map(([name]) => name)).toEqual(["tart", "vz", "utmctl"]);
+            commandPath.mockClear();
+            const status = await handleMacosTool("device_status", { deviceId: "macos-audit-0" });
+            expect(json(status).device.id).toBe("macos-audit-0");
+            expect(commandPath.mock.calls.map(([name]) => name)).toEqual(["tart", "vz", "utmctl"]);
+        } finally {
+            commandPath.mockRestore();
+            cleanupFakeMacosMcpContext(context);
+        }
+    });
+
+    it("iOS uses one actual simctl process for multiple owned devices and observes new state on the next list", async () => {
+        const context = createFakeMacosMcpContext();
+        const xcrun = join(context.binDir, "xcrun");
+        const inventoryPath = join(context.homeDir, "simulator-inventory.json");
+        const logPath = join(context.homeDir, "simctl-count.log");
+        const originalInventory = process.env.AUDIT_IOS_INVENTORY;
+        const originalLog = process.env.AUDIT_IOS_LOG;
+        process.env.AUDIT_IOS_INVENTORY = inventoryPath;
+        process.env.AUDIT_IOS_LOG = logPath;
+        writeFileSync(xcrun, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$AUDIT_IOS_LOG"\n/bin/cat "$AUDIT_IOS_INVENTORY"\n');
+        chmodSync(xcrun, 0o755);
+        const devices: Array<{ name: string; udid: string; state: string }> = [];
+        try {
+            for (let index = 0; index < 3; index++) {
+                const created = await handleIosTool("device_create", { backend: "ios-simulator", name: `Audit ${index}`, deviceId: `ios-audit-${index}`, udid: `AUDIT-UDID-${index}` });
+                expect(created?.isError).not.toBe(true);
+                const device = json(created).device;
+                devices.push({ name: device.simulatorName, udid: device.udid, state: "Booted" });
+            }
+            writeFileSync(inventoryPath, JSON.stringify({ devices: { "ios-runtime": devices } }));
+            writeFileSync(logPath, "");
+            const running = listIosDevices();
+            expect(running).toHaveLength(3);
+            expect(running.map((device: any) => device.status)).toEqual(["booted", "booted", "booted"]);
+            expect(readFileSync(logPath, "utf8").trim().split("\n")).toEqual(["simctl list devices -j"]);
+
+            writeFileSync(inventoryPath, JSON.stringify({ devices: { "ios-runtime": devices.map((device) => ({ ...device, state: "Shutdown" })) } }));
+            writeFileSync(logPath, "");
+            const stopped = listIosDevices();
+            expect(stopped.map((device: any) => device.status)).toEqual(["stopped", "stopped", "stopped"]);
+            expect(readFileSync(logPath, "utf8").trim().split("\n")).toEqual(["simctl list devices -j"]);
+
+            writeFileSync(logPath, "");
+            const inventory = await handleIosTool("device_inventory", { backend: "ios-simulator" });
+            expect(json(inventory).devices).toHaveLength(3);
+            expect(readFileSync(logPath, "utf8").trim().split("\n")).toEqual(["simctl list -j"]);
+
+            writeFileSync(xcrun, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$AUDIT_IOS_LOG"\necho "simctl unavailable" >&2\nexit 9\n');
+            writeFileSync(logPath, "");
+            const failed = await handleIosTool("device_inventory", { backend: "ios-simulator" });
+            expect(json(failed).hostSimulators.available).toBe(false);
+            expect(readFileSync(logPath, "utf8").trim().split("\n")).toEqual(["simctl list -j"]);
+        } finally {
+            if (originalInventory === undefined) delete process.env.AUDIT_IOS_INVENTORY; else process.env.AUDIT_IOS_INVENTORY = originalInventory;
+            if (originalLog === undefined) delete process.env.AUDIT_IOS_LOG; else process.env.AUDIT_IOS_LOG = originalLog;
+            cleanupFakeMacosMcpContext(context);
+        }
+    });
+
+    it("iOS wireless rejects unsupported action before discovery and surfaces xctrace failure", async () => {
+        const context = createFakeMacosMcpContext();
+        const commandPath = vi.spyOn(commands, "commandPath");
+        const xcrun = join(context.binDir, "xcrun");
+        writeFileSync(xcrun, '#!/bin/sh\necho "device inventory failed" >&2\nexit 7\n');
+        chmodSync(xcrun, 0o755);
+        try {
+            const unsupported = await handleIosRealTool("device_wireless", { backend: "ios-device", action: "pair", udid: "test-phone" });
+            expect(unsupported?.isError).toBe(true);
+            expect(json(unsupported)).not.toHaveProperty("networkVisible");
+            expect(commandPath).not.toHaveBeenCalled();
+            const status = await handleIosRealTool("device_wireless", { backend: "ios-device", action: "status" });
+            expect(status?.isError).toBe(true);
+            expect(json(status)).toMatchObject({ ok: false, error: "ios-wireless-inventory-failed" });
+            expect(JSON.stringify(status)).toContain("device inventory failed");
+        } finally {
+            commandPath.mockRestore();
+            cleanupFakeMacosMcpContext(context);
+        }
+    });
+});
+
+
+describe("broker-first backend discovery over the MCP wire", () => {
+    it("does not probe unused local providers, while detail and explicit direct mode opt into them", { timeout: 30000 }, async () => {
+        const env: Record<string, string> = {};
+        let log = "";
+        const context = await createDeviceLabMcpTestContext({ env, setupHome(home) {
+            log = join(home, "discovery-processes.jsonl");
+            writeFileSync(log, "");
+            const preload = join(home, "trace-discovery.cjs");
+            writeFileSync(preload, `const fs=require('fs'),cp=require('child_process');const original=cp.spawnSync;cp.spawnSync=function(command,args,...rest){fs.appendFileSync(${JSON.stringify(log)},JSON.stringify({command,args})+'\\n');return original.call(this,command,args,...rest)};require('module').syncBuiltinESMExports();`);
+            env.NODE_OPTIONS = `--require=${JSON.stringify(join(home, "isolate-broker-auth.cjs"))} --require=${JSON.stringify(preload)}`;
+        } });
+        try {
+            const port = await freePort();
+            const args = { implicitBroker: true, autolaunch: false, hostCandidates: ["127.0.0.1"], port, timeoutMs: 100 };
+            writeFileSync(log, "");
+            const minimal = await context.client.callTool({ name: "device_backends", arguments: { ...args, detail: false } });
+            expect(json(minimal)).toMatchObject({ ok: false, error: "broker-unavailable" });
+            expect(readFileSync(log, "utf8")).not.toMatch(/command -v (?:adb|emulator|avdmanager|xcrun|wsb|tart)/);
+            expect(readFileSync(log, "utf8")).toContain("command -v qemu-system-x86_64");
+            expect(json(minimal).backends.some((backend: any) => backend.name === "linux-vm")).toBe(true);
+
+            writeFileSync(log, "");
+            const detailed = await context.client.callTool({ name: "device_backends", arguments: { ...args, detail: true } });
+            expect(json(detailed).localBackends.length).toBeGreaterThan(1);
+            expect(readFileSync(log, "utf8")).toContain("command -v adb");
+            expect(readFileSync(log, "utf8")).toContain("command -v qemu-system-x86_64");
+
+            writeFileSync(log, "");
+            const direct = await context.client.callTool({ name: "device_backends", arguments: { implicitBroker: false, detail: false } });
+            expect(json(direct).backends.some((backend: any) => backend.name === "android-emulator")).toBe(true);
+            expect(readFileSync(log, "utf8")).toContain("command -v adb");
+        } finally { await cleanupDeviceLabMcpTestContext(context); }
+    });
+});
+
+
+describe("Android discovery scope", () => {
+    it("status resolves SDK tools once and standalone Appium discovery does not inspect emulator tools", async () => {
+        const context = createFakeMacosMcpContext();
+        const commandPath = vi.spyOn(commands, "commandPath");
+        try {
+            const created = await handleAndroidTool("device_create", { backend: "android-emulator", name: "Count fixture", deviceId: "android-count-fixture", avdName: "CountFixture", port: 5588 });
+            expect(created?.isError).not.toBe(true);
+            commandPath.mockClear();
+            const status = await handleAndroidTool("device_status", { deviceId: "android-count-fixture" });
+            expect(status?.isError).not.toBe(true);
+            for (const tool of ["adb", "emulator", "avdmanager"]) {
+                expect(commandPath.mock.calls.filter(([name]) => name === tool)).toHaveLength(1);
+            }
+            commandPath.mockClear();
+            appiumDiscovery();
+            expect(commandPath.mock.calls.map(([name]) => name)).not.toEqual(expect.arrayContaining(["emulator"]));
+            expect(commandPath.mock.calls.map(([name]) => name)).not.toEqual(expect.arrayContaining(["avdmanager"]));
+            expect(commandPath.mock.calls.filter(([name]) => name === "adb")).toHaveLength(1);
+        } finally { commandPath.mockRestore(); cleanupFakeMacosMcpContext(context); }
+    });
+});

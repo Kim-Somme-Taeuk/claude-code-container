@@ -2580,10 +2580,12 @@ function isBrokerServeCommandLine(commandLine: string, port: number, expectedCli
 
 function discoverBrokerPortProcess(port: number, platform: NodeJS.Platform): BrokerPortProcess | null {
     if (platform === "linux") return discoverLinuxBrokerPortProcess(port);
-    if (platform === "darwin") return discoverCommandBrokerPortProcess("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], "darwin");
+    if (platform === "darwin") return discoverCommandBrokerPortProcess("/usr/sbin/lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], "darwin");
     if (platform === "win32") return discoverWindowsBrokerPortProcess(port);
     return null;
 }
+
+export const discoverBrokerPortProcessForTest = discoverBrokerPortProcess;
 
 function discoverLinuxBrokerPortProcess(port: number): BrokerPortProcess | null {
     const portHex = port.toString(16).toUpperCase().padStart(4, "0");
@@ -2626,13 +2628,14 @@ function discoverLinuxBrokerPortProcess(port: number): BrokerPortProcess | null 
 }
 
 function discoverCommandBrokerPortProcess(command: string, args: string[], platform: NodeJS.Platform): BrokerPortProcess | null {
-    const result = spawnSync(command, args, { encoding: "utf8", windowsHide: true, timeout: 1000 });
-    if (result.status !== 0 || !result.stdout) return null;
+    const result = spawnSync(command, args, { encoding: "utf8", windowsHide: true, timeout: 5000 });
+    if (result.status !== 0 || result.error || result.signal || !result.stdout) return null;
     const pid = platform === "darwin"
         ? Number((result.stdout.match(/^p(\d+)$/m) || [])[1])
         : NaN;
     if (!Number.isInteger(pid) || pid <= 0) return null;
-    const ps = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8", windowsHide: true, timeout: 1000 });
+    const ps = spawnSync("/bin/ps", ["-ww", "-p", String(pid), "-o", "command="], { encoding: "utf8", windowsHide: true, timeout: 5000 });
+    if (ps.status !== 0 || ps.error || ps.signal) return null;
     return { pid, commandLine: ps.stdout.trim(), processIdentity: readDeviceRuntimeProcessIdentity(pid, { platform }) };
 }
 

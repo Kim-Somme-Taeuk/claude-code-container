@@ -9,7 +9,7 @@ import { requiresOwnerDeviceOperation } from "../state/device-operation-policy.m
 import { inspectProcessIdentity, refreshOwnedRuntimeProcessIdentity, signalOwnedRuntimeProcess, terminateOwnedRuntimeProcess, waitForProcessIdentity } from "../state/process-identity.mjs";
 import { transitionAppiumGeneration } from "../state/runtime-generation.mjs";
 import { claimPhysicalLease, heartbeatPhysicalLease, releasePhysicalLease, releasePhysicalLeaseWithMutation, startPhysicalLeaseHeartbeat } from "../state/physical-lease-store.mjs";
-import { withTargetStatus } from "../status.mjs";
+import { withTargetStatus, withTargetStatuses } from "../status.mjs";
 import { fetchIosAppiumJson, iosAppiumDiscovery, iosDiscovery, normalizeIosOrientation } from "./ios-simulator.mjs";
 
 const IOS_REAL_CAPABILITIES = [
@@ -24,8 +24,7 @@ const IOS_REAL_CAPABILITIES = [
     "mobile_stop_app",
 ];
 
-export function iosRealBackend() {
-    const discovery = iosRealDiscovery();
+export function iosRealBackend(discovery = iosRealDiscovery()) {
     return {
         name: "ios-device",
         host: "macos-host-usb-xcode",
@@ -163,8 +162,8 @@ function iosWirelessUnsupported(action, details = {}) {
     }, null, 2));
 }
 
-function appiumStatus(device) {
-    const discovery = iosAppiumDiscovery();
+function appiumStatus(device, ios) {
+    const discovery = iosAppiumDiscovery(ios);
     return {
         deviceId: device.id,
         appium: discovery,
@@ -269,8 +268,8 @@ async function appiumServerReady(appium) {
     }
 }
 
-async function appiumSessionReady(appium) {
-    if (!appium?.sessionId || !await appiumServerReady(appium)) return false;
+async function appiumSessionReady(appium, serverReady) {
+    if (!appium?.sessionId || !serverReady) return false;
     try {
         await fetchIosAppiumJson(`${appium.serverUrl}/session/${appium.sessionId}`, { method: "GET" });
         return true;
@@ -325,12 +324,12 @@ async function ensureIosRealAppiumSession(deviceId) {
     const port = device.appiumPort || appiumPortForDevice(device.id);
     const serverUrl = `http://127.0.0.1:${port}`;
 
-    if (await appiumSessionReady(device.appium)) {
+    const serverReady = await appiumServerReady(device.appium);
+    if (await appiumSessionReady(device.appium, serverReady)) {
         return { device, serverUrl: device.appium.serverUrl, sessionId: device.appium.sessionId };
     }
 
     const staleAppium = device.appium ?? null;
-    const serverReady = await appiumServerReady(staleAppium);
     const ownedServer = Boolean(staleAppium?.runtimeId
         && staleAppium.processOwner === "device-lab-mcp"
         && staleAppium.startedBy === "direct-provider"
@@ -368,7 +367,7 @@ async function ensureIosRealAppiumSession(deviceId) {
         child.unref();
     }
 
-    const ready = await waitForAppium(serverUrl);
+    const ready = (reusableServer && staleAppium.serverUrl === serverUrl) || await waitForAppium(serverUrl);
     if (startupRuntime) startupRuntime = refreshOwnedRuntimeProcessIdentity(startupRuntime);
     if (!ready) {
         if (child?.pid) await terminateOwnedAppiumProcess(startupRuntime, "iOS physical Appium startup");
@@ -494,7 +493,7 @@ function requireBundleIdArg(bundleId, toolName) {
 }
 
 export function listIosRealDevices() {
-    return readIosRealDevices().map((device) => withTargetStatus({ ...device, ownerId: ownerId() }));
+    return withTargetStatuses(readIosRealDevices().map((device) => ({ ...device, ownerId: ownerId() })));
 }
 
 async function handleIosRealToolUnlocked(name, args) {
@@ -515,36 +514,34 @@ async function handleIosRealToolUnlocked(name, args) {
         case "device_wireless": {
             const { backend = "ios-device", action = "status", udid } = args;
             if (backend !== "ios-device") return undefined;
+            if (action !== "status") return iosWirelessUnsupported(action, { udid: udid || null });
             const discovery = iosRealDiscovery();
             if (!discovery.xcrun) {
                 return iosWirelessUnsupported(action, { error: "ios-wireless-missing-xcrun", missing: ["xcrun"] });
             }
             const inventory = hostIosDevices(discovery);
+            if (!inventory.available) return textResult(false, JSON.stringify({
+                ok: false, backend, action, error: "ios-wireless-inventory-failed",
+                detail: inventory.error || inventory.missing.join(", "),
+            }));
             const devices = inventory.devices || [];
             const selected = udid ? devices.find((device) => device.udid === udid) || null : null;
-            if (action === "status") {
-                return jsonResult({
-                    ok: true,
-                    backend,
-                    provider: "xcrun-xctrace",
-                    supportedActions: ["status"],
-                    unsupportedActions: ["pair", "connect", "usb-tcpip"],
-                    inventory,
-                    udid: udid || null,
-                    selected,
-                    networkVisible: selected ? selected.connection === "wifi" : devices.some((device) => device.connection === "wifi"),
-                    attachFlow: "If the target UDID is visible as a network device, call device_attach with backend=ios-device, udid, and connection=wifi.",
-                    notes: [
-                        "Apple trust, Developer Mode, and Xcode network pairing must be completed on the macOS host",
-                        "CCC does not bypass or automate the Trust This Computer prompt",
-                        "Physical-device ownership is still claimed by device_attach or broker attach",
-                    ],
-                });
-            }
-            return iosWirelessUnsupported(action, {
+            return jsonResult({
+                ok: true,
+                backend,
+                provider: "xcrun-xctrace",
+                supportedActions: ["status"],
+                unsupportedActions: ["pair", "connect", "usb-tcpip"],
+                inventory,
                 udid: udid || null,
                 selected,
-                networkVisible: selected ? selected.connection === "wifi" : false,
+                networkVisible: selected ? selected.connection === "wifi" : devices.some((device) => device.connection === "wifi"),
+                attachFlow: "If the target UDID is visible as a network device, call device_attach with backend=ios-device, udid, and connection=wifi.",
+                notes: [
+                    "Apple trust, Developer Mode, and Xcode network pairing must be completed on the macOS host",
+                    "CCC does not bypass or automate the Trust This Computer prompt",
+                    "Physical-device ownership is still claimed by device_attach or broker attach",
+                ],
             });
         }
 
@@ -697,7 +694,7 @@ async function handleIosRealToolUnlocked(name, args) {
             if (!device) return undefined;
             const discovery = iosRealDiscovery();
             const host = discovery.xcrun ? hostIosDevices(discovery).devices.find((item) => item.udid === device.udid) || null : null;
-            return jsonResult({ device: withTargetStatus(device), backend: iosRealBackend(), hostDevice: host, appium: appiumStatus(device) });
+            return jsonResult({ device: withTargetStatus(device), backend: iosRealBackend(discovery), hostDevice: host, appium: appiumStatus(device, discovery) });
         }
 
         case "mobile_session_status": {

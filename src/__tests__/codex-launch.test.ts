@@ -207,3 +207,83 @@ describe("non-destructive Codex launch", () => {
         if (!failed) expect(launch.mock.calls[0]).toEqual(["docker", [...prefix, ...command], { stdio: "inherit" }]);
     });
 });
+
+
+const missingStart = () => probe(1, "", { stderr: "Error: daemon executable not found at /home/user/.codex/packages/app-server-daemon/current/bin/codex; run daemon update" });
+const fallbackHelp = "Usage: codex [OPTIONS]\n      --no-daemon\n          Run an in-process server\n";
+
+describe("one-session fallback for a positively broken daemon installation", () => {
+    it.each([
+        ["codex", "resume", "session-id", "continue now"],
+        ["codex", "fork", "--last", "make another variant"],
+        ["codex", "-c", 'literal="$(touch /tmp/not-run)"', "resume", "session-id", "--image", "/tmp/image with spaces.png"],
+    ])("uses the supported global flag without dropping original arguments: %j", (...args) => {
+        const command = args as string[];
+        const mock = runner(missingDaemon(), probe(0, startHelp), missingStart(), probe(0, fallbackHelp));
+        const result = prepare(command, mock);
+        expect(result).toEqual({ ok: true, command: ["codex", "--no-daemon", ...command.slice(1)], notice: expect.stringContaining("without the background server") });
+        expect(command).not.toContain("--no-daemon");
+        expect(mock).toHaveBeenCalledTimes(4);
+        expect(mock.mock.calls[3][1]).toEqual([...prefix, "codex", "--help"]);
+        expect(mock.mock.calls[3][2]).toMatchObject({ timeout: 5000, maxBuffer: 64 * 1024 });
+        expect(mock.mock.calls.flatMap((call) => call[1])).not.toContain("update");
+        expect(mock.mock.calls.filter((call) => call[1].includes("start") && !call[1].includes("--help"))).toHaveLength(1);
+    });
+    it.each([
+        probe(1, "", { stderr: "Socket permission denied" }),
+        probe(1, missingStart().stderr),
+        probe(null, "", { stderr: missingStart().stderr, signal: "SIGINT" }),
+        probe(null, "", { stderr: missingStart().stderr, error: new Error("timeout") }),
+    ])("never falls back for unrelated, interrupted or timed-out startup: %j", (failure) => {
+        const mock = runner(missingDaemon(), probe(0, startHelp), failure);
+        expect(prepare(["codex"], mock).ok).toBe(false);
+        expect(mock).toHaveBeenCalledTimes(3);
+    });
+    it.each([
+        probe(0, "Usage: codex --no-daemon-is-not-a-flag"),
+        probe(0, "Documentation mentions --no-daemon but does not advertise it"),
+        probe(1, fallbackHelp),
+        probe(null, fallbackHelp, { signal: "SIGTERM" }),
+        probe(null, fallbackHelp, { error: new Error("help timeout") }),
+    ])("requires positively advertised fallback support: %j", (help) => {
+        const command = ["codex", "resume", "session-id"];
+        const mock = runner(missingDaemon(), probe(0, startHelp), missingStart(), help);
+        expect(prepare(command, mock)).toMatchObject({ ok: false, command });
+        expect(mock).toHaveBeenCalledTimes(4);
+    });
+    it("leaves partial daemon files, control endpoint and history unchanged", () => {
+        const home = mkdtempSync(join(tmpdir(), "ccc-codex-fallback-"));
+        const current = join(home, "packages", "app-server-daemon", "current");
+        mkdirSync(current, { recursive: true });
+        mkdirSync(join(home, "app-server-control"));
+        const files = [join(home, "history.jsonl"), join(current, "preserve-package-data"), join(home, "app-server-control", "app-server-control.sock")];
+        for (const file of files) writeFileSync(file, "retain original bytes\n");
+        const mock = vi.fn((_runtime: string, args: string[]) => {
+            if (args[prefix.length] === "node") return spawnSync(process.execPath, args.slice(prefix.length + 1), { encoding: "utf8", timeout: 5000, env: { ...process.env, CODEX_HOME: home } });
+            if (args.includes("start")) return args.includes("--help") ? probe(0, startHelp) : missingStart();
+            return probe(0, fallbackHelp);
+        });
+        try {
+            expect(prepare(["codex", "resume", "session-id"], mock)).toMatchObject({ ok: true, command: ["codex", "--no-daemon", "resume", "session-id"] });
+            expect(mock).toHaveBeenCalledTimes(4);
+            for (const file of files) expect(readFileSync(file, "utf8")).toBe("retain original bytes\n");
+        } finally { rmSync(home, { recursive: true, force: true }); }
+    });
+    it("launches the returned fallback command once, prints the notice, and still cleans up", () => {
+        const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+        const start = source.indexOf("let preparationStatus:");
+        const end = source.indexOf("if (process.env.DEBUG)", start);
+        const js = transpileModule(source.slice(start, end) + "\nreturn resultStatus;", { compilerOptions: { target: ScriptTarget.ES2022 } }).outputText;
+        const events: string[] = [];
+        const command = ["codex", "resume", "session-id"];
+        const fallback = ["codex", "--no-daemon", "resume", "session-id"];
+        const launch = vi.fn(() => { events.push("launch"); return { status: 0 }; });
+        const execute = new Function("commandTool", "options", "prepareCodexLaunch", "runtimeCli", "execArgs", "containerName", "resolvedCmd", "process", "console", "CLAUDE_BIN_PATH", "cmd", "spawnSync", "restoreCodexConfigHostOwnership", "unlinkSync", "envFile", js);
+        const result = execute({ name: "codex" }, { interactive: true }, () => ({ ok: true, command: fallback, notice: "daemon fallback" }), () => "docker", [...prefix.slice(0, -1)], "ccc-fixture", command,
+            { stdin: { isTTY: false }, stdout: { isTTY: false } }, { error: (message: string) => events.push(message) }, "unused", command, launch,
+            () => events.push("ownership-cleanup"), () => events.push("env-cleanup"), "/tmp/private-env");
+        expect(result).toBe(0);
+        expect(launch).toHaveBeenCalledExactlyOnceWith("docker", [...prefix, ...fallback], { stdio: "inherit" });
+        expect(events).toEqual(["[ccc] daemon fallback", "launch", "ownership-cleanup", "env-cleanup"]);
+    });
+});

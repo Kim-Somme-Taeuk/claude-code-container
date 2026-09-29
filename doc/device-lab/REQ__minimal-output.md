@@ -43,3 +43,25 @@ Each authenticated RPC still checks the live broker generation and reads its
 owner credential. Device inventory and backend mismatch checks remain current;
 no device result, credential or authorization is cached across operations.
 Caller-supplied arguments cannot provide trusted preparation evidence.
+
+## Every tool and provider
+
+The compact contract applies to every advertised tool, including current-display
+and VM management tools. Known successful helper envelopes must not repeat UI
+hierarchies, input text, parsed response JSON or empty command diagnostics.
+Opaque command output, image data, semantic UI content, current incarnation IDs,
+artifact paths and unique failure/containment evidence remain available.
+`detail: true` preserves the original diagnostic payload.
+
+Advertised inputs describe the requested action and target. Internal mobile
+connection settings need not be repeated in every tool schema; legacy callers
+may still provide them. Destructive confirmation and input constraints remain.
+
+Provider discovery and status formatting may share a fresh snapshot within one
+list operation. They must not share snapshots across requests or replace fresh
+mutation-time identity, generation and lease checks. State mutation may skip a
+byte-identical write only after locking, reading and validating the result.
+
+The exhaustive audit records every advertised tool and implementation function,
+its disposition and supporting evidence. Static review and fixture tests are
+reported separately from actual platform/device execution.

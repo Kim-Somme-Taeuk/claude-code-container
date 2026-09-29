@@ -117,8 +117,7 @@ function macosDiscovery() {
     };
 }
 
-export function macosBackend() {
-    const discovery = macosDiscovery();
+export function macosBackend(discovery = macosDiscovery()) {
     return {
         name: "macos-vm",
         host: "macos-host",
@@ -357,11 +356,11 @@ function macosProviderPlan(device, discovery = macosDiscovery()) {
     };
 }
 
-function deviceWithPlan(device) {
+function deviceWithPlan(device, discovery) {
     const publicDevice = publicMacosDevice(device);
     return withTargetStatus({
         ...publicDevice,
-        providerPlan: macosProviderPlan(publicDevice),
+        providerPlan: macosProviderPlan(publicDevice, discovery),
     });
 }
 
@@ -1176,7 +1175,10 @@ function sshBridge(device, toolName) {
 }
 
 export function listMacosDevices() {
-    return readMacosDevices().map((device) => deviceWithPlan({ ...device, ownerId: ownerId() }));
+    const devices = readMacosDevices();
+    if (!devices.length) return [];
+    const discovery = macosDiscovery();
+    return devices.map((device) => deviceWithPlan({ ...device, ownerId: ownerId() }, discovery));
 }
 
 async function handleMacosToolUnlocked(name, args) {
@@ -1557,7 +1559,8 @@ async function handleMacosToolUnlocked(name, args) {
             const { deviceId } = args;
             const device = findMacosDevice(deviceId);
             if (!device) return undefined;
-            return jsonResult({ device: deviceWithPlan(device), backend: macosBackend() });
+            const discovery = macosDiscovery();
+            return jsonResult({ device: deviceWithPlan(device, discovery), backend: macosBackend(discovery) });
         }
 
         case "device_snapshot_create": {

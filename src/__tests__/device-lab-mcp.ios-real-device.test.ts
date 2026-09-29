@@ -4,7 +4,7 @@ import { join } from "path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { handleIosRealTool } from "../../device-lab-mcp/src/backends/ios-device.mjs";
 import { iosRealDeviceE2ECapability } from "../../scripts/real-tests/ios-e2e.ts";
-import { cleanupFakeIosMcpContext, createFakeIosMcpContext, TIMEOUT, type FakeIosMcpContext } from "./helpers/fake-ios-mcp-fixture.js";
+import { exerciseStaleExternalIosSession, cleanupFakeIosMcpContext, createFakeIosMcpContext, TIMEOUT, type FakeIosMcpContext } from "./helpers/fake-ios-mcp-fixture.js";
 
 function parseToolJson(result: { content?: unknown }) {
     return JSON.parse((((result.content as Array<{ text?: string }> | undefined) ?? [])[0]?.text ?? "{}")) as Record<string, unknown>;
@@ -84,6 +84,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
             selected: expect.objectContaining({ name: "Network Named USB iPhone", connection: "usb" }),
         }));
 
+        const logBeforeUnsupportedPair = readFileSync(logPath, "utf-8");
         const unsupportedIosPair = await client.callTool({
             name: "device_wireless",
             arguments: { backend: "ios-device", action: "pair", udid: "00008110-001C195E0E91801E" },
@@ -98,8 +99,9 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         expect(unsupportedIosPairPayload).toEqual(expect.objectContaining({
             ok: false,
             error: "ios-wireless-pairing-requires-xcode-trust",
-            networkVisible: false,
         }));
+        expect(unsupportedIosPairPayload).not.toHaveProperty("networkVisible");
+        expect(readFileSync(logPath, "utf-8")).toBe(logBeforeUnsupportedPair);
         expect(unsupportedIosPairPayload.attachFlow).toContain("device_inventory");
 
         const iosLeaseDir = join(homeDir, ".ccc/devices/physical-leases/ios-device/locks");
@@ -260,6 +262,38 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
             serverUrl: realDumpPayload.serverUrl,
             physical: true,
         }));
+
+        // A healthy session needs one fresh server check plus its session check.
+        const beforeReadyReuse = readFileSync(logPath, "utf-8").length;
+        const healthyReuse = await client.callTool({ name: "mobile_dump_ui", arguments: { deviceId: "ios-device-real-iphone" } });
+        expect(healthyReuse.isError, JSON.stringify(healthyReuse)).not.toBe(true);
+        const readyReuseLog = readFileSync(logPath, "utf-8").slice(beforeReadyReuse);
+        expect((readyReuseLog.match(/appium-http GET \/status\n/g) || []).length).toBe(1);
+        expect((readyReuseLog.match(/appium-http GET \/session\/IOS-SESSION-1\n/g) || []).length).toBe(1);
+        expect(readyReuseLog).not.toContain("appium-http POST /session");
+
+        const externalReuse = await exerciseStaleExternalIosSession(context, "ios-device", "ios-device-real-iphone");
+        expect(externalReuse.result.isError, JSON.stringify(externalReuse.result)).not.toBe(true);
+        const externalRequests = externalReuse.log.split("\n").filter((line) => line.startsWith("appium-http "));
+        expect(externalRequests).toEqual([
+            "appium-http GET /status",
+            `appium-http GET /session/${externalReuse.previousSessionId}`,
+            "appium-http POST /session",
+            "appium-http GET /session/IOS-SESSION-2/source",
+        ]);
+        expect(externalReuse.log).not.toContain("appium server --port");
+        expect(externalReuse.log).not.toContain("appium-server-sigint");
+
+        // Failed health must not authorize reuse of the old session. A new
+        // owned server is started and must pass its own readiness check.
+        writeFileSync(join(homeDir, "fail-ios-status-once"), "1");
+        const beforeFailedStatus = readFileSync(logPath, "utf-8").length;
+        const healthRecovered = await client.callTool({ name: "mobile_dump_ui", arguments: { deviceId: "ios-device-real-iphone" } });
+        expect(healthRecovered.isError, JSON.stringify(healthRecovered)).not.toBe(true);
+        const failedStatusLog = readFileSync(logPath, "utf-8").slice(beforeFailedStatus);
+        expect((failedStatusLog.match(/appium-http GET \/status\n/g) || []).length).toBe(2);
+        expect(failedStatusLog).toContain("appium-http POST /session");
+        expect(failedStatusLog.slice(0, failedStatusLog.indexOf("appium-http POST /session"))).not.toContain("appium-http GET /session/");
 
         const realScreenshot = await client.callTool({
             name: "device_screenshot",

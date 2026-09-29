@@ -72,7 +72,7 @@ try {
 `;
 
 export type CodexLaunchPreparation =
-    | { ok: true; command: string[] }
+    | { ok: true; command: string[]; notice?: string }
     | { ok: false; command: string[]; status: number; error: string };
 
 /** Initialize a positively missing daemon without changing or replaying the user command. */
@@ -107,6 +107,18 @@ export function prepareCodexLaunch(
     if (interactive.profile) return failure("Codex daemon is missing; automatic initialization does not support --profile. Start the daemon with the intended configuration before resuming.");
     try {
         const start = runner(runtime, [...startArgs, ...interactive.daemonArgs], { ...probeOptions, timeout: 60000 });
+        if (!start.error && !start.signal && start.status !== 0
+            && /Error: daemon executable not found at [^\r\n]+[\/]packages[\/]app-server-daemon[\/]current[\/]bin[\/]codex;/.test(String(start.stderr))) {
+            const help = runner(runtime, [...execPrefix, command[0], "--help"], probeOptions);
+            if (!help.error && !help.signal && help.status === 0
+                && /^\s+--no-daemon\s*$/m.test(String(help.stdout))) {
+                return {
+                    ok: true,
+                    command: [original[0], "--no-daemon", ...original.slice(1)],
+                    notice: "Codex daemon installation is incomplete; running this session without the background server. Session history is preserved.",
+                };
+            }
+        }
         if (start.error || start.signal || start.status !== 0) {
             const status = start.signal === "SIGINT" ? 130 : start.signal === "SIGTERM" ? 143 : start.signal === "SIGHUP" ? 129
                 : typeof start.status === "number" && start.status > 0 ? start.status : 1;

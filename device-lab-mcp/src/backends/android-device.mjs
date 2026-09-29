@@ -14,7 +14,7 @@ import { requiresOwnerDeviceOperation } from "../state/device-operation-policy.m
 import { inspectProcessIdentity, readProcessIdentity, signalOwnedRuntimeProcess } from "../state/process-identity.mjs";
 import { claimRecordingFinalization, recordingGenerationMatches, transitionRecordingGeneration } from "../state/runtime-generation.mjs";
 import { claimPhysicalLease, heartbeatPhysicalLease, releasePhysicalLease, releasePhysicalLeaseWithMutation, startPhysicalLeaseHeartbeat } from "../state/physical-lease-store.mjs";
-import { withTargetStatus } from "../status.mjs";
+import { withTargetStatus, withTargetStatuses } from "../status.mjs";
 import { commitLocalOutputStage, createLocalOutputStage, stageLocalInputFile } from "../transfer-file.mjs";
 
 const ANDROID_SCREENSHOT_TIMEOUT_MS = 30_000;
@@ -45,8 +45,7 @@ const ANDROID_REAL_DEVICE_ID_TOOLS = new Set(ANDROID_REAL_CAPABILITIES.filter((n
     "device_wireless",
 ].includes(name)));
 
-export function androidRealBackend() {
-    const discovery = androidDiscovery();
+export function androidRealBackend(discovery = androidDiscovery()) {
     const missing = discovery.adb ? [] : ["adb"];
     return {
         name: "android-device",
@@ -295,8 +294,8 @@ function androidWirelessCommandPayload(command, result, redactedIndices = []) {
     };
 }
 
-function appiumStatus(device) {
-    const discovery = appiumDiscovery();
+function appiumStatus(device, android) {
+    const discovery = appiumDiscovery(android);
     return {
         deviceId: device.id,
         appium: { available: discovery.available, missing: discovery.missing, tools: { appium: discovery.appium, adb: discovery.adb } },
@@ -450,7 +449,7 @@ async function stopVolatileProcesses(device, adb) {
 }
 
 export function listAndroidRealDevices() {
-    return readAndroidRealDevices().map((device) => withTargetStatus({ ...device, ownerId: ownerId() }));
+    return withTargetStatuses(readAndroidRealDevices().map((device) => ({ ...device, ownerId: ownerId() })));
 }
 
 async function handleAndroidRealToolUnlocked(name, args) {
@@ -781,7 +780,7 @@ async function handleAndroidRealToolUnlocked(name, args) {
                 const r = run(discovery.adb, ["-s", device.serial, "get-state"]);
                 hostState = { stdout: r.stdout.trim(), stderr: r.stderr, status: r.status };
             }
-            return jsonResult({ device: withTargetStatus(device), backend: androidRealBackend(), hostState, appium: appiumStatus(device) });
+            return jsonResult({ device: withTargetStatus(device), backend: androidRealBackend(discovery), hostState, appium: appiumStatus(device, discovery) });
         }
 
         case "device_exec": {

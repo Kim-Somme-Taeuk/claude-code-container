@@ -166,7 +166,11 @@ function send(res, status, payload) {
 }
 const server = http.createServer((req, res) => {
   fs.appendFileSync(log, 'appium-http ' + req.method + ' ' + req.url + '\\n');
-  if (req.method === 'GET' && req.url === '/status') return send(res, 200, {value: {ready: true}});
+  if (req.method === 'GET' && req.url === '/status') {
+    const failedStatus = process.env.HOME + '/fail-ios-status-once';
+    if (fs.existsSync(failedStatus)) { fs.unlinkSync(failedStatus); return send(res, 503, {value: {error: 'fixture status unavailable'}}); }
+    return send(res, 200, {value: {ready: true}});
+  }
   if (req.method === 'POST' && req.url === '/session') {
     let body = '';
     req.on('data', chunk => { body += chunk; });
@@ -289,4 +293,29 @@ export async function cleanupFakeIosMcpContext(context: FakeIosMcpContext | unde
     }
     rmSync(context.homeDir, { recursive: true, force: true });
     rmSync(context.binDir, { recursive: true, force: true });
+}
+
+// Exercise the external-server reuse branch while preserving ownership metadata
+// for fixture cleanup after the assertion. No real provider is involved.
+export async function exerciseStaleExternalIosSession(context: FakeIosMcpContext, backend: "ios" | "ios-device", deviceId: string) {
+    const owners = join(context.homeDir, ".ccc", "devices", "owners");
+    const statePath = join(owners, readdirSync(owners)[0], backend, "devices.json");
+    const original = JSON.parse(readFileSync(statePath, "utf8"));
+    const device = original.devices.find((item: { id: string }) => item.id === deviceId);
+    if (!device?.appium?.sessionId) throw new Error("Fixture requires an existing Appium session");
+    const owned = structuredClone(device.appium);
+    device.appium = { ...owned, processOwner: "external", startedBy: "existing-server" };
+    writeFileSync(statePath, JSON.stringify(original));
+    writeFileSync(join(context.homeDir, "stale-ios-session"), "1");
+    const before = readFileSync(context.logPath, "utf8").length;
+    try {
+        const result = await context.client.callTool({ name: "mobile_dump_ui", arguments: { deviceId } });
+        const log = readFileSync(context.logPath, "utf8").slice(before);
+        return { result, log, previousSessionId: owned.sessionId };
+    } finally {
+        const current = JSON.parse(readFileSync(statePath, "utf8"));
+        const latest = current.devices.find((item: { id: string }) => item.id === deviceId);
+        if (latest) latest.appium = { ...owned, sessionId: latest.appium?.sessionId || owned.sessionId };
+        writeFileSync(statePath, JSON.stringify(current));
+    }
 }

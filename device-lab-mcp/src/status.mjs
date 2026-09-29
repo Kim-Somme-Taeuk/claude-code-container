@@ -30,12 +30,17 @@ function leaseExpired(lease) {
     return typeof lease?.expiresAt === "string" && Date.parse(lease.expiresAt) <= Date.now();
 }
 
-function leaseStateFor(target) {
+function leaseStateFor(target, snapshots) {
     if (!target?.physical) return { state: "not-required" };
     const backend = target.backend;
     const hardwareId = leaseHardwareId(target);
     if (!backend || !hardwareId) return { state: "unknown", hardwareId };
-    const lease = readPhysicalLeases(backend).find((entry) => entry.hardwareId === hardwareId && entry.ownerId === ownerId()) || null;
+    let leases = snapshots?.get(backend);
+    if (!leases) {
+        leases = readPhysicalLeases(backend);
+        snapshots?.set(backend, leases);
+    }
+    const lease = leases.find((entry) => entry.hardwareId === hardwareId && entry.ownerId === ownerId()) || null;
     if (!lease) return { state: "missing", hardwareId };
     return {
         state: leaseExpired(lease) ? "expired" : "owned",
@@ -92,4 +97,13 @@ export function withTargetStatus(target, options = {}) {
         ...targetStatus,
         targetStatus,
     };
+}
+
+// Display-only snapshot: never shared with mutation-time lease authorization.
+export function withTargetStatuses(targets, options = {}) {
+    const snapshots = new Map();
+    return targets.map((target) => withTargetStatus(target, {
+        ...options,
+        leaseState: options.leaseState || leaseStateFor(target, snapshots),
+    }));
 }

@@ -416,7 +416,7 @@ function lifecycleBackendDevices() {
     ];
 }
 
-function directBackendList() {
+function directBackendList(includeLocalProviders = true) {
     return [
         {
             name: "x11-current-display",
@@ -426,13 +426,15 @@ function directBackendList() {
             lazy: false,
             capabilities: currentDisplayTarget().capabilities,
         },
-        androidBackend(),
-        androidRealBackend(),
-        iosBackend(),
-        iosRealBackend(),
-        windowsBackend(),
-        windowsVmBackend(),
-        macosBackend(),
+        ...(includeLocalProviders ? [
+            androidBackend(),
+            androidRealBackend(),
+            iosBackend(),
+            iosRealBackend(),
+            windowsBackend(),
+            windowsVmBackend(),
+            macosBackend(),
+        ] : []),
         linuxVmBackend(),
     ];
 }
@@ -447,11 +449,11 @@ function brokerDiscoveryExecutionTimeout(args = {}) {
     };
 }
 
-async function handleDeviceBackends(args = {}) {
-    const directBackends = directBackendList();
+async function handleDeviceBackends(args = {}, { detail = false } = {}) {
+    const brokerOptOut = optsOutOfImplicitBroker(args);
+    const directBackends = directBackendList(brokerOptOut || detail);
     const containerBackends = directBackends.filter((backend) => backend.host === "container");
     const explicitBroker = wantsBrokerBackends(args);
-    const brokerOptOut = optsOutOfImplicitBroker(args);
     if (brokerOptOut) {
         const broker = await brokerStatus({ ...args, autolaunch: false, probe: false });
         return jsonResult({
@@ -478,7 +480,7 @@ async function handleDeviceBackends(args = {}) {
                     ...brokerBackends.result.backends,
                 ],
                 hostBackends: brokerBackends.result,
-                localBackends: directBackends,
+                ...(detail ? { localBackends: directBackends } : {}),
             });
         }
         return jsonResult({
@@ -489,17 +491,18 @@ async function handleDeviceBackends(args = {}) {
             routedBy: "device-backends-broker",
             backends: containerBackends,
             brokerBackendsError: brokerBackends,
-            localBackends: directBackends,
+            ...(detail ? { localBackends: directBackends } : {}),
         });
     }
     return jsonResult({
-        ok: broker.available === true,
+        ok: false,
+        error: broker.available ? "broker-provider-discovery-unavailable" : "broker-unavailable",
         ownerId: ownerId(),
         broker,
-        source: broker.available ? "host-broker-provider-discovery" : "broker-unavailable",
+        source: broker.available ? "broker-provider-discovery-failed" : "broker-unavailable",
         routedBy: "device-backends-broker",
-        backends: broker.available ? directBackends : containerBackends,
-        localBackends: directBackends,
+        backends: containerBackends,
+        ...(detail ? { localBackends: directBackends } : {}),
     });
 }
 
@@ -1582,7 +1585,7 @@ export async function startServer() {
 
                 switch (name) {
                     case "device_backends":
-                        return handleDeviceBackends(args);
+                        return handleDeviceBackends(args, { detail: rawArgs?.detail === true });
 
                     case "device_broker_status":
                         return jsonResult(await brokerStatus(args));

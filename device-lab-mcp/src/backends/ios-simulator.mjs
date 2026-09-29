@@ -79,11 +79,10 @@ export function iosDiscovery() {
     };
 }
 
-export function iosAppiumDiscovery() {
-    const ios = iosDiscovery();
+export function iosAppiumDiscovery(ios = iosDiscovery()) {
     const appium = localBinPath("appium") || commandPath("appium");
     const xcuitestDriver = localBinPath("appium-xcuitest-driver") || commandPath("appium-xcuitest-driver");
-    const xcodebuild = commandPath("xcodebuild");
+    const xcodebuild = Object.hasOwn(ios, "xcodebuild") ? ios.xcodebuild : commandPath("xcodebuild");
     const missing = [...ios.missing];
     if (!appium) missing.push("appium");
     if (!xcuitestDriver) missing.push("appium-xcuitest-driver");
@@ -106,8 +105,7 @@ export function normalizeIosOrientation(orientation) {
     return null;
 }
 
-export function iosBackend() {
-    const discovery = iosDiscovery();
+export function iosBackend(discovery = iosDiscovery()) {
     return {
         name: "ios-simulator",
         host: "macos-host",
@@ -270,8 +268,8 @@ async function appiumServerReady(appium) {
     }
 }
 
-async function appiumSessionReady(appium) {
-    if (!appium?.sessionId || !await appiumServerReady(appium)) return false;
+async function appiumSessionReady(appium, serverReady) {
+    if (!appium?.sessionId || !serverReady) return false;
     try {
         await fetchIosAppiumJson(`${appium.serverUrl}/session/${appium.sessionId}`, { method: "GET" });
         return true;
@@ -492,12 +490,12 @@ async function ensureIosAppiumSession(deviceId) {
     const port = device.appiumPort || appiumPortForIosDevice(device.id);
     const serverUrl = `http://127.0.0.1:${port}`;
 
-    if (await appiumSessionReady(device.appium)) {
+    const serverReady = await appiumServerReady(device.appium);
+    if (await appiumSessionReady(device.appium, serverReady)) {
         return { device, serverUrl: device.appium.serverUrl, sessionId: device.appium.sessionId };
     }
 
     const staleAppium = device.appium ?? null;
-    const serverReady = await appiumServerReady(staleAppium);
     const ownedServer = Boolean(staleAppium?.runtimeId
         && staleAppium.processOwner === "device-lab-mcp"
         && staleAppium.startedBy === "direct-provider"
@@ -535,7 +533,7 @@ async function ensureIosAppiumSession(deviceId) {
         child.unref();
     }
 
-    const ready = await waitForAppium(serverUrl);
+    const ready = (reusableServer && staleAppium.serverUrl === serverUrl) || await waitForAppium(serverUrl);
     if (startupRuntime) startupRuntime = refreshOwnedRuntimeProcessIdentity(startupRuntime);
     if (!ready) {
         if (child?.pid) {
@@ -676,11 +674,11 @@ function boundedSimulatorIdentityDetail(value) {
     return text.length > 4096 ? `${text.slice(0, 4096)}...` : text;
 }
 
-function resolveOwnedSimulatorTarget(xcrun, device) {
+function resolveOwnedSimulatorTarget(xcrun, device, inventory) {
     if (!isOwnedSimulatorName(device?.simulatorName)) {
         return { error: `Refusing iOS Simulator operation for non-owned simulator name: ${device?.simulatorName}` };
     }
-    const listed = simctlJson(xcrun, ["list", "devices", "-j"]);
+    const listed = inventory ?? simctlJson(xcrun, ["list", "devices", "-j"]);
     if (listed.error) {
         const detail = boundedSimulatorIdentityDetail(listed.error.stderr || listed.error.stdout || `exit ${listed.error.status}`);
         return { error: `Unable to verify iOS Simulator ownership${detail ? `: ${detail}` : ""}` };
@@ -765,7 +763,7 @@ function simctlJson(xcrun, args) {
     }
 }
 
-function hostSimulatorInventory(discovery = iosDiscovery()) {
+function hostSimulatorInventory(discovery = iosDiscovery(), inventory) {
     if (!discovery.available) {
         return {
             available: false,
@@ -775,7 +773,7 @@ function hostSimulatorInventory(discovery = iosDiscovery()) {
             deviceTypes: [],
         };
     }
-    const listed = simctlJson(discovery.xcrun, ["list", "-j"]);
+    const listed = inventory ?? simctlJson(discovery.xcrun, ["list", "-j"]);
     if (listed.error) {
         return {
             available: false,
@@ -800,10 +798,9 @@ function normalizeSimState(state) {
     return String(state).toLowerCase() === "booted" ? "booted" : "stopped";
 }
 
-function reconcileIosDevice(device) {
-    const discovery = iosDiscovery();
+function reconcileIosDevice(device, discovery = iosDiscovery(), inventory) {
     if (!discovery.available) return device;
-    const ownedTarget = resolveOwnedSimulatorTarget(discovery.xcrun, device);
+    const ownedTarget = resolveOwnedSimulatorTarget(discovery.xcrun, device, inventory);
     if (ownedTarget.error) return device;
     const simulator = ownedTarget.simulator;
 
@@ -823,8 +820,16 @@ function reconcileIosDevice(device) {
         : item) || device;
 }
 
+function iosDevicesWithInventory(devices, discovery, inventory) {
+    return devices.map((device) => withTargetStatus({ ...reconcileIosDevice(device, discovery, inventory), ownerId: ownerId() }));
+}
+
 export function listIosDevices() {
-    return readIosDevices().map((device) => withTargetStatus({ ...reconcileIosDevice(device), ownerId: ownerId() }));
+    const devices = readIosDevices();
+    if (devices.length === 0) return [];
+    const discovery = iosDiscovery();
+    const inventory = discovery.available ? simctlJson(discovery.xcrun, ["list", "devices", "-j"]) : undefined;
+    return iosDevicesWithInventory(devices, discovery, inventory);
 }
 
 async function handleIosToolUnlocked(name, args) {
@@ -834,11 +839,12 @@ async function handleIosToolUnlocked(name, args) {
             if (backend !== "ios-simulator") return undefined;
 
             const discovery = iosDiscovery();
+            const inventory = discovery.available ? simctlJson(discovery.xcrun, ["list", "-j"]) : undefined;
             return jsonResult({
                 backend,
                 ownerId: ownerId(),
-                devices: listIosDevices(),
-                hostSimulators: hostSimulatorInventory(discovery),
+                devices: iosDevicesWithInventory(readIosDevices(), discovery, inventory),
+                hostSimulators: hostSimulatorInventory(discovery, inventory),
                 discovery,
             });
         }
@@ -1006,7 +1012,8 @@ async function handleIosToolUnlocked(name, args) {
             const { deviceId } = args;
             const device = findIosDevice(deviceId);
             if (!device) return undefined;
-            return jsonResult({ device: withTargetStatus(reconcileIosDevice(device)), backend: iosBackend() });
+            const discovery = iosDiscovery();
+            return jsonResult({ device: withTargetStatus(reconcileIosDevice(device, discovery)), backend: iosBackend(discovery) });
         }
 
         case "device_start": {

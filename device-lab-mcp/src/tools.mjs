@@ -1,17 +1,3 @@
-const EXPLICIT_BROKER_ROUTE_PROPERTIES = {
-    broker: { type: "boolean" },
-    viaBroker: { type: "boolean" },
-    implicitBroker: { type: "boolean" },
-    autolaunch: { type: "boolean" },
-    hostCandidates: { type: "array", items: { type: "string" } },
-    launchHost: { type: "string" },
-    port: { type: "number", minimum: 1, maximum: 65535 },
-    brokerPort: { type: "number", minimum: 1, maximum: 65535 },
-    timeoutMs: { type: "number", minimum: 1 },
-    rpcTimeoutMs: { type: "number", minimum: 1, maximum: 21615000 },
-    launchTimeoutMs: { type: "number", minimum: 1 },
-};
-
 const HELPER_TIMEOUT_PROPERTY = { type: "number", minimum: 1, maximum: 300000 };
 const BOUNDED_WAIT_TIMEOUT_PROPERTY = { type: "number", minimum: 1, maximum: 600000 };
 const HYPER_V_BOOT_TIMEOUT_PROPERTY = { type: "number", minimum: 1, maximum: 1200000, description: "Maximum guest boot and transport wait in milliseconds. Hyper-V linux-vm GUI installation has a separate bounded first-start budget." };
@@ -34,19 +20,6 @@ const BOUNDED_FILE_POLICY_PROPERTIES = {
 const DEVICE_UPLOAD_FILE_POLICY_PROPERTIES = {
     ...BOUNDED_FILE_POLICY_PROPERTIES,
     maxFileBytes: { type: "number", minimum: 1, maximum: 134217728 },
-};
-
-const EXPLICIT_BROKER_ROUTE_PROPERTIES_WITHOUT_PORT = {
-    broker: { type: "boolean" },
-    viaBroker: { type: "boolean" },
-    implicitBroker: { type: "boolean" },
-    autolaunch: { type: "boolean" },
-    hostCandidates: { type: "array", items: { type: "string" } },
-    launchHost: { type: "string" },
-    brokerPort: { type: "number", minimum: 1, maximum: 65535 },
-    timeoutMs: { type: "number", minimum: 1 },
-    rpcTimeoutMs: { type: "number", minimum: 1, maximum: 21615000 },
-    launchTimeoutMs: { type: "number", minimum: 1 },
 };
 
 const DEVICE_BACKEND_PROPERTY = {
@@ -124,27 +97,17 @@ const APP_BACKEND_PROPERTY = {
     backend: { type: "string", enum: ["android-emulator", "android-device", "ios-simulator", "ios-device"] },
 };
 
-const MOBILE_BROKER_ROUTE_PROPERTIES = {
-    ...MOBILE_BACKEND_PROPERTY,
-    appiumPort: { type: "number", minimum: 1, maximum: 65535 },
-    serverPort: { type: "number", minimum: 1, maximum: 65535 },
-    automationName: { type: "string" },
-    provider: { type: "string" },
-    physical: { type: "boolean" },
-};
-
 const DEVICE_BROKER_ROUTE_PROPERTIES = {
     ...DEVICE_BACKEND_PROPERTY,
 };
 
-const BROKER_MANAGEMENT_ROUTE_PROPERTIES = {};
 
 const CONFIRM_DESTRUCTIVE_PROPERTY = {
     confirmDestructive: { type: "boolean" },
 };
 
 function mobileBrokerProperties(properties) {
-    return { ...properties, ...MOBILE_BROKER_ROUTE_PROPERTIES };
+    return { ...properties, ...MOBILE_BACKEND_PROPERTY };
 }
 
 function deviceBrokerProperties(properties) {
@@ -156,11 +119,7 @@ function typedDeviceBrokerProperties(backendProperty, properties) {
 }
 
 function typedMobileBrokerProperties(backendProperty, properties) {
-    return { ...properties, ...backendProperty, appiumPort: MOBILE_BROKER_ROUTE_PROPERTIES.appiumPort, serverPort: MOBILE_BROKER_ROUTE_PROPERTIES.serverPort, automationName: MOBILE_BROKER_ROUTE_PROPERTIES.automationName, provider: MOBILE_BROKER_ROUTE_PROPERTIES.provider, physical: MOBILE_BROKER_ROUTE_PROPERTIES.physical };
-}
-
-function brokerManagementProperties(properties) {
-    return { ...properties, ...BROKER_MANAGEMENT_ROUTE_PROPERTIES };
+    return { ...properties, ...backendProperty };
 }
 
 const APP_LAUNCH_ANY_OF = [{ required: ["packageName"] }, { required: ["bundleId"] }, { required: ["component"] }];
@@ -290,10 +249,10 @@ const DEVICE_CREATE_INPUT_SCHEMA = {
 };
 
 export const TOOLS = [
-    { name: "device_backends", description: "List backend availability without starting devices; detail:true includes capabilities", inputSchema: { type: "object", properties: brokerManagementProperties({}), required: [] } },
-    { name: "device_broker_status", description: "Inspect the zero-configuration host broker contract without starting devices", inputSchema: { type: "object", properties: brokerManagementProperties({ probe: { type: "boolean" } }), required: [] } },
+    { name: "device_backends", description: "List backend availability without starting devices; detail:true includes capabilities", inputSchema: { type: "object", properties: {}, required: [] } },
+    { name: "device_broker_status", description: "Inspect the zero-configuration host broker contract without starting devices", inputSchema: { type: "object", properties: { probe: { type: "boolean" } }, required: [] } },
     { name: "device_list", description: "List devices and current display targets owned by this CCC container", inputSchema: { type: "object", properties: {}, required: [] } },
-    { name: "device_inventory", description: "List owner-scoped device definitions and backend host inventory without starting devices", inputSchema: { type: "object", properties: deviceBrokerProperties({ backend: { type: "string", enum: ["android-emulator", "android-device", "ios-simulator", "ios-device", "windows-sandbox", "windows-vm", "macos-vm", "linux-vm"] } }), required: [] } },
+    { name: "device_inventory", description: "Inspect one backend’s devices and host inventory without starting devices. Defaults to local Android emulator inventory; specify backend for host routing. Use device_list for all owned devices.", inputSchema: { type: "object", properties: deviceBrokerProperties({ backend: { type: "string", enum: ["android-emulator", "android-device", "ios-simulator", "ios-device", "windows-sandbox", "windows-vm", "macos-vm", "linux-vm"] } }), required: [] } },
     { name: "device_image_list", description: "List owner-scoped VM base images where supported", inputSchema: { type: "object", properties: LINUX_VM_BACKEND_PROPERTY, required: ["backend"] } },
     { name: "device_image_import", description: "Import or register an owner-scoped VM base image where supported", inputSchema: { type: "object", properties: { ...LINUX_VM_BACKEND_PROPERTY, name: { type: "string", maxLength: 128 }, imageId: DEVICE_ID_PROPERTY, sourcePath: DEVICE_PATH_PROPERTY, format: { type: "string", enum: ["qcow2", "raw"] }, copy: { type: "boolean" }, force: { type: "boolean" } }, required: ["backend", "name", "sourcePath"] } },
     { name: "device_wireless", description: "Prepare or inspect native real-device wireless debugging without creating an owner attachment", inputSchema: { type: "object", properties: { backend: { type: "string", enum: ["android-device", "ios-device"] }, action: { type: "string", enum: ["status", "usb-tcpip", "pair", "connect"] }, serial: { type: "string" }, host: { type: "string" }, port: { type: "number" }, pairHost: { type: "string" }, pairPort: { type: "number" }, pairingCode: { type: "string" }, connect: { type: "boolean" }, timeoutMs: { type: "number", minimum: 1, maximum: 30000 } }, required: ["backend"] } },

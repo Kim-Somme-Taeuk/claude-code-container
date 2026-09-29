@@ -4,7 +4,7 @@ import type { AddressInfo } from "net";
 import { dirname, join } from "path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { fetchIosAppiumJson, IOS_APPIUM_HTTP_MAX_TIMEOUT_MS, IOS_APPIUM_RESPONSE_LIMIT_BYTES, normalizeIosAppiumHttpTimeoutMs } from "../../device-lab-mcp/src/backends/ios-simulator.mjs";
-import { cleanupFakeIosMcpContext, createFakeIosMcpContext, TIMEOUT, type FakeIosMcpContext } from "./helpers/fake-ios-mcp-fixture.js";
+import { exerciseStaleExternalIosSession, cleanupFakeIosMcpContext, createFakeIosMcpContext, TIMEOUT, type FakeIosMcpContext } from "./helpers/fake-ios-mcp-fixture.js";
 
 function parseToolJson(result: { content?: unknown }) {
     return JSON.parse((((result.content as Array<{ text?: string }> | undefined) ?? [])[0]?.text ?? "{}")) as Record<string, unknown>;
@@ -652,6 +652,38 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
             startToken: expect.any(String),
             commandHash: expect.stringMatching(/^[a-f0-9]{64}$/),
         }));
+
+        // A healthy session needs one fresh server check plus its session check.
+        const beforeReadyReuse = readFileSync(logPath, "utf-8").length;
+        const healthyReuse = await client.callTool({ name: "mobile_dump_ui", arguments: { deviceId: ownedDeviceId } });
+        expect(healthyReuse.isError, JSON.stringify(healthyReuse)).not.toBe(true);
+        const readyReuseLog = readFileSync(logPath, "utf-8").slice(beforeReadyReuse);
+        expect((readyReuseLog.match(/appium-http GET \/status\n/g) || []).length).toBe(1);
+        expect((readyReuseLog.match(/appium-http GET \/session\/IOS-SESSION-1\n/g) || []).length).toBe(1);
+        expect(readyReuseLog).not.toContain("appium-http POST /session");
+
+        const externalReuse = await exerciseStaleExternalIosSession(context, "ios", ownedDeviceId);
+        expect(externalReuse.result.isError, JSON.stringify(externalReuse.result)).not.toBe(true);
+        const externalRequests = externalReuse.log.split("\n").filter((line) => line.startsWith("appium-http "));
+        expect(externalRequests).toEqual([
+            "appium-http GET /status",
+            `appium-http GET /session/${externalReuse.previousSessionId}`,
+            "appium-http POST /session",
+            "appium-http GET /session/IOS-SESSION-2/source",
+        ]);
+        expect(externalReuse.log).not.toContain("appium server --port");
+        expect(externalReuse.log).not.toContain("appium-server-sigint");
+
+        // Failed health must not authorize reuse of the old session. A new
+        // owned server is started and must pass its own readiness check.
+        writeFileSync(join(homeDir, "fail-ios-status-once"), "1");
+        const beforeFailedStatus = readFileSync(logPath, "utf-8").length;
+        const healthRecovered = await client.callTool({ name: "mobile_dump_ui", arguments: { deviceId: ownedDeviceId } });
+        expect(healthRecovered.isError, JSON.stringify(healthRecovered)).not.toBe(true);
+        const failedStatusLog = readFileSync(logPath, "utf-8").slice(beforeFailedStatus);
+        expect((failedStatusLog.match(/appium-http GET \/status\n/g) || []).length).toBe(2);
+        expect(failedStatusLog).toContain("appium-http POST /session");
+        expect(failedStatusLog.slice(0, failedStatusLog.indexOf("appium-http POST /session"))).not.toContain("appium-http GET /session/");
 
         const statePath = join(homeDir, ".ccc", "devices", "owners", ownerId, "ios", "devices.json");
         const originalState = readFileSync(statePath, "utf-8");

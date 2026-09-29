@@ -183,12 +183,7 @@ function expectRoutingProperties(properties: Record<string, unknown>, extra: { p
     expectNoRoutingProperties(properties);
     void extra.port;
     if (extra.mobile === true) {
-        expect(properties).toEqual(expect.objectContaining({
-            appiumPort: expect.objectContaining({ maximum: 65535 }),
-            automationName: expect.objectContaining({ type: "string" }),
-            physical: expect.objectContaining({ type: "boolean" }),
-            serverPort: expect.objectContaining({ maximum: 65535 }),
-        }));
+        expectNoRoutingProperties(properties, ["appiumPort", "serverPort", "automationName", "provider", "physical"]);
     }
 }
 

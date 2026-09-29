@@ -867,6 +867,9 @@ async function exec(
         if (!preparation.ok) {
             console.error(`[ccc] ${preparation.error}`);
             preparationStatus = preparation.status;
+        } else {
+            resolvedCmd = preparation.command;
+            if (preparation.notice) console.error(`[ccc] ${preparation.notice}`);
         }
     }
 
