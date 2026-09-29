@@ -43,10 +43,15 @@ keeps the mise cache on `ccc-mise-cache`.
 4. Before creating a container, ccc creates `<codex host dir>/packages` itself,
    so the bind-side mount point is owned by the user and not by the Docker
    daemon (root) on Linux rootful Docker.
-5. The codex recovery wipe never deletes `packages`, because that is the
-   shared volume other projects' containers are using. The prompt and the
-   completion message say so ("except auth.json, config.toml and the shared
-   daemon packages").
+5. Codex launch failures never offer or perform a state wipe. They also never
+   trigger an automatic CLI update or blindly replay a failed command. For
+   supported interactive launches (including `resume` and `fork`), a bounded
+   read-only check may select `--no-daemon` when the daemon executable is
+   missing and the installed CLI supports that option. Session arguments and
+   environment are preserved. Explicit remote/no-daemon invocations and
+   noninteractive commands are left unchanged. Uncertain or failed probes
+   leave the original invocation unchanged. The fallback does not modify the
+   shared packages or restart a daemon used by other projects.
 6. `ccc clean --volumes` removes `ccc-codex-packages` along with the other
    `ccc-` volumes.
 
@@ -81,3 +86,8 @@ keeps the mise cache on `ccc-mise-cache`.
   `Error: Permission denied (os error 13)` after "Installing daemon".
 - `docker run --rm -v ccc-codex-packages:/v ccc ls /v/app-server-daemon`
   shows `releases/` and `current` after a codex launch.
+
+- With the daemon executable absent, supported interactive Codex launches use
+  `--no-daemon` while retaining `resume`/`fork` session arguments and history.
+- An unrelated Codex failure exits once, without npm updates, automatic replay,
+  or a state deletion question.

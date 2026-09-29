@@ -8,7 +8,7 @@ import {
     readFileSync,
     unlinkSync,
 } from "fs";
-import { basename, dirname, join, posix, relative, resolve } from "path";
+import { basename, dirname, join, relative, resolve } from "path";
 import { fileURLToPath } from "url";
 import {
     formatScannedFiles,
@@ -34,11 +34,11 @@ import {
     collectForwardedEnv,
     writeEnvFile,
     LAB_RUNNER_PROFILE_NAME,
-    CODEX_PACKAGES_CONTAINER_DIR,
 } from "./utils.js";
 
 import { ensureClipboardServer, hasAnyActiveSessionsExcept, retireClipboardServerFromPortFile } from "./clipboard-server.js";
 import { clipboardPortFile as clipboardPortFilePath, DEFAULT_PROFILE_NAME, defaultProfileDir, ensureDefaultProfileDir, migrateHomeLayout, normalizeProfile } from "./home-layout.js";
+import { prepareCodexLaunch } from "./codex-launch.js";
 import { maybeAttachCodexClipboardImage } from "./codex-clipboard-image.js";
 import {
     parseWorktreeArg,
@@ -453,74 +453,6 @@ export function buildToolInvocation(tool: ToolDefinition, args: string[]): strin
     return [tool.binary, ...tool.defaultFlags, ...args];
 }
 
-/**
- * Decide whether a codex exit looks like a real failure worth auto-recovering
- * from. Excludes clean exits (0), user interrupts (SIGINT/SIGTERM, exit 130/143),
- * and signal-terminated exits with `signal` set.
- */
-function isCodexLikelyFailure(status: number | null, signal: NodeJS.Signals | null): boolean {
-    if (signal === "SIGINT" || signal === "SIGTERM" || signal === "SIGHUP") return false;
-    if (status == null) return false;
-    if (status === 0) return false;
-    if (status === 130 || status === 143) return false;
-    return true;
-}
-
-/**
- * Force-update codex inside the container to the latest npm release.
- * Returns true on success.
- */
-function forceUpdateCodexInContainer(containerName: string): boolean {
-    const r = spawnSync(
-        runtimeCli(),
-        [
-            "exec", "-w", "/home/ccc", containerName, "sh", "-c",
-            "~/.local/bin/mise exec node@22 -- npm install -g @openai/codex@latest --force && ~/.local/bin/mise reshim 2>/dev/null; true",
-        ],
-        { stdio: "inherit" },
-    );
-    return r.status === 0;
-}
-
-// Top-level entries: keep auth.json and config.toml, drop everything else
-// (subdirectories, sqlite files of any extension, JSON state files, etc.).
-// packages is the ccc-codex-packages volume shared by every project's
-// container, so it is never part of one project's wipe.
-export const CODEX_STATE_WIPE_COMMAND =
-    `find ${posix.dirname(CODEX_PACKAGES_CONTAINER_DIR)} -mindepth 1 -maxdepth 1 ! -name auth.json ! -name config.toml `
-    + `! -name ${posix.basename(CODEX_PACKAGES_CONTAINER_DIR)} -exec rm -rf {} + 2>/dev/null; true`;
-
-/**
- * Last-resort recovery when update+retry didn't fix codex's state mismatch.
- * Wipes every file and subdirectory under /home/ccc/.codex except `auth.json`,
- * `config.toml`, and the shared `packages` volume. Bind-mounted to the host, so
- * this clears the host's ~/.codex too. Then retries the codex command once.
- */
-async function offerCodexStateWipe(containerName: string, execArgs: string[]): Promise<number> {
-    console.error("\n[ccc] codex state is still incompatible after the update.");
-    const answer = await prompt(
-        "Wipe everything in ~/.codex except auth.json, config.toml and the shared daemon packages, then retry? Session history is lost. [y/N]: ",
-        true,
-    );
-    if (answer !== "y" && answer !== "yes") {
-        console.error("[ccc] Leaving ~/.codex untouched.");
-        return 1;
-    }
-
-    spawnSync(
-        runtimeCli(),
-        [
-            "exec", containerName, "sh", "-c",
-            CODEX_STATE_WIPE_COMMAND,
-        ],
-        { stdio: "ignore" },
-    );
-
-    console.error("[ccc] Wiped ~/.codex (kept auth.json, config.toml, packages). Retrying codex...");
-    const retry = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" });
-    return retry.status ?? 1;
-}
-
 export async function maybeAttachCodexClipboardImageForCommand(
     projectPath: string,
     cmd: string[],
@@ -929,6 +861,10 @@ async function exec(
     const envFile = writeEnvFile(envEntries);
     execArgs.push("--env-file", envFile);
 
+    if (commandTool?.name === "codex" && options.interactive !== false) {
+        resolvedCmd = prepareCodexLaunch(runtimeCli(), [...execArgs, containerName], resolvedCmd);
+    }
+
     if (options.interactive !== false && process.stdin.isTTY && process.stdout.isTTY) {
         execArgs.push("-it");
     }
@@ -942,37 +878,8 @@ async function exec(
         execArgs.push(...resolvedCmd);
     }
 
-    let resultStatus: number;
-    if (commandTool?.name === "codex") {
-        // Codex recovery ladder:
-        //   1) Run with inherited stdio (preserves the TUI when it works).
-        //   2) On unexpected non-zero exit (anything other than 0/Ctrl-C/SIGTERM),
-        //      force-update codex in the container and retry once.
-        //   3) If the retry still fails the same way, prompt to wipe codex's
-        //      state DB files and retry one more time.
-        // We don't pattern-match stderr because codex sometimes routes startup
-        // errors through stdout (especially on Windows + Docker Desktop), which
-        // is inherited, not captured, when the TUI needs a TTY.
-        const first = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" });
-        resultStatus = first.status ?? 1;
-        if (isCodexLikelyFailure(first.status, first.signal)) {
-            console.error("\n[ccc] codex exited with an unexpected error. Updating codex in container and retrying...");
-            if (forceUpdateCodexInContainer(containerName)) {
-                console.error("[ccc] Retrying codex...");
-                const retry = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" });
-                resultStatus = retry.status ?? 1;
-                if (isCodexLikelyFailure(retry.status, retry.signal)) {
-                    resultStatus = await offerCodexStateWipe(containerName, execArgs);
-                }
-            } else {
-                console.error("[ccc] Codex update failed in container.");
-                resultStatus = await offerCodexStateWipe(containerName, execArgs);
-            }
-        }
-    } else {
-        const result = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" });
-        resultStatus = result.status ?? 1;
-    }
+    const result = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" });
+    const resultStatus = result.status ?? 1;
     restoreCodexConfigHostOwnership(containerName);
     try { unlinkSync(envFile); } catch { /* ignore cleanup error */ }
 
