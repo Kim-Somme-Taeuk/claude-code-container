@@ -31,3 +31,15 @@ Known ceiling: Unknown envelopes remain unfiltered — add explicit projections 
 Verification covers default and detailed responses, nested failures, fenced
 action identifiers, opaque data preservation, flow results, unavailable brokers,
 CLI exit status, and fresh source and bundled MCP server responses.
+
+## Broker call flow
+
+A tool operation reuses successful broker preparation and owner resolution
+within that operation. Reuse is private, scoped to the same route, launch
+options and owner context, and discarded on failure. Each public invocation,
+including concurrent calls, and each flow step gets a fresh scope.
+
+Each authenticated RPC still checks the live broker generation and reads its
+owner credential. Device inventory and backend mismatch checks remain current;
+no device result, credential or authorization is cached across operations.
+Caller-supplied arguments cannot provide trusted preparation evidence.

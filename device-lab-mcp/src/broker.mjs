@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "async_hooks";
 import { createHash, createHmac, randomBytes } from "crypto";
 import { spawn, spawnSync } from "child_process";
 import { accessSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, unlinkSync } from "fs";
@@ -9,6 +10,30 @@ import { missingBrokerCapabilities } from "./contracts/broker-capabilities.mjs";
 import { writeJsonFileAtomically } from "./state/shared-mutation-lock.mjs";
 import { readDeviceLabStateFile } from "./state/state-file.mjs";
 import { canonicalWindowsPowerShellPath, canonicalWindowsSystemExecutablePath, hiddenWindowsPowerShellArgs, terminateWindowsProcessByStartToken } from "./state/windows-system-powershell.mjs";
+
+const brokerOperations = new AsyncLocalStorage();
+const brokerSetupEvidence = new WeakMap();
+
+export function withBrokerOperation(callback) {
+    const operation = { setups: new Map() };
+    return brokerOperations.run(operation, async () => {
+        try {
+            return await callback();
+        } finally {
+            operation.setups = null;
+        }
+    });
+}
+
+function invalidateBrokerSetup() {
+    const operation = brokerOperations.getStore();
+    if (operation?.setups) operation.setups = new Map();
+}
+
+function withSetupEvidence(result, health, ownerResolve) {
+    brokerSetupEvidence.set(result, { health, ownerResolve });
+    return result;
+}
 
 const HOST_CANDIDATES = [
     "127.0.0.1",
@@ -1530,6 +1555,22 @@ async function replaceVerifiedOwnedLegacyBroker(runtime, port, statusBroker, opt
 }
 
 async function ensureBroker(options = {}) {
+    const operation = brokerOperations.getStore();
+    const setups = operation?.setups;
+    const key = JSON.stringify([normalizeLaunchOptions(options), ownerId(), ownerBasis(), projectMountPath(), brokerStateRoot()]);
+    if (setups?.has(key)) return setups.get(key);
+    try {
+        const result = await ensureBrokerUncached(options);
+        if (result.ok && operation?.setups === setups) setups?.set(key, result);
+        else if (!result.ok) invalidateBrokerSetup();
+        return result;
+    } catch (error) {
+        invalidateBrokerSetup();
+        throw error;
+    }
+}
+
+async function ensureBrokerUncached(options = {}) {
     const owner = ownerId();
     const launch = normalizeLaunchOptions(options);
     const before = await probeBrokerHealth(launch);
@@ -1543,7 +1584,7 @@ async function ensureBroker(options = {}) {
                 compatibility.body?.broker,
                 options,
             )) {
-                return ensureBroker(options);
+                return ensureBrokerUncached(options);
             }
             return {
                 ok: false,
@@ -1589,7 +1630,7 @@ async function ensureBroker(options = {}) {
                 processVerification,
                 compatibility.body?.broker,
             );
-            return {
+            return withSetupEvidence({
                 ok: true,
                 ownerId: owner,
                 launched: false,
@@ -1602,7 +1643,7 @@ async function ensureBroker(options = {}) {
                     { reason: "broker-reuse-process-verified", processVerification },
                     { reason: "broker-owner-resolve-ready", ownerResolve },
                 ],
-            };
+            }, before, ownerResolve);
         }
         const runtime = readBrokerRuntime();
         const attempts = [...before.attempts, { reason: "broker-owner-resolve-incompatible", ownerResolve }];
@@ -1683,7 +1724,7 @@ async function ensureBroker(options = {}) {
                         compatibility.body?.broker,
                         options,
                     )) {
-                        return ensureBroker(options);
+                        return ensureBrokerUncached(options);
                     }
                     return {
                         ok: false,
@@ -1733,7 +1774,7 @@ async function ensureBroker(options = {}) {
                         processVerification,
                         compatibility.body?.broker,
                     );
-                    return {
+                    return withSetupEvidence({
                         ok: true,
                         ownerId: owner,
                         launched: false,
@@ -1747,7 +1788,7 @@ async function ensureBroker(options = {}) {
                             { reason: "broker-reuse-process-verified", processVerification },
                             { reason: "broker-owner-resolve-ready", ownerResolve },
                         ],
-                    };
+                    }, existingProbe, ownerResolve);
                 }
                 stale.push({ reason: "runtime-owner-resolve-incompatible", runtime: existing, attempts: existingProbe.attempts, ownerResolve });
                 const termination = await terminateVerifiedBrokerRuntime(existing, 1500, {
@@ -1782,7 +1823,7 @@ async function ensureBroker(options = {}) {
                             compatibility.body?.broker,
                             options,
                         )) {
-                            return ensureBroker(options);
+                            return ensureBrokerUncached(options);
                         }
                         return {
                             ok: false,
@@ -1833,7 +1874,7 @@ async function ensureBroker(options = {}) {
                             processVerification,
                             compatibility.body?.broker,
                         );
-                        return {
+                        return withSetupEvidence({
                             ok: true,
                             ownerId: owner,
                             launched: false,
@@ -1848,7 +1889,7 @@ async function ensureBroker(options = {}) {
                                 { reason: "broker-reuse-process-verified", processVerification },
                                 { reason: "broker-owner-resolve-ready", ownerResolve },
                             ],
-                        };
+                        }, recoveryProbe, ownerResolve);
                     }
                 }
                 const termination = await terminateVerifiedBrokerRuntime(existing, 3000, {
@@ -1987,7 +2028,7 @@ async function ensureBroker(options = {}) {
                 }
                 Object.assign(runtime, launchProcessVerification.runtime);
                 writeBrokerRuntime(runtime);
-                return {
+                return withSetupEvidence({
                     ok: true,
                     ownerId: ownerResolve.ownerId,
                     launched: true,
@@ -2002,7 +2043,7 @@ async function ensureBroker(options = {}) {
                         { reason: "broker-launch-process-verified", processVerification },
                         { reason: "broker-owner-resolve-ready", ownerResolve },
                     ],
-                };
+                }, ready, ownerResolve);
             }
             const launchCleanup = await cleanupLaunchedBrokerRuntime(runtime, child, 3000);
             return {
@@ -2055,6 +2096,7 @@ async function ensureBroker(options = {}) {
 }
 
 export async function brokerShutdown(options = {}) {
+    invalidateBrokerSetup();
     const owner = ownerId();
     const runtime = readBrokerRuntime();
     if (!runtime) return { ok: true, ownerId: owner, stopped: false, reason: "no-runtime" };
@@ -2375,6 +2417,17 @@ function authenticatedBrokerHeaders(token, owner, runtime, body) {
 export const authenticatedBrokerHeadersForTest = authenticatedBrokerHeaders;
 
 async function brokerRpcRequest(options = {}) {
+    try {
+        const result = await brokerRpcRequestUncached(options);
+        if (!result.ok) invalidateBrokerSetup();
+        return result;
+    } catch (error) {
+        invalidateBrokerSetup();
+        throw error;
+    }
+}
+
+async function brokerRpcRequestUncached(options = {}) {
     let owner = ownerId();
     const requestedHosts = Array.isArray(options.hostCandidates) ? options.hostCandidates.map(String) : [];
     const untrustedHost = requestedHosts.find((host) => !TRUSTED_BROKER_HOSTS.has(host));
@@ -2457,7 +2510,7 @@ async function brokerRpcRequest(options = {}) {
             attempts: [],
         };
     }
-    const resolvedOwner = await resolveBrokerOwner(probeOptions);
+    const resolvedOwner = brokerSetupEvidence.get(launch)?.ownerResolve || await resolveBrokerOwner(probeOptions);
     if (resolvedOwner.ok) owner = resolvedOwner.ownerId;
     else {
         const brokerUnavailable = resolvedOwner.error === "broker-owner-resolve-unavailable"
@@ -2587,6 +2640,7 @@ async function brokerRpcRequest(options = {}) {
                 attempts,
             };
         } catch (error) {
+            invalidateBrokerSetup();
             const failure = brokerTransportFailure(error);
             attempts.push({
                 host,
@@ -2603,6 +2657,7 @@ async function brokerRpcRequest(options = {}) {
         }
     }
     if (hyperVCreateTransportRetryEligible(options, method, attempts)) {
+        invalidateBrokerSetup();
         const initial = summarizeBrokerTransportFailure(attempts, launch);
         await new Promise((resolve) => setTimeout(resolve, 250));
         const retried = await brokerRpcRequest({
@@ -2957,11 +3012,12 @@ export async function brokerStatus(options = {}) {
     }
     const probeOptions = normalizeProbeOptions({ ...statusOptions, probe: statusOptions.probe !== false });
     const effectiveProbeOptions = launch?.ok ? { ...probeOptions, probe: true, hostCandidates: [launch.host], port: launch.port } : probeOptions;
+    const setupEvidence = brokerSetupEvidence.get(launch);
     const probe = effectiveProbeOptions.probe
-        ? await probeBrokerHealth(effectiveProbeOptions)
+        ? setupEvidence?.health || await probeBrokerHealth(effectiveProbeOptions)
         : { requested: false, available: false, selected: null, attempts: [] };
     const ownerResolve = probe.available
-        ? await resolveBrokerOwner(effectiveProbeOptions)
+        ? setupEvidence?.ownerResolve || await resolveBrokerOwner(effectiveProbeOptions)
         : { ok: false, error: "broker-unavailable", selected: null, attempts: [] };
     const ownerResolveWarning = probe.available && !ownerResolve.ok
         ? "host broker is reachable but does not satisfy the required owner-resolve contract; restart or upgrade the host broker so /v1/owner/resolve is available"
@@ -2973,6 +3029,7 @@ export async function brokerStatus(options = {}) {
     const containerContract = brokerContainerContract();
     const launchIncompatible = launch?.error === "host-broker-incompatible";
     const ownerAuthAvailable = ownerResolve.ok && Boolean(ownerToken(ownerResolve.ownerId || owner));
+    if (!probe.available || !ownerResolve.ok || !ownerAuthAvailable || launchIncompatible) invalidateBrokerSetup();
     const ownerAuthWarning = ownerResolve.ok && !ownerAuthAvailable
         ? "host broker is reachable but the resolved owner credential is unavailable"
         : null;

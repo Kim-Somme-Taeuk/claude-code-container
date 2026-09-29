@@ -9,7 +9,7 @@ import { handleMacosTool, listMacosDevices, macosBackend } from "./backends/maco
 import { handleLinuxVmManagementTool, handleLinuxVmTool, linuxVmBackend, listLinuxVmDevices } from "./backends/linux-vm.mjs";
 import { handleWindowsTool, listWindowsDevices, windowsBackend } from "./backends/windows-sandbox.mjs";
 import { listWindowsVmDevices, windowsVmBackend } from "./backends/windows-vm.mjs";
-import { brokerApple, brokerAppium, brokerCommand, brokerDeviceTool, brokerLease, brokerPhysical, brokerRpc, brokerShutdown, brokerStatus, implicitBrokerProbeOptions } from "./broker.mjs";
+import { brokerApple, brokerAppium, brokerCommand, brokerDeviceTool, brokerLease, brokerPhysical, brokerRpc, brokerShutdown, brokerStatus, implicitBrokerProbeOptions, withBrokerOperation } from "./broker.mjs";
 import { ownerId } from "./context.mjs";
 import { currentDisplayTarget, handleDisplayTool, x11Available } from "./display/x11.mjs";
 import { evaluateDestructivePolicy } from "./policy/destructive.mjs";
@@ -1546,7 +1546,8 @@ async function handleRunFlow(args, { toolName, toolAllowed }) {
             continue;
         }
 
-        const result = await dispatchTool(tool, step.arguments || {});
+        // A preceding step may have changed the broker or device state.
+        const result = await withBrokerOperation(() => dispatchTool(tool, step.arguments || {}));
         const summary = { index, label, tool, ...summarizeToolResult(result) };
         results.push(summary);
         if (summary.isError && stopOnError) return jsonResult({ ok: false, stoppedAt: index, results });
@@ -1574,7 +1575,7 @@ export async function startServer() {
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { name, arguments: rawArgs = {} } = request.params;
         const args = normalizeToolArgs(rawArgs);
-        const result = await (async () => {
+        const result = await withBrokerOperation(async () => {
             try {
                 const policy = evaluateDestructivePolicy(name, args);
                 if (!policy.ok) return policyDeniedResult(policy);
@@ -1623,7 +1624,7 @@ export async function startServer() {
             } catch (err) {
                 return textResult(false, `Unexpected error: ${err.message}`);
             }
-        })();
+        });
         return rawArgs?.detail === true ? result : compactToolResult(name, result);
     });
 
