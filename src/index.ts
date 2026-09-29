@@ -39,6 +39,7 @@ import {
 import { ensureClipboardServer, hasAnyActiveSessionsExcept, retireClipboardServerFromPortFile } from "./clipboard-server.js";
 import { clipboardPortFile as clipboardPortFilePath, DEFAULT_PROFILE_NAME, defaultProfileDir, ensureDefaultProfileDir, migrateHomeLayout, normalizeProfile } from "./home-layout.js";
 import { prepareCodexLaunch } from "./codex-launch.js";
+import { buildCodexResumeRecoveryCommand } from "./codex-resume-recovery.js";
 import { maybeAttachCodexClipboardImage } from "./codex-clipboard-image.js";
 import {
     parseWorktreeArg,
@@ -875,6 +876,9 @@ async function exec(
 
     if (options.interactive !== false && process.stdin.isTTY && process.stdout.isTTY) {
         execArgs.push("-it");
+        if (commandTool?.name === "codex" && preparationStatus === null) {
+            resolvedCmd = buildCodexResumeRecoveryCommand(resolvedCmd);
+        }
     }
 
     execArgs.push(containerName);

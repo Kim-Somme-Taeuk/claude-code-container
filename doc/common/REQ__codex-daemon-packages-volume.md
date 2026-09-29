@@ -51,8 +51,9 @@ keeps the mise cache on `ccc-mise-cache`.
    command, session arguments and environment are preserved. If start itself
    reports the exact missing managed executable error and installed root help
    explicitly supports `--no-daemon`, ccc adds that flag for this launch and
-   reports the fallback. It does not replace shared packages or replay a TUI. Explicit remote/no-daemon invocations and
-   noninteractive commands are left unchanged. Uncertain probes leave the
+   reports the fallback. Daemon preparation does not replace shared packages or
+   replay a TUI. Explicit remote/no-daemon invocations and noninteractive commands
+   skip daemon preparation. Local resume recovery is described below. Uncertain probes leave the
    original invocation unchanged. Other initialization failures stop before the TUI
    while retaining normal cleanup. ccc never force-updates packages, restarts
    an existing daemon or deletes history as recovery. Supported configuration
@@ -105,28 +106,30 @@ keeps the mise cache on `ccc-mise-cache`.
   does not certify cross-version rollout compatibility; report any independent
   resume protocol failure instead of deleting state or retrying indefinitely.
 
-## Scoped recovery for `list_turns` resume failures
+## Automatic recovery for `list_turns` resume failures
 
 `doctor` and `migrate-rollouts` are administrative Codex commands. CCC forwards
 their arguments without adding chat permission flags, clipboard images or daemon
-initialization. Recovery is explicitly invoked; CCC never migrates all sessions
-or replays a failed resume automatically.
+initialization. The user does not need an administrative recovery command for
+the specific local resume failure below.
 
 Codex 0.158.0 can report `list_turns is not supported yet (code -32601)` when
 a paginated rollout has a stale `legacy` history mode in its SQLite index.
 This was reproduced with synthetic history; it is not proof of corruption in
-a user's conversation. For that reproduced condition, the native targeted command
-reconciles the index and permits resume, without directly editing SQLite:
+a user's conversation. For an eligible interactive local resume, CCC recognizes
+only the exact terminal bootstrap error and non-interrupted failure exit. It
+validates the failed rollout path under the effective Codex home's session tree
+and its UUID, invokes the native migration for that session only, then retries
+resume once for the same UUID. A short recovery notice replaces manual steps.
 
-```sh
-ccc codex @WORKSPACE migrate-rollouts --apply --thread SESSION_ID --json
-ccc codex @WORKSPACE resume SESSION_ID
-```
+Terminal input, output, dimensions and signal behavior remain interactive. No
+terminal transcript is saved. Captured output and migration responses are bounded.
+Migration must report success for the exact UUID before retry. It can report
+`already_paginated` while repairing stale index metadata. Native migration can
+transform a legacy rollout; CCC never edits SQLite or deletes state itself.
 
-Use the failed session's UUID and the same CCC profile/workspace. The native
-command may report `already_paginated` while still repairing stale index metadata.
-For an actual legacy rollout, `--apply` performs Codex's native format migration;
-do not describe it as universally read-only or byte-preserving. If migration
-fails or this command is unavailable, preserve the native diagnostic and history;
-do not remove state files or broaden the migration to other sessions. The user's
-host recovery is confirmed only after their resume succeeds.
+Unrelated errors, cancellation, unknown options, explicit prompts/images, remote
+sessions and unsupported configuration combinations never trigger recovery.
+Unsupported native tooling or failed/locked migration preserves the failure and
+history. CCC never broadens the repair, repeats a prompt or enters a retry loop.
+The user's host recovery is confirmed only after their resume succeeds.
