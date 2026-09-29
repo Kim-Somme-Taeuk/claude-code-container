@@ -104,3 +104,29 @@ keeps the mise cache on `ccc-mise-cache`.
   no-daemon fallback preserves history and executes the user command once. It
   does not certify cross-version rollout compatibility; report any independent
   resume protocol failure instead of deleting state or retrying indefinitely.
+
+## Scoped recovery for `list_turns` resume failures
+
+`doctor` and `migrate-rollouts` are administrative Codex commands. CCC forwards
+their arguments without adding chat permission flags, clipboard images or daemon
+initialization. Recovery is explicitly invoked; CCC never migrates all sessions
+or replays a failed resume automatically.
+
+Codex 0.158.0 can report `list_turns is not supported yet (code -32601)` when
+a paginated rollout has a stale `legacy` history mode in its SQLite index.
+This was reproduced with synthetic history; it is not proof of corruption in
+a user's conversation. For that reproduced condition, the native targeted command
+reconciles the index and permits resume, without directly editing SQLite:
+
+```sh
+ccc codex @WORKSPACE migrate-rollouts --apply --thread SESSION_ID --json
+ccc codex @WORKSPACE resume SESSION_ID
+```
+
+Use the failed session's UUID and the same CCC profile/workspace. The native
+command may report `already_paginated` while still repairing stale index metadata.
+For an actual legacy rollout, `--apply` performs Codex's native format migration;
+do not describe it as universally read-only or byte-preserving. If migration
+fails or this command is unavailable, preserve the native diagnostic and history;
+do not remove state files or broaden the migration to other sessions. The user's
+host recovery is confirmed only after their resume succeeds.

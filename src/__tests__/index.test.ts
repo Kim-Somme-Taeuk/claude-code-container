@@ -1192,6 +1192,13 @@ describe('buildToolInvocation', () => {
     expect(buildToolInvocation(codex, ['update'])).toEqual(['codex', 'update'])
   })
 
+  it.each([
+    ['migrate-rollouts', '--apply', '--thread', '01a0c2d2-c645-7ec0-82b4-ab99ece25683', '--json'],
+    ['doctor', '--summary'],
+  ])('forwards Codex recovery arguments without chat flags: %j', (...args) => {
+    expect(buildToolInvocation(getToolByName('codex')!, args)).toEqual(['codex', ...args])
+  })
+
   it('prepends defaultFlags when first arg is a flag, not a subcommand', () => {
     const codex = getToolByName('codex')!
     expect(buildToolInvocation(codex, ['--model', 'o3'])).toEqual([

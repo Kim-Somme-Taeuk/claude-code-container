@@ -14,6 +14,8 @@ const CODEX_CLIPBOARD_SUBCOMMANDS = new Set([
     "completion",
     "sandbox",
     "debug",
+    "doctor",
+    "migrate-rollouts",
     "apply",
     "resume",
     "fork",
@@ -157,6 +159,10 @@ export async function maybeAttachCodexClipboardImage(
     }
 
     const relativeImagePath = buildCodexClipboardImageRelativePath(options.timestamp ?? Date.now());
+    const imageArgs = injectCodexClipboardImageArgs(args, relativeImagePath);
+    if (imageArgs.length === args.length && imageArgs.every((arg, index) => arg === args[index])) {
+        return { args: [...args] };
+    }
     const readImage = options.readImage ?? readClipboardImagePng;
     const image = await readImage(options.clipboardUrl, options.clipboardToken);
     if (!image) {
@@ -168,7 +174,7 @@ export async function maybeAttachCodexClipboardImage(
     writeFileSync(hostImagePath, image);
 
     return {
-        args: injectCodexClipboardImageArgs(args, relativeImagePath),
+        args: imageArgs,
         relativeImagePath,
     };
 }

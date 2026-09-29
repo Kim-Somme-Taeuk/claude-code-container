@@ -50,6 +50,8 @@ describe("non-destructive Codex launch", () => {
     it.each([
         ["codex", "exec", "perform action"], ["codex", "review"], ["codex", "login"],
         ["codex", "app-server", "daemon", "start"], ["codex", bypass, "unknown-command"],
+        ["codex", "doctor", "--summary"],
+        ["codex", "migrate-rollouts", "--apply", "--thread", "session-id", "--json"],
         ["codex", bypass, "doctor"], ["codex", "resume", "--remote", "unix:///socket"],
         ["codex", "fork", "--remote=wss://example.invalid"], ["codex", bypass, "--no-daemon"],
         ["codex", "--help"], ["codex", "resume", "-h"], ["codex", "--version"],

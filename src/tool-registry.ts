@@ -69,6 +69,7 @@ const TOOLS: ToolDefinition[] = [
             "login", "logout",
             "mcp", "plugin", "mcp-server", "app-server", "remote-control",
             "completion", "update",
+            "doctor", "migrate-rollouts",
             "sandbox", "debug",
             "apply", "a",
             "resume", "fork",
