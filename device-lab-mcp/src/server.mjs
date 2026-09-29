@@ -263,10 +263,16 @@ function summarizeContentItem(item) {
     return { type: item.type || "unknown" };
 }
 
-function summarizeToolResult(result) {
+function summarizeToolResult(name, result) {
     const content = (result?.content || []).map(summarizeContentItem);
+    const isError = Boolean(result?.isError) || content.some((item) => item.type === "json" && item.value?.ok === false);
+    const unmetWait = !isError && content.some((item) => item.type === "json" && (
+        (name === "mobile_wait_for_text" && item.value?.found === false)
+        || (name === "mobile_wait_for_app" && (item.value?.found === false || item.value?.running === false))
+    ));
     return {
-        isError: Boolean(result?.isError) || content.some((item) => item.type === "json" && item.value?.ok === false),
+        isError: isError || unmetWait,
+        ...(unmetWait ? { error: "wait-condition-not-met" } : {}),
         content,
     };
 }
@@ -1566,7 +1572,7 @@ async function handleRunFlow(args, { toolName, toolAllowed, detail }) {
 
         // A preceding step may have changed the broker or device state.
         const result = await withBrokerOperation(() => dispatchTool(tool, step.arguments || {}));
-        const summary = { index, label, tool, ...summarizeToolResult(result) };
+        const summary = { index, label, tool, ...summarizeToolResult(tool, result) };
         results.push(summary);
         if (summary.isError && stopOnError) return finish({ ok: false, stoppedAt: index, results });
     }

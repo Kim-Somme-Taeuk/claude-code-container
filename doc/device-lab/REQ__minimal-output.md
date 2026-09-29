@@ -107,3 +107,21 @@ step identities and outcomes, explicitly mark omitted successful content and
 bounded failure diagnostics, and retain actionable failure/recovery evidence.
 The final serialized UTF-8 failure response stays within 64 KiB. This does not
 change standalone opaque command/UI results or other diagnostic size limits.
+
+## Intuitive tool selection and verification flows
+
+Tool descriptions distinguish owned-device listing, backend prerequisites, and
+single-backend inventory; recorded status does not promise universal live
+readiness. Creation, startup and physical attachment remain separate actions.
+Boot-wait guidance must match boolean polarity and platform-dependent defaults.
+Descriptions expose flow limitations: fixed arguments, no previous-result
+interpolation, and image summaries; inspecting screenshots requires a standalone
+screenshot call. These clarifications must not increase the serialized tool
+catalog above the 57,496-byte baseline or change tool identities/schema constraints.
+
+Within either flow, an explicit unmet condition from mobile_wait_for_text
+(found:false) or mobile_wait_for_app (found:false or running:false) is a failed
+step with error wait-condition-not-met. Default stopOnError prevents subsequent
+actions; false continues while the flow remains unsuccessful. Original wait
+observations and provider errors remain available. Successful waits, standalone
+observational responses and unrelated tools' false fields retain their semantics.

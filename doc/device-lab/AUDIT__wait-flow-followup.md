@@ -58,3 +58,21 @@ On an oversized failed flow, successful text/JSON content is explicitly omitted
 before failure diagnostics are shortened. If unusually many content blocks cannot
 fit even as individual markers, the response keeps every step outcome and a
 bounded diagnostic excerpt with the original content count and byte size.
+
+## Intuitive tool flow follow-up (baseline `9b1db42b`)
+
+The catalog distinguishes owned device IDs from prerequisites and one-backend
+inventory, and recorded status from an active readiness probe. Boot-wait guidance
+now describes the actual boolean meaning without claiming a universal default.
+Direct Android/iOS start defaults to waiting; direct macOS differs. Missing Appium
+session metadata does not by itself make direct Android ADB actions unavailable.
+
+Flow arguments are literal; previous results are not interpolated. Flow screenshot
+results are summaries, so inspecting an image requires a standalone screenshot
+call. An explicit unmet text/app wait now fails its verification step and stops
+later actions by default. With stopOnError:false, later steps run but the overall
+flow stays unsuccessful. Standalone wait observations retain their current shape.
+
+Remaining follow-ups: some direct unknown-device routes report Unknown tool even
+for a known tool; iOS process-wait observation failures can be reported as absence.
+Those need separate routing/provider fixes rather than misleading description changes.
