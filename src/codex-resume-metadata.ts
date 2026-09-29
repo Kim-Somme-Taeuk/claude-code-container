@@ -2,6 +2,11 @@ import { realpathSync } from "node:fs";
 import type { FailedResumeRollout } from "./codex-resume-diagnostics.js";
 import type { ResumeProcessRunner, ResumeStdinAction } from "./codex-resume-process.js";
 
+export type ResumeMetadataFailureStage =
+    | "metadata-support" | "metadata-home" | "metadata-initialize" | "metadata-read" | "metadata-close";
+
+export type ResumeMetadataResult = { ok: true } | { ok: false; stage: ResumeMetadataFailureStage };
+
 function record(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -13,14 +18,17 @@ export async function restoreResumeMetadata(
     rollout: FailedResumeRollout,
     home: string,
     runner: ResumeProcessRunner,
-): Promise<boolean> {
+): Promise<ResumeMetadataResult> {
     const help = await runner.run([command, "app-server", "--help"], { timeoutMs: 5000 });
     if (runner.interrupted || help.code !== 0 || help.signal || help.overflow
-        || !/Usage:\s+\S+\s+app-server\b/.test(help.output) || !help.output.includes("--stdio")) return false;
+        || !/Usage:\s+\S+\s+app-server\b/.test(help.output) || !help.output.includes("--stdio")) {
+        return { ok: false, stage: "metadata-support" };
+    }
     let canonicalHome: string;
-    try { canonicalHome = realpathSync(home); } catch { return false; }
+    try { canonicalHome = realpathSync(home); } catch { return { ok: false, stage: "metadata-home" }; }
     let stage: "initialize" | "read" | "done" = "initialize";
     let valid = true;
+    let failureStage: ResumeMetadataFailureStage | undefined;
     const initialize = {
         id: 1,
         method: "initialize",
@@ -39,8 +47,10 @@ export async function restoreResumeMetadata(
                 }
                 if ("method" in message || "error" in message || !record(message.result)) throw new Error();
                 if (stage === "initialize" && message.id === 1) {
-                    if (typeof message.result.codexHome !== "string"
-                        || realpathSync(message.result.codexHome) !== canonicalHome) throw new Error();
+                    if (typeof message.result.codexHome !== "string") throw new Error();
+                    failureStage = "metadata-home";
+                    if (realpathSync(message.result.codexHome) !== canonicalHome) throw new Error();
+                    failureStage = undefined;
                     stage = "read";
                     return { input: JSON.stringify({ method: "initialized", params: {} }) + "\n"
                         + JSON.stringify({ id: 2, method: "thread/read", params: { threadId: rollout.id, includeTurns: false } }) + "\n" };
@@ -59,6 +69,12 @@ export async function restoreResumeMetadata(
             }
         },
     });
-    return !runner.interrupted && result.code === 0 && !result.signal && !result.overflow
-        && valid && (stage as string) === "done";
+    const finalStage = stage as string; // Updated by the stdout callback while the runner is awaited.
+    if (!runner.interrupted && result.code === 0 && !result.signal && !result.overflow
+        && valid && finalStage === "done") return { ok: true };
+    return {
+        ok: false,
+        stage: failureStage ?? (finalStage === "done" ? "metadata-close"
+            : finalStage === "read" ? "metadata-read" : "metadata-initialize"),
+    };
 }

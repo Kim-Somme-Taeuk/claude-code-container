@@ -173,14 +173,15 @@ describe.skipIf(process.platform === "win32")("typed recovery orchestration", ()
         expect(dispose).toHaveBeenCalledTimes(1);
     });
 
-    it("bounds a failed migration diagnostic", async () => {
+    it("reports the initial migration stage without replaying captured output", async () => {
         const { home, file } = fixture();
         const steps = sequence(file).slice(0, 4);
-        steps[3] = result({ code: 1, stderr: "x".repeat(10000) });
+        steps[3] = result({ code: 1, stderr: "PRIVATE_MIGRATION_STDERR" + "x".repeat(10000), output: "PRIVATE_MIGRATION_STDOUT" });
         const { runner } = scriptedRunner(steps);
         const report = vi.fn();
         expect(await runCodexResumeRecovery(plan(), runner, home, report)).toBe(1);
         expect(report.mock.calls.map(call => String(call[0])).join("").length).toBeLessThan(2500);
+        expect(report.mock.calls.map(call => String(call[0])).join("")).toBe("[ccc] Repairing this session's history index and resuming once.\n[ccc] Session migration failed (migration).\n");
     });
 
     it.each([

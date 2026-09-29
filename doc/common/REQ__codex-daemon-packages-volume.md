@@ -145,6 +145,14 @@ Unsupported native tooling or failed/locked migration preserves the failure and
 history. CCC never broadens the repair, repeats a prompt or enters a retry loop.
 The user's host recovery is confirmed only after their resume succeeds.
 
+Failures use one fixed, short explanation and a stage identifier: `migration`,
+`migration-after-metadata`, or metadata `support`, `home`, `initialize`, `read`,
+and `close` (prefixed with `metadata-`). The stages distinguish a first migration
+failure from one after metadata restoration, without replaying raw migration or
+RPC diagnostics. Successful output and recovery bounds remain unchanged. These
+diagnostics improve identification of the failure; they do not establish the
+cause of the reported Mac failure or confirm that it has been repaired.
+
 Recovery diagnostics, process handling and orchestration are ordinary strict
 TypeScript modules with direct tests. The build bundles these modules for the
 existing container launch transport; runtime behavior must not live in a

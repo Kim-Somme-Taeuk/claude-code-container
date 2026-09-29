@@ -73,7 +73,7 @@ describe.skipIf(process.platform === "win32")("scoped native metadata protocol",
     it("validates initialization before sending the one scoped read and closes on its response", async () => {
         const { home, rollout } = fixture();
         const { runner, run, actions } = protocolRunner([response1(home), { method: "notice", params: {} }, response2(rollout.path)]);
-        expect(await restoreResumeMetadata("codex", ["-c", 'model="test"'], rollout, home, runner)).toBe(true);
+        expect(await restoreResumeMetadata("codex", ["-c", 'model="test"'], rollout, home, runner)).toEqual({ ok: true });
         expect(run).toHaveBeenCalledTimes(2);
         expect(run.mock.calls[1][0]).toEqual(["codex", "app-server", "-c", 'model="test"', "--stdio"]);
         const requests = actions.flatMap(action => action.input?.trim().split("\n").map(line => JSON.parse(line)) || []);
@@ -86,7 +86,7 @@ describe.skipIf(process.platform === "win32")("scoped native metadata protocol",
         const { home, rollout } = fixture();
         const wrong = fixture().home;
         const { runner, actions } = protocolRunner([response1(wrong)]);
-        expect(await restoreResumeMetadata("codex", [], rollout, home, runner)).toBe(false);
+        expect(await restoreResumeMetadata("codex", [], rollout, home, runner)).toEqual({ ok: false, stage: "metadata-home" });
         expect(actions.flatMap(action => action.input ? [action.input] : []).join("")).not.toContain("thread/read");
     });
 
@@ -106,14 +106,40 @@ describe.skipIf(process.platform === "win32")("scoped native metadata protocol",
             if (kind === "response-with-method") lines[1] = { ...response2(rollout.path), method: "notice" };
             if (kind === "missing-read") lines = [response1(home)];
             const { runner } = protocolRunner(lines);
-            expect(await restoreResumeMetadata("codex", [], rollout, home, runner)).toBe(false);
+            expect(await restoreResumeMetadata("codex", [], rollout, home, runner)).toEqual({ ok: false, stage: kind === "duplicate-read" ? "metadata-close" : "metadata-read" });
         },
     );
 
     it.each([{ code: 1 }, { overflow: true }, { signal: "SIGTERM" as const }])("requires clean bounded app-server exit: %j", async completion => {
         const { home, rollout } = fixture();
         const { runner } = protocolRunner([response1(home), response2(rollout.path)], completion);
-        expect(await restoreResumeMetadata("codex", [], rollout, home, runner)).toBe(false);
+        expect(await restoreResumeMetadata("codex", [], rollout, home, runner)).toEqual({ ok: false, stage: "metadata-close" });
+    });
+
+    it.each([
+        { lines: [] },
+        { lines: ["PRIVATE_RPC_MALFORMED"] },
+        { lines: [{ id: 1, error: { code: -1, message: "PRIVATE_RPC_ERROR" } }] },
+    ])("identifies initialization failure without retaining its response: %j", async ({ lines }) => {
+        const { home, rollout } = fixture();
+        const { runner, actions } = protocolRunner(lines);
+        expect(await restoreResumeMetadata("codex", [], rollout, home, runner)).toEqual({ ok: false, stage: "metadata-initialize" });
+        expect(actions.some(action => action.input?.includes("thread/read"))).toBe(false);
+    });
+
+    it("identifies unsupported metadata recovery before starting the server", async () => {
+        const { home, rollout } = fixture();
+        const { runner, run } = protocolRunner([]);
+        run.mockResolvedValue(result({ output: "PRIVATE_UNSUPPORTED_HELP" }));
+        expect(await restoreResumeMetadata("codex", [], rollout, home, runner)).toEqual({ ok: false, stage: "metadata-support" });
+        expect(run).toHaveBeenCalledTimes(1);
+    });
+
+    it("identifies an unavailable local home before starting the server", async () => {
+        const { home, rollout } = fixture();
+        const { runner, run } = protocolRunner([]);
+        expect(await restoreResumeMetadata("codex", [], rollout, join(home, "missing-home"), runner)).toEqual({ ok: false, stage: "metadata-home" });
+        expect(run.mock.calls.some(call => !call[0].includes("--help"))).toBe(false);
     });
 
     it.each(["success", "failed-rpc", "failed-second-migration", "interrupted-help", "interrupted-rpc"])("bounds the complete metadata fallback: %s", async mode => {
@@ -132,7 +158,7 @@ describe.skipIf(process.platform === "win32")("scoped native metadata protocol",
                 if (args.includes("--help")) return result({ output: "Usage: codex migrate-rollouts\n--apply --thread --json" });
                 migrations++;
                 if (migrations === 1) return result({ code: 1, stderr: missing() });
-                return mode === "failed-second-migration" ? result({ code: 1, stderr: missing() }) : result({ output: JSON.stringify({ outcomes: [{ thread_id: id, status: "already_paginated" }] }) });
+                return mode === "failed-second-migration" ? result({ code: 1, stderr: "PRIVATE_SECOND_MIGRATION" }) : result({ output: JSON.stringify({ outcomes: [{ thread_id: id, status: "already_paginated" }] }) });
             }
             if (args.includes("--help")) {
                 if (mode === "interrupted-help") interrupted = 143;
@@ -147,6 +173,11 @@ describe.skipIf(process.platform === "win32")("scoped native metadata protocol",
         expect(migrations).toBe(mode === "success" || mode === "failed-second-migration" ? 2 : 1);
         expect(terminals).toBe(mode === "success" ? 2 : 1);
         expect(report.mock.calls.map(call => call[0]).join("")).not.toContain("sensitive-preview-marker");
+        const diagnostic = report.mock.calls.map(call => call[0]).join("");
+        expect(diagnostic).not.toContain("PRIVATE_SECOND_MIGRATION");
+        if (mode === "failed-rpc") expect(diagnostic).toContain("[ccc] Could not restore this session's metadata (metadata-read).\n");
+        if (mode === "failed-second-migration") expect(diagnostic).toContain("[ccc] Session migration failed after metadata recovery (migration-after-metadata).\n");
+        if (mode.startsWith("interrupted") || mode === "success") expect(diagnostic).not.toMatch(/\((?:metadata-[a-z]+|migration(?:-after-metadata)?)\)/);
         expect(runner.dispose).toHaveBeenCalledTimes(1);
     });
 });

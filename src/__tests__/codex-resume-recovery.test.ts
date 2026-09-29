@@ -48,7 +48,7 @@ interface FixtureOptions {
     reportedId?: string;
     pathScope?: "outside" | "symlink" | "archived" | "missing";
     noScript?: boolean;
-    metadata?: "restore" | "wrong-home" | "wrong-path" | "rpc-error" | "unsupported";
+    metadata?: "restore" | "wrong-home" | "wrong-path" | "rpc-error" | "unsupported" | "initialize-error" | "close-error";
 }
 
 function runFixture(args: string[] = ["codex", "resume", "--last"], options: FixtureOptions = {}) {
@@ -97,7 +97,7 @@ if(args[0] === 'app-server') {
   while((end = pending.indexOf('\\n')) >= 0) {
    const message = JSON.parse(pending.slice(0,end)); pending = pending.slice(end+1);
    fs.appendFileSync(path.join(root,'rpc.jsonl'),JSON.stringify(message)+'\\n');
-   if(message.method === 'initialize') process.stdout.write(JSON.stringify({id:message.id,result:{codexHome:behavior.metadata === 'wrong-home' ? root : process.env.CODEX_HOME}})+'\\n');
+   if(message.method === 'initialize') process.stdout.write(JSON.stringify(behavior.metadata === 'initialize-error' ? {id:message.id,error:{code:-32603,message:'PRIVATE_CONVERSATION_PREVIEW'}} : {id:message.id,result:{codexHome:behavior.metadata === 'wrong-home' ? root : process.env.CODEX_HOME}})+'\\n');
    if(message.method === 'thread/read') {
     process.stdout.write(JSON.stringify({method:'remoteControl/status/changed',params:{}})+'\\n');
     const response = behavior.metadata === 'rpc-error'
@@ -108,7 +108,10 @@ if(args[0] === 'app-server') {
    }
   }
  });
- process.stdin.on('end', () => process.exit(0));
+ process.stdin.on('end', () => {
+  if(behavior.metadata === 'close-error') process.stderr.write('PRIVATE_CONVERSATION_PREVIEW');
+  process.exit(behavior.metadata === 'close-error' ? 1 : 0);
+ });
 } else {
 if(args[0] === 'migrate-rollouts') {
  if(args.includes('--help')) {
@@ -268,15 +271,40 @@ describe.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/script"))(
             expect.objectContaining({ params: { threadId: id, includeTurns: false } }),
         ]);
         expect(readFileSync(run.inside, "utf8")).toBe("fixture history\n");
-        expect(run.result.stderr).not.toContain("PRIVATE_CONVERSATION_PREVIEW");
+        expect(run.result.stdout + run.result.stderr).not.toContain("PRIVATE_CONVERSATION_PREVIEW");
     });
 
-    it.each(["wrong-home", "wrong-path", "rpc-error", "unsupported"] as const)("stops unsafe or unavailable metadata recovery: %s", metadata => {
+    it.each([
+        ["wrong-home", "Could not verify the Codex data directory", "metadata-home"],
+        ["wrong-path", "Could not restore this session's metadata", "metadata-read"],
+        ["rpc-error", "Could not restore this session's metadata", "metadata-read"],
+        ["unsupported", "Codex metadata recovery is unavailable", "metadata-support"],
+        ["initialize-error", "Could not verify the metadata server", "metadata-initialize"],
+        ["close-error", "The metadata server did not finish cleanly", "metadata-close"],
+    ] as const)("identifies metadata failure without exposing protocol data: %s", (metadata, explanation, stage) => {
         const run = runFixture(undefined, { metadata });
+        expect(run.result.error).toBeUndefined();
         expect(run.result.status).toBe(1);
         expect(run.migrations).toHaveLength(1);
         expect(run.resumes).toHaveLength(1);
         if (metadata === "wrong-home") expect(run.rpc.some(message => message.method === "thread/read")).toBe(false);
-        expect(run.result.stderr).not.toContain("PRIVATE_CONVERSATION_PREVIEW");
+        expect(run.result.stderr).toContain(`[ccc] ${explanation} (${stage}).\n`);
+        expect(run.result.stdout + run.result.stderr).not.toContain("PRIVATE_CONVERSATION_PREVIEW");
+    });
+
+    it.each([false, true])("distinguishes migration failure after metadata=%s without replaying native output", afterMetadata => {
+        const run = runFixture(undefined, {
+            metadata: afterMetadata ? "restore" : undefined,
+            migration: "PRIVATE_MIGRATION_OUTPUT",
+            migrationExit: 1,
+        });
+        expect(run.result.error).toBeUndefined();
+        expect(run.result.status).toBe(1);
+        expect(run.migrations).toHaveLength(afterMetadata ? 2 : 1);
+        expect(run.resumes).toHaveLength(1);
+        expect(run.result.stderr).toBe("[ccc] Repairing this session's history index and resuming once.\n" + (afterMetadata
+            ? "[ccc] Session migration failed after metadata recovery (migration-after-metadata).\n"
+            : "[ccc] Session migration failed (migration).\n"));
+        expect(run.result.stdout + run.result.stderr).not.toMatch(/PRIVATE_MIGRATION_OUTPUT|PRIVATE_CONVERSATION_PREVIEW/);
     });
 });
