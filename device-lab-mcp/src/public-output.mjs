@@ -25,6 +25,23 @@ function internalStatus(value) {
         && !/(?:Path|Dir|Script|Root)$/.test(key)));
 }
 
+function recordingStatus(value) {
+    if (!object(value) || failed(value)) return value;
+    return omit(value, ["pid", "processIdentity", "processStartToken", "processOwner", "startedBy", "ownerId", "createdAt", "updatedAt"]);
+}
+
+function automationStatus(value) {
+    if (!object(value) || failed(value)) return value;
+    const result = omit(value, ["lazy", "tools"]);
+    if (object(result.appium) && !failed(result.appium)) {
+        result.appium = omit(result.appium, ["appium", "adb", "xcrun", "xcodebuild", "xcuitestDriver", "tools"]);
+    }
+    if (object(result.session) && !failed(result.session)) {
+        result.session = omit(internalStatus(result.session), ["processIdentity", "processOwner", "startedBy"]);
+    }
+    return result;
+}
+
 function target(value, options = {}) {
     if (!object(value) || failed(value)) return value;
     const result = omit(value, ["ownerId", "stateRoot", "ownerRoot", "stateDir", "metadataPath", "runtimeFile", "avdRoot", "createdAt", "updatedAt", "pid", "appiumPort", "capabilities"]);
@@ -43,6 +60,7 @@ function target(value, options = {}) {
         }
         if (result.sessionState.state === "none" && Object.keys(result.sessionState).length === 1) delete result.sessionState;
     }
+    if (object(result.recording)) result.recording = recordingStatus(result.recording);
     if (options.compactPlan === true && object(result.providerPlan) && !failed(result.providerPlan)) {
         result.providerPlan = omit(result.providerPlan, ["providerCommand", "workspaceDir", "startCommand", "stopCommand", "deleteCommand", "implemented"]);
         if (object(result.providerPlan.helper)) result.providerPlan.helper = internalStatus(result.providerPlan.helper);
@@ -184,10 +202,16 @@ function operationResult(name, value) {
             delete result.keys;
         }
     }
-    if (name === "mobile_session_status") {
-        delete result.lazy;
-        if (object(result.appium) && !failed(result.appium)) result.appium = omit(result.appium, ["appium", "adb", "xcrun", "xcodebuild", "xcuitestDriver", "tools"]);
-        if (object(result.session)) result.session = internalStatus(result.session);
+    if (name === "mobile_session_status") return automationStatus(result);
+    if (name === "mobile_get_clipboard" && typeof result.text === "string" && result.stdout === result.text) delete result.stdout;
+    if (["device_record_video_start", "device_record_video_stop", "device_record_video_status"].includes(name)) {
+        if (object(result.recording)) result.recording = recordingStatus(result.recording);
+        if (object(result.helper) && !failed(result.helper) && object(result.recording)) {
+            const remaining = Object.fromEntries(Object.entries(result.helper).filter(([key, item]) =>
+                JSON.stringify(item) !== JSON.stringify(value.recording[key])));
+            if (Object.keys(remaining).length) result.helper = remaining;
+            else delete result.helper;
+        }
     }
     if (name === "mobile_wait_for_text") delete result.source;
     if (name === "mobile_dump_ui" && typeof result.source === "string") {
@@ -259,6 +283,7 @@ function project(name, value) {
     if (Array.isArray(value.targets)) result.targets = value.targets.map(target);
     if (object(value.targetStatus) || (name === "device_status" && typeof value.id === "string")) result = target(result, { compactPlan: name === "device_status" });
     if (object(value.backend)) result.backend = backend(value.backend);
+    if (name === "device_status" && object(value.appium)) result.appium = automationStatus(value.appium);
     if (name === "device_inventory" && object(value.discovery)) {
         result.discovery = omit(value.discovery, ["adb", "emulator", "avdmanager", "xcrun", "xcodebuild", "powershell", "ssh", "scp"]);
     }

@@ -65,3 +65,25 @@ byte-identical write only after locking, reading and validating the result.
 The exhaustive audit records every advertised tool and implementation function,
 its disposition and supporting evidence. Static review and fixture tests are
 reported separately from actual platform/device execution.
+
+## Mobile waits and compact recording status
+
+Android text/app waits use one monotonic polling budget after prerequisite and
+ownership checks. Every UI dump, read, fallback and process query uses only the
+remaining budget (at most the normal command timeout), and sleep cannot exceed
+it. Zero/negative numeric timeouts normalize to one millisecond; nonfinite or
+nonnumeric values use the default; upper bounds follow the advertised schema.
+Standalone UI dumps and lifecycle boot waits keep their own existing behavior.
+
+A failed final observation is an MCP error, not proof that the text/app is absent.
+A later successful observation clears an earlier error. An empty, clean pidof
+exit 1 means the app is absent. Successful no-match responses remain ordinary
+results. Physical Android clipboard reads return the same exact `text` contract
+as emulator clipboard reads, including empty strings and newlines.
+
+Compact recording results keep active/finalizing state, recording/session IDs,
+artifact paths, start/stop times and unique warnings or recovery data. Generated
+host process identity and ownership metadata remain internal or in detail mode.
+Only exact helper echoes are deduplicated. Session status keeps availability,
+missing prerequisites and session identity while hiding executable discovery and
+process metadata. No provider state is changed by presentation.

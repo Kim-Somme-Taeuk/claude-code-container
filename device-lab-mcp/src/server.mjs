@@ -11,7 +11,7 @@ import { handleWindowsTool, listWindowsDevices, windowsBackend } from "./backend
 import { listWindowsVmDevices, windowsVmBackend } from "./backends/windows-vm.mjs";
 import { brokerApple, brokerAppium, brokerCommand, brokerDeviceTool, brokerLease, brokerPhysical, brokerRpc, brokerShutdown, brokerStatus, implicitBrokerProbeOptions, withBrokerOperation } from "./broker.mjs";
 import { ownerId } from "./context.mjs";
-import { currentDisplayTarget, handleDisplayTool, x11Available } from "./display/x11.mjs";
+import { currentDisplayTarget, handleDisplayTool } from "./display/x11.mjs";
 import { evaluateDestructivePolicy } from "./policy/destructive.mjs";
 import { jsonResult, textResult } from "./responses.mjs";
 import { compactToolResult } from "./public-output.mjs";
@@ -417,14 +417,15 @@ function lifecycleBackendDevices() {
 }
 
 function directBackendList(includeLocalProviders = true) {
+    const display = currentDisplayTarget();
     return [
         {
             name: "x11-current-display",
             host: "container",
             creatable: false,
-            available: x11Available(),
+            available: display.available,
             lazy: false,
-            capabilities: currentDisplayTarget().capabilities,
+            capabilities: display.capabilities,
         },
         ...(includeLocalProviders ? [
             androidBackend(),

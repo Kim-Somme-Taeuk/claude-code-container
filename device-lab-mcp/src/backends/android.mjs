@@ -1,3 +1,4 @@
+import { waitForAndroidText, waitForAndroidApp } from "./android-wait.mjs";
 import { spawn } from "child_process";
 import { createHash, randomUUID } from "crypto";
 import { closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, unlinkSync, writeSync } from "fs";
@@ -766,33 +767,7 @@ function dumpAndroidUiWithAdb(device, adb) {
     };
 }
 
-async function waitForAndroidText(device, adb, text, timeoutMs = 10000, intervalMs = 500) {
-    const deadline = Date.now() + Math.max(0, timeoutMs);
-    let lastSource = "";
-    while (Date.now() <= deadline) {
-        const dump = dumpAndroidUiWithAdb(device, adb);
-        if (!dump.error) {
-            lastSource = dump.source;
-            if (dump.source.includes(text)) return { found: true, source: dump.source, remotePath: dump.remotePath };
-        }
-        await sleep(Math.max(50, intervalMs));
-    }
-    return { found: false, source: lastSource, timeoutMs };
-}
 
-async function waitForAndroidApp(device, adb, packageName, timeoutMs = 10000, intervalMs = 500) {
-    const deadline = Date.now() + Math.max(0, timeoutMs);
-    let last = null;
-    while (Date.now() <= deadline) {
-        const r = run(adb, adbArgsForDevice(device, ["shell", "pidof", packageName]));
-        last = r;
-        if (r.status === 0 && r.stdout.trim()) {
-            return { running: true, pid: r.stdout.trim(), stdout: r.stdout, stderr: r.stderr, status: r.status };
-        }
-        await sleep(Math.max(50, intervalMs));
-    }
-    return { running: false, timeoutMs, stdout: last?.stdout || "", stderr: last?.stderr || "", status: last?.status ?? null };
-}
 
 export function listAndroidDevices() {
     return readAndroidDevices().map((device) => publicAndroidDevice({ ...device, ownerId: ownerId() }));
@@ -1755,8 +1730,8 @@ async function handleAndroidToolUnlocked(name, args) {
             const target = ensureAdbDevice(deviceId);
             const unavailable = adbTargetResult(target);
             if (unavailable !== null) return unavailable;
-            const result = await waitForAndroidText(target.device, target.adb, text, timeoutMs, intervalMs);
-            return jsonResult({ ...result, text, provider: "adb-uiautomator" });
+            const result = await waitForAndroidText(target.adb, adbArgsForDevice(target.device, []), `/sdcard/window-${target.device.id}.xml`, text, timeoutMs, intervalMs);
+            return result.error ? fail(result.error) : jsonResult({ ...result, text, provider: "adb-uiautomator" });
         }
 
         case "mobile_wait_for_app": {
@@ -1765,8 +1740,8 @@ async function handleAndroidToolUnlocked(name, args) {
             const unavailable = adbTargetResult(target);
             if (unavailable !== null) return unavailable;
             if (!packageName) return textResult(false, "Android wait-for-app requires packageName");
-            const result = await waitForAndroidApp(target.device, target.adb, packageName, timeoutMs, intervalMs);
-            return jsonResult({ ...result, packageName, provider: "adb" });
+            const result = await waitForAndroidApp(target.adb, adbArgsForDevice(target.device, []), packageName, timeoutMs, intervalMs);
+            return result.error ? fail(result.error) : jsonResult({ ...result, packageName, provider: "adb" });
         }
 
         case "mobile_screenshot": {
