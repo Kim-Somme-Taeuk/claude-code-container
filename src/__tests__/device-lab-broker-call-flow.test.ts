@@ -4,6 +4,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { once } from "node:events";
+import { fileURLToPath } from "node:url";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { freePort } from "./helpers/fake-broker-mcp-fixture.js";
 import { ownerId } from "../../device-lab-mcp/src/context.mjs";
 import { brokerRpc, brokerStatus, REQUIRED_CCC_HOST_BROKER_CAPABILITIES, withBrokerOperation } from "../../device-lab-mcp/src/broker.mjs";
@@ -95,13 +98,41 @@ server.listen(port,'127.0.0.1',()=>process.stdout.write(JSON.stringify({pid:proc
         expect(count("/status")).toBe(8);
     });
 
-    it("starts fresh nested scopes for successive flow steps", async () => {
+    it("starts fresh nested operation scopes", async () => {
         await withBrokerOperation(async () => {
             expect((await withBrokerOperation(rpc)).ok).toBe(true);
             expect((await withBrokerOperation(rpc)).ok).toBe(true);
         });
         expect(count("/health")).toBe(2);
         expect(count("/v1/owner/resolve")).toBe(2);
+    });
+
+    it("isolates every device_run_flow step through the actual MCP server", { timeout: 15000 }, async () => {
+        const client = new Client({ name: "broker-flow-regression", version: "1" }, { capabilities: {} });
+        const transport = new StdioClientTransport({
+            command: process.execPath,
+            args: [fileURLToPath(new URL("../../device-lab-mcp/server.mjs", import.meta.url))],
+            env: Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
+        });
+        try {
+            await client.connect(transport);
+            const result = await client.callTool({
+                name: "device_run_flow",
+                arguments: { steps: [0, 1].map(() => ({
+                    tool: "device_inventory", arguments: { ...options, backend: "android-emulator", viaBroker: true },
+                })) },
+            });
+            expect(result.isError).not.toBe(true);
+            const payload = JSON.parse((result.content as Array<{ text: string }>)[0].text);
+            expect(payload.ok, JSON.stringify(payload)).toBe(true);
+            expect(payload.results).toHaveLength(2);
+            expect(count("/health")).toBe(2);
+            expect(count("/v1/owner/resolve")).toBe(2);
+            expect(count("/status")).toBe(4);
+            expect(requests().filter(path => path.endsWith("/rpc"))).toHaveLength(2);
+        } finally {
+            await client.close();
+        }
     });
 
     it("refuses changed generation before sending an authenticated RPC", async () => {
