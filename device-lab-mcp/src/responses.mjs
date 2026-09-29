@@ -46,13 +46,19 @@ export function textResult(ok, text) {
     return { content: [{ type: "text", text: ok ? text : truncateDiagnosticText(text) }], isError: !ok };
 }
 
+function serializedJsonResult(value, text) {
+    // JSON has already been bounded structurally. Text truncation here could
+    // corrupt its syntax; nested command/RPC data does not set the outer flag.
+    return { content: [{ type: "text", text }], isError: value?.ok === false };
+}
+
 export function jsonResult(value) {
     let text = JSON.stringify(value, null, 2);
     if (isFailureDiagnostic(value)) {
         const originalBytes = utf8Bytes(text);
         if (originalBytes > MCP_ERROR_TEXT_LIMIT_BYTES) text = JSON.stringify(oversizedDiagnosticSummary(value, originalBytes), null, 2);
     }
-    return textResult(true, text);
+    return serializedJsonResult(value, text);
 }
 
 // Only flow envelopes use this bound: preserve step outcomes before spending
@@ -60,7 +66,7 @@ export function jsonResult(value) {
 export function flowJsonResult(value, { detail = false } = {}) {
     let serialize = (item) => JSON.stringify(item, null, detail ? 2 : undefined);
     let text = serialize(value);
-    if (value.ok !== false || utf8Bytes(text) <= MCP_ERROR_TEXT_LIMIT_BYTES) return textResult(true, text);
+    if (value.ok !== false || utf8Bytes(text) <= MCP_ERROR_TEXT_LIMIT_BYTES) return serializedJsonResult(value, text);
     const originalBytes = utf8Bytes(text);
     serialize = (item) => JSON.stringify(item);
     const marker = (item) => ({ diagnosticTruncated: true, originalBytes: utf8Bytes(JSON.stringify(item)) });
@@ -78,7 +84,7 @@ export function flowJsonResult(value, { detail = false } = {}) {
         })),
     };
     text = serialize(summary);
-    if (utf8Bytes(text) <= MCP_ERROR_TEXT_LIMIT_BYTES) return textResult(true, text);
+    if (utf8Bytes(text) <= MCP_ERROR_TEXT_LIMIT_BYTES) return serializedJsonResult(value, text);
 
     // Put actionable evidence ahead of bulky observations if a pathological
     // diagnostic must ultimately become a bounded JSON excerpt.
@@ -145,7 +151,7 @@ export function flowJsonResult(value, { detail = false } = {}) {
         }
         return bounded;
     });
-    return textResult(true, serialize(summary));
+    return serializedJsonResult(value, serialize(summary));
 }
 
 export function fail(result) {

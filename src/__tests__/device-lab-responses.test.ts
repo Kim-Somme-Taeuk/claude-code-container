@@ -38,7 +38,7 @@ describe("device-lab MCP diagnostic response bounds", () => {
         const text = resultText(result);
         const parsed = JSON.parse(text) as Record<string, unknown>;
 
-        expect(result.isError).toBe(false);
+        expect(result.isError).toBe(true);
         expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(MCP_ERROR_TEXT_LIMIT_BYTES);
         expect(parsed).toEqual(expect.objectContaining({
             ok: false,
@@ -50,6 +50,20 @@ describe("device-lab MCP diagnostic response bounds", () => {
         }));
         expect(parsed.originalBytes).toEqual(expect.any(Number));
         expect(parsed).not.toHaveProperty("detail");
+    });
+
+    it("marks only explicit outer failure without interpreting opaque payload fields", () => {
+        for (const data of [
+            { error: "user data" }, { ok: true, error: "user data" },
+            { ok: true, result: { ok: false, error: "guest command data" } },
+            { stdout: '{"ok":false,"error":"guest output"}' },
+            { found: false },
+        ]) {
+            const result = jsonResult(data);
+            expect(result.isError).toBe(false);
+            expect(JSON.parse(resultText(result))).toEqual(data);
+        }
+        expect(jsonResult({ ok: false, error: "provider-failed" }).isError).toBe(true);
     });
 
     it("bounds command failures and tiny explicit truncation budgets", () => {

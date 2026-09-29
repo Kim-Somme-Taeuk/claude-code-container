@@ -110,13 +110,13 @@ describe("public Device Lab tool guidance", () => {
         expect(guidance).not.toMatch(/defaults? to true[.;]|defaults? to false[.;]/);
     });
 
-    it.each(["device_run_flow"])("%s explains static arguments, image summaries, and unmet waits", (name) => {
+    it.each(["device_run_flow"])("%s explains static arguments, viewable images, and unmet waits", (name) => {
         const entry = tool(name);
         const guidance = JSON.stringify(entry).toLowerCase();
         expect(guidance).toMatch(/literal|fixed|static/);
         expect(guidance).toMatch(/no[^.;]*interpolat|not[^.;]*interpolat|without[^.;]*interpolat/);
-        expect(guidance).toMatch(/screenshot[^.;]*summar|summar[^.;]*screenshot/);
-        expect(guidance).toMatch(/standalone|separately|directly/);
+        expect(guidance).toMatch(/screenshot[^.;]*viewable images/);
+        expect(guidance).toMatch(/step references/);
         expect(guidance).toMatch(/wait[^.;]*(fail|unmet)|(fail|unmet)[^.;]*wait/);
         expect(description(name)).toMatch(/mobile/);
         if (name === "device_run_flow") expect(description(name)).toMatch(/display|desktop/);

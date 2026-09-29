@@ -42,8 +42,72 @@ function automationStatus(value) {
     return result;
 }
 
+function qemuRecord(value) {
+    return object(value) && value.provider === "container-qemu" && typeof value.id === "string"
+        && (typeof value.runtimeState === "string" || value.targetKind === "lab-vm");
+}
+
+function sameValue(left, right) {
+    return left !== undefined && JSON.stringify(left) === JSON.stringify(right);
+}
+
+// Only remove successful observations already represented in this response.
+// Unique history (including artifact destinations) and unknown records stay intact.
+function qemuHistory(entries, current, successful, same = sameValue) {
+    return entries.filter((entry, index) => !successful(entry)
+        || !((successful(current) && same(entry, current))
+            || entries.slice(0, index).some((prior) => successful(prior) && same(entry, prior))));
+}
+
+function qemuTarget(value) {
+    if (!qemuRecord(value) || failed(value)) return value;
+    const result = { ...value };
+    if (object(result.paths)) result.paths = omit(result.paths, ["labDir", "snapshotsDir"]);
+    if (object(result.runtime) && !failed(result.runtime)) result.runtime = omit(result.runtime, ["pid", "command", "args", "processIdentity"]);
+    if (object(result.readiness) && !failed(result.readiness) && Array.isArray(result.readiness.history)) {
+        const successful = (entry) => object(entry) && !failed(entry) && ["ready", "process-running", "stopped"].includes(entry.state)
+            && Object.keys(entry).every((key) => ["id", "labId", "targetId", "provider", "state", "checkedAt", "checks", "diagnostics"].includes(key))
+            && Array.isArray(entry.checks) && entry.checks.every((check) => object(check) && !failed(check)
+                && ["pass", "skipped"].includes(check.status)
+                && Object.keys(check).every((key) => ["name", "status", "pid", "reason"].includes(key)))
+            && sameValue(entry.diagnostics, { kind: "process-only" });
+        result.readiness = { ...result.readiness, history: qemuHistory(result.readiness.history, result.readiness.latest,
+            successful, (left, right) => sameValue(omit(left, ["id", "checkedAt"]), omit(right, ["id", "checkedAt"]))) };
+        if (!result.readiness.history.length) delete result.readiness.history;
+    }
+    if (Array.isArray(result.fileOperations) && !result.fileOperations.length) delete result.fileOperations;
+    return result;
+}
+
+function qemuOperation(value) {
+    if (!object(value) || failed(value) || !qemuRecord(value.lab || value.device)) return value;
+    const result = omit(value, ["ownerId"]);
+    if (object(value.lab)) result.lab = target(value.lab);
+    if (object(value.device)) result.device = target(value.device);
+    if (object(value.target)) result.target = target(value.target);
+    for (const key of ["start", "stop", "materialized"]) {
+        if (object(value[key])) result[key] = qemuOperation(value[key]);
+    }
+    // Successful launch/materialization command wiring is not a user exec result.
+    // Dry-run plans and every nonempty diagnostic remain reviewable.
+    for (const key of ["started", ...(value.materialized === true && typeof value.diskImage === "string" ? ["result"] : [])]) {
+        if (!object(value[key]) || value[key].ok !== true || failed(value[key])) continue;
+        result[key] = omit(value[key], ["pid", "processIdentity", "command", "args"]);
+        for (const stream of ["stdout", "stderr"]) if (result[key][stream] === "") delete result[key][stream];
+        if (result[key].status === 0) delete result[key].status;
+    }
+    for (const key of ["lab", "device"]) {
+        if (!qemuRecord(value[key]) || failed(value[key]) || !Array.isArray(value[key].sessions)) continue;
+        result[key] = { ...result[key], sessions: qemuHistory(value[key].sessions, value.session,
+            (entry) => object(entry) && !failed(entry) && entry.state === "open") };
+        if (!result[key].sessions.length) delete result[key].sessions;
+    }
+    return result;
+}
+
 function target(value, options = {}) {
     if (!object(value) || failed(value)) return value;
+    value = qemuTarget(value);
     const result = omit(value, ["ownerId", "stateRoot", "ownerRoot", "stateDir", "metadataPath", "runtimeFile", "avdRoot", "createdAt", "updatedAt", "pid", "appiumPort", "capabilities"]);
     // Remove only values also represented at the target's top level.
     if (object(value.targetStatus)) {
@@ -252,6 +316,7 @@ export function compactToolValue(name, value) {
             && ("selected" in value || Array.isArray(value.attempts) || object(value.launch));
         return brokerFailure ? transportFailure(value) : omit(value, ["routedBy"]);
     }
+    value = qemuOperation(value);
     if (value.ok === true && value.backend === "linux-vm"
         && ((name === "device_image_list" && Array.isArray(value.images))
             || (name === "device_image_import" && object(value.image)))) {
@@ -295,8 +360,30 @@ export function compactToolValue(name, value) {
     if (object(value.targetStatus) || (name === "device_status" && typeof value.id === "string")) result = target(result, { compactPlan: name === "device_status" });
     if (object(value.backend)) result.backend = backend(value.backend);
     if (name === "device_status" && object(value.appium)) result.appium = automationStatus(value.appium);
-    if (name === "device_inventory" && object(value.discovery)) {
+    if (name === "device_inventory" && object(value.discovery) && !failed(value.discovery)) {
         result.discovery = omit(value.discovery, ["adb", "emulator", "avdmanager", "xcrun", "xcodebuild", "powershell", "ssh", "scp"]);
+        if (value.backend === "linux-vm" && value.discovery.provider === "container-qemu" && !failed(value.discovery)) {
+            result.discovery = omit(result.discovery, ["ownerId", "stateRoot", "qemu", "qemuImg"]);
+        }
+        if (value.backend === "windows-sandbox" && object(value.hostSandboxes) && !failed(value.hostSandboxes)) {
+            result.discovery = omit(result.discovery, ["wsb"]);
+            result.hostSandboxes = omit(value.hostSandboxes, ["command", "lazy"]);
+            for (const key of ["available", "missing"]) {
+                if (sameValue(value.hostSandboxes[key], value.discovery[key])) delete result.hostSandboxes[key];
+            }
+        }
+        if (value.backend === "macos-vm" && Array.isArray(value.discovery.providers)) {
+            const providers = (entries) => entries.map((entry) => object(entry) && !failed(entry) && typeof entry.name === "string"
+                ? omit(entry, ["command"]) : entry);
+            result.discovery.providers = providers(value.discovery.providers);
+            if (object(value.hostVms) && !failed(value.hostVms)) {
+                result.hostVms = omit(value.hostVms, ["lazy"]);
+                if (Array.isArray(value.hostVms.providers)) result.hostVms.providers = providers(value.hostVms.providers);
+                for (const key of ["available", "missing", "providers"]) {
+                    if (sameValue(result.hostVms[key], result.discovery[key])) delete result.hostVms[key];
+                }
+            }
+        }
     }
     if (name === "device_inventory" && Array.isArray(value.backends)) {
         result.backends = value.backends.map((entry) => object(entry)

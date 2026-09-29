@@ -197,26 +197,24 @@ function deviceFlowToolAllowed(name) {
 }
 
 function summarizeContentItem(item) {
-    if (item.type === "image") {
-        return {
-            type: "image",
-            mimeType: item.mimeType || null,
-            bytes: item.data ? Buffer.byteLength(item.data, "base64") : 0,
-        };
+    const text = item.text || "";
+    try {
+        return { type: "json", value: JSON.parse(text) };
+    } catch {
+        return { type: "text", text };
     }
-    if (item.type === "text") {
-        const text = item.text || "";
-        try {
-            return { type: "json", value: JSON.parse(text) };
-        } catch {
-            return { type: "text", text };
-        }
-    }
-    return { type: item.type || "unknown" };
 }
 
-function summarizeToolResult(name, result) {
-    const content = (result?.content || []).map(summarizeContentItem);
+function summarizeToolResult(name, result, nativeContent) {
+    const content = [];
+    // A range stays small even for many native blocks and survives diagnostic
+    // truncation of step.content. Index 0 is the outer JSON summary.
+    const contentIndex = nativeContent.length + 1;
+    for (const item of result?.content || []) {
+        if (item.type === "text") content.push(summarizeContentItem(item));
+        else nativeContent.push(item);
+    }
+    const contentCount = nativeContent.length + 1 - contentIndex;
     const isError = Boolean(result?.isError) || content.some((item) => item.type === "json" && item.value?.ok === false);
     const unmetWait = !isError && content.some((item) => item.type === "json" && (
         (name === "mobile_wait_for_text" && item.value?.found === false)
@@ -225,7 +223,8 @@ function summarizeToolResult(name, result) {
     return {
         isError: isError || unmetWait,
         ...(unmetWait ? { error: "wait-condition-not-met" } : {}),
-        content,
+        ...(contentCount ? { contentIndex, contentCount } : {}),
+        ...(content.length ? { content } : {}),
     };
 }
 
@@ -1543,9 +1542,14 @@ async function dispatchTool(name, rawArgs) {
 }
 
 async function handleRunFlow(args, { toolName, toolAllowed, detail }) {
-    const finish = (value) => typeof value === "string"
-        ? textResult(false, value)
-        : flowJsonResult(detail ? value : compactToolValue(toolName, value), { detail });
+    const nativeContent = [];
+    const finish = (value) => {
+        const response = typeof value === "string"
+            ? textResult(false, value)
+            : flowJsonResult(detail ? value : compactToolValue(toolName, value), { detail });
+        response.content.push(...nativeContent);
+        return response;
+    };
     const { steps, stopOnError = true } = args;
     if (!Array.isArray(steps)) return finish(`${toolName} requires steps array`);
     if (steps.length === 0) return finish(`${toolName} requires at least one step`);
@@ -1575,8 +1579,13 @@ async function handleRunFlow(args, { toolName, toolAllowed, detail }) {
             continue;
         }
         // A preceding step may have changed the broker or device state.
-        const result = await withBrokerOperation(() => dispatchTool(tool, flowStepArguments(tool, args, step.arguments)));
-        const summary = { index, label, tool, ...summarizeToolResult(tool, result) };
+        let result;
+        try {
+            result = await withBrokerOperation(() => dispatchTool(tool, flowStepArguments(tool, args, step.arguments)));
+        } catch (err) {
+            result = textResult(false, `Unexpected error: ${err.message}`);
+        }
+        const summary = { index, label, tool, ...summarizeToolResult(tool, result, nativeContent) };
         results.push(summary);
         if (summary.isError && stopOnError) return finish({ ok: false, stoppedAt: index, results });
     }

@@ -12,7 +12,7 @@ Read-only lists share simulator inventory, macOS discovery and physical lease ob
 
 ## Retained deliberately
 
-No authorization, generation, ownership, physical-lease or process-identity check is cached across calls. Mutating simulator identity is observed fresh. Wait loops still perform per-poll checks; tightening subprocess deadline/error contracts is a separate follow-up, not a reason to remove those checks. VM histories and unique nested recovery evidence stay intact instead of generic recursive filtering. External Appium server readiness does not imply ownership of its process.
+No authorization, generation, ownership, physical-lease or process-identity check is cached across calls. Mutating simulator identity is observed fresh. Wait loops retain per-poll checks within the shared observation allowance. VM histories retain unique observations, artifacts and recovery evidence; repeated successful process-only observations are compacted explicitly. External Appium server readiness does not imply ownership of its process.
 
 ## Every tool
 
@@ -131,23 +131,22 @@ paths remain usable. Inventory now uses the existing compact provider-plan
 projection for direct devices and nested backend devices. Exact producer-shaped
 fixtures verify omissions, failed/unknown records, and original detailed output.
 
-The full goal remains open for these source-confirmed issues:
+These source-confirmed issues are now addressed by the follow-up sections below:
 
-- Mobile install/launch/screenshot duplicate canonical device actions. Rotation
-  shortcuts sound relative but set different absolute orientations on Android/iOS.
-- Flow schemas hide their allowed action set and require repeated target arguments;
-  their action sets differ and empty flows silently succeed.
-- Creation and mobile action inputs include unclear platform-specific alternatives;
-  some target-specific QEMU tools redundantly require the sole possible backend.
-- The computer-use quick start recommends generic inventory and extra status
-  calls despite IDs in creation/start results.
-- Sandbox/macOS inventory still exposes executable wiring and duplicate discovery.
-- QEMU stored directory maps and historical operations/readiness need a semantic
-  projection that preserves artifacts and failure/recovery evidence.
-- iOS and broker-Appium polling budgets were independent; the observation-budget follow-up addresses these paths.
+- Canonical discovery replaces six redundant mobile aliases; explicit orientation
+  avoids misleading relative rotation shortcuts.
+- Flows expose their action set, inherit a shared target safely, reject empty or
+  malformed steps, and return native screenshots directly.
+- Sole-backend selectors are implicit and platform-specific inputs have concise
+  guidance; creation exposes named inputs.
+- The quick start reuses returned IDs and avoids unconditional status chains.
+- Sandbox/macOS inventory removes executable wiring and duplicate discovery.
+- QEMU projection removes internal directory wiring and repeated successful
+  observations while preserving unique failure/recovery and artifact evidence.
+- Direct iOS and broker Appium observations share a bounded remaining allowance.
 
-All final tool families require realistic success/failure and opaque-data
-verification after these changes; registry counts alone cannot close the goal.
+The final tool-family verification combines realistic success/failure and
+opaque-data fixtures; registry counts alone do not establish native coverage.
 Native provider execution remains distinct from fixture and source coverage.
 
 ## Canonical catalog and flow consolidation (baseline `b8a8e6f5`)
@@ -168,8 +167,8 @@ The quick start now reuses returned identities and avoids unconditional
 prerequisite/inventory/status chains. Detailed raw capability diagnostics may
 retain legacy names; default discovery omits capability arrays.
 
-Flow screenshot summaries still require a standalone call for image inspection;
-the full-goal response/flow verification must assess this remaining extra call.
+The final response follow-up supersedes screenshot summaries with native content
+and step references, removing the required follow-up screenshot call.
 
 ## Input clarity (baseline `06594d27`)
 
@@ -186,3 +185,50 @@ Concise descriptions explain creation alternatives, Android/iOS app identifiers,
 permissions, mobile keys and battery controls. These descriptions intentionally
 spend catalog text where it avoids guessing inputs; raw catalog bytes alone do
 not measure failed calls or repeated lookup costs.
+
+## Final response and native-flow verification (baseline `baeb02d5`)
+
+The current public catalog has 87 tools; all 93 accepted identities retain
+semantic output fixtures, including six callable legacy aliases. The historical
+inventory above includes those accepted aliases and their pre-default selectors.
+The input-clarity section defines current sole-backend defaults.
+
+Explicit QEMU projections cover lab/device aliases, singular/plural targets,
+readiness/session results and nested start/stop/materialization results. They
+hide generated lab/snapshot directories and executable wiring, retaining usable
+workspace/artifact/export paths. Repeated successful process-only readiness
+observations ignore generated IDs/timestamps when comparing semantic content;
+unique checks, guest/custom diagnostics, failures, recovery and artifact-bearing
+file operations remain. One realistic 50-observation list fixture shrinks from
+34,600 to 879 serialized JSON bytes (97.46%); this measures that fixture, not all
+responses or model tokens. Sandbox/macOS inventory keeps provider/prerequisite,
+singleton/lock and inventory-limitation facts without repeated executable discovery.
+
+Flows return native images/resources/audio alongside one JSON summary. A step's
+`contentIndex` and `contentCount` identify its contiguous native range in the outer
+MCP content array; index 0 holds JSON. Repeated requested screenshots remain
+separate observations. Prior images survive later invalid steps or provider
+exceptions, and native ranges survive failed-JSON compaction. Failed flows and
+explicit outer `ok:false` JSON replies set MCP `isError:true`; nested opaque data
+and successful no-match standalone observations retain their meaning. The
+64 KiB failure bound covers JSON text, not native attachments.
+
+Changed named-function review: `qemuRecord`, `qemuHistory`, `qemuTarget`,
+`qemuOperation`, `target`, inventory discovery projection, `compactToolValue`,
+`serializedJsonResult`, `jsonResult`, `flowJsonResult`, `summarizeContentItem`,
+`summarizeToolResult`, and `handleRunFlow`. The earlier per-function audit remains
+the baseline for unchanged functions; these explicit paths are regression tested.
+
+| Family | Evidence |
+|---|---|
+| Accepted/public catalogs, actions, failures, opaque data | all-tools-output, canonical-flow, input-clarity, tool-guidance |
+| QEMU metadata, nested results, histories and source detail bypass | provider-output, image-inventory-output, MCP Linux provider suites |
+| Sandbox/macOS provider discovery and retained contention evidence | provider-output plus existing platform MCP fixture suites |
+| Hyper-V identity, geometry, failures and artifacts | hyper-v-public-response |
+| Mobile waits, clipboard, recording and helper results | wait-output, public-output, provider MCP fixtures |
+| Mixed native content, repeated images, stop/continue/throw and JSON bounds | flow-output, responses, flow-wait |
+| Broker preparation count and fresh per-step authority | broker-call-flow, canonical-flow |
+
+Known ceiling: Unknown shapes and unique history remain unfiltered deliberately.
+Source, producer fixtures and packaged stdio tests establish their stated
+contracts; this Linux verification does not certify every native host/device.

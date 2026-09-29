@@ -1,10 +1,33 @@
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { flowJsonResult, jsonResult } from "../../device-lab-mcp/src/responses.mjs";
 import { compactToolValue } from "../../device-lab-mcp/src/public-output.mjs";
 import { cleanupFakeAndroidMcpContext, createFakeAndroidMcpContext } from "./helpers/fake-android-mcp-fixture.js";
 import { cleanupDeviceLabMcpTestContext, createDeviceLabMcpTestContext } from "./helpers/device-lab-mcp-fixture.js";
+
+// Exercise the real handler/flow/serializer with only provider observations and
+// transport registration replaced. Stdio fixture children remain unmocked.
+const nativeFixture = vi.hoisted(() => ({ handlers: [] as Array<(request: any) => Promise<any>>, result: {} as any, calls: 0, throwOnCall: 0 }));
+vi.mock("@modelcontextprotocol/sdk/server/index.js", () => ({ Server: class {
+    setRequestHandler(_schema: unknown, handler: (request: any) => Promise<any>) { nativeFixture.handlers.push(handler); }
+    async connect() {}
+} }));
+vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({ StdioServerTransport: class {} }));
+vi.mock("../../device-lab-mcp/src/backends/android.mjs", async (importOriginal) => ({
+    ...await importOriginal<Record<string, unknown>>(),
+    handleAndroidTool: async () => {
+        nativeFixture.calls++;
+        if (nativeFixture.calls === nativeFixture.throwOnCall) throw new Error("provider-disconnected");
+        return structuredClone(nativeFixture.result);
+    },
+}));
+vi.mock("../../device-lab-mcp/src/backends/linux-vm.mjs", async (importOriginal) => ({
+    ...await importOriginal<Record<string, unknown>>(),
+    handleLinuxVmManagementTool: async () => null, handleLinuxVmTool: async () => null,
+}));
+import { startServer } from "../../device-lab-mcp/src/server.mjs";
+beforeAll(async () => { await startServer(); });
 
 function text(result: any): string { return result.content[0].text; }
 function value(result: any): any { return JSON.parse(text(result)); }
@@ -15,6 +38,28 @@ function step(index: number, isError: boolean, data: unknown, tool = "mobile_wai
 }
 
 describe("flow output before diagnostic bounds", () => {
+    it.each(["device_run_flow", "mobile_run_flow"])("returns two inspectable screenshots in one real stdio %s call", async (name) => {
+        const context = await createFakeAndroidMcpContext();
+        try {
+            const created = value(await context.client.callTool({ name: "device_create", arguments: {
+                backend: "android-emulator", name: "Flow images", avdName: "Flow", port: 5582,
+            } }));
+            const screenshot = { tool: "device_screenshot", arguments: { deviceId: created.device.id, implicitBroker: false } };
+            for (const detail of [false, true]) {
+                const response: any = await context.client.callTool({ name, arguments: { detail, steps: [screenshot, screenshot] } });
+                expect(response.isError).toBe(false);
+                expect(response.content.slice(1)).toHaveLength(2);
+                for (const item of response.content.slice(1)) {
+                    expect(item).toMatchObject({ type: "image", mimeType: "image/png" });
+                    expect(Buffer.from(item.data, "base64").subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+                }
+                expect(value(response).results).toMatchObject([{ contentIndex: 1, contentCount: 1 }, { contentIndex: 2, contentCount: 1 }]);
+                expect(text(response)).not.toContain(response.content[1].data);
+            }
+            expect(readFileSync(context.logPath, "utf8").split("exec-out screencap -p").length - 1).toBe(4);
+        } finally { await cleanupFakeAndroidMcpContext(context); }
+    });
+
     it.each([
         ["mobile_run_flow", false], ["mobile_run_flow", true],
         ["device_run_flow", false], ["device_run_flow", true],
@@ -109,6 +154,7 @@ describe("flow output before diagnostic bounds", () => {
             step(1, true, evidence),
         ] };
         const result = flowJsonResult(original, { detail: true });
+        expect(result.isError).toBe(true);
         const parsed = value(result);
         expect(Buffer.byteLength(text(result))).toBeLessThanOrEqual(65536);
         expect(parsed).toMatchObject({ ok: false, stoppedAt: 1, diagnosticTruncated: true, maxBytes: 65536 });
@@ -124,6 +170,7 @@ describe("flow output before diagnostic bounds", () => {
             ...step(index, true, { ...evidence, error: `failure-${index}`, stdout: huge }), label: `label-${index}-${huge}`,
         })) };
         const result = flowJsonResult(original, { detail });
+        expect(result.isError).toBe(true);
         const parsed = value(result);
         expect(Buffer.byteLength(text(result))).toBeLessThanOrEqual(65536);
         expect(parsed.results).toHaveLength(50);
@@ -142,5 +189,89 @@ describe("flow output before diagnostic bounds", () => {
         const parsed = value(jsonResult({ ok: false, error: "standalone", source: "x".repeat(70000) }));
         expect(parsed).toMatchObject({ ok: false, error: "standalone", diagnosticTruncated: true, maxBytes: 65536 });
         expect(parsed.source).toBeUndefined();
+    });
+});
+
+const nativeImage = { type: "image", mimeType: "image/png", data: "aW1hZ2U=", annotations: { audience: ["assistant"] } };
+const nativeBlocks = [nativeImage, nativeImage,
+    { type: "resource", resource: { uri: "file:///capture.xml", mimeType: "text/xml", text: "<ui/>" } },
+    { type: "audio", mimeType: "audio/wav", data: "YXVkaW8=" },
+    { type: "resource_link", uri: "file:///capture.png", name: "capture", mimeType: "image/png" },
+];
+const nativeStep = { tool: "mobile_tap", arguments: { deviceId: "native-flow", implicitBroker: false, x: 1, y: 2 } };
+function nativeCall(name: string, args: Record<string, unknown>) {
+    return nativeFixture.handlers[1]({ params: { name, arguments: args } });
+}
+
+describe.each(["device_run_flow", "mobile_run_flow"])("%s native observations", (name) => {
+    it("retains prior images when the next provider throws", async () => {
+        nativeFixture.calls = 0;
+        nativeFixture.throwOnCall = 2;
+        nativeFixture.result = { content: [nativeImage], isError: false };
+        try {
+            const result = await nativeCall(name, { steps: [nativeStep, nativeStep, nativeStep] });
+            expect(result.isError).toBe(true);
+            expect(value(result).stoppedAt).toBe(1);
+            expect(value(result).results[1].content[0].text).toContain("provider-disconnected");
+            expect(result.content.slice(1)).toEqual([nativeImage]);
+            expect(nativeFixture.calls).toBe(2);
+        } finally { nativeFixture.throwOnCall = 0; }
+    });
+
+    it.each([false, true])("preserves ordered native occurrences and references (detail=%s)", async (detail) => {
+        nativeFixture.calls = 0;
+        nativeFixture.result = { isError: false, content: [nativeBlocks[0], { type: "text", text: '{"ok":true,"value":"observation"}' }, ...nativeBlocks.slice(1)] };
+        const original = structuredClone(nativeFixture.result);
+        const result = await nativeCall(name, { detail, steps: [nativeStep, nativeStep] });
+        expect(result.isError).toBe(false);
+        expect(nativeFixture.calls).toBe(2);
+        expect(result.content.slice(1)).toEqual([...nativeBlocks, ...nativeBlocks]);
+        expect(value(result).results).toMatchObject([
+            { contentIndex: 1, contentCount: 5, content: [{ type: "json", value: { value: "observation" } }] },
+            { contentIndex: 6, contentCount: 5 },
+        ]);
+        expect(text(result)).not.toContain(nativeImage.data);
+        expect(nativeFixture.result).toEqual(original);
+    });
+
+    it.each([false, true])("retains prior observations when a later input is invalid (continue=%s)", async (continueOnError) => {
+        nativeFixture.result = { content: [nativeImage], isError: false };
+        const result = await nativeCall(name, { stopOnError: !continueOnError, steps: [nativeStep, { tool: "mobile_key", arguments: {} }, nativeStep] });
+        expect(result.isError).toBe(true);
+        expect(value(result).ok).toBe(false);
+        expect(result.content.slice(1)).toEqual(continueOnError ? [nativeImage, nativeImage] : [nativeImage]);
+        expect(value(result).results[0]).toMatchObject({ contentIndex: 1, contentCount: 1 });
+        if (continueOnError) expect(value(result).results[2]).toMatchObject({ contentIndex: 2, contentCount: 1 });
+        else expect(value(result).stoppedAt).toBe(1);
+    });
+
+    it.each([false, true])("keeps references and errors through large failed JSON bounds (detail=%s)", async (detail) => {
+        nativeFixture.result = { isError: true, content: [
+            { type: "text", text: JSON.stringify({ ok: false, error: "native-step-failed", cleanup: { stopped: false }, diagnostic: '\u0000"\\😀漢字'.repeat(12000) }) },
+            ...nativeBlocks,
+        ] };
+        const result = await nativeCall(name, { detail, stopOnError: false, steps: Array.from({ length: 50 }, () => ({ ...nativeStep, label: "😀".repeat(18000) })) });
+        expect(result.isError).toBe(true);
+        expect(Buffer.byteLength(text(result))).toBeLessThanOrEqual(65536);
+        const parsed = value(result);
+        expect(parsed.ok).toBe(false);
+        expect(parsed.results).toHaveLength(50);
+        expect(result.content).toHaveLength(251);
+        parsed.results.forEach((entry: any, index: number) => {
+            expect(entry).toMatchObject({ contentIndex: 1 + index * 5, contentCount: 5, isError: true });
+            expect(result.content.slice(entry.contentIndex, entry.contentIndex + entry.contentCount)).toEqual(nativeBlocks);
+            expect(JSON.stringify(entry.content)).toContain("native-step-failed");
+        });
+        expect(text(result)).not.toContain(nativeImage.data);
+    });
+
+    it("omits native references for text-only results and marks an unmet wait as a flow error", async () => {
+        nativeFixture.result = { isError: false, content: [{ type: "text", text: '{"found":false}' }] };
+        const result = await nativeCall(name, { steps: [{ tool: "mobile_wait_for_text", arguments: { ...nativeStep.arguments, text: "needle" } }, nativeStep] });
+        expect(result.isError).toBe(true);
+        expect(result.content).toHaveLength(1);
+        expect(value(result).results[0]).not.toHaveProperty("contentIndex");
+        expect(value(result).results[0].error).toBe("wait-condition-not-met");
+        expect(value(result).results).toHaveLength(1);
     });
 });

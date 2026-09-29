@@ -39,9 +39,29 @@ Diagnostic provider/routing tests explicitly request detailed output. Public
 presentation tests must request compact output or use a client with no diagnostic
 defaults, so compatibility coverage cannot hide a broken default response.
 
+## Final VM and flow presentation
+
+Known QEMU responses omit generated storage wiring and repeated successful
+history from default output. Current readiness, target/session identity, usable
+artifact paths and unique failure or recovery evidence remain. Sandbox and
+macOS inventory retain prerequisites, provider identities and singleton/lock
+evidence while removing executable wiring and exact discovery duplicates.
+Detailed output retains the provider payload; presentation never changes state.
+
+Flows return requested images and other native content after their leading JSON
+summary, in step order, with a zero-based `contentIndex` and `contentCount` range into the outer content
+array for each step containing native blocks. Index 0 is the JSON summary. Each returned
+occurrence remains present, including repeated images and observations preceding
+a failure. Failed flows set MCP `isError:true`. The 64 KiB failed-flow limit
+applies to JSON text, not native attachments; bounding preserves their references.
+General JSON replies mark explicit outer `ok:false` as an MCP error, without
+inferring failure from arbitrary error fields or nested command/RPC data.
+
 ## Known ceiling
 
 Known ceiling: Unknown envelopes remain unfiltered — add explicit projections when new provider response shapes require compaction.
+
+Known ceiling: Semantic readiness-history deduplication recognizes process-only diagnostics; guest/custom diagnostics remain intact — upgrade when their producer-specific diagnostic preservation rules are explicitly covered.
 
 Verification covers default and detailed responses, nested failures, fenced
 action identifiers, opaque data preservation, flow results, unavailable brokers,
@@ -129,11 +149,10 @@ Tool descriptions distinguish owned-device listing, backend prerequisites, and
 single-backend inventory; recorded status does not promise universal live
 readiness. Creation, startup and physical attachment remain separate actions.
 Boot-wait guidance must match boolean polarity and platform-dependent defaults.
-The initial description-only review exposed flow limitations: fixed arguments, no previous-result
-interpolation, and image summaries; inspecting screenshots requires a standalone
-screenshot call. That description-only pass preserved tool identities and constraints within its
-57,496-byte baseline. The canonical catalog contract below supersedes that
-identity freeze for consolidation.
+Flow arguments remain fixed, with no previous-result interpolation. Requested
+screenshots are native image blocks in the same response, so inspection requires
+no follow-up screenshot call. The canonical catalog contract below defines the
+consolidated tool identities.
 
 Within either flow, an explicit unmet condition from mobile_wait_for_text
 (found:false) or mobile_wait_for_app (found:false or running:false) is a failed

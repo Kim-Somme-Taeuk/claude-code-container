@@ -84,8 +84,10 @@ app, then wait until its UI is ready:
 }
 ```
 
-Steps stop on failure by default. Take a standalone `device_screenshot` when an
-image needs inspection; flow screenshots currently return summaries. Arguments
+Steps stop on failure by default. Add `device_screenshot` as the last step to
+inspect the result in the same response. Images appear after the JSON summary;
+each producing step identifies its image/content range with `contentIndex` and
+`contentCount` (zero-based in the outer content array). Arguments
 are literal, with no result interpolation. Set `incarnationId` at the flow level
 when the target requires it; only step tools accepting that field inherit it. A step changing `deviceId` or `backend` must supply
 its complete new target: none of the old target fields are inherited. Each

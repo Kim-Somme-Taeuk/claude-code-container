@@ -66,9 +66,8 @@ now describes the actual boolean meaning without claiming a universal default.
 Direct Android/iOS start defaults to waiting; direct macOS differs. Missing Appium
 session metadata does not by itself make direct Android ADB actions unavailable.
 
-Flow arguments are literal; previous results are not interpolated. Flow screenshot
-results are summaries, so inspecting an image requires a standalone screenshot
-call. An explicit unmet text/app wait now fails its verification step and stops
+Flow arguments are literal; previous results are not interpolated. Flow screenshots now return native images in the same response, with per-step
+content references; the former standalone follow-up call is unnecessary. An explicit unmet text/app wait now fails its verification step and stops
 later actions by default. With stopOnError:false, later steps run but the overall
 flow stays unsuccessful. Standalone wait observations retain their current shape.
 
