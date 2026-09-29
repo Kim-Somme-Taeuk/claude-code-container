@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { transpileModule, ScriptTarget } from "typescript";
 import { prepareCodexLaunch } from "../codex-launch.js";
 
 const prefix = ["exec", "-w", "/project/with spaces", "--env-file", "/tmp/private-env", "ccc-fixture"];
@@ -11,6 +12,8 @@ function probe(status: number | null, stdout = "", extra = {}) {
     return { status, stdout, stderr: "", signal: null, ...extra };
 }
 function missingDaemon() { return probe(1, "ccc-codex-daemon-missing\n"); }
+const startHelp = "Usage: codex app-server daemon start [OPTIONS]\n";
+const ready = (command: string[]) => ({ ok: true, command });
 function runner(...results: ReturnType<typeof probe>[]) {
     const mock = vi.fn();
     for (const result of results) mock.mockReturnValueOnce(result);
@@ -29,21 +32,19 @@ describe("non-destructive Codex launch", () => {
         ["codex", "-m", "model-a", "resume", "session-id"],
         ["codex", bypass, "--", "exec"],
         ["codex", bypass, "-c", 'profile="exec"', "--image", "/tmp/image with spaces.png", "explain the image"],
-    ])("adds one supported fallback without altering original arguments: %j", (...args) => {
+    ])("starts a missing daemon once without altering original arguments: %j", (...args) => {
         const command = args as string[];
-        const mock = runner(missingDaemon(), probe(0, "Usage: codex\n --no-daemon  Run without shared server\n"));
+        const mock = runner(missingDaemon(), probe(0, startHelp), probe(0));
         const actual = prepare(command, mock);
-        expect(actual.filter(arg => arg === "--no-daemon")).toHaveLength(1);
-        expect(actual.filter(arg => arg !== "--no-daemon")).toEqual(command);
-        expect(mock).toHaveBeenCalledTimes(2);
+        expect(actual).toEqual(ready(command));
+        expect(mock).toHaveBeenCalledTimes(3);
         for (const call of mock.mock.calls) {
             expect(call[0]).toBe("docker");
             expect(call[1].slice(0, prefix.length)).toEqual(prefix);
             expect(call[2].timeout).toBeGreaterThan(0);
-            expect(call[2].timeout).toBeLessThanOrEqual(30000);
+            expect(call[2].timeout).toBeLessThanOrEqual(120000);
         }
-        const separator = actual.indexOf("--");
-        if (separator >= 0) expect(actual.indexOf("--no-daemon")).toBeLessThan(separator);
+        expect(mock.mock.calls[2][1].slice(prefix.length, prefix.length + 4)).toEqual(["codex", "app-server", "daemon", "start"]);
     });
 
     it.each([
@@ -55,7 +56,7 @@ describe("non-destructive Codex launch", () => {
     ])("does not probe or modify excluded invocations: %j", (...args) => {
         const command = args as string[];
         const mock = runner();
-        expect(prepare(command, mock)).toEqual(command);
+        expect(prepare(command, mock)).toEqual(ready(command));
         expect(mock).not.toHaveBeenCalled();
     });
 
@@ -63,25 +64,72 @@ describe("non-destructive Codex launch", () => {
         "keeps invocation unchanged unless absence is positively confirmed: %j", result => {
             const command = ["codex", "resume", "session-id"];
             const mock = runner(result);
-            expect(prepare(command, mock)).toEqual(command);
+            expect(prepare(command, mock)).toEqual(ready(command));
             expect(mock).toHaveBeenCalledTimes(1);
         },
     );
 
-    it.each([probe(0, "Usage: old codex"), probe(1, "--no-daemon"), probe(null, "--no-daemon", { signal: "SIGTERM" })])(
-        "requires a successful supported-flag probe: %j", help => {
+    it.each([probe(0, "Usage: old codex"), probe(1, startHelp), probe(null, startHelp, { signal: "SIGTERM" })])(
+        "does not start a daemon without a successful supported-command probe: %j", help => {
             const command = ["codex", "fork", "--last"];
             const mock = runner(missingDaemon(), help);
-            expect(prepare(command, mock)).toEqual(command);
+            const result = prepare(command, mock);
+            expect(result.command).toEqual(command);
+            expect(result).toEqual(ready(command));
+            expect(mock).toHaveBeenCalledTimes(2);
         },
     );
 
     it("does not confuse flag values with command names or remote options", () => {
         const command = ["codex", "-m", "exec", "-c", 'x="--remote"', "resume", "session-id"];
-        const mock = runner(missingDaemon(), probe(0, "--no-daemon"));
+        const mock = runner(missingDaemon(), probe(0, startHelp), probe(0));
         const result = prepare(command, mock);
-        expect(result).toContain("--no-daemon");
-        expect(result.filter(arg => arg !== "--no-daemon")).toEqual(command);
+        expect(result).toEqual(ready(command));
+        expect(mock.mock.calls[2][1].slice(prefix.length)).toEqual(["codex", "app-server", "daemon", "start", "-c", 'x="--remote"']);
+    });
+
+    it("forwards only supported configuration arguments with exact order and quoting boundaries", () => {
+        const overrides = ["--config", 'note="$(touch /tmp/not-run)"', "-cmodel=\"a b\"", "--enable=feature_a", "--disable", "feature_b"];
+        const command = ["codex", ...overrides, "resume", "session-id", "-i", "/tmp/image.png", "continue now"];
+        const mock = runner(missingDaemon(), probe(0, startHelp), probe(0));
+        expect(prepare(command, mock)).toEqual(ready(command));
+        expect(mock.mock.calls[2][1]).toEqual([...prefix, "codex", "app-server", "daemon", "start", ...overrides]);
+    });
+
+    it("accepts idempotent already-running startup without restarting or changing mode", () => {
+        const command = ["codex", "fork", "--last"];
+        const mock = runner(missingDaemon(), probe(0, startHelp), probe(0, '{"status":"alreadyRunning"}'));
+        expect(prepare(command, mock)).toEqual(ready(command));
+        expect(mock).toHaveBeenCalledTimes(3);
+        expect(mock.mock.calls[2][1]).not.toContain("restart");
+        expect(mock.mock.calls[2][1]).not.toContain("--no-daemon");
+    });
+
+    it.each([
+        [probe(7, "", { stderr: "daemon failed" }), 7],
+        [probe(null, "", { error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }) }), 1],
+        [probe(null, "", { signal: "SIGINT" }), 130],
+        [probe(null, "", { signal: "SIGTERM" }), 143],
+    ] as const)("returns explicit failure for unsuccessful startup: %j", (started, expectedStatus) => {
+        const command = ["codex", "resume", "session-id"];
+        const mock = runner(missingDaemon(), probe(0, startHelp), started);
+        const result = prepare(command, mock);
+        expect(result).toEqual(expect.objectContaining({ ok: false, command, status: expectedStatus, error: expect.any(String) }));
+        expect(mock).toHaveBeenCalledTimes(3);
+    });
+
+    it.each([["-p", "custom"], ["--profile=custom"]])("does not initialize a daemon under a silently different profile: %j", (...profile) => {
+        const command = ["codex", ...profile, "resume", "session-id"];
+        const mock = runner(missingDaemon(), probe(0, startHelp));
+        expect(prepare(command, mock)).toEqual(expect.objectContaining({ ok: false, command, status: 1, error: expect.stringMatching(/profile/i) }));
+        expect(mock).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not block profiles on older CLIs without daemon start support", () => {
+        const command = ["codex", "--profile", "custom", "resume", "session-id"];
+        const mock = runner(missingDaemon(), probe(1, "", { stderr: "unknown command daemon" }));
+        expect(prepare(command, mock)).toEqual(ready(command));
+        expect(mock).toHaveBeenCalledTimes(2);
     });
 
     it("executes the read-only probe against the selected CODEX_HOME and preserves its session state", () => {
@@ -100,15 +148,16 @@ describe("non-destructive Codex launch", () => {
                     env: { ...process.env, HOME: home, CODEX_HOME: selectedHome },
                 });
             }
-            return probe(0, " --no-daemon Run without shared server\n");
+            return probe(0, args.includes("--help") ? startHelp : "");
         });
         try {
-            expect(prepare(command, mock)).toContain("--no-daemon");
+            expect(prepare(command, mock)).toEqual(ready(command));
+            expect(mock).toHaveBeenCalledTimes(3);
             mkdirSync(join(selectedHome, "packages", "app-server-daemon", "current", "bin"), { recursive: true });
             writeFileSync(executable, "#!/bin/sh\nexit 0\n");
             chmodSync(executable, 0o755);
             mock.mockClear();
-            expect(prepare(command, mock)).toEqual(command);
+            expect(prepare(command, mock)).toEqual(ready(command));
             expect(mock).toHaveBeenCalledTimes(1);
             expect(readFileSync(session, "utf8")).toBe("existing-session-history\n");
             expect(readFileSync(executable, "utf8")).toBe("#!/bin/sh\nexit 0\n");
@@ -120,7 +169,7 @@ describe("non-destructive Codex launch", () => {
     it("leaves command untouched if a probe runner throws", () => {
         const command = ["codex", "resume", "session-id"];
         const mock = vi.fn(() => { throw new Error("runtime unavailable"); });
-        expect(prepare(command, mock)).toEqual(command);
+        expect(prepare(command, mock)).toEqual(ready(command));
     });
 
     it("removes the destructive recovery ladder from the real launch entry point", () => {
@@ -129,5 +178,32 @@ describe("non-destructive Codex launch", () => {
             expect(source).not.toContain(obsolete);
         }
         expect(source).toContain("prepareCodexLaunch");
+    });
+
+    it.each([true, false])("runs common cleanup and launches TUI only after successful preparation (failed=%s)", failed => {
+        const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+        const start = source.indexOf("let preparationStatus:");
+        const end = source.indexOf("if (process.env.DEBUG)", start);
+        expect(start).toBeGreaterThan(0);
+        expect(end).toBeGreaterThan(start);
+        // Execute the real entry-point block, replacing only its external effects.
+        const js = transpileModule(source.slice(start, end) + "\nreturn resultStatus;", {
+            compilerOptions: { target: ScriptTarget.ES2022 },
+        }).outputText;
+        const events: string[] = [];
+        const command = ["codex", "resume", "session-id"];
+        const launch = vi.fn(() => { events.push("launch"); return { status: 23 }; });
+        const execute = new Function("commandTool", "options", "prepareCodexLaunch", "runtimeCli", "execArgs", "containerName", "resolvedCmd", "process", "console", "CLAUDE_BIN_PATH", "cmd", "spawnSync", "restoreCodexConfigHostOwnership", "unlinkSync", "envFile", js);
+        const status = execute(
+            { name: "codex" }, { interactive: true },
+            () => failed ? { ok: false, command, status: 7, error: "initialization failed" } : ready(command),
+            () => "docker", [...prefix.slice(0, -1)], "ccc-fixture", command,
+            { stdin: { isTTY: false }, stdout: { isTTY: false } }, { error: vi.fn() }, "unused", command,
+            launch, () => events.push("ownership-cleanup"), () => events.push("env-cleanup"), "/tmp/private-env",
+        );
+        expect(status).toBe(failed ? 7 : 23);
+        expect(events).toEqual(failed ? ["ownership-cleanup", "env-cleanup"] : ["launch", "ownership-cleanup", "env-cleanup"]);
+        expect(launch).toHaveBeenCalledTimes(failed ? 0 : 1);
+        if (!failed) expect(launch.mock.calls[0]).toEqual(["docker", [...prefix, ...command], { stdio: "inherit" }]);
     });
 });
