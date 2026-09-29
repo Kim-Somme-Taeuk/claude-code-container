@@ -76,3 +76,17 @@ flow stays unsuccessful. Standalone wait observations retain their current shape
 Remaining follow-ups: some direct unknown-device routes report Unknown tool even
 for a known tool; iOS process-wait observation failures can be reported as absence.
 Those need separate routing/provider fixes rather than misleading description changes.
+
+## iOS app observation follow-up (baseline `7ca47947`)
+
+Reproduced all simulator commands failing with exit 2 and a diagnostic while the
+app wait returned running:false. A nonexistent xcrun executable also lost its
+spawn error. The wait now keeps trustworthy observations per polling sweep and
+uses the final sweep only: successful queries can establish absence; total query
+failure becomes an MCP error retaining a bounded command cause. Existing pgrep
+and launchctl fallbacks and ownership checks remain in place. A successful fallback
+can still find the app when pgrep is unavailable.
+
+Known ceiling: this corrects observation semantics, not the iOS polling deadline.
+Individual commands still use their existing independent timeout. No macOS host
+or real iOS device result is implied by Linux-host fixture verification.

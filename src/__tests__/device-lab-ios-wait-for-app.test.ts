@@ -1,32 +1,161 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
-import { afterEach, describe, expect, it } from "vitest";
-import { waitForIosApp } from "../../device-lab-mcp/src/backends/ios-simulator.mjs";
+import { spawnSync } from "child_process";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-const roots: string[] = [];
-afterEach(() => {
-    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+const fixture = vi.hoisted(() => ({
+    handlers: [] as Array<(request: any) => Promise<any>>,
+    observe: (_args: string[]): any => ({ status: 2, stdout: "", stderr: "simulator unavailable" }),
+    calls: [] as string[][],
+    device: null as any,
+}));
+vi.mock("@modelcontextprotocol/sdk/server/index.js", () => ({ Server: class {
+    setRequestHandler(_schema: unknown, handler: (request: any) => Promise<any>) { fixture.handlers.push(handler); }
+    async connect() {}
+} }));
+vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({ StdioServerTransport: class {} }));
+vi.mock("../../device-lab-mcp/src/commands.mjs", async (importOriginal) => ({
+    ...await importOriginal<Record<string, unknown>>(),
+    commandPath: (name: string) => name === "xcrun" ? "/fixture/xcrun" : null,
+    run: (_cmd: string, args: string[]) => {
+        fixture.calls.push(args);
+        if (args[1] === "list") return { status: 0, stdout: JSON.stringify({ devices: { runtime: [
+            { udid: fixture.device.udid, name: fixture.device.simulatorName, state: "Booted" },
+        ] } }), stderr: "" };
+        return fixture.observe(args);
+    },
+}));
+vi.mock("../../device-lab-mcp/src/state/ios-state.mjs", async (importOriginal) => ({
+    ...await importOriginal<Record<string, unknown>>(),
+    findIosDevice: (id: string) => fixture.device?.id === id ? fixture.device : null,
+}));
+import { ownerId } from "../../device-lab-mcp/src/context.mjs";
+import { waitForIosApp } from "../../device-lab-mcp/src/backends/ios-simulator.mjs";
+import { startServer } from "../../device-lab-mcp/src/server.mjs";
+
+const bundleId = "com.apple.mobilesafari";
+const result = (status: number | null, stdout = "", stderr = "", extra = {}) => ({ status, stdout, stderr, ...extra });
+const failed = () => result(2, "", "simulator unavailable");
+const isPgrep = (args: string[]) => args[3] === "pgrep";
+async function finish<T>(pending: Promise<T>) {
+    await vi.runAllTimersAsync();
+    return pending;
+}
+const wait = (timeoutMs = 0) => finish(waitForIosApp("/fixture/xcrun", "SIM-UDID", bundleId, timeoutMs, 50));
+const call = (name: string, args: Record<string, unknown>) => finish(fixture.handlers[1]({ params: { name, arguments: args } }));
+const args = { deviceId: "ios-observation-fixture", bundleId, timeoutMs: 0, intervalMs: 50, implicitBroker: false };
+
+beforeAll(async () => { await startServer(); });
+beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    fixture.calls.length = 0;
+    fixture.observe = failed;
+    fixture.device = { id: args.deviceId, udid: "SIM-UDID", simulatorName: `ccc-${ownerId()}-observation` };
 });
+afterEach(() => { vi.useRealTimers(); });
 
 describe("iOS Simulator app observation", () => {
-    it("falls back to launchctl when the simulator guest has no pgrep", async () => {
-        const root = mkdtempSync(join(tmpdir(), "ccc-ios-wait-app-"));
-        roots.push(root);
-        const xcrun = join(root, "xcrun");
-        writeFileSync(xcrun, `#!/bin/sh
-case " $* " in
-  *" pgrep "*) echo "No such file or directory" >&2; exit 2 ;;
-  *" launchctl print user/501 "*) echo "UIKitApplication:com.apple.mobilesafari[1234]"; exit 0 ;;
-esac
-exit 1
-`);
-        chmodSync(xcrun, 0o755);
+    it("retains pgrep positive observations and stops querying immediately", async () => {
+        fixture.observe = () => result(0, "123\n", "warning");
+        expect(await wait()).toMatchObject({ running: true, pid: "123", status: 0, stderr: "warning" });
+        expect(fixture.calls).toHaveLength(1);
+    });
 
-        await expect(waitForIosApp(xcrun, "SIM-UDID", "com.apple.mobilesafari", 100, 10)).resolves.toEqual(expect.objectContaining({
-            running: true,
-            observedBy: "launchctl-user/501",
-            status: 0,
-        }));
+    it("falls back in domain order when the guest has no pgrep", async () => {
+        fixture.observe = (argv) => argv.at(-1) === "gui/501"
+            ? result(0, `UIKitApplication:${bundleId}[1234]`) : result(2, "", "No such file or directory");
+        expect(await wait()).toMatchObject({ running: true, observedBy: "launchctl-gui/501", status: 0 });
+        expect(fixture.calls.map((argv) => argv.slice(3))).toEqual([
+            ["pgrep", "-f", bundleId], ["pgrep", "-i", "-f", "mobilesafari"],
+            ["launchctl", "print", "user/501"], ["launchctl", "print", "gui/501"],
+        ]);
+    });
+
+    it("uses clean pgrep absence metadata despite failed fallback commands", async () => {
+        fixture.observe = (argv) => isPgrep(argv) ? result(1) : failed();
+        expect(await wait()).toEqual({ running: false, timeoutMs: 0, stdout: "", stderr: "", status: 1,
+            observedBy: "pgrep-and-launchctl" });
+    });
+
+    it("accepts a clean launchctl absence even if pgrep and other domains fail", async () => {
+        fixture.observe = (argv) => argv.at(-1) === "user/501" ? result(0, "other.app", "warning") : failed();
+        expect(await wait()).toMatchObject({ running: false, status: 0, stdout: "other.app", stderr: "warning" });
+    });
+
+    it.each([result(1, "unexpected"), result(1, "", "permission denied")])("does not mistake pgrep exit 1 diagnostics for absence: %j", async (observation) => {
+        fixture.observe = (argv) => isPgrep(argv) ? observation : failed();
+        expect(await wait()).toHaveProperty("error");
+    });
+
+    it("reports total command failure instead of clean absence", async () => {
+        const observed = await wait();
+        expect(observed).not.toHaveProperty("running");
+        expect(observed.error.stderr).toContain("simulator unavailable");
+    });
+
+    it("retains a real ENOENT spawn diagnostic when stderr is empty", async () => {
+        const missing = spawnSync("/definitely-missing-ccc-ios-observation/xcrun", [], { encoding: "utf8" });
+        expect(missing.error).toHaveProperty("code", "ENOENT");
+        fixture.observe = () => missing;
+        expect((await wait()).error.stderr).toContain("ENOENT");
+    });
+
+    it.each([
+        { error: Object.assign(new Error("spawn failed"), { code: "EACCES" }) },
+        { signal: "SIGTERM" },
+    ])("rejects apparently positive exit 0 accompanied by %j", async (extra) => {
+        fixture.observe = () => result(0, `123 ${bundleId}`, "", extra);
+        const observed = await wait();
+        expect(observed).not.toHaveProperty("running");
+        expect(observed.error.stderr).toContain("signal" in extra ? "SIGTERM" : "spawn failed");
+    });
+
+    it.each([true, false])("uses only the final sweep's trust (first clean=%s)", async (firstClean) => {
+        fixture.observe = (argv) => {
+            const clean = Date.now() === 0 ? firstClean : !firstClean;
+            return clean && isPgrep(argv) ? result(1) : failed();
+        };
+        const observed = await wait(50);
+        expect(fixture.calls).toHaveLength(10);
+        if (firstClean) expect(observed.error.stderr).toContain("simulator unavailable");
+        else expect(observed).toMatchObject({ running: false, status: 1, stderr: "" });
+    });
+
+    it("bounds long multibyte failure details and marks truncation", async () => {
+        fixture.observe = () => result(2, "", "simulator unavailable " + "界".repeat(100000));
+        const observed = await wait();
+        expect(observed.error.stderr).toContain("simulator unavailable");
+        expect(observed.error.stderr).toContain("truncated");
+        expect(Buffer.byteLength(observed.error.stderr)).toBeLessThanOrEqual(64 * 1024);
+    });
+});
+
+describe("public iOS wait and flow errors", () => {
+    it.each([false, true])("returns an MCP observation error with the cause (detail=%s)", async (detail) => {
+        const observed = await call("mobile_wait_for_app", { ...args, detail });
+        expect(observed.isError).toBe(true);
+        expect(observed.content[0].text).toContain("simulator unavailable");
+        expect(observed.content[0].text).not.toContain('"running":false');
+        expect(fixture.calls.some((argv) => argv[1] === "list")).toBe(true);
+    });
+
+    it("keeps standalone clean absence successful and includes provider and bundle in detail mode", async () => {
+        fixture.observe = (argv) => isPgrep(argv) ? result(1) : failed();
+        const observed = await call("mobile_wait_for_app", { ...args, detail: true });
+        expect(observed.isError).toBe(false);
+        expect(JSON.parse(observed.content[0].text)).toMatchObject({ running: false, bundleId, provider: "simctl", status: 1 });
+    });
+
+    it.each(["mobile_run_flow", "device_run_flow"])("%s stops with the original observation error before the next action", async (name) => {
+        const observed = await call(name, { steps: [
+            { tool: "mobile_wait_for_app", arguments: args },
+            { tool: "mobile_wait_for_app", arguments: args },
+        ] });
+        const body = JSON.parse(observed.content[0].text);
+        expect(body).toMatchObject({ ok: false, stoppedAt: 0 });
+        expect(body.results).toHaveLength(1);
+        expect(body.results[0].isError).toBe(true);
+        expect(body.results[0].error).toBeUndefined();
+        expect(JSON.stringify(body.results[0].content)).toContain("simulator unavailable");
+        expect(fixture.calls.filter((argv) => argv[1] === "list")).toHaveLength(1);
     });
 });

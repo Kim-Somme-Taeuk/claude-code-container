@@ -125,3 +125,15 @@ step with error wait-condition-not-met. Default stopOnError prevents subsequent
 actions; false continues while the flow remains unsuccessful. Original wait
 observations and provider errors remain available. Successful waits, standalone
 observational responses and unrelated tools' false fields retain their semantics.
+
+## iOS Simulator app observation failures
+
+An app wait distinguishes clean absence from inability to query the simulator.
+A positive pgrep/launchctl observation retains success. Each polling sweep starts
+with fresh observation trust: a clean observation in the final sweep permits
+running:false, even if another fallback is unavailable. A clean pgrep exit 1
+requires empty stdout/stderr; exit 0 without an error or signal is a valid query.
+If the final sweep has no trustworthy observation, the public tool returns a
+bounded MCP error retaining the command failure cause, not running:false. Earlier
+clean observations cannot hide later total query failure. Existing fallback order,
+ownership checks, and clean-absence response shape remain unchanged.

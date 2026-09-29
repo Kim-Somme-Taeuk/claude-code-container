@@ -2,9 +2,10 @@
 
 ## Scope and stopping point
 
-The user asked to finish only the findings already identified, document them,
-and let another agent continue. Do not start another optimization sweep as part
-of this task. Codex session-history recovery was explicitly abandoned; preserve
+The earlier task ended after the identified findings were documented. The user
+then authorized continuation; the next scoped fix addresses iOS Simulator app
+observation failures. Avoid reopening a broad optimization sweep as part of that
+fix. Codex session-history recovery was explicitly abandoned; preserve
 the history and do not resume that work or propose deleting it.
 
 ## Implemented
@@ -58,24 +59,25 @@ and QA PASS, verification still found no hook-owned receipts. The task was parke
 as BLOCKED_ENV for receipt collection only. Do not fabricate receipts, repeat
 lenses solely to collect them, or confuse formal close with test success.
 
-## Known follow-ups, not implemented here
+## Follow-up status
 
 1. **Unknown device versus unknown tool.** Direct routing can fall through to
    `Unknown tool: <known tool>` for an unknown device ID. Start at
    `dispatchTool` in `server.mjs`. Reproduce across direct/explicit/implicit
    broker routes before introducing a more specific error; distinguish a missing
    device from an unsupported action and preserve ownership isolation.
-2. **iOS observation failure versus absence.** `waitForIosApp` in
-   `backends/ios-simulator.mjs` can report `running:false` after failed process
-   observations. Test `pgrep` and `launchctl` fallbacks, clean absence and transport
-   errors separately. See existing `device-lab-ios-wait-for-app.test.ts` and the
-   Android wait-budget tests. Do not change standalone semantics speculatively.
+2. **iOS observation classification: addressed in the continuation.**
+   `waitForIosApp` in `backends/ios-simulator.mjs` now distinguishes a trustworthy
+   final-sweep absence from total query failure. Failed observations become MCP
+   errors; clean absence and successful fallback matches retain their behavior.
+   See `device-lab-ios-wait-for-app.test.ts`. Its independent command timeouts
+   remain unchanged; end-to-end iOS polling deadlines are still a separate issue.
 3. **Broker Appium end-to-end deadlines.** Client HTTP timeout changes alone do
    not bound host polling work. Trace broker session preparation, attestation and
    host request budgets before designing deadline propagation. Preserve fresh
    per-step authorization, owner generations and physical leases.
 
-The next agent should choose and reproduce one of these findings before editing.
+The next agent should choose and reproduce an unresolved finding before editing.
 Keep responses small; avoid generic hint fields, new guide tools, or broad
 recursive response rewriting. This handoff does not claim every tool's UX is
 fully optimized.
