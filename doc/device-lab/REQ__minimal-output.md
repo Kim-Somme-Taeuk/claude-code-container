@@ -201,3 +201,23 @@ actions do not receive an inherited incarnationId). Explicit invalid values stil
 validation. Never inherit confirmation, credentials, force or routing controls.
 Target-neutral display/inventory steps receive no defaults. Each step retains
 fresh broker/ownership checks, stopping semantics and compact/detail output.
+
+## Mobile observation deadlines
+
+Mobile text/app waits use one observation allowance after device discovery and
+initial Appium session setup. The default is 10 seconds; finite numeric timeouts
+are clamped to 1–600000 ms and poll intervals to 1–60000 ms (default 500). Each
+subprocess, HTTP phase and controllable observation lock consumes the remaining
+allowance; pauses cannot extend it or start another observation afterward.
+Timeouts and incomplete output cannot supply a match or evidence of absence.
+A completed clean non-match may establish absence, including a valid simulator
+observation in the latest fallback sweep; without such evidence, failed
+observation remains an error. Lost ownership always fails. Physical attachment
+and broker identity checks remain.
+
+This bounds observation work, not installation/session bootstrap or exact wall
+clock completion: bounded process inspection, filesystem work, termination and
+scheduling can add overhead. Matching client and host broker builds are required
+for the underlying host request cancellation guarantee; older hosts retain their
+previous internal request limits. Ordinary non-wait Appium requests retain their
+existing timeout defaults.

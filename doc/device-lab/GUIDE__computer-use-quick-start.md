@@ -95,3 +95,13 @@ and confirmations are never inherited from the flow.
 Use `device_install_app`, `device_launch_app`, `device_screenshot` and
 `mobile_set_orientation` in new calls. Old mobile aliases and `mobile_run_flow`
 remain callable for existing workflows but are absent from tool discovery.
+
+## Waiting for a mobile condition
+
+Use one `mobile_wait_for_text` or `mobile_wait_for_app` call instead of repeated
+status/UI calls. `timeoutMs` is the observation allowance after initial device
+discovery and Appium setup; the default is 10000 ms. Observation commands,
+requests and pauses share that allowance. Process inspection, filesystem work,
+termination and timer scheduling can add overhead. A completed non-match is
+different from an observation error; flows stop on an unmet wait by default.
+Update client and host broker together for host-side cancellation support.

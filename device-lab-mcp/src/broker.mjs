@@ -1,3 +1,4 @@
+import { createWaitBudget } from "./wait-budget.mjs";
 import { AsyncLocalStorage } from "async_hooks";
 import { createHash, createHmac, randomBytes } from "crypto";
 import { spawn, spawnSync } from "child_process";
@@ -2285,16 +2286,18 @@ function ownerToken(owner) {
         : null;
 }
 
-async function resolveBrokerOwner(probeOptions) {
+async function resolveBrokerOwner(probeOptions, waitBudget) {
     const attempts = [];
     const requestBody = JSON.stringify({
         projectMountPath: projectMountPath(),
         profile: process.env.CCC_PROFILE || null,
     });
     for (const host of probeOptions.hostCandidates) {
+        const timeoutMs = waitBudget ? waitBudget.requestTimeout(probeOptions.timeoutMs) : probeOptions.timeoutMs;
+        if (timeoutMs <= 0) break;
         const endpoint = `http://${host}:${probeOptions.port}/v1/owner/resolve`;
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), probeOptions.timeoutMs);
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
         const startedAt = Date.now();
         try {
             const response = await fetch(endpoint, {
@@ -2466,6 +2469,12 @@ async function brokerRpcRequestUncached(options = {}) {
             attempts: [],
         };
     }
+    const explicitRequestBudget = method === "broker.appium.request" && options.params?.requestTimeoutMs !== undefined;
+    if (explicitRequestBudget && (typeof options.params.requestTimeoutMs !== "number"
+        || !Number.isFinite(options.params.requestTimeoutMs) || options.params.requestTimeoutMs <= 0
+        || options.params.requestTimeoutMs > 600000)) {
+        return { ok: false, ownerId: owner, method, error: "invalid-appium-request-timeout", attempts: [] };
+    }
     let launch = null;
     if (options.autolaunch === true) {
         launch = await ensureBroker(options);
@@ -2495,6 +2504,7 @@ async function brokerRpcRequestUncached(options = {}) {
         }
         probeOptions = { ...probeOptions, hostCandidates: [launch.host], port: launch.port };
     }
+    const waitBudget = explicitRequestBudget ? createWaitBudget(options.params.requestTimeoutMs) : null;
     let requestBody = JSON.stringify({
         ownerId: owner,
         method,
@@ -2510,7 +2520,7 @@ async function brokerRpcRequestUncached(options = {}) {
             attempts: [],
         };
     }
-    const resolvedOwner = brokerSetupEvidence.get(launch)?.ownerResolve || await resolveBrokerOwner(probeOptions);
+    const resolvedOwner = brokerSetupEvidence.get(launch)?.ownerResolve || await resolveBrokerOwner(probeOptions, waitBudget);
     if (resolvedOwner.ok) owner = resolvedOwner.ownerId;
     else {
         const brokerUnavailable = resolvedOwner.error === "broker-owner-resolve-unavailable"
@@ -2556,11 +2566,13 @@ async function brokerRpcRequestUncached(options = {}) {
 
     const attempts = [];
     for (const host of probeOptions.hostCandidates) {
+        if (waitBudget && waitBudget.remaining() <= 0) break;
+        let attemptTimeoutMs = rpcTimeoutMs;
         const rpcPath = `/v1/owners/${encodeURIComponent(owner)}/rpc`;
         const endpoint = `http://${host}:${probeOptions.port}${rpcPath}`;
         const startedAt = Date.now();
         try {
-            const verifiedRuntime = await verifyAuthenticatedBrokerGeneration(host, probeOptions.port, launch, options);
+            const verifiedRuntime = await verifyAuthenticatedBrokerGeneration(host, probeOptions.port, launch, waitBudget ? { ...options, timeoutMs: waitBudget.requestTimeout(5000) } : options);
             if (!verifiedRuntime) {
                 return {
                     ok: false,
@@ -2572,11 +2584,18 @@ async function brokerRpcRequestUncached(options = {}) {
                     attempts,
                 };
             }
+            if (waitBudget) {
+                attemptTimeoutMs = waitBudget.requestTimeout(rpcTimeoutMs);
+                if (attemptTimeoutMs <= 0) break;
+                requestBody = JSON.stringify({ ownerId: owner, method, params: {
+                    ...options.params, requestTimeoutMs: attemptTimeoutMs,
+                } });
+            }
             const response = await brokerRpcHttpJsonRequest({
                 host,
                 port: probeOptions.port,
                 path: rpcPath,
-                timeoutMs: rpcTimeoutMs,
+                timeoutMs: attemptTimeoutMs,
                 // Only Hyper-V console frames are bounded this tightly; other desktop providers keep
                 // the general RPC limit their larger native screenshots already fit under.
                 maxBytes: method === "broker.device.tool.invoke" && options.params?.tool === "device_screenshot"
@@ -2589,6 +2608,11 @@ async function brokerRpcRequestUncached(options = {}) {
                 },
                 body: requestBody,
             });
+            if (waitBudget && waitBudget.remaining() <= 0) {
+                const error = new Error("broker RPC timed out");
+                error.name = "AbortError";
+                throw error;
+            }
             const responseBody = response.responseBody;
             const body = responseBody.body;
             const attempt = {
@@ -2598,7 +2622,7 @@ async function brokerRpcRequestUncached(options = {}) {
                 ok: responseBody.ok && response.ok,
                 status: response.status,
                 durationMs: Date.now() - startedAt,
-                timeoutMs: rpcTimeoutMs,
+                timeoutMs: attemptTimeoutMs,
                 body: summarizeBody(body),
                 ...(responseBody.ok ? {} : { error: responseBody.error, maxBytes: responseBody.maxBytes }),
             };
@@ -2649,7 +2673,7 @@ async function brokerRpcRequestUncached(options = {}) {
                 ok: false,
                 status: null,
                 durationMs: Date.now() - startedAt,
-                timeoutMs: rpcTimeoutMs,
+                timeoutMs: attemptTimeoutMs,
                 error: failure.error,
                 transportCode: failure.transportCode,
                 transportRetryable: failure.retryable,
@@ -2987,6 +3011,7 @@ export async function brokerAppium(options = {}) {
             method: options.method,
             path: options.path,
             body: options.body,
+            ...(action === "request" && options.requestTimeoutMs !== undefined ? { requestTimeoutMs: options.requestTimeoutMs } : {}),
         },
     });
 }

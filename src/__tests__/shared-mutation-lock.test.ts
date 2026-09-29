@@ -50,6 +50,37 @@ describe("device-lab shared mutation lock", () => {
         return { root, external, backend, source: join(root, "source.txt") };
     }
 
+    for (const [label, sync, asyncLock] of [
+        ["host", withHostSharedMutationLock, withHostSharedMutationLockAsync],
+        ["direct", withNestedSharedMutationLock, withSharedMutationLockAsync],
+    ] as const) {
+        it(`${label} refuses expired budgets before entering an uncontended callback`, async () => {
+            const callback = vi.fn();
+            const options = { waitBudget: { remaining: () => 0 } };
+            expect(() => sync(lockPath(), callback, options)).toThrow();
+            await expect(asyncLock(lockPath(), callback, options)).rejects.toThrow();
+            expect(callback).not.toHaveBeenCalled();
+        });
+        it(`${label} bounds contended acquisition and never enters after the owner releases`, async () => {
+            const file = lockPath();
+            let release!: () => void;
+            let entered!: () => void;
+            const gate = new Promise<void>((resolve) => { release = resolve; });
+            const ready = new Promise<void>((resolve) => { entered = resolve; });
+            const owner = asyncLock(file, async () => { entered(); await gate; });
+            await ready;
+            const callback = vi.fn();
+            const deadline = performance.now() + 40;
+            const options = { waitBudget: { remaining: () => Math.max(0, deadline - performance.now()) } };
+            try {
+                await expect(asyncLock(file, callback, options)).rejects.toMatchObject({ code: "shared-mutation-lock-timeout" });
+                expect(performance.now() - deadline).toBeLessThan(1000);
+            } finally { release(); await owner; }
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            expect(callback).not.toHaveBeenCalled();
+        });
+    }
+
     it("removes its token-fenced lock after the operation", () => {
         const file = lockPath();
         const result = withSharedMutationLock(file, () => {

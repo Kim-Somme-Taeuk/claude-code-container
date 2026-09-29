@@ -19,6 +19,7 @@ import { OWNER_DEVICE_ID_PATTERN } from "./state/owner-device-state.mjs";
 import { readOwnerDevices } from "./state/device-store.mjs";
 import { ALL_TOOLS, DEVICE_FLOW_TOOL_NAMES, SINGLE_BACKEND_TOOL_DEFAULTS, TOOLS } from "./tools.mjs";
 import { flowStepArguments, normalizeToolArgs } from "./tool-arguments.mjs";
+import { createWaitBudget } from "./wait-budget.mjs";
 
 const FLOW_MAX_STEPS = 50;
 const DEVICE_REQUIRED_TOOLS = new Set(ALL_TOOLS
@@ -1228,13 +1229,15 @@ async function handleBrokerMobileTool(name, args) {
     if (name === "mobile_wait_for_text") {
         const text = args?.text;
         if (!text) return textResult(false, "mobile_wait_for_text requires text");
-        const timeoutMs = Math.max(0, Number(args?.timeoutMs ?? 10000));
-        const intervalMs = Math.max(50, Number(args?.intervalMs ?? 500));
-        const deadline = Date.now() + timeoutMs;
+        const wait = createWaitBudget(args?.timeoutMs, args?.intervalMs);
+        const timeoutMs = wait.timeoutMs;
+        let observed = false;
         let lastSource = "";
-        while (Date.now() <= deadline) {
+        while (wait.remaining() > 0) {
             const request = await brokerAppium({
-                ...appiumOptions,
+                ...selectedBrokerProbeOptions(appiumOptions, ensure),
+                autolaunch: false,
+                requestTimeoutMs: wait.requestTimeout(600000),
                 action: "request",
                 backend: resolvedBackend,
                 deviceId,
@@ -1242,22 +1245,27 @@ async function handleBrokerMobileTool(name, args) {
                 path: "/source",
             });
             if (!request.ok) return jsonResult({ ...request, routedBy: "mobile-broker-appium" });
+            if (wait.remaining() <= 0) return textResult(false, "Appium wait deadline exhausted during observation");
+            observed = true;
             lastSource = String(request.result?.response?.body?.value ?? "");
             if (lastSource.includes(text)) return jsonResult({ found: true, text, source: lastSource, provider: "broker-appium", backend: resolvedBackend, broker: request });
-            await new Promise((resolve) => setTimeout(resolve, intervalMs));
+            await wait.pause();
         }
+        if (!observed) return textResult(false, "Appium wait deadline exhausted before observation");
         return jsonResult({ found: false, text, source: lastSource, timeoutMs, provider: "broker-appium", backend: resolvedBackend });
     }
 
     if (name === "mobile_wait_for_app") {
-        const timeoutMs = Math.max(0, Number(args?.timeoutMs ?? 10000));
-        const intervalMs = Math.max(50, Number(args?.intervalMs ?? 500));
-        const deadline = Date.now() + timeoutMs;
+        const wait = createWaitBudget(args?.timeoutMs, args?.intervalMs);
+        const timeoutMs = wait.timeoutMs;
+        let observed = false;
         let lastState = null;
         const expectedAppId = appIdForBackend(args, resolvedBackend);
-        while (Date.now() <= deadline) {
+        while (wait.remaining() > 0) {
             const request = await brokerAppium({
-                ...appiumOptions,
+                ...selectedBrokerProbeOptions(appiumOptions, ensure),
+                autolaunch: false,
+                requestTimeoutMs: wait.requestTimeout(600000),
                 action: "request",
                 backend: resolvedBackend,
                 deviceId,
@@ -1266,6 +1274,8 @@ async function handleBrokerMobileTool(name, args) {
                 body: mapped.body,
             });
             if (!request.ok) return jsonResult({ ...request, routedBy: "mobile-broker-appium" });
+            if (wait.remaining() <= 0) return textResult(false, "Appium wait deadline exhausted during observation");
+            observed = true;
             lastState = request.result?.response?.body?.value ?? request.result?.response?.body ?? null;
             if (resolvedBackend.startsWith("ios")) {
                 const activeBundleId = lastState?.bundleId ?? lastState?.bundleID ?? null;
@@ -1273,8 +1283,9 @@ async function handleBrokerMobileTool(name, args) {
             } else if (Number(lastState) >= 3) {
                 return jsonResult({ found: true, packageName: expectedAppId, appState: lastState, provider: "broker-appium", backend: resolvedBackend, broker: request });
             }
-            await new Promise((resolve) => setTimeout(resolve, intervalMs));
+            await wait.pause();
         }
+        if (!observed) return textResult(false, "Appium wait deadline exhausted before observation");
         return jsonResult({ found: false, appState: lastState, timeoutMs, provider: "broker-appium", backend: resolvedBackend });
     }
 

@@ -144,7 +144,7 @@ The full goal remains open for these source-confirmed issues:
 - Sandbox/macOS inventory still exposes executable wiring and duplicate discovery.
 - QEMU stored directory maps and historical operations/readiness need a semantic
   projection that preserves artifacts and failure/recovery evidence.
-- iOS and broker-Appium polling use independent command/request budgets.
+- iOS and broker-Appium polling budgets were independent; the observation-budget follow-up addresses these paths.
 
 All final tool families require realistic success/failure and opaque-data
 verification after these changes; registry counts alone cannot close the goal.

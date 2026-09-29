@@ -515,16 +515,26 @@ function moveMalformedLock(file: string, token: string, validateDirectories: () 
 export function withSharedMutationLock<T>(
     file: string,
     operation: () => T,
-    options: { waitMs?: number; staleMs?: number } = {},
+    options: { waitMs?: number; staleMs?: number; waitBudget?: { remaining(): number } } = {},
 ): T {
     const waitMs = options.waitMs ?? DEFAULT_WAIT_MS;
     const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
-    const deadline = Date.now() + waitMs;
+    const clock = options.waitBudget ? () => performance.now() : () => Date.now();
+    const deadline = clock() + waitMs;
+    const remaining = () => Math.min(deadline - clock(), options.waitBudget?.remaining() ?? Infinity);
+    const assertBudget = () => {
+        if (options.waitBudget && remaining() <= 0) {
+            const error = new Error(`Timed out acquiring shared mutation lock: ${file}`) as Error & { code?: string };
+            error.code = "shared-mutation-lock-timeout";
+            throw error;
+        }
+    };
     const token = randomBytes(16).toString("hex");
     const directories = secureStateParentDirectory(file);
     const validateDirectories = () => assertStateDirectoriesUnchanged(directories);
 
     while (true) {
+        assertBudget();
         try {
             validateDirectories();
             const fd = openSync(file, "wx", 0o600);
@@ -545,17 +555,18 @@ export function withSharedMutationLock<T>(
             if (!existing && lockIsStale(file, existing, staleMs)) {
                 if (moveMalformedLock(file, token, validateDirectories)) continue;
             }
-            if (Date.now() >= deadline) {
+            if (remaining() <= 0) {
                 const error = new Error(`Timed out acquiring shared mutation lock: ${file}`) as Error & { code?: string };
                 error.code = "shared-mutation-lock-timeout";
                 throw error;
             }
-            sleepSync(POLL_MS);
+            sleepSync(options.waitBudget ? Math.max(0, Math.min(POLL_MS, remaining())) : POLL_MS);
         }
     }
 
     try {
         validateDirectories();
+        assertBudget();
         return operation();
     } finally {
         validateDirectories();
@@ -567,17 +578,27 @@ export function withSharedMutationLock<T>(
 export async function withSharedMutationLockAsync<T>(
     file: string,
     operation: () => Promise<T> | T,
-    options: { waitMs?: number; staleMs?: number } = {},
+    options: { waitMs?: number; staleMs?: number; waitBudget?: { remaining(): number } } = {},
 ): Promise<T> {
     const waitMs = options.waitMs ?? DEFAULT_WAIT_MS;
     const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
-    const deadline = Date.now() + waitMs;
+    const clock = options.waitBudget ? () => performance.now() : () => Date.now();
+    const deadline = clock() + waitMs;
+    const remaining = () => Math.min(deadline - clock(), options.waitBudget?.remaining() ?? Infinity);
+    const assertBudget = () => {
+        if (options.waitBudget && remaining() <= 0) {
+            const error = new Error(`Timed out acquiring shared mutation lock: ${file}`) as Error & { code?: string };
+            error.code = "shared-mutation-lock-timeout";
+            throw error;
+        }
+    };
     const token = randomBytes(16).toString("hex");
     const directories = secureStateParentDirectory(file);
     const validateDirectories = () => assertStateDirectoriesUnchanged(directories);
     const record = await lockRecordAsync(token);
 
     while (true) {
+        assertBudget();
         try {
             validateDirectories();
             const fd = openSync(file, "wx", 0o600);
@@ -598,17 +619,18 @@ export async function withSharedMutationLockAsync<T>(
             if (!existing && await lockIsStaleAsync(file, existing, staleMs)) {
                 if (moveMalformedLock(file, token, validateDirectories)) continue;
             }
-            if (Date.now() >= deadline) {
+            if (remaining() <= 0) {
                 const error = new Error(`Timed out acquiring shared mutation lock: ${file}`) as Error & { code?: string };
                 error.code = "shared-mutation-lock-timeout";
                 throw error;
             }
-            await sleep(POLL_MS);
+            await sleep(options.waitBudget ? Math.max(0, Math.min(POLL_MS, remaining())) : POLL_MS);
         }
     }
 
     try {
         validateDirectories();
+        assertBudget();
         return await operation();
     } finally {
         validateDirectories();

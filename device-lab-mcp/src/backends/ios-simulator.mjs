@@ -1,3 +1,4 @@
+import { createWaitBudget } from "../wait-budget.mjs";
 import { spawn } from "child_process";
 import { createHash, randomUUID } from "crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "fs";
@@ -12,7 +13,7 @@ import { claimIosDevice, findIosDevice, readIosDevices, transitionIosDevice, upd
 import { withOwnerDeviceOperation } from "../state/device-store.mjs";
 import { requiresOwnerDeviceOperation } from "../state/device-operation-policy.mjs";
 import { inspectProcessIdentity, readProcessIdentity, refreshOwnedRuntimeProcessIdentity, signalOwnedRuntimeProcess, terminateOwnedRuntimeProcess, waitForProcessIdentity } from "../state/process-identity.mjs";
-import { claimRecordingFinalization, recordingGenerationMatches, transitionAppiumGeneration, transitionRecordingGeneration } from "../state/runtime-generation.mjs";
+import { appiumGenerationMatches, claimRecordingFinalization, recordingGenerationMatches, transitionAppiumGeneration, transitionRecordingGeneration } from "../state/runtime-generation.mjs";
 import { withTargetStatus } from "../status.mjs";
 import { commitLocalOutputStage, copyStagedInputFile, createLocalOutputStage, discardLocalOutputStage, populateLocalOutputStage, restoreLocalOutputStage, stageLocalInputFile } from "../transfer-file.mjs";
 
@@ -436,18 +437,20 @@ async function waitForAppium(url) {
 }
 
 export async function waitForIosApp(xcrun, target, bundleId, timeoutMs = 10000, intervalMs = 500) {
-    const deadline = Date.now() + Math.max(0, timeoutMs);
+    const budget = createWaitBudget(timeoutMs, intervalMs);
     let last = null;
     let observation = null;
     const executableHint = String(bundleId).split(".").filter(Boolean).at(-1) || String(bundleId);
-    while (Date.now() <= deadline) {
+    while (budget.remaining() > 0) {
         // Only the latest sweep can establish that the app is absent.
         observation = null;
         for (const args of [
             ["simctl", "spawn", target, "pgrep", "-f", bundleId],
             ["simctl", "spawn", target, "pgrep", "-i", "-f", executableHint],
         ]) {
-            const r = run(xcrun, args);
+            const allowance = budget.requestTimeout();
+            if (!allowance) break;
+            const r = run(xcrun, args, { timeout: allowance });
             last = r;
             const clean = !r.error && !r.signal && (r.status === 0
                 || (r.status === 1 && !r.stdout && !r.stderr));
@@ -457,7 +460,9 @@ export async function waitForIosApp(xcrun, target, bundleId, timeoutMs = 10000, 
             }
         }
         for (const domain of ["user/501", "gui/501", "system"]) {
-            const launchctl = run(xcrun, ["simctl", "spawn", target, "launchctl", "print", domain]);
+            const allowance = budget.requestTimeout();
+            if (!allowance) break;
+            const launchctl = run(xcrun, ["simctl", "spawn", target, "launchctl", "print", domain], { timeout: allowance });
             last = launchctl;
             const clean = !launchctl.error && !launchctl.signal && launchctl.status === 0;
             if (clean) observation = launchctl;
@@ -472,7 +477,7 @@ export async function waitForIosApp(xcrun, target, bundleId, timeoutMs = 10000, 
                 };
             }
         }
-        await sleep(Math.max(50, intervalMs));
+        await budget.pause();
     }
     if (!observation) {
         const cause = last ? [
@@ -489,7 +494,7 @@ export async function waitForIosApp(xcrun, target, bundleId, timeoutMs = 10000, 
     }
     return {
         running: false,
-        timeoutMs,
+        timeoutMs: budget.timeoutMs,
         stdout: String(observation.stdout || "").slice(-512),
         stderr: String(observation.stderr || "").slice(-512),
         status: observation.status ?? null,
@@ -659,6 +664,19 @@ async function postIosAppium(deviceId, path, body, provider = "appium-xcuitest")
         return { result: jsonResult({ provider, sessionId: session.sessionId, response: response?.value ?? response }) };
     } catch (error) {
         return { result: textResult(false, `iOS Simulator Appium request failed: ${error.message}`) };
+    }
+}
+
+function guardIosObservation(deviceId, original, session) {
+    const current = findIosDevice(deviceId);
+    if (!current || current.udid !== original.udid
+        || current.simulatorName !== original.simulatorName
+        || current.createdAt !== original.createdAt
+        || current.lifecycle?.runtimeId !== original.lifecycle?.runtimeId
+        || !appiumGenerationMatches(session.device?.appium, current.appium)
+        || current.appium?.serverUrl !== session.serverUrl
+        || current.appium?.sessionId !== session.sessionId) {
+        throw new Error("iOS Simulator device or Appium session changed during observation; retry the wait");
     }
 }
 
@@ -1763,23 +1781,37 @@ async function handleIosToolUnlocked(name, args) {
         }
 
         case "mobile_wait_for_text": {
-            const { deviceId, text, timeoutMs = 10000, intervalMs = 500 } = args;
+            const { deviceId, text, timeoutMs, intervalMs } = args;
             const device = findIosDevice(deviceId);
             if (!device) return undefined;
             if (!text) return textResult(false, "iOS Simulator wait-for-text requires text");
-            const deadline = Date.now() + Math.max(0, timeoutMs);
+            const resolved = await iosAppiumSessionOrResult(deviceId);
+            if (resolved.unknown) return undefined;
+            if (resolved.result) return resolved.result;
+            const { session } = resolved;
+            const budget = createWaitBudget(timeoutMs, intervalMs);
             let lastSource = "";
-            while (Date.now() <= deadline) {
-                const resolved = await iosAppiumSource(deviceId);
-                if (resolved.unknown) return undefined;
-                if (resolved.result) return resolved.result;
-                if (!resolved.result) {
-                    lastSource = String(resolved.source || "");
+            let observed = false;
+            while (budget.remaining() > 0) {
+                try {
+                    guardIosObservation(deviceId, device, session);
+                    const allowance = budget.requestTimeout(5000);
+                    if (!allowance) throw new Error("Appium observation budget exhausted before source request");
+                    const response = await fetchIosAppiumJson(`${session.serverUrl}/session/${session.sessionId}/source`, {
+                        method: "GET", timeoutMs: allowance,
+                    });
+                    guardIosObservation(deviceId, device, session);
+                    if (budget.remaining() <= 0) throw new Error("Appium source observation timed out");
+                    observed = true;
+                    lastSource = String((response?.value ?? response?.source ?? response) || "");
                     if (lastSource.includes(text)) return jsonResult({ found: true, text, source: lastSource, provider: "appium-xcuitest" });
+                } catch (error) {
+                    return textResult(false, `iOS Simulator Appium source request failed: ${error.message}`);
                 }
-                await sleep(Math.max(50, intervalMs));
+                await budget.pause();
             }
-            return jsonResult({ found: false, text, source: lastSource, timeoutMs, provider: "appium-xcuitest" });
+            if (!observed) return textResult(false, "Appium observation budget exhausted before source request");
+            return jsonResult({ found: false, text, source: lastSource, timeoutMs: budget.timeoutMs, provider: "appium-xcuitest" });
         }
 
         case "mobile_back":

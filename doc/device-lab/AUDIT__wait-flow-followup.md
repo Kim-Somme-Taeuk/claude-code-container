@@ -49,10 +49,9 @@ physical leases and fresh per-step operation scopes remain necessary.
 
 ## Known ceiling
 
-Broker-Appium text/app polling still has independent host request
-and attestation budgets. An HTTP-only timeout clamp would not bound host work;
-end-to-end deadline propagation requires a separate broker/host contract change.
-The existing Android ADB polling improvements do not claim to cover that route.
+The independent broker-Appium request/attestation budgets identified at this
+baseline are addressed by the observation-budget work below. Older host broker
+builds still use the previous internal request limits.
 
 On an oversized failed flow, successful text/JSON content is explicitly omitted
 before failure diagnostics are shortened. If unusually many content blocks cannot
@@ -87,9 +86,8 @@ failure becomes an MCP error retaining a bounded command cause. Existing pgrep
 and launchctl fallbacks and ownership checks remain in place. A successful fallback
 can still find the app when pgrep is unavailable.
 
-Known ceiling: this corrects observation semantics, not the iOS polling deadline.
-Individual commands still use their existing independent timeout. No macOS host
-or real iOS device result is implied by Linux-host fixture verification.
+The observation-budget follow-up below also bounds these simulator commands.
+Known ceiling: Linux-host fixtures do not prove native macOS or physical iOS behavior.
 
 ## Device diagnostic follow-up (baseline `5560c9e2`)
 
@@ -101,3 +99,19 @@ precedence. Raw owner-state reads avoid querying device providers merely to expl
 an error; container QEMU targets and the current display remain recognizable.
 The user requested deletion of the standalone MCP UX handoff; durable behavior
 and remaining wait-budget limitations stay in this audit and the REQ.
+
+## Shared observation budget (baseline `2b2fc317`)
+
+Android and direct iOS waits use a small monotonic budget primitive. Simulator
+process fallbacks share the remaining allowance; direct Appium waits prepare the
+session once and bound each observation request. Physical attachment/session
+checks remain part of observation instead of disappearing with repeated setup.
+Broker polls propagate an optional request allowance through owner resolution,
+generation attestation and RPC; the host consumes its allocation through owner
+and lease lock acquisition before the Appium fetch. Ordinary Appium requests
+keep their existing timeout defaults. Exhaustion prevents later observations.
+
+Known ceiling: the allowance starts after discovery and initial session setup.
+Bounded identity inspection, filesystem work, process termination and event-loop
+scheduling can add wall-clock overhead. Older broker builds cannot enforce the
+new underlying host request allowance; deploy matching client/broker builds.

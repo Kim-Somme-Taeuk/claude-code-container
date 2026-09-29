@@ -1,10 +1,5 @@
 import { runWithTimeout } from "../commands.mjs";
-
-function boundedWaitNumber(value, fallback, maximum) {
-    return typeof value === "number" && Number.isFinite(value)
-        ? Math.min(maximum, Math.max(1, Math.trunc(value)))
-        : fallback;
-}
+import { createWaitBudget } from "../wait-budget.mjs";
 
 function commandFailed(result) {
     return result.status !== 0 || Boolean(result.error || result.signal);
@@ -16,21 +11,13 @@ function waitFailure(result) {
 }
 
 function androidWait(adb, targetArgs, timeoutMs, intervalMs) {
-    const timeout = boundedWaitNumber(timeoutMs, 10000, 600000);
-    const interval = boundedWaitNumber(intervalMs, 500, 60000);
-    const deadline = performance.now() + timeout;
-    const remaining = () => Math.max(0, deadline - performance.now());
+    const wait = createWaitBudget(timeoutMs, intervalMs);
     return {
-        timeoutMs: timeout,
-        remaining,
+        ...wait,
         run(args) {
-            const budget = remaining();
+            const budget = wait.requestTimeout();
             if (budget <= 0) return { status: null, stderr: "Android wait deadline exhausted before completing the observation" };
-            return runWithTimeout(adb, [...targetArgs, ...args], Math.min(120000, Math.ceil(budget)));
-        },
-        async pause() {
-            const delay = Math.min(interval, remaining());
-            if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+            return runWithTimeout(adb, [...targetArgs, ...args], budget);
         },
     };
 }

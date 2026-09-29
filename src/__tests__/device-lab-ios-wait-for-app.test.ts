@@ -5,6 +5,7 @@ const fixture = vi.hoisted(() => ({
     handlers: [] as Array<(request: any) => Promise<any>>,
     observe: (_args: string[]): any => ({ status: 2, stdout: "", stderr: "simulator unavailable" }),
     calls: [] as string[][],
+    allowances: [] as number[],
     device: null as any,
 }));
 vi.mock("@modelcontextprotocol/sdk/server/index.js", () => ({ Server: class {
@@ -15,7 +16,8 @@ vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({ StdioServerTranspo
 vi.mock("../../device-lab-mcp/src/commands.mjs", async (importOriginal) => ({
     ...await importOriginal<Record<string, unknown>>(),
     commandPath: (name: string) => name === "xcrun" ? "/fixture/xcrun" : null,
-    run: (_cmd: string, args: string[]) => {
+    run: (_cmd: string, args: string[], options?: { timeout?: number }) => {
+        if (options?.timeout !== undefined) fixture.allowances.push(options.timeout);
         fixture.calls.push(args);
         if (args[1] === "list") return { status: 0, stdout: JSON.stringify({ devices: { runtime: [
             { udid: fixture.device.udid, name: fixture.device.simulatorName, state: "Booted" },
@@ -39,21 +41,39 @@ async function finish<T>(pending: Promise<T>) {
     await vi.runAllTimersAsync();
     return pending;
 }
-const wait = (timeoutMs = 0) => finish(waitForIosApp("/fixture/xcrun", "SIM-UDID", bundleId, timeoutMs, 50));
+const wait = (timeoutMs = 1) => finish(waitForIosApp("/fixture/xcrun", "SIM-UDID", bundleId, timeoutMs, 50));
 const call = (name: string, args: Record<string, unknown>) => finish(fixture.handlers[1]({ params: { name, arguments: args } }));
-const args = { deviceId: "ios-observation-fixture", bundleId, timeoutMs: 0, intervalMs: 50, implicitBroker: false };
+const args = { deviceId: "ios-observation-fixture", bundleId, timeoutMs: 1, intervalMs: 50, implicitBroker: false };
 
 beforeAll(async () => { await startServer(); });
 beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
+    vi.spyOn(performance, "now").mockImplementation(() => Date.now());
     fixture.calls.length = 0;
+    fixture.allowances.length = 0;
     fixture.observe = failed;
     fixture.device = { id: args.deviceId, udid: "SIM-UDID", simulatorName: `ccc-${ownerId()}-observation` };
 });
-afterEach(() => { vi.useRealTimers(); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("iOS Simulator app observation", () => {
+    it("reduces subprocess allowance across fallbacks and skips work after exhaustion", async () => {
+        fixture.observe = () => { vi.setSystemTime(Date.now() + 30); return failed(); };
+        const observed = await wait(100);
+        expect(observed).toHaveProperty("error");
+        expect(fixture.allowances).toEqual([100, 70, 40, 10]);
+        expect(fixture.calls).toHaveLength(4);
+    });
+
+    it("caps the final pause and does not begin a new sweep at the deadline", async () => {
+        fixture.observe = () => { vi.setSystemTime(Date.now() + 2); return result(1); };
+        const timer = vi.spyOn(globalThis, "setTimeout");
+        expect(await wait(20)).toMatchObject({ running: false });
+        expect(fixture.calls).toHaveLength(5);
+        expect(timer).toHaveBeenCalledWith(expect.any(Function), 10);
+    });
+
     it("retains pgrep positive observations and stops querying immediately", async () => {
         fixture.observe = () => result(0, "123\n", "warning");
         expect(await wait()).toMatchObject({ running: true, pid: "123", status: 0, stderr: "warning" });
@@ -72,7 +92,7 @@ describe("iOS Simulator app observation", () => {
 
     it("uses clean pgrep absence metadata despite failed fallback commands", async () => {
         fixture.observe = (argv) => isPgrep(argv) ? result(1) : failed();
-        expect(await wait()).toEqual({ running: false, timeoutMs: 0, stdout: "", stderr: "", status: 1,
+        expect(await wait()).toEqual({ running: false, timeoutMs: 1, stdout: "", stderr: "", status: 1,
             observedBy: "pgrep-and-launchctl" });
     });
 
@@ -114,7 +134,7 @@ describe("iOS Simulator app observation", () => {
             const clean = Date.now() === 0 ? firstClean : !firstClean;
             return clean && isPgrep(argv) ? result(1) : failed();
         };
-        const observed = await wait(50);
+        const observed = await wait(51);
         expect(fixture.calls).toHaveLength(10);
         if (firstClean) expect(observed.error.stderr).toContain("simulator unavailable");
         else expect(observed).toMatchObject({ running: false, status: 1, stderr: "" });

@@ -141,6 +141,107 @@ describe("device-lab host broker Appium session authority", () => {
         expect(appiumWebDriverRequestTimeoutMs(600000)).toBe(300000);
     });
 
+    it.each(["headers", "body"])("aborts a stalled Appium %s within the explicit observation allowance", async (stall) => {
+        const cwd = "/project/broker-appium-wait-stall-test";
+        const ownerId = deviceLabOwnerId(cwd);
+        let requests = 0;
+        let upstreamClosed = false;
+        const appium = createServer((_req, res) => {
+            requests += 1;
+            res.on("close", () => { upstreamClosed = true; });
+            if (stall === "body") {
+                res.writeHead(200, { "content-type": "application/json" });
+                res.write('{"value":"<App>matching text</App>');
+            }
+        });
+        const appiumUrl = await listen(appium);
+        const port = (appium.address() as AddressInfo).port;
+        const broker = createDeviceBrokerServer({ cwd, host: "127.0.0.1", port: 0 });
+        const baseUrl = await listen(broker);
+        writeBrokerDevices(ownerId, "android", [{
+            id: "pixel-wait", status: "running", backend: "android-emulator",
+            appium: currentProcessAppiumRuntime(appiumUrl, port, "wait-runtime", { sessionId: "WAIT" }),
+        }]);
+        try {
+            const started = performance.now();
+            const response = await fetch(ownerRpcEndpoint(baseUrl, ownerId), {
+                method: "POST", headers: ownerRpcHeaders(ownerId),
+                body: JSON.stringify({ method: "broker.appium.request", params: {
+                    backend: "android-emulator", deviceId: "pixel-wait", method: "GET", path: "/source", requestTimeoutMs: 350,
+                } }),
+            });
+            const payload = await response.json();
+            expect(performance.now() - started).toBeLessThan(1800);
+            expect(requests).toBe(1);
+            expect(response.status).toBe(504);
+            expect(payload).toMatchObject({ ok: false, error: "appium-request-timeout" });
+            expect(JSON.stringify(payload)).not.toContain("matching text");
+            await new Promise(resolve => setTimeout(resolve, 50));
+            expect(upstreamClosed).toBe(true);
+        } finally {
+            appium.closeAllConnections();
+            await close(appium);
+            await close(broker);
+        }
+    });
+
+    it.each([0, -1, 600001, "100", null, true])("rejects invalid wire observation allowance %s before Appium access", async (requestTimeoutMs) => {
+        const cwd = "/project/broker-invalid-wait-test";
+        const ownerId = deviceLabOwnerId(cwd);
+        const broker = createDeviceBrokerServer({ cwd, host: "127.0.0.1", port: 0 });
+        const baseUrl = await listen(broker);
+        try {
+            const response = await fetch(ownerRpcEndpoint(baseUrl, ownerId), {
+                method: "POST", headers: ownerRpcHeaders(ownerId),
+                body: JSON.stringify({ method: "broker.appium.request", params: {
+                    backend: "android-emulator", deviceId: "missing", method: "GET", path: "/source", requestTimeoutMs,
+                } }),
+            });
+            expect(response.status).toBe(400);
+            expect(await response.json()).toMatchObject({ ok: false, error: "invalid-appium-request-timeout" });
+        } finally { await close(broker); }
+    });
+
+    it.each(["owner", "lease"])("never fetches after the observation budget expires in the %s lock", async (lockKind) => {
+        const cwd = "/project/broker-wait-lock-test";
+        const ownerId = deviceLabOwnerId(cwd);
+        let requests = 0;
+        const appium = createServer((_req, res) => { requests += 1; res.end('{"value":"match"}'); });
+        const appiumUrl = await listen(appium);
+        const broker = createDeviceBrokerServer({ cwd, host: "127.0.0.1", port: 0 });
+        const baseUrl = await listen(broker);
+        const deviceId = "physical-wait";
+        writeBrokerDevices(ownerId, "ios-device", [{
+            id: deviceId, status: "attached", backend: "ios-device", udid: "WAIT-UDID",
+            leaseClaimId: "claim", leaseClaimNonce: "nonce",
+            appium: currentProcessAppiumRuntime(appiumUrl, (appium.address() as AddressInfo).port, "lock-runtime", { sessionId: "WAIT" }),
+        }]);
+        writePhysicalLease(ownerId, "ios-device", "WAIT-UDID", deviceId, "claim", "nonce");
+        const lockDir = lockKind === "owner"
+            ? join(homedir(), ".ccc", "devices", "owners", ownerId, "ios-device", "operations")
+            : join(homedir(), ".ccc", "devices", "physical-leases", "ios-device", "locks");
+        mkdirSync(lockDir, { recursive: true });
+        const lockFile = join(lockDir, lockKind === "owner"
+            ? createHash("sha256").update(deviceId).digest("hex").slice(0, 32) + ".lock"
+            : "WAIT-UDID.mutation.lock");
+        writeFileSync(lockFile, JSON.stringify({ token: "held", pid: process.pid, createdAt: new Date().toISOString() }));
+        try {
+            const started = performance.now();
+            const response = await fetch(ownerRpcEndpoint(baseUrl, ownerId), {
+                method: "POST", headers: ownerRpcHeaders(ownerId),
+                body: JSON.stringify({ method: "broker.appium.request", params: {
+                    backend: "ios-device", deviceId, method: "GET", path: "/source", requestTimeoutMs: 120,
+                } }),
+            });
+            expect(response.status).toBe(409);
+            expect(await response.json()).toMatchObject({ ok: false, error: "device-operation-lock-failed" });
+            expect(performance.now() - started).toBeLessThan(1200);
+            rmSync(lockFile);
+            await new Promise(resolve => setTimeout(resolve, 100));
+            expect(requests).toBe(0);
+        } finally { await close(appium); await close(broker); }
+    });
+
     it("rejects forged iOS Simulator identities before reusing or creating Appium sessions", async () => {
         const ownerId = deviceLabOwnerId("/project/broker-appium-ios-owner-fence-test");
         const simulatorName = `ccc-${ownerId}-forged-alias`;

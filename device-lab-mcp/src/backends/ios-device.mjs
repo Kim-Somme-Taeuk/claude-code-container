@@ -1,3 +1,4 @@
+import { createWaitBudget } from "../wait-budget.mjs";
 import { createHash, randomUUID } from "crypto";
 import { spawn } from "child_process";
 import { commandPath, run, runWithTimeout } from "../commands.mjs";
@@ -7,7 +8,7 @@ import { claimIosRealDevice, findIosRealDevice, readIosRealDevices, transitionIo
 import { withOwnerDeviceOperation } from "../state/device-store.mjs";
 import { requiresOwnerDeviceOperation } from "../state/device-operation-policy.mjs";
 import { inspectProcessIdentity, refreshOwnedRuntimeProcessIdentity, signalOwnedRuntimeProcess, terminateOwnedRuntimeProcess, waitForProcessIdentity } from "../state/process-identity.mjs";
-import { transitionAppiumGeneration } from "../state/runtime-generation.mjs";
+import { appiumGenerationMatches, transitionAppiumGeneration } from "../state/runtime-generation.mjs";
 import { claimPhysicalLease, heartbeatPhysicalLease, releasePhysicalLease, releasePhysicalLeaseWithMutation, startPhysicalLeaseHeartbeat } from "../state/physical-lease-store.mjs";
 import { withTargetStatus, withTargetStatuses } from "../status.mjs";
 import { fetchIosAppiumJson, iosAppiumDiscovery, iosDiscovery, normalizeIosOrientation } from "./ios-simulator.mjs";
@@ -85,13 +86,14 @@ function abortIosRealLifecycle(deviceId, lifecycle, original, actual = {}) {
     return transitionIosRealDevice(deviceId, current, restored);
 }
 
-function refreshIosRealDeviceLease(device) {
+function refreshIosRealDeviceLease(device, waitBudget) {
     if (!device?.id || !device?.udid || !device?.leaseClaimId || !device?.leaseClaimNonce) {
         return { ok: false, error: "iOS physical device lease metadata is incomplete; clear stale owner metadata and attach the device again" };
     }
     const refreshed = heartbeatPhysicalLease("ios-device", device.udid, device.id, {
         claimId: device.leaseClaimId,
         claimNonce: device.leaseClaimNonce,
+        waitBudget,
     });
     if (!refreshed.ok) {
         return { ok: false, error: `iOS physical device lease is not owned by this attachment: ${refreshed.error || "lease-conflict"}` };
@@ -469,17 +471,27 @@ async function postIosRealAppium(deviceId, path, body, provider = "appium-xcuite
     }
 }
 
-async function iosRealAppiumSource(deviceId) {
-    const resolved = await iosRealAppiumSessionOrResult(deviceId);
-    if (resolved.unknown || resolved.result) return resolved;
-    const { session } = resolved;
-    try {
-        const response = await fetchIosAppiumJson(`${session.serverUrl}/session/${session.sessionId}/source`, { method: "GET" });
-        return { session, source: response?.value ?? response?.source ?? response };
-    } catch (error) {
-        return { result: textResult(false, `Appium source request failed: ${error.message}`) };
+function currentIosRealObservationDevice(deviceId, attachment, session) {
+    const current = findIosRealDevice(deviceId);
+    if (!current || current.udid !== attachment.udid
+        || current.leaseClaimId !== attachment.leaseClaimId
+        || current.leaseClaimNonce !== attachment.leaseClaimNonce
+        || current.lifecycle?.runtimeId !== attachment.lifecycle?.runtimeId
+        || !appiumGenerationMatches(session.device?.appium, current.appium)
+        || current.appium?.serverUrl !== session.serverUrl
+        || current.appium?.sessionId !== session.sessionId) {
+        throw new Error("iOS physical attachment or Appium session changed during observation; retry the wait");
     }
+    return current;
 }
+
+function guardIosRealObservation(deviceId, attachment, session, budget) {
+    const current = currentIosRealObservationDevice(deviceId, attachment, session);
+    const lease = refreshIosRealDeviceLease(current, budget);
+    if (!lease.ok) throw new Error(lease.error);
+    currentIosRealObservationDevice(deviceId, attachment, session);
+}
+
 
 function requirePathArg(path, toolName) {
     if (!path) return textResult(false, `iOS real-device ${toolName} requires path`);
@@ -904,21 +916,37 @@ async function handleIosRealToolUnlocked(name, args) {
         }
 
         case "mobile_wait_for_text": {
-            const { deviceId, text, timeoutMs = 10000, intervalMs = 500 } = args;
+            const { deviceId, text, timeoutMs, intervalMs } = args;
             const device = findIosRealDevice(deviceId);
             if (!device) return undefined;
             if (!text) return textResult(false, "iOS real-device wait-for-text requires text");
-            const deadline = Date.now() + Math.max(0, timeoutMs);
+            const resolved = await iosRealAppiumSessionOrResult(deviceId);
+            if (resolved.unknown) return undefined;
+            if (resolved.result) return resolved.result;
+            const { session } = resolved;
+            const budget = createWaitBudget(timeoutMs, intervalMs);
             let lastSource = "";
-            while (Date.now() <= deadline) {
-                const resolved = await iosRealAppiumSource(deviceId);
-                if (resolved.unknown) return undefined;
-                if (resolved.result) return resolved.result;
-                lastSource = String(resolved.source || "");
-                if (lastSource.includes(text)) return jsonResult({ found: true, text, source: lastSource, provider: "appium-xcuitest", physical: true });
-                await sleep(Math.max(50, intervalMs));
+            let observed = false;
+            while (budget.remaining() > 0) {
+                try {
+                    guardIosRealObservation(deviceId, device, session, budget);
+                    const allowance = budget.requestTimeout(5000);
+                    if (!allowance) throw new Error("Appium observation budget exhausted before request");
+                    const response = await fetchIosAppiumJson(`${session.serverUrl}/session/${session.sessionId}/source`, {
+                        method: "GET", timeoutMs: allowance,
+                    });
+                    currentIosRealObservationDevice(deviceId, device, session);
+                    if (budget.remaining() <= 0) throw new Error("Appium observation timed out");
+                    observed = true;
+                    lastSource = String((response?.value ?? response?.source ?? response) || "");
+                    if (lastSource.includes(text)) return jsonResult({ found: true, text, source: lastSource, provider: "appium-xcuitest", physical: true });
+                } catch (error) {
+                    return textResult(false, `Appium source request failed: ${error.message}`);
+                }
+                await budget.pause();
             }
-            return jsonResult({ found: false, text, source: lastSource, timeoutMs, provider: "appium-xcuitest", physical: true });
+            if (!observed) return textResult(false, "Appium observation budget exhausted before request");
+            return jsonResult({ found: false, text, source: lastSource, timeoutMs: budget.timeoutMs, provider: "appium-xcuitest", physical: true });
         }
 
         case "mobile_wait_for_app": {
@@ -930,14 +958,22 @@ async function handleIosRealToolUnlocked(name, args) {
             if (resolved.unknown) return undefined;
             if (resolved.result) return resolved.result;
             const { session } = resolved;
-            const deadline = Date.now() + Math.max(0, timeoutMs);
+            const budget = createWaitBudget(timeoutMs, intervalMs);
             let lastActiveApp = null;
-            while (Date.now() <= deadline) {
+            let observed = false;
+            while (budget.remaining() > 0) {
                 try {
+                    guardIosRealObservation(deviceId, device, session, budget);
+                    const allowance = budget.requestTimeout(5000);
+                    if (!allowance) throw new Error("Appium observation budget exhausted before request");
                     const response = await fetchIosAppiumJson(`${session.serverUrl}/session/${session.sessionId}/execute/sync`, {
                         method: "POST",
+                        timeoutMs: allowance,
                         body: JSON.stringify({ script: "mobile: activeAppInfo", args: [] }),
                     });
+                    currentIosRealObservationDevice(deviceId, device, session);
+                    if (budget.remaining() <= 0) throw new Error("Appium observation timed out");
+                    observed = true;
                     lastActiveApp = response?.value ?? response;
                     if (lastActiveApp?.bundleId === bundleId || lastActiveApp?.bundleID === bundleId) {
                         return jsonResult({ found: true, bundleId, activeApp: lastActiveApp, provider: "appium-xcuitest", physical: true });
@@ -945,9 +981,10 @@ async function handleIosRealToolUnlocked(name, args) {
                 } catch (error) {
                     return textResult(false, `iOS real-device Appium active app request failed: ${error.message}`);
                 }
-                await sleep(Math.max(50, intervalMs));
+                await budget.pause();
             }
-            return jsonResult({ found: false, bundleId, activeApp: lastActiveApp, timeoutMs, provider: "appium-xcuitest", physical: true });
+            if (!observed) return textResult(false, "Appium observation budget exhausted before request");
+            return jsonResult({ found: false, bundleId, activeApp: lastActiveApp, timeoutMs: budget.timeoutMs, provider: "appium-xcuitest", physical: true });
         }
 
         case "mobile_stop_app": {

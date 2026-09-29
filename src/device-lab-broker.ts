@@ -5823,9 +5823,10 @@ function ownerDeviceOperationLockFile(ownerId: string, stateKey: string, deviceI
     return join(brokerRoot(), "owners", ownerId, stateKey, "operations", `${key}.lock`);
 }
 
-function withOwnerDeviceOperation<T>(ownerId: string, stateKey: string, deviceId: string, operation: () => Promise<T> | T) {
+function withOwnerDeviceOperation<T>(ownerId: string, stateKey: string, deviceId: string, operation: () => Promise<T> | T, waitBudget?: AppiumRequestBudget) {
     return withSharedMutationLockAsync(ownerDeviceOperationLockFile(ownerId, stateKey, deviceId), operation, {
         waitMs: 30000,
+        waitBudget,
         staleMs: 15 * 60 * 1000,
     });
 }
@@ -6890,7 +6891,7 @@ function physicalDeviceLeaseMatches(ownerId: string, stateKey: string, deviceId:
         && lease.claimNonce === record.leaseClaimNonce);
 }
 
-function refreshPhysicalDeviceLeaseForOperation(ownerId: string, match: DeviceToolMatch, deviceId: string): BrokerRpcResult | null {
+function refreshPhysicalDeviceLeaseForOperation(ownerId: string, match: DeviceToolMatch, deviceId: string, waitBudget?: AppiumRequestBudget): BrokerRpcResult | null {
     if (!DEVICE_BROKER_PHYSICAL_BACKENDS.has(match.stateKey)) return null;
     const hardwareId = match.stateKey === "android-device" ? field(match.device, "serial") : field(match.device, "udid");
     const claimId = field(match.device, "leaseClaimId");
@@ -6902,7 +6903,7 @@ function refreshPhysicalDeviceLeaseForOperation(ownerId: string, match: DeviceTo
             deviceId,
             claimId,
             claimNonce,
-        })
+        }, waitBudget)
         : null;
     if (heartbeat?.status === 200) return null;
     const leaseError = heartbeat?.payload && typeof heartbeat.payload === "object" && !Array.isArray(heartbeat.payload)
@@ -7167,7 +7168,7 @@ function claimPhysicalLease(ownerId: string, params: unknown): BrokerRpcResult {
     });
 }
 
-function heartbeatPhysicalBrokerLease(ownerId: string, params: unknown) {
+function heartbeatPhysicalBrokerLease(ownerId: string, params: unknown, waitBudget?: AppiumRequestBudget) {
     const parsed = validateLeaseParams(params, "heartbeat");
     if (!parsed.ok) return leaseParamError(parsed);
     const directory = inspectPhysicalLeaseDirectory(parsed.backend);
@@ -7200,7 +7201,7 @@ function heartbeatPhysicalBrokerLease(ownerId: string, params: unknown) {
         const refreshed = withLeaseExpiry(existing, parsed.ttlMs);
         writeLeaseFile(file, refreshed);
         return { status: 200, payload: { ok: true, result: { lease: refreshed, heartbeat: true } } };
-    });
+    }, { waitBudget });
 }
 
 function physicalLeaseReleaseConflict(ownerId: string, parsed: LeaseParamSuccess, existing: Record<string, unknown> | null): BrokerRpcResult | null {
@@ -8300,6 +8301,10 @@ function validateAppiumRequestParams(params: unknown): AppiumRequestParamError |
     const parsed = validateAppiumParams(params, "request");
     if (!parsed.ok) return parsed;
     const input = params as Record<string, unknown>;
+    if (input.requestTimeoutMs !== undefined && (typeof input.requestTimeoutMs !== "number"
+        || !Number.isFinite(input.requestTimeoutMs) || input.requestTimeoutMs <= 0 || input.requestTimeoutMs > 600000)) {
+        return { ok: false, status: 400, error: "invalid-appium-request-timeout" };
+    }
     const method = typeof input.method === "string" ? input.method.toUpperCase() : "GET";
     if (!["GET", "POST"].includes(method)) {
         return { ok: false, status: 400, error: "invalid-appium-request-method", allowed: ["GET", "POST"] };
@@ -16670,7 +16675,13 @@ async function deleteAppiumWebDriverSessionUnlocked(ownerId: string, params: unk
     };
 }
 
-async function proxyAppiumWebDriverRequest(ownerId: string, params: unknown, normalized: NormalizedBrokerOptions) {
+type AppiumRequestBudget = { remaining(): number };
+
+function appiumRequestBudgetFailure(): BrokerRpcResult {
+    return { status: 504, payload: { ok: false, error: "appium-request-timeout" } };
+}
+
+async function proxyAppiumWebDriverRequest(ownerId: string, params: unknown, normalized: NormalizedBrokerOptions, waitBudget?: AppiumRequestBudget) {
     const parsed = validateAppiumRequestParams(params);
     if (!parsed.ok) return appiumParamError(parsed);
     let device: unknown;
@@ -16689,11 +16700,14 @@ async function proxyAppiumWebDriverRequest(ownerId: string, params: unknown, nor
     const listenerVerification = verifyBrokerOwnedAppiumListener(appium, normalized);
     if (!listenerVerification.ok) return appiumListenerOwnershipFailure(ownerId, parsed, listenerVerification);
     const serverUrl = listenerVerification.serverUrl;
+    const timeoutMs = waitBudget ? Math.ceil(waitBudget.remaining()) : appiumWebDriverRequestTimeoutMs(normalized.commandTimeoutMs);
+    if (timeoutMs <= 0) return appiumRequestBudgetFailure();
     const response = await fetchAppiumJson(`${serverUrl}/session/${encodeURIComponent(appium.sessionId)}${parsed.path}`, {
         method: parsed.method,
         body: parsed.method === "GET" ? undefined : parsed.body,
-        timeoutMs: appiumWebDriverRequestTimeoutMs(normalized.commandTimeoutMs),
+        timeoutMs,
     });
+    if (waitBudget && waitBudget.remaining() <= 0) return appiumRequestBudgetFailure();
     return {
         status: response.ok ? 200 : 502,
         payload: {
@@ -16717,12 +16731,16 @@ async function withAppiumDeviceOperation(
     ownerId: string,
     params: unknown,
     action: "record" | "clear" | "start" | "stop" | "session" | "delete-session" | "request",
-    operation: () => Promise<BrokerRpcResult> | BrokerRpcResult,
+    operation: (waitBudget?: AppiumRequestBudget) => Promise<BrokerRpcResult> | BrokerRpcResult,
 ): Promise<BrokerRpcResult> {
     const parsed = action === "request" ? validateAppiumRequestParams(params) : validateAppiumParams(params, action);
     if (!parsed.ok) return appiumParamError(parsed);
+    const requestTimeoutMs = action === "request" ? (params as Record<string, unknown>).requestTimeoutMs : undefined;
+    const deadline = typeof requestTimeoutMs === "number" ? performance.now() + requestTimeoutMs : null;
+    const waitBudget = deadline === null ? undefined : { remaining: () => Math.max(0, deadline - performance.now()) };
     try {
         return await withOwnerDeviceOperation(ownerId, parsed.stateKey, parsed.deviceId, () => {
+            if (waitBudget && waitBudget.remaining() <= 0) return appiumRequestBudgetFailure();
             if (DEVICE_BROKER_PHYSICAL_BACKENDS.has(parsed.stateKey)
                 && (action === "session" || action === "delete-session" || action === "request")) {
                 let device: unknown;
@@ -16736,11 +16754,12 @@ async function withAppiumDeviceOperation(
                     stateKey: parsed.stateKey,
                     backend: parsed.backend,
                     device: device as Record<string, unknown>,
-                }, parsed.deviceId);
+                }, parsed.deviceId, waitBudget);
                 if (leaseFailure) return leaseFailure;
             }
-            return operation();
-        });
+            if (waitBudget && waitBudget.remaining() <= 0) return appiumRequestBudgetFailure();
+            return operation(waitBudget);
+        }, waitBudget);
     } catch (error) {
         if (!isDeviceOperationLockTimeout(error)) throw error;
         return deviceOperationLockFailure(ownerId, parsed.backend, parsed.deviceId, error);
@@ -16819,7 +16838,7 @@ async function handleBrokerRpcUnsafe(ownerId: string, body: unknown, normalized:
     if (method === "broker.appium.stop") return withAppiumDeviceOperation(ownerId, rpc.params, "stop", () => stopAppiumServerUnlocked(ownerId, rpc.params, normalized));
     if (method === "broker.appium.session.ensure") return withAppiumDeviceOperation(ownerId, rpc.params, "session", () => ensureAppiumWebDriverSessionUnlocked(ownerId, rpc.params, normalized));
     if (method === "broker.appium.session.delete") return withAppiumDeviceOperation(ownerId, rpc.params, "delete-session", () => deleteAppiumWebDriverSessionUnlocked(ownerId, rpc.params, normalized));
-    if (method === "broker.appium.request") return withAppiumDeviceOperation(ownerId, rpc.params, "request", () => proxyAppiumWebDriverRequest(ownerId, rpc.params, normalized));
+    if (method === "broker.appium.request") return withAppiumDeviceOperation(ownerId, rpc.params, "request", (waitBudget) => proxyAppiumWebDriverRequest(ownerId, rpc.params, normalized, waitBudget));
     return { status: 404, payload: { ok: false, error: "unknown-method", method } };
 }
 

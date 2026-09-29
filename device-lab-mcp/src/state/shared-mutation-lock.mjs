@@ -492,15 +492,33 @@ function moveMalformedLock(file, token, validateDirectories = () => {}) {
     return false;
 }
 
+function boundedLockWait(file, waitMs, waitBudget) {
+    if (!waitBudget) return null;
+    const deadline = performance.now() + waitMs;
+    const remaining = () => Math.min(deadline - performance.now(), waitBudget.remaining());
+    return {
+        remaining,
+        check() {
+            if (remaining() > 0) return;
+            const error = new Error(`Timed out acquiring shared mutation lock: ${file}`);
+            error.code = "shared-mutation-lock-timeout";
+            throw error;
+        },
+    };
+}
+
 export function withSharedMutationLock(file, operation, options = {}) {
     const waitMs = options.waitMs ?? DEFAULT_WAIT_MS;
     const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
     const deadline = Date.now() + waitMs;
+    const boundedWait = boundedLockWait(file, waitMs, options.waitBudget);
+    boundedWait?.check();
     const token = randomUUID();
     const directories = secureStateParentDirectory(file);
     const validateDirectories = () => assertStateDirectoriesUnchanged(directories);
 
     while (true) {
+        boundedWait?.check();
         try {
             validateDirectories();
             const fd = openSync(file, "wx", 0o600);
@@ -525,12 +543,14 @@ export function withSharedMutationLock(file, operation, options = {}) {
                 error.code = "shared-mutation-lock-timeout";
                 throw error;
             }
-            sleepSync(POLL_MS);
+            boundedWait?.check();
+            sleepSync(boundedWait ? Math.min(POLL_MS, boundedWait.remaining()) : POLL_MS);
         }
     }
 
     try {
         validateDirectories();
+        boundedWait?.check();
         return operation();
     } finally {
         validateDirectories();
@@ -543,12 +563,17 @@ export async function withSharedMutationLockAsync(file, operation, options = {})
     const waitMs = options.waitMs ?? DEFAULT_WAIT_MS;
     const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
     const deadline = Date.now() + waitMs;
+    const boundedWait = boundedLockWait(file, waitMs, options.waitBudget);
+    boundedWait?.check();
     const token = randomUUID();
     const directories = secureStateParentDirectory(file);
     const validateDirectories = () => assertStateDirectoriesUnchanged(directories);
-    const record = await lockRecordAsync(token);
+    // Bounded callers avoid starting asynchronous process-identity probes whose
+    // own queue and timeout would outlive the observation allowance.
+    const record = boundedWait ? lockRecord(token) : await lockRecordAsync(token);
 
     while (true) {
+        boundedWait?.check();
         try {
             validateDirectories();
             const fd = openSync(file, "wx", 0o600);
@@ -562,10 +587,10 @@ export async function withSharedMutationLockAsync(file, operation, options = {})
         } catch (error) {
             if (error?.code !== "EEXIST") throw error;
             const existing = readLock(file);
-            if (existing?.token && await lockIsStaleAsync(file, existing, staleMs)) {
+            if (existing?.token && (boundedWait ? lockIsStale(file, existing, staleMs) : await lockIsStaleAsync(file, existing, staleMs))) {
                 if (moveIfTokenMatches(file, existing.token, "stale", validateDirectories)) continue;
             }
-            if (!existing && await lockIsStaleAsync(file, existing, staleMs)) {
+            if (!existing && (boundedWait ? lockIsStale(file, existing, staleMs) : await lockIsStaleAsync(file, existing, staleMs))) {
                 if (moveMalformedLock(file, token, validateDirectories)) continue;
             }
             if (Date.now() >= deadline) {
@@ -573,12 +598,14 @@ export async function withSharedMutationLockAsync(file, operation, options = {})
                 error.code = "shared-mutation-lock-timeout";
                 throw error;
             }
-            await sleep(POLL_MS);
+            boundedWait?.check();
+            await sleep(boundedWait ? Math.min(POLL_MS, boundedWait.remaining()) : POLL_MS);
         }
     }
 
     try {
         validateDirectories();
+        boundedWait?.check();
         return await operation();
     } finally {
         validateDirectories();

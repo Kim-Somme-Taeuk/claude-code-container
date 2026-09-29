@@ -207,15 +207,20 @@ function commitLeaseTransaction(backend, lock, previousLease, previousLeases, ne
     }
 }
 
-function withLeaseTransaction(backend, hardwareId, operation) {
+function withLeaseTransaction(backend, hardwareId, operation, options = {}) {
     ensureLeaseDirectoryChain(backend, true);
     const lock = lockFile(backend, hardwareId);
     return withSharedMutationLock(mutationLockFile(backend, hardwareId), () =>
         withSharedMutationLock(aggregateMutationLockFile(backend), () => {
             const lease = readLock(lock, backend, hardwareId);
             const leases = readPhysicalLeases(backend);
+            if (options.waitBudget && !(options.waitBudget.remaining() > 0)) {
+                const error = new Error(`Timed out acquiring physical lease observation locks: ${backend}/${hardwareId}`);
+                error.code = "shared-mutation-lock-timeout";
+                throw error;
+            }
             return operation({ lock, lease, leases });
-        }));
+        }, options), options);
 }
 
 export function prunePhysicalLeases(backend) {
@@ -335,7 +340,7 @@ export function heartbeatPhysicalLease(backend, hardwareId, deviceId, options = 
         const nextLeases = aggregateTracksLease ? replaceAggregateLease(leases, hardwareId, refreshed) : leases;
         commitLeaseTransaction(backend, lock, existing, leases, refreshed, nextLeases);
         return { ok: true, lease: refreshed, heartbeat: true };
-    });
+    }, { waitBudget: options.waitBudget });
 }
 
 export function releasePhysicalLease(backend, hardwareId, deviceId, options = {}) {
