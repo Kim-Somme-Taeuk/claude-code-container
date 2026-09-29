@@ -61,6 +61,13 @@ lenses solely to collect them, or confuse formal close with test success.
 
 ## Follow-up status
 
+Continuation implementation: `7fdbba8e`. Build/lint and seven scoped suites
+(159 tests) passed. Independent code/security reviews passed; independent QA
+passed four suites (75 tests) plus fresh generated-bundle stdio checks for
+positive matches, compact/detail query errors, clean absence and both flows'
+original-cause stopping behavior. These used isolated Linux fixtures, not native
+macOS devices. Task: `TASK__device-lab-ios-wait-observation-errors`.
+
 1. **Unknown device versus unknown tool.** Direct routing can fall through to
    `Unknown tool: <known tool>` for an unknown device ID. Start at
    `dispatchTool` in `server.mjs`. Reproduce across direct/explicit/implicit
