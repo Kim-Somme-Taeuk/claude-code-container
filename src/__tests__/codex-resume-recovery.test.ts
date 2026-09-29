@@ -48,6 +48,7 @@ interface FixtureOptions {
     reportedId?: string;
     pathScope?: "outside" | "symlink" | "archived" | "missing";
     noScript?: boolean;
+    metadata?: "restore" | "wrong-home" | "wrong-path" | "rpc-error" | "unsupported";
 }
 
 function runFixture(args: string[] = ["codex", "resume", "--last"], options: FixtureOptions = {}) {
@@ -83,10 +84,40 @@ const log = path.join(root,'calls.jsonl');
 const args = process.argv.slice(2);
 const prior = fs.existsSync(log) ? fs.readFileSync(log,'utf8').trim().split('\\n').map(JSON.parse) : [];
 fs.appendFileSync(log,JSON.stringify(args)+'\\n');
+if(args[0] === 'app-server') {
+ if(args.includes('--help')) {
+  process.stdout.write(behavior.metadata === 'unsupported' ? 'unsupported' : 'Usage: codex app-server [OPTIONS]\\n--stdio\\n');
+  process.exit(0);
+ }
+ let pending = '';
+ process.stdin.setEncoding('utf8');
+ process.stdin.on('data', chunk => {
+  pending += chunk;
+  let end;
+  while((end = pending.indexOf('\\n')) >= 0) {
+   const message = JSON.parse(pending.slice(0,end)); pending = pending.slice(end+1);
+   fs.appendFileSync(path.join(root,'rpc.jsonl'),JSON.stringify(message)+'\\n');
+   if(message.method === 'initialize') process.stdout.write(JSON.stringify({id:message.id,result:{codexHome:behavior.metadata === 'wrong-home' ? root : process.env.CODEX_HOME}})+'\\n');
+   if(message.method === 'thread/read') {
+    process.stdout.write(JSON.stringify({method:'remoteControl/status/changed',params:{}})+'\\n');
+    const response = behavior.metadata === 'rpc-error'
+     ? {id:message.id,error:{code:-32603,message:'PRIVATE_CONVERSATION_PREVIEW'}}
+     : {id:message.id,result:{thread:{id:message.params.threadId,path:behavior.metadata === 'wrong-path' ? path.join(root,'wrong.jsonl') : behavior.rollout,preview:'PRIVATE_CONVERSATION_PREVIEW'}}};
+    fs.writeFileSync(path.join(root,'metadata-restored'),'yes');
+    process.stdout.write(JSON.stringify(response)+'\\n');
+   }
+  }
+ });
+ process.stdin.on('end', () => process.exit(0));
+} else {
 if(args[0] === 'migrate-rollouts') {
  if(args.includes('--help')) {
   process.stdout.write(behavior.help === 'unsupported' ? 'unsupported' : 'Usage: codex migrate-rollouts [OPTIONS]\\n--apply --thread --json\\n');
   process.exit(0);
+ }
+ if(behavior.metadata && !fs.existsSync(path.join(root,'metadata-restored'))) {
+  process.stderr.write('Error: thread-store internal error: rollout migration failed: thread ${id} is missing its SQLite metadata\\n');
+  process.exit(1);
  }
  process.stdout.write(behavior.migration);
  process.exit(behavior.migrationExit ?? 0);
@@ -105,6 +136,7 @@ if(behavior.output === 'nonfinal') process.stderr.write('Error: unrelated later 
 if(behavior.firstSignal) { process.kill(process.pid, behavior.firstSignal); setTimeout(() => process.exit(99), 1000); }
 else
 process.exit(behavior.firstExit ?? 1);
+}
 `);
     chmodSync(fake, 0o755);
     const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: home, PATH: `${bin}:${process.env.PATH}`, RECOVERY_TEST_ROOT: root };
@@ -118,7 +150,9 @@ process.exit(behavior.firstExit ?? 1);
     const calls: string[][] = existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line)) : [];
     const resumes = calls.filter(call => call.includes("resume"));
     const migrations = calls.filter(call => call[0] === "migrate-rollouts" && call.includes("--apply"));
-    return { result, calls, resumes, migrations, inside, root };
+    const rpcFile = join(root, "rpc.jsonl");
+    const rpc = existsSync(rpcFile) ? readFileSync(rpcFile, "utf8").trim().split("\n").map(line => JSON.parse(line)) : [];
+    return { result, calls, resumes, migrations, inside, root, rpc };
 }
 
 describe.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/script"))("executed automatic recovery wrapper", () => {
@@ -222,5 +256,27 @@ describe.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/script"))(
         expect(run.result.status).toBe(1);
         expect(run.resumes).toHaveLength(1);
         expect(run.result.stderr.length).toBeLessThan(5000);
+    });
+
+    it("reconstructs missing metadata through one targeted native read before retrying migration", () => {
+        const run = runFixture(undefined, { metadata: "restore" });
+        expect(run.result.error).toBeUndefined();
+        expect(run.result.status, run.result.stderr).toBe(0);
+        expect(run.migrations).toHaveLength(2);
+        expect(run.resumes).toHaveLength(2);
+        expect(run.rpc.filter(message => message.method === "thread/read")).toEqual([
+            expect.objectContaining({ params: { threadId: id, includeTurns: false } }),
+        ]);
+        expect(readFileSync(run.inside, "utf8")).toBe("fixture history\n");
+        expect(run.result.stderr).not.toContain("PRIVATE_CONVERSATION_PREVIEW");
+    });
+
+    it.each(["wrong-home", "wrong-path", "rpc-error", "unsupported"] as const)("stops unsafe or unavailable metadata recovery: %s", metadata => {
+        const run = runFixture(undefined, { metadata });
+        expect(run.result.status).toBe(1);
+        expect(run.migrations).toHaveLength(1);
+        expect(run.resumes).toHaveLength(1);
+        if (metadata === "wrong-home") expect(run.rpc.some(message => message.method === "thread/read")).toBe(false);
+        expect(run.result.stderr).not.toContain("PRIVATE_CONVERSATION_PREVIEW");
     });
 });

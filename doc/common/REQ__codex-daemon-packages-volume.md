@@ -128,8 +128,26 @@ Migration must report success for the exact UUID before retry. It can report
 `already_paginated` while repairing stale index metadata. Native migration can
 transform a legacy rollout; CCC never edits SQLite or deletes state itself.
 
+If that migration reports the exact missing-SQLite-metadata error for the same
+session, CCC may start one bounded native stdio app-server. It validates the
+server's Codex home before requesting `thread/read` for that UUID with
+`includeTurns:false`. The returned UUID and canonical rollout path must match
+the failed session. This native read can reconstruct its missing metadata.
+After a clean server exit, CCC may run the scoped migration once more before
+the original single resume retry. Unsupported tooling, protocol errors, identity
+mismatches and interruption stop recovery. RPC bodies and conversation previews
+are never printed as diagnostics; existing history is not deleted or rewritten
+by CCC.
+
 Unrelated errors, cancellation, unknown options, explicit prompts/images, remote
 sessions and unsupported configuration combinations never trigger recovery.
 Unsupported native tooling or failed/locked migration preserves the failure and
 history. CCC never broadens the repair, repeats a prompt or enters a retry loop.
 The user's host recovery is confirmed only after their resume succeeds.
+
+Recovery diagnostics, process handling and orchestration are ordinary strict
+TypeScript modules with direct tests. The build bundles these modules for the
+existing container launch transport; runtime behavior must not live in a
+handwritten JavaScript string. Package verification exercises that generated
+bundle without a source checkout. If the bundle is unavailable, CCC reports a
+rebuild/reinstall diagnostic and runs the original command without recovery.
