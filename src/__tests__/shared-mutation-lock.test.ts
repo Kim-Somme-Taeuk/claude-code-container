@@ -364,6 +364,78 @@ describe("device-lab shared mutation lock", () => {
         }
     });
 
+    it("keeps budgeted host locks out of an occupied async identity queue and preserves the live owner", async () => {
+        const identity = readDeviceRuntimeProcessIdentity(process.pid);
+        if (!identity) return;
+        let release!: () => void;
+        let occupied!: () => void;
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        const allSlotsOccupied = new Promise<void>((resolve) => { occupied = resolve; });
+        let probes = 0;
+        let blockedProbes = 0;
+        vi.resetModules();
+        vi.doMock("../device-lab-process-identity.js", async (importOriginal) => {
+            const actual = await importOriginal<typeof import("../device-lab-process-identity.js")>();
+            return {
+                ...actual,
+                async readDeviceRuntimeProcessIdentityAsync() {
+                    probes++;
+                    if (probes === 1) return identity;
+                    blockedProbes++;
+                    if (blockedProbes === 4) occupied();
+                    await gate;
+                    return null;
+                },
+            };
+        });
+        const waiters: Promise<unknown>[] = [];
+        let bounded: Promise<unknown> | undefined;
+        try {
+            const module = await import("../device-lab-shared-state.js?bounded-identity-queue");
+            // Ordinary acquisition still uses the asynchronous identity reader.
+            await module.withSharedMutationLockAsync(lockPath(), () => undefined);
+            expect(probes).toBe(1);
+            for (let index = 0; index < 4; index++) {
+                const file = lockPath();
+                writeFileSync(file, JSON.stringify({ token: testToken(), pid: process.pid, host: hostname(),
+                    processIdentity: { ...identity, startToken: `${identity.startToken}-queue-${index}` } }));
+                const old = new Date(Date.now() - 5000);
+                utimesSync(file, old, old);
+                waiters.push(module.withSharedMutationLockAsync(file, () => undefined, { waitMs: 40 })
+                    .catch((error) => error));
+            }
+            await allSlotsOccupied;
+            expect(probes).toBe(5);
+            const file = lockPath();
+            const record = { token: testToken(), pid: process.pid, host: hostname(), processIdentity: identity };
+            writeFileSync(file, JSON.stringify(record));
+            const old = new Date(Date.now() - 5000);
+            utimesSync(file, old, old);
+            const callback = vi.fn();
+            const deadline = performance.now() + 30;
+            bounded = module.withSharedMutationLockAsync(file, callback, {
+                waitBudget: { remaining: () => Math.max(0, deadline - performance.now()) },
+            }).then(() => "entered", (error) => error.code);
+            const outcome = await Promise.race([
+                bounded,
+                new Promise((resolve) => setTimeout(() => resolve("still queued after deadline"), 150)),
+            ]);
+            expect(outcome).toBe("shared-mutation-lock-timeout");
+            expect(callback).not.toHaveBeenCalled();
+            expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(record);
+            release();
+            await Promise.all([...waiters, bounded]);
+            // Releasing occupied slots must not launch a stale fifth owner probe.
+            expect(probes).toBe(5);
+            expect(callback).not.toHaveBeenCalled();
+        } finally {
+            release();
+            await Promise.all([...waiters, bounded]);
+            vi.doUnmock("../device-lab-process-identity.js");
+            vi.resetModules();
+        }
+    });
+
     it("never restores a mismatched moved lock over a live successor", async () => {
         const file = lockPath();
         const stale = { token: testToken(), pid: 2147483647, host: hostname() };

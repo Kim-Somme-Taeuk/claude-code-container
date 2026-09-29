@@ -547,6 +547,7 @@ export function withSharedMutationLock<T>(
             break;
         } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+            assertBudget();
             const existing = readLock(file);
             const existingToken = typeof existing?.token === "string" ? existing.token : null;
             if (existingToken && lockIsStale(file, existing, staleMs)) {
@@ -595,7 +596,10 @@ export async function withSharedMutationLockAsync<T>(
     const token = randomBytes(16).toString("hex");
     const directories = secureStateParentDirectory(file);
     const validateDirectories = () => assertStateDirectoriesUnchanged(directories);
-    const record = await lockRecordAsync(token);
+    assertBudget();
+    // Bounded observations must not queue a fresh identity subprocess after
+    // their deadline. The synchronous path conservatively avoids Windows CIM.
+    const record = options.waitBudget ? lockRecord(token) : await lockRecordAsync(token);
 
     while (true) {
         assertBudget();
@@ -611,12 +615,13 @@ export async function withSharedMutationLockAsync<T>(
             break;
         } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+            assertBudget();
             const existing = readLock(file);
             const existingToken = typeof existing?.token === "string" ? existing.token : null;
-            if (existingToken && await lockIsStaleAsync(file, existing, staleMs)) {
+            if (existingToken && (options.waitBudget ? lockIsStale(file, existing, staleMs) : await lockIsStaleAsync(file, existing, staleMs))) {
                 if (moveIfTokenMatches(file, existingToken, "stale", validateDirectories)) continue;
             }
-            if (!existing && await lockIsStaleAsync(file, existing, staleMs)) {
+            if (!existing && (options.waitBudget ? lockIsStale(file, existing, staleMs) : await lockIsStaleAsync(file, existing, staleMs))) {
                 if (moveMalformedLock(file, token, validateDirectories)) continue;
             }
             if (remaining() <= 0) {
