@@ -12,6 +12,15 @@ import { cleanupFakeMacosMcpContext, createFakeMacosMcpContext } from "./helpers
 
 function json(result: any) { return JSON.parse(result.content[0].text); }
 
+const mobileCatalogTools = ["adb", "emulator", "avdmanager", "xcrun", "xcodebuild"];
+function mobileCatalogLookups(log: string) {
+    return readFileSync(log, "utf8").trim().split("\n").filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .flatMap(({ command, args }) => command === "/bin/sh" && args?.[0] === "-c"
+            ? [String(args[1]).replace(/^command -v /, "")] : [])
+        .filter((name) => mobileCatalogTools.includes(name)).sort();
+}
+
 describe("provider discovery is shared only inside one inventory operation", () => {
     it("macOS lists three devices with one provider lookup round and refreshes the next call", async () => {
         const context = createFakeMacosMcpContext();
@@ -127,7 +136,9 @@ describe("broker-first backend discovery over the MCP wire", () => {
             const minimal = await context.client.callTool({ name: "device_backends", arguments: { ...args, detail: false } });
             expect(json(minimal)).toMatchObject({ ok: false, error: "broker-unavailable" });
             expect(readFileSync(log, "utf8")).not.toMatch(/command -v (?:adb|emulator|avdmanager|xcrun|wsb|tart)/);
+            expect(mobileCatalogLookups(log)).toEqual([]);
             expect(readFileSync(log, "utf8")).toContain("command -v qemu-system-x86_64");
+
             expect(json(minimal).backends.some((backend: any) => backend.name === "linux-vm")).toBe(true);
 
             writeFileSync(log, "");
@@ -135,11 +146,65 @@ describe("broker-first backend discovery over the MCP wire", () => {
             expect(json(detailed).localBackends.length).toBeGreaterThan(1);
             expect(readFileSync(log, "utf8")).toContain("command -v adb");
             expect(readFileSync(log, "utf8")).toContain("command -v qemu-system-x86_64");
+            expect(mobileCatalogLookups(log)).toEqual([...mobileCatalogTools].sort());
 
             writeFileSync(log, "");
             const direct = await context.client.callTool({ name: "device_backends", arguments: { implicitBroker: false, detail: false } });
             expect(json(direct).backends.some((backend: any) => backend.name === "android-emulator")).toBe(true);
             expect(readFileSync(log, "utf8")).toContain("command -v adb");
+            expect(mobileCatalogLookups(log)).toEqual([...mobileCatalogTools].sort());
+        } finally { await cleanupDeviceLabMcpTestContext(context); }
+    });
+
+    it.each(["direct", "detailed-broker"])("%s catalog refreshes executables each call and preserves physical-device availability", { timeout: 30000 }, async (route) => {
+        const env: Record<string, string> = {};
+        let statePath = "";
+        const context = await createDeviceLabMcpTestContext({ env, setupHome(home) {
+            statePath = join(home, "catalog-executables.json");
+            writeFileSync(statePath, "{}");
+            const preload = join(home, "catalog-executables.cjs");
+            writeFileSync(preload, `const fs=require('fs'),cp=require('child_process');
+const original=cp.spawnSync;
+cp.spawnSync=function(command,args,...rest){
+    const match=command==='/bin/sh'&&args?.[0]==='-c'&&/^command -v (adb|emulator|avdmanager|xcrun|xcodebuild)$/.exec(args[1]);
+    if(match){const value=JSON.parse(fs.readFileSync(${JSON.stringify(statePath)},'utf8'))[match[1]];return {status:value?0:1,stdout:value?value+'\\n':'',stderr:''};}
+    return original.call(this,command,args,...rest);
+};require('module').syncBuiltinESMExports();`);
+            env.NODE_OPTIONS = `--require=${JSON.stringify(join(home, "isolate-broker-auth.cjs"))} --require=${JSON.stringify(preload)}`;
+        } });
+        try {
+            const port = await freePort();
+            const args = route === "direct" ? { implicitBroker: false, detail: true }
+                : { implicitBroker: true, detail: true, autolaunch: false, hostCandidates: ["127.0.0.1"], port, timeoutMs: 100 };
+            async function catalog(executables: Record<string, string>) {
+                writeFileSync(statePath, JSON.stringify(executables));
+                const result = json(await context.client.callTool({ name: "device_backends", arguments: args }));
+                return (route === "direct" ? result.backends : result.localBackends)
+                    .filter((backend: any) => ["android-emulator", "android-device", "ios-simulator", "ios-device"].includes(backend.name));
+            }
+            const first = await catalog({ adb: "/sdk/adb", emulator: "/sdk/emulator", avdmanager: "/sdk/avdmanager", xcrun: "/xcode/xcrun" });
+            expect(first).toHaveLength(4);
+            for (const backend of first) {
+                expect(backend).toMatchObject({ available: true, status: "available", missing: [], lazy: true });
+                expect(backend.capabilities).toContain("device_inventory");
+            }
+            expect(first.find((backend: any) => backend.name === "ios-device")).toMatchObject({
+                host: "macos-host-usb-xcode", creatable: false, attachable: true,
+                tools: { xcrun: "/xcode/xcrun", xcodebuild: null },
+            });
+            const second = await catalog({ adb: "/new-sdk/adb", xcodebuild: "/xcode/xcodebuild" });
+            expect(second.find((backend: any) => backend.name === "android-device")).toMatchObject({
+                host: "host-usb-adb", creatable: false, attachable: true, available: true, missing: [], tools: { adb: "/new-sdk/adb" },
+            });
+            expect(second.find((backend: any) => backend.name === "android-emulator")).toMatchObject({
+                available: false, status: "missing-prerequisites", missing: ["emulator"],
+                tools: { adb: "/new-sdk/adb", emulator: null, avdmanager: null }, provisioning: { available: false, missing: ["avdmanager"] },
+            });
+            for (const name of ["ios-simulator", "ios-device"]) {
+                expect(second.find((backend: any) => backend.name === name)).toMatchObject({ available: false, status: "missing-prerequisites", missing: ["xcrun"], tools: { xcrun: null } });
+            }
+            expect(second.find((backend: any) => backend.name === "ios-device").tools.xcodebuild).toBe("/xcode/xcodebuild");
+            expect(await catalog({ adb: "/sdk/adb", emulator: "/sdk/emulator", avdmanager: "/sdk/avdmanager", xcrun: "/xcode/xcrun" })).toEqual(first);
         } finally { await cleanupDeviceLabMcpTestContext(context); }
     });
 });

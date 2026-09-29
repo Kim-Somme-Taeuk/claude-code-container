@@ -1,10 +1,10 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { androidBackend, handleAndroidTool, listAndroidDevices } from "./backends/android.mjs";
+import { androidBackend, androidDiscovery, handleAndroidTool, listAndroidDevices } from "./backends/android.mjs";
 import { androidRealBackend, handleAndroidRealTool, listAndroidRealDevices } from "./backends/android-device.mjs";
-import { handleIosTool, iosBackend, listIosDevices } from "./backends/ios-simulator.mjs";
-import { handleIosRealTool, iosRealBackend, listIosRealDevices } from "./backends/ios-device.mjs";
+import { handleIosTool, iosBackend, iosDiscovery, listIosDevices } from "./backends/ios-simulator.mjs";
+import { handleIosRealTool, iosRealBackend, iosRealDiscovery, listIosRealDevices } from "./backends/ios-device.mjs";
 import { handleMacosTool, listMacosDevices, macosBackend } from "./backends/macos-vm.mjs";
 import { handleLinuxVmManagementTool, handleLinuxVmTool, linuxVmBackend, listLinuxVmDevices } from "./backends/linux-vm.mjs";
 import { handleWindowsTool, listWindowsDevices, windowsBackend } from "./backends/windows-sandbox.mjs";
@@ -13,8 +13,8 @@ import { brokerApple, brokerAppium, brokerCommand, brokerDeviceTool, brokerLease
 import { ownerId } from "./context.mjs";
 import { currentDisplayTarget, handleDisplayTool } from "./display/x11.mjs";
 import { evaluateDestructivePolicy } from "./policy/destructive.mjs";
-import { jsonResult, textResult } from "./responses.mjs";
-import { compactToolResult } from "./public-output.mjs";
+import { flowJsonResult, jsonResult, textResult } from "./responses.mjs";
+import { compactToolResult, compactToolValue } from "./public-output.mjs";
 import { OWNER_DEVICE_ID_PATTERN } from "./state/owner-device-state.mjs";
 import { TOOLS } from "./tools.mjs";
 
@@ -228,7 +228,8 @@ const BROKER_APPIUM_ROUTED_MOBILE_TOOLS = new Set(["mobile_session_status", "mob
 const DEFAULT_BROKER_APPIUM_RPC_TIMEOUT_MS = 315000;
 
 function flowStepTool(step) {
-    return step?.tool || step?.name || "";
+    const tool = step?.tool || step?.name || "";
+    return typeof tool === "string" ? tool : "";
 }
 
 function mobileFlowToolAllowed(name) {
@@ -418,6 +419,8 @@ function lifecycleBackendDevices() {
 
 function directBackendList(includeLocalProviders = true) {
     const display = currentDisplayTarget();
+    const android = includeLocalProviders ? androidDiscovery() : null;
+    const ios = includeLocalProviders ? iosDiscovery() : null;
     return [
         {
             name: "x11-current-display",
@@ -428,10 +431,10 @@ function directBackendList(includeLocalProviders = true) {
             capabilities: display.capabilities,
         },
         ...(includeLocalProviders ? [
-            androidBackend(),
-            androidRealBackend(),
-            iosBackend(),
-            iosRealBackend(),
+            androidBackend(android),
+            androidRealBackend(android),
+            iosBackend(ios),
+            iosRealBackend(iosRealDiscovery(ios)),
             windowsBackend(),
             windowsVmBackend(),
             macosBackend(),
@@ -1448,6 +1451,14 @@ function cursorMoveBackendUnsupportedResult() {
 
 async function dispatchTool(name, rawArgs) {
     const args = normalizeToolArgs(rawArgs);
+    if (name === "mobile_key"
+        && !(typeof args.key === "string" && args.key.length > 0)
+        && !(typeof args.keyCode === "number" && Number.isFinite(args.keyCode))) {
+        return textResult(false, "mobile_key requires key or keyCode");
+    }
+    if (name === "mobile_wait_for_text" && !(typeof args.text === "string" && args.text.length > 0)) {
+        return textResult(false, "mobile_wait_for_text requires text");
+    }
     if (isCursorMove(name, args)) {
         if (!Number.isInteger(args.x) || args.x < 0 || !Number.isInteger(args.y) || args.y < 0) {
             return jsonResult({ ok: false, error: "device-cursor-coordinates-invalid", detail: "Provide both x and y as nonnegative screenshot pixels." });
@@ -1527,26 +1538,29 @@ async function dispatchTool(name, rawArgs) {
     return textResult(false, `Unknown tool: ${name}`);
 }
 
-async function handleRunFlow(args, { toolName, toolAllowed }) {
+async function handleRunFlow(args, { toolName, toolAllowed, detail }) {
+    const finish = (value) => typeof value === "string"
+        ? textResult(false, value)
+        : flowJsonResult(detail ? value : compactToolValue(toolName, value), { detail });
     const { steps, stopOnError = true } = args;
-    if (!Array.isArray(steps)) return textResult(false, `${toolName} requires steps array`);
-    if (steps.length > FLOW_MAX_STEPS) return textResult(false, `${toolName} supports at most ${FLOW_MAX_STEPS} steps`);
+    if (!Array.isArray(steps)) return finish(`${toolName} requires steps array`);
+    if (steps.length > FLOW_MAX_STEPS) return finish(`${toolName} supports at most ${FLOW_MAX_STEPS} steps`);
 
     const results = [];
     for (let index = 0; index < steps.length; index += 1) {
         const step = steps[index] || {};
         const tool = flowStepTool(step);
-        const label = step.label || tool || `step-${index + 1}`;
+        const label = (typeof step.label === "string" && step.label) || tool || `step-${index + 1}`;
         if (!tool) {
             const summary = { index, label, isError: true, error: "Flow step requires tool or name" };
             results.push(summary);
-            if (stopOnError) return jsonResult({ ok: false, stoppedAt: index, results });
+            if (stopOnError) return finish({ ok: false, stoppedAt: index, results });
             continue;
         }
         if (!toolAllowed(tool)) {
             const summary = { index, label, tool, isError: true, error: `${toolName} does not allow step tool: ${tool}` };
             results.push(summary);
-            if (stopOnError) return jsonResult({ ok: false, stoppedAt: index, results });
+            if (stopOnError) return finish({ ok: false, stoppedAt: index, results });
             continue;
         }
 
@@ -1554,18 +1568,18 @@ async function handleRunFlow(args, { toolName, toolAllowed }) {
         const result = await withBrokerOperation(() => dispatchTool(tool, step.arguments || {}));
         const summary = { index, label, tool, ...summarizeToolResult(result) };
         results.push(summary);
-        if (summary.isError && stopOnError) return jsonResult({ ok: false, stoppedAt: index, results });
+        if (summary.isError && stopOnError) return finish({ ok: false, stoppedAt: index, results });
     }
 
-    return jsonResult({ ok: results.every((result) => !result.isError), results });
+    return finish({ ok: results.every((result) => !result.isError), results });
 }
 
-async function handleMobileRunFlow(args) {
-    return handleRunFlow(args, { toolName: "mobile_run_flow", toolAllowed: mobileFlowToolAllowed });
+async function handleMobileRunFlow(args, options) {
+    return handleRunFlow(args, { toolName: "mobile_run_flow", toolAllowed: mobileFlowToolAllowed, ...options });
 }
 
-async function handleDeviceRunFlow(args) {
-    return handleRunFlow(args, { toolName: "device_run_flow", toolAllowed: deviceFlowToolAllowed });
+async function handleDeviceRunFlow(args, options) {
+    return handleRunFlow(args, { toolName: "device_run_flow", toolAllowed: deviceFlowToolAllowed, ...options });
 }
 
 export async function startServer() {
@@ -1616,10 +1630,10 @@ export async function startServer() {
                         return handleDeviceList(args);
 
                     case "mobile_run_flow":
-                        return handleMobileRunFlow(args);
+                        return handleMobileRunFlow(args, { detail: rawArgs?.detail === true });
 
                     case "device_run_flow":
-                        return handleDeviceRunFlow(args);
+                        return handleDeviceRunFlow(args, { detail: rawArgs?.detail === true });
 
                     default: {
                         return dispatchTool(name, args);
@@ -1629,7 +1643,8 @@ export async function startServer() {
                 return textResult(false, `Unexpected error: ${err.message}`);
             }
         });
-        return rawArgs?.detail === true ? result : compactToolResult(name, result);
+        return rawArgs?.detail === true || name === "mobile_run_flow" || name === "device_run_flow"
+            ? result : compactToolResult(name, result);
     });
 
     const transport = new StdioServerTransport();

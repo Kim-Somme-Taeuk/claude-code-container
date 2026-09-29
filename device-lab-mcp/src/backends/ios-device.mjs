@@ -39,8 +39,7 @@ export function iosRealBackend(discovery = iosRealDiscovery()) {
     };
 }
 
-function iosRealDiscovery() {
-    const ios = iosDiscovery();
+export function iosRealDiscovery(ios = iosDiscovery()) {
     const xcodebuild = commandPath("xcodebuild");
     const missing = [...ios.missing];
     return {

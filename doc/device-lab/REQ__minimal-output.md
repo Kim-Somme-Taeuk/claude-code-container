@@ -87,3 +87,23 @@ host process identity and ownership metadata remain internal or in detail mode.
 Only exact helper echoes are deduplicated. Session status keeps availability,
 missing prerequisites and session identity while hiding executable discovery and
 process metadata. No provider state is changed by presentation.
+
+## Catalog, input and flow efficiency
+
+Direct and detailed local backend catalogs share executable discovery only within
+that catalog call. Emulator/simulator and physical-device prerequisites keep their
+existing meanings. Default broker discovery remains lazy; later calls observe
+new executable availability.
+
+Missing or invalid mobile key/text-wait arguments fail before target or broker
+preparation, including inside flows. Zero key codes and whitespace text remain
+valid. Advertised schemas require an action value, and legacy nested options are
+normalized before validation.
+
+Default flow output is projected before failed-response size limits, so a large
+successful observation cannot erase a later failure's identity and cause.
+Detailed flow output remains original while it fits. Oversized failed flows keep
+step identities and outcomes, explicitly mark omitted successful content and
+bounded failure diagnostics, and retain actionable failure/recovery evidence.
+The final serialized UTF-8 failure response stays within 64 KiB. This does not
+change standalone opaque command/UI results or other diagnostic size limits.

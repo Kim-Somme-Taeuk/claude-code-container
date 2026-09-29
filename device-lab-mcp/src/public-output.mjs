@@ -232,14 +232,14 @@ function operationResult(name, value) {
     return result;
 }
 
-function project(name, value) {
+export function compactToolValue(name, value) {
     if (!object(value) || !TOOL_NAMES.has(name) || name === "device_exec") return value;
     if (name === "device_run_flow" || name === "mobile_run_flow") {
         if (!Array.isArray(value.results)) return value;
         return { ...value, results: value.results.map((step) => {
             if (!object(step) || !Array.isArray(step.content)) return step;
             return { ...step, content: step.content.map((item) => item.type === "json"
-                ? { ...item, value: project(step.tool, item.value) } : item) };
+                ? { ...item, value: compactToolValue(step.tool, item.value) } : item) };
         }) };
     }
     // Explicit raw transport diagnostics are opaque, including their result keys.
@@ -294,7 +294,7 @@ function project(name, value) {
     }
     // Known broker RPC envelope. Do not descend into exec output or arbitrary RPC values.
     if (object(value.result) && "routedBy" in value && name !== "device_exec") {
-        result.result = project(name, value.result);
+        result.result = compactToolValue(name, value.result);
     }
     if (value.provider === "broker-appium" && object(value.broker) && value.broker.ok === true) {
         const response = value.broker.result?.response;
@@ -316,7 +316,7 @@ export function compactToolResult(name, result) {
     return { ...result, content: result.content.map((item) => {
         if (item.type !== "text" || typeof item.text !== "string") return item;
         try {
-            return { ...item, text: JSON.stringify(project(name, JSON.parse(item.text))) };
+            return { ...item, text: JSON.stringify(compactToolValue(name, JSON.parse(item.text))) };
         } catch {
             return item;
         }
