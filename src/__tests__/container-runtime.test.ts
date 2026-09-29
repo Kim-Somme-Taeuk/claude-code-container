@@ -53,6 +53,7 @@ describe("container-runtime", () => {
         delete process.env.CCC_SELINUX_RELABEL;
         delete process.env.CCC_PODMAN_CGROUPS;
         delete process.env.container;
+        delete process.env.WSL_DISTRO_NAME;
         delete process.env.VITEST;
         for (const key of Object.keys(process.env)) {
             if (key.startsWith("VITEST_")) delete process.env[key];

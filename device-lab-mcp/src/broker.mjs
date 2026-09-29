@@ -3,7 +3,7 @@ import { spawn, spawnSync } from "child_process";
 import { accessSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, unlinkSync } from "fs";
 import { homedir } from "os";
 import { delimiter, dirname, join, resolve } from "path";
-import { ownerBasis, ownerId, PACKAGE_ROOT } from "./context.mjs";
+import { ownerBasis, ownerId, projectMountPath, PACKAGE_ROOT } from "./context.mjs";
 import { writeJsonFileAtomically } from "./state/shared-mutation-lock.mjs";
 import { readDeviceLabStateFile } from "./state/state-file.mjs";
 
@@ -1221,7 +1221,7 @@ function ownerToken(owner) {
 async function resolveBrokerOwner(probeOptions) {
     const attempts = [];
     const requestBody = JSON.stringify({
-        projectMountPath: process.cwd() || "/project",
+        projectMountPath: projectMountPath(),
         profile: process.env.CCC_PROFILE || null,
     });
     for (const host of probeOptions.hostCandidates) {

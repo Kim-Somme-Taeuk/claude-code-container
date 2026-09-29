@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mkdirSync } from "fs";
+import { existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import {
     cleanupDeviceLabMcpTestContext,
@@ -1013,6 +1013,13 @@ describe("device-lab MCP foundation and definitions", () => {
     });
 
     it("lists only the current non-creatable X11 display in the foundation slice", { timeout: TIMEOUT }, async () => {
+        // This subprocess observes the host filesystem, including optional X11
+        // tools. Controlled prerequisite combinations are covered separately.
+        const available = ["xdotool", "scrot"].every((tool) =>
+            ["/usr/bin", "/bin"].some((directory) => existsSync(join(directory, tool))));
+        const readiness = available
+            ? { state: "ready" }
+            : { state: "unavailable", reason: "missing-prerequisites" };
         const result = await client.callTool({ name: "device_list", arguments: {} });
         expect(result.isError).not.toBe(true);
 
@@ -1029,12 +1036,14 @@ describe("device-lab MCP foundation and definitions", () => {
                 lifecycle: "current",
                 targetKind: "current-display",
                 runtimeState: "current",
+                available,
+                readiness,
                 targetStatus: expect.objectContaining({
                     targetKind: "current-display",
                     creatable: false,
                     attachable: false,
                     runtimeState: "current",
-                    readiness: { state: "ready" },
+                    readiness,
                     leaseState: { state: "not-required" },
                     sessionState: expect.objectContaining({ state: "none" }),
                 }),

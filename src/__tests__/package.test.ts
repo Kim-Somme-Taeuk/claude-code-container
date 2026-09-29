@@ -24,6 +24,43 @@ function schemaProperties(inputSchema: unknown): Record<string, unknown> {
     return ((inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties || {}) as Record<string, unknown>;
 }
 
+function packedFiles(output: string, packageName: string): Set<string> {
+    const parsed: unknown = JSON.parse(output);
+    // npm versions emit either a record array or an object keyed by package name.
+    const candidates: unknown[] = Array.isArray(parsed)
+        ? parsed.filter((entry) => entry && typeof entry === "object" && entry.name === packageName)
+        : parsed && typeof parsed === "object" ? [(parsed as Record<string, unknown>)[packageName]] : [];
+    const pack = candidates[0] as { name?: unknown; files?: unknown } | null | undefined;
+    if (candidates.length !== 1 || !pack || pack.name !== packageName || !Array.isArray(pack.files)
+        || !pack.files.every((file) => file && typeof file === "object" && typeof file.path === "string" && file.path.length > 0)) {
+        throw new Error(`npm pack output must contain exactly one valid ${packageName} record with file paths`);
+    }
+    return new Set(pack.files.map((file: { path: string }) => file.path));
+}
+
+describe("npm pack result formats", () => {
+    const name = "claude-code-container";
+    const pack = { name, files: [{ path: "scripts/install.js" }, { path: "dist/index.js" }] };
+
+    it.each([[pack], { [name]: pack }])("reads the selected package's files", (payload) => {
+        expect(packedFiles(JSON.stringify(payload), name)).toEqual(new Set(["scripts/install.js", "dist/index.js"]));
+    });
+
+    it("selects the named package rather than the first package", () => {
+        expect(packedFiles(JSON.stringify([{ name: "other", files: [] }, pack]), name)).toContain("dist/index.js");
+    });
+
+    it.each([
+        null, [], {}, { error: { code: "EPACK" } },
+        [pack, pack], [{ name: "other", files: pack.files }],
+        { [name]: { ...pack, name: "other" } },
+        { [name]: { name } }, { [name]: { name, files: {} } },
+        { [name]: { name, files: [null] } }, { [name]: { name, files: [{ path: 42 }] } },
+    ])("rejects missing, ambiguous or malformed package output %#", (payload) => {
+        expect(() => packedFiles(JSON.stringify(payload), name)).toThrow("npm pack output must contain exactly one valid");
+    });
+});
+
 describe("npm package contents", () => {
     it("locks a reproducible, patched Appium broker runtime", () => {
         const manifest = JSON.parse(readFileSync(join(repoRoot, "device-lab-mcp", "package.json"), "utf-8")) as {
@@ -58,6 +95,7 @@ describe("npm package contents", () => {
 
     it("ships the postinstall script referenced by package.json", () => {
         const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf-8")) as {
+            name: string;
             scripts?: Record<string, string>;
             engines?: Record<string, string>;
         };
@@ -71,10 +109,7 @@ describe("npm package contents", () => {
             encoding: "utf-8",
             stdio: ["ignore", "pipe", "pipe"],
         });
-        const [pack] = JSON.parse(out) as Array<{
-            files: Array<{ path: string }>;
-        }>;
-        const files = new Set(pack.files.map((file) => file.path));
+        const files = packedFiles(out, pkg.name);
 
         expect(files).toContain("scripts/install.js");
         expect(files).toContain("dist/index.js");

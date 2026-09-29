@@ -94,6 +94,18 @@ and stop isolated experiment targets only when a task needs them.
 
 ## Verification Cues
 
+- Source/package MCP clients running on the host and clients running at the
+  corresponding canonical container mount must request the same canonical
+  `/project/<project-id>` and profile when resolving their broker owner. The
+  request uses the same project-ID derivation as the client owner identity;
+  canonical mount paths are not hashed again. The broker still requires an
+  existing matching host registration, validates paths/profiles, and owns secret
+  provisioning. Unregistered or malformed requests must not gain RPC access.
+- Exercise host-path and canonical-path identity parity, profile separation,
+  negative owner-resolution responses, and concurrent secret provisioning with
+  real HTTP/child-process fixtures. Test setup must not bypass registration or
+  replace authorization responses with fabricated success.
+
 - `ccc` startup remains unchanged when no device MCP tool is called.
 - A Windows MCP smoke test can start a sandbox, run a simple command, capture
   evidence, and stop the sandbox.
