@@ -137,6 +137,83 @@ describe("minimal public Device Lab output", () => {
         expect(text).toContain('"stopped":false');
     });
 
+    it("deduplicates a broker transport failure while preserving provider containment and cleanup evidence", () => {
+        const provider = {
+            error: "guest-shutdown-failed", detail: "Guest remains running", remedy: "Stop guest before retry",
+            scrubContainmentFailed: true, cleanup: { stopped: false, deleted: false, error: "cleanup-incomplete" },
+        };
+        const body = { ok: false, error: "provider-command-failed", result: provider };
+        const original = {
+            ok: false, error: "provider-command-failed", method: "broker.device.tool.invoke", result: provider, body,
+            routedBy: "device-lifecycle-broker", ownerId: "internal-owner", runtime: { file: "/internal/runtime" },
+            selected: { host: "internal-host", port: 17373, endpoint: "/v1/rpc", status: 502, body },
+            attempts: [{ host: "internal-host", durationMs: 123, status: 502, body }],
+            launch: { ok: true, reused: true, attempts: [
+                { reason: "broker-reuse-process-verified", processVerification: { ok: true, pid: 999 } },
+                { ok: true, endpoint: "http://internal-host:17373/health", body: { ok: true, name: "ccc-device-broker", implemented: ["internal-capability-v1"] } },
+            ] },
+        };
+        const { value, text } = projected("device_stop", original);
+        expect(value.ok).toBe(false);
+        expect(value.result).toEqual(provider);
+        expect(text.split("Guest remains running")).toHaveLength(2);
+        for (const internal of ["internal-host", "internal-owner", "/internal/runtime", "internal-capability-v1", "processVerification", "durationMs"]) {
+            expect(text).not.toContain(internal);
+        }
+        expect(text).toContain('"scrubContainmentFailed":true');
+        expect(text.length).toBeLessThan(JSON.stringify(original).length);
+    });
+
+    it("retains distinct transport attempts and selected provider errors when they are not top-level duplicates", () => {
+        const providerFailure = { error: "guest-rpc-refused", detail: "Guest agent connection rejected", scrubContainmentFailed: true };
+        const { value, text } = projected("device_start", {
+            ok: false, error: "broker-command-failed", method: "broker.device.start", routedBy: "device-lifecycle-broker",
+            selected: { host: "internal-host", port: 17373, status: 502, body: providerFailure },
+            attempts: [
+                { host: "first-host", error: "connection-refused", transportCode: "ECONNREFUSED", retryable: true },
+                { host: "second-host", error: "request-aborted", transportCode: "ETIMEDOUT", retryable: false, termination: "deadline" },
+            ],
+        });
+        expect(value.selected.body).toEqual(providerFailure);
+        expect(value.attempts).toEqual(expect.arrayContaining([
+            expect.objectContaining({ error: "connection-refused", transportCode: "ECONNREFUSED", retryable: true }),
+            expect.objectContaining({ error: "request-aborted", transportCode: "ETIMEDOUT", retryable: false, termination: "deadline" }),
+        ]));
+        expect(text).not.toContain("first-host");
+        expect(text).toContain("Guest agent connection rejected");
+    });
+
+    it("leaves opaque RPC failures and unknown failure payloads unchanged", () => {
+        const applicationFailure = {
+            ok: false, error: "application-failure", method: "custom-method", selected: { ownerId: "user-selection", body: { x: 1 } },
+            attempts: [{ host: "application-data", runtime: "application-runtime" }], result: { source: "application-source" },
+        };
+        expect(projected("device_broker_rpc", applicationFailure).value).toEqual(applicationFailure);
+        expect(projected("future_tool", applicationFailure).value).toEqual(applicationFailure);
+    });
+
+    it("removes successful readiness checks without hiding pending, unknown, or denied access states", () => {
+        const { value } = projected("device_backends", { backends: [{
+            name: "windows-vm", available: true, readiness: {
+                ok: true, available: true, moduleAvailable: true, hypervisorPresent: true,
+                vmmsRunning: true, qemuImgAvailable: true, qemuImgTrusted: true,
+                managementAccess: false, rebootPending: true, sessionRefreshRequired: "unknown",
+                linuxImageMissing: ["image.vhdx"], missing: [], freeMemoryMb: 16384,
+            },
+        }] });
+        const readiness = value.backends[0].readiness;
+        expect(readiness.managementAccess).toBe(false);
+        expect(readiness.rebootPending).toBe(true);
+        expect(readiness.sessionRefreshRequired).toBe("unknown");
+        expect(readiness.linuxImageMissing).toEqual(["image.vhdx"]);
+        expect(readiness).not.toHaveProperty("moduleAvailable");
+        expect(readiness).not.toHaveProperty("freeMemoryMb");
+        expect(readiness).not.toHaveProperty("missing");
+        const failedReadiness = { ok: false, available: false, managementAccess: false, rebootPending: "unknown", detail: "Access denied" };
+        const failure = projected("device_backends", { backends: [{ name: "windows-vm", available: false, readiness: failedReadiness }] });
+        expect(failure.value.backends[0].readiness).toEqual(failedReadiness);
+    });
+
     it("compacts flow results without losing step failure or returned clipboard data", () => {
         const { value, text } = projected("mobile_run_flow", {
             ok: false, stoppedAt: 1, results: [

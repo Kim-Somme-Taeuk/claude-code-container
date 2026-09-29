@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createHash } from "crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { basename, join, resolve } from "path";
 
@@ -54,6 +54,11 @@ export async function createDeviceLabMcpTestContext(options: DeviceLabMcpTestCon
     process.env.HOME = homeDir;
     const pathDir = join(homeDir, "bin");
     mkdirSync(pathDir, { recursive: true });
+    // A container's real owner credential must not override these synthetic
+    // owners. Redirect only the conventional mount; validation stays enabled.
+    const preload = join(homeDir, "isolate-broker-auth.cjs");
+    const absentMount = join(homeDir, "absent-conventional-mount");
+    writeFileSync(preload, `const fs=require('fs');const root=${JSON.stringify(absentMount)};for(const key of ['existsSync','lstatSync','openSync']){const original=fs[key];fs[key]=function(file,...args){const path=String(file).replaceAll('\\\\','/').replace(/^[A-Za-z]:/,'');const mount='/run/ccc-device-broker-auth';return original.call(fs,path===mount||path.startsWith(mount+'/')?root+path.slice(mount.length):file,...args)}}require('module').syncBuiltinESMExports();`);
     options.setupHome?.(homeDir);
     const transport = new StdioClientTransport({
         command: process.execPath,
@@ -62,6 +67,7 @@ export async function createDeviceLabMcpTestContext(options: DeviceLabMcpTestCon
             HOME: homeDir,
             PATH: pathDir,
             NODE_ENV: "test",
+            NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
             CCC_DEVICE_LAB_TEST_ALLOW_UNVERIFIED_BROKER: "1",
             ...options.env,
         },

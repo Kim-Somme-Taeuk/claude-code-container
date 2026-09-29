@@ -20,7 +20,7 @@ describe("Windows test child-process policy", () => {
 
         expect(level3).toContain("hidden-child-processes.cjs");
         expect(level3).toContain("NODE_OPTIONS");
-        expect(level3Host).toContain('[join(repoRoot, "dist", "index.js"), "devices", "broker", "status"]');
+        expect(level3Host).toContain('[join(repoRoot, "dist", "index.js"), "devices", "broker", "status", "--verbose"]');
         expect(level3Host).toContain("brokerReady:\\s*true");
         expect(vitestRunner).toContain("hidden-child-processes.cjs");
         expect(vitestRunner).toContain("windowsHide: true");
