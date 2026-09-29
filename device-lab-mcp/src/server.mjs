@@ -16,9 +16,13 @@ import { evaluateDestructivePolicy } from "./policy/destructive.mjs";
 import { flowJsonResult, jsonResult, textResult } from "./responses.mjs";
 import { compactToolResult, compactToolValue } from "./public-output.mjs";
 import { OWNER_DEVICE_ID_PATTERN } from "./state/owner-device-state.mjs";
+import { readOwnerDevices } from "./state/device-store.mjs";
 import { TOOLS } from "./tools.mjs";
 
 const FLOW_MAX_STEPS = 50;
+const DEVICE_REQUIRED_TOOLS = new Set(TOOLS
+    .filter((tool) => tool.inputSchema?.required?.includes("deviceId"))
+    .map((tool) => tool.name));
 const FLOW_BLOCKED_TOOLS = new Set(["mobile_run_flow", "device_run_flow"]);
 const MOBILE_FLOW_ALLOWED_DEVICE_TOOLS = new Set(["device_status", "device_screenshot"]);
 const DEVICE_FLOW_ALLOWED_TOOLS = new Set([
@@ -1455,6 +1459,33 @@ function cursorMoveBackendUnsupportedResult() {
     return jsonResult({ ok: false, error: "device-cursor-move-backend-unsupported", detail: "Cursor movement requires backend windows-vm or linux-vm with provider hyper-v." });
 }
 
+function unhandledDeviceToolResult(name, args) {
+    if (!DEVICE_REQUIRED_TOOLS.has(name)) return null;
+    const deviceId = args.deviceId;
+    const detail = "Use device_list to choose a device.";
+    let diagnostic;
+    if (deviceId === undefined) {
+        diagnostic = { ok: false, error: "missing-device-id", detail };
+    } else {
+        // Read only this owner's stored targets; diagnosing an unsupported action
+        // must not discover providers or turn an unreadable state into absence.
+        const matches = new Set();
+        if (deviceId === CURRENT_DISPLAY_DEVICE_ID) matches.add(CURRENT_DISPLAY_DEVICE_ID);
+        for (const [stateKey, backend] of LIFECYCLE_STATE_BACKENDS) {
+            if (readOwnerDevices(stateKey).some((device) => device.id === deviceId)) matches.add(backend);
+        }
+        if (listLinuxVmDevices({ strictState: true }).some((device) => device.id === deviceId)) matches.add("linux-vm");
+        if (matches.size === 0) {
+            diagnostic = { ok: false, error: "device-not-found", deviceId, detail };
+        } else if (matches.size > 1) {
+            diagnostic = { ok: false, error: "ambiguous-device-backend", deviceId, matches: [...matches] };
+        } else {
+            diagnostic = { ok: false, error: "device-tool-unsupported", tool: name, deviceId, backend: [...matches][0] };
+        }
+    }
+    return textResult(false, JSON.stringify(diagnostic));
+}
+
 async function dispatchTool(name, rawArgs) {
     const args = normalizeToolArgs(rawArgs);
     if (name === "mobile_key"
@@ -1541,7 +1572,7 @@ async function dispatchTool(name, rawArgs) {
     const displayResult = await handleDisplayTool(name, args);
     if (displayResult) return displayResult;
 
-    return textResult(false, `Unknown tool: ${name}`);
+    return unhandledDeviceToolResult(name, args) || textResult(false, `Unknown tool: ${name}`);
 }
 
 async function handleRunFlow(args, { toolName, toolAllowed, detail }) {

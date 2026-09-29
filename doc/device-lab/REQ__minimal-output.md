@@ -137,3 +137,15 @@ If the final sweep has no trustworthy observation, the public tool returns a
 bounded MCP error retaining the command failure cause, not running:false. Earlier
 clean observations cannot hide later total query failure. Existing fallback order,
 ownership checks, and clean-absence response shape remain unchanged.
+
+## Device lookup diagnostics
+
+When no provider handles a registered tool requiring deviceId, the terminal
+diagnostic distinguishes omitted IDs (missing-device-id), absent owner-local
+devices (device-not-found), and unsupported operations on known targets
+(device-tool-unsupported). Missing/absent targets give a short device_list hint.
+Truly unknown tool names retain Unknown tool. Invalid IDs, provider/broker
+errors, backend mismatch, policy refusals and successful results keep precedence.
+Diagnostic lookup must not query providers or other owners, mutate state, mask
+corrupt state as absence, or add lookup work to successful calls. Local QEMU
+targets and the current display remain recognizable; ambiguous IDs are not guessed.

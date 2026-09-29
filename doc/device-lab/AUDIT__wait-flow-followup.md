@@ -90,3 +90,14 @@ can still find the app when pgrep is unavailable.
 Known ceiling: this corrects observation semantics, not the iOS polling deadline.
 Individual commands still use their existing independent timeout. No macOS host
 or real iOS device result is implied by Linux-host fixture verification.
+
+## Device diagnostic follow-up (baseline `5560c9e2`)
+
+A direct mobile_screenshot call with a nonexistent device ID returned
+Unknown tool even though the tool was registered. Terminal fallback diagnostics
+now distinguish a missing ID, an absent owner-local device, and an unsupported
+operation on a known target. Existing provider and broker errors retain
+precedence. Raw owner-state reads avoid querying device providers merely to explain
+an error; container QEMU targets and the current display remain recognizable.
+The user requested deletion of the standalone MCP UX handoff; durable behavior
+and remaining wait-budget limitations stay in this audit and the REQ.

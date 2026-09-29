@@ -874,6 +874,7 @@ export function listLabs(options = {}) {
                 const loaded = readLab(ctx, entry.name);
                 return loaded.ok ? loaded.lab : null;
             } catch {
+                if (options.strictState === true) throw new Error("lab-state-invalid");
                 return null;
             }
         })

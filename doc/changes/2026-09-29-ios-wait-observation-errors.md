@@ -12,4 +12,4 @@ causes such as ENOENT, signals and stderr are retained in a bounded diagnostic.
 This changes observation classification, not polling deadlines. Individual
 commands retain their independent timeout; Linux fixture verification does not
 replace native macOS/iOS validation. Unknown-device routing diagnostics and
-broker Appium end-to-end deadlines remain in the Device Lab handoff.
+broker Appium end-to-end deadlines remain documented in the Device Lab wait-flow audit.
