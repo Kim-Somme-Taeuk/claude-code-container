@@ -426,7 +426,7 @@ describe("device-lab MCP broker routing", () => {
                 brokerPort: 17373,
             },
         });
-        expect(result.isError).not.toBe(true);
+        expect(result.isError).toBe(true);
         expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text || "{}"))).toEqual(expect.objectContaining({
             ok: false,
             error: "invalid-broker-host-candidate",
@@ -1658,7 +1658,7 @@ describe("device-lab MCP broker routing", () => {
                     timeoutMs: 500,
                 },
             });
-            expect(result.isError).not.toBe(true);
+            expect(result.isError).toBe(true);
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"));
             expect(payload).toEqual(expect.objectContaining({
                 ok: false,
@@ -1876,7 +1876,7 @@ describe("device-lab MCP broker routing", () => {
                 timeoutMs: 50,
             },
         });
-        expect(unavailable.isError).not.toBe(true);
+        expect(unavailable.isError).toBe(true);
         const unavailablePayload = JSON.parse(((unavailable.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ok: boolean;
             error: string;
@@ -1896,7 +1896,7 @@ describe("device-lab MCP broker routing", () => {
                 timeoutMs: 50,
             },
         });
-        expect(tooLarge.isError).not.toBe(true);
+        expect(tooLarge.isError).toBe(true);
         expect(JSON.parse(((tooLarge.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: false,
             error: "request-too-large",
@@ -1913,7 +1913,7 @@ describe("device-lab MCP broker routing", () => {
                 timeoutMs: 50,
             },
         });
-        expect(unsupportedLeaseRpc.isError).not.toBe(true);
+        expect(unsupportedLeaseRpc.isError).toBe(true);
         expect(JSON.parse(((unsupportedLeaseRpc.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: false,
             error: "unsupported-public-broker-rpc-method",
@@ -1930,7 +1930,7 @@ describe("device-lab MCP broker routing", () => {
                 timeoutMs: 50,
             },
         });
-        expect(unsupportedServiceRpc.isError).not.toBe(true);
+        expect(unsupportedServiceRpc.isError).toBe(true);
         expect(JSON.parse(((unsupportedServiceRpc.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: false,
             error: "unsupported-public-broker-rpc-method",
@@ -2298,7 +2298,7 @@ describe("device-lab MCP broker routing", () => {
             name: "device_broker_lease",
             arguments: { action: "steal", backend: "android-device" },
         });
-        expect(invalidAction.isError).not.toBe(true);
+        expect(invalidAction.isError).toBe(true);
         expect(JSON.parse(((invalidAction.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: false,
             error: "invalid-lease-action",
@@ -2315,7 +2315,7 @@ describe("device-lab MCP broker routing", () => {
                 timeoutMs: 50,
             },
         });
-        expect(unavailable.isError).not.toBe(true);
+        expect(unavailable.isError).toBe(true);
         expect(JSON.parse(((unavailable.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: false,
             error: "broker-rpc-unavailable",
@@ -2361,7 +2361,7 @@ describe("device-lab MCP broker routing", () => {
                     timeoutMs: 500,
                 },
             });
-            expect(duplicate.isError).not.toBe(true);
+            expect(duplicate.isError).toBe(true);
             expect(JSON.parse(((duplicate.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 ok: false,
                 error: "physical-lease-device-mismatch",
@@ -2380,7 +2380,7 @@ describe("device-lab MCP broker routing", () => {
                     timeoutMs: 500,
                 },
             });
-            expect(invalid.isError).not.toBe(true);
+            expect(invalid.isError).toBe(true);
             expect(JSON.parse(((invalid.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 ok: false,
                 error: "invalid-hardware-id",
@@ -2655,7 +2655,7 @@ describe("device-lab MCP broker routing", () => {
                     timeoutMs: 500,
                 },
             });
-            expect(failedRun.isError).not.toBe(true);
+            expect(failedRun.isError).toBe(true);
             expect(JSON.parse(((failedRun.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 ok: false,
                 error: "provider-command-failed",
@@ -2684,7 +2684,7 @@ describe("device-lab MCP broker routing", () => {
                     timeoutMs: 500,
                 },
             });
-            expect(missingMetadata.isError).not.toBe(true);
+            expect(missingMetadata.isError).toBe(true);
             expect(JSON.parse(((missingMetadata.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 ok: false,
                 error: "missing-provider-metadata",
@@ -2784,7 +2784,7 @@ describe("device-lab MCP broker routing", () => {
                     timeoutMs: 50,
                 },
             });
-            expect(result.isError).not.toBe(true);
+            expect(result.isError).toBe(true);
             expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 ok: false,
                 error: "broker-rpc-unavailable",
@@ -2805,7 +2805,7 @@ describe("device-lab MCP broker routing", () => {
                     timeoutMs: 50,
                 },
             });
-            expect(hyperVLinux.isError).not.toBe(true);
+            expect(hyperVLinux.isError).toBe(true);
             expect(JSON.parse(((hyperVLinux.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 ok: false,
                 error: "broker-rpc-unavailable",
@@ -2884,7 +2884,7 @@ describe("device-lab MCP broker routing", () => {
                     timeoutMs: 500,
                 },
             });
-            expect(result.isError).not.toBe(true);
+            expect(result.isError).toBe(true);
             expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 ok: false,
                 error: "device-not-found",
@@ -2907,7 +2907,7 @@ describe("device-lab MCP broker routing", () => {
                         timeoutMs: 500,
                     },
                 });
-                expect(missingDeletion.isError).not.toBe(true);
+                expect(missingDeletion.isError).toBe(true);
                 expect(JSON.parse(((missingDeletion.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                     ok: false,
                     error: "device-not-found",
@@ -3025,7 +3025,7 @@ describe("device-lab MCP broker routing", () => {
                         ...args,
                     },
                 });
-                expect(result.isError).not.toBe(true);
+                expect(result.isError).toBe(true);
                 expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                     ok: false,
                     error: "device-backend-mismatch",
@@ -3071,7 +3071,7 @@ describe("device-lab MCP broker routing", () => {
                     timeoutMs: 500,
                 },
             });
-            expect(mobile.isError).not.toBe(true);
+            expect(mobile.isError).toBe(true);
             expect(JSON.parse(((mobile.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 ok: false,
                 error: "unsupported-mobile-backend",
@@ -3089,7 +3089,7 @@ describe("device-lab MCP broker routing", () => {
                     timeoutMs: 500,
                 },
             });
-            expect(physical.isError).not.toBe(true);
+            expect(physical.isError).toBe(true);
             expect(JSON.parse(((physical.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 ok: false,
                 error: "unsupported-physical-backend",
@@ -3204,7 +3204,7 @@ describe("device-lab MCP broker routing", () => {
                     timeoutMs: 50,
                 },
             });
-            expect(result.isError).not.toBe(true);
+            expect(result.isError).toBe(true);
             expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 ok: false,
                 error: "broker-rpc-unavailable",
@@ -3244,7 +3244,7 @@ describe("device-lab MCP broker routing", () => {
                         ...extra,
                     },
                 });
-                expect(result.isError).not.toBe(true);
+                expect(result.isError).toBe(true);
                 expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                     ok: false,
                     error: "broker-rpc-unavailable",
@@ -3312,7 +3312,7 @@ describe("device-lab MCP broker routing", () => {
                     timeoutMs: 500,
                 },
             });
-            expect(result.isError).not.toBe(true);
+            expect(result.isError).toBe(true);
             expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 ok: false,
                 error: "broker-device-tool-backend-not-supported",
@@ -3348,7 +3348,7 @@ describe("device-lab MCP broker routing", () => {
             name: "device_broker_command",
             arguments: { action: "run", backend: "android-emulator", command: "device_start", deviceId: "android-x" },
         });
-        expect(invalidAction.isError).not.toBe(true);
+        expect(invalidAction.isError).toBe(true);
         expect(JSON.parse(((invalidAction.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: false,
             error: "invalid-command-action",
@@ -3359,7 +3359,7 @@ describe("device-lab MCP broker routing", () => {
             name: "device_status",
             arguments: { deviceId: "missing-broker-device", broker: true },
         });
-        expect(inferenceFailure.isError).not.toBe(true);
+        expect(inferenceFailure.isError).toBe(true);
         expect(JSON.parse(((inferenceFailure.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: false,
             error: "device-backend-not-found",
@@ -3379,7 +3379,7 @@ describe("device-lab MCP broker routing", () => {
                 timeoutMs: 50,
             },
         });
-        expect(unavailable.isError).not.toBe(true);
+        expect(unavailable.isError).toBe(true);
         expect(JSON.parse(((unavailable.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: false,
             error: "broker-rpc-unavailable",

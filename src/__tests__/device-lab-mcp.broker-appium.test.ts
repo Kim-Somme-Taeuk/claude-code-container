@@ -388,7 +388,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 timeoutMs: 50,
             },
         });
-        expect(result.isError).not.toBe(true);
+        expect(result.isError).toBe(true);
         expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: false,
             error: "invalid-appium-action",
@@ -1085,7 +1085,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 timeoutMs: 50,
             },
         });
-        expect(result.isError).not.toBe(true);
+        expect(result.isError).toBe(true);
         expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: false,
             error: "device-backend-not-found",

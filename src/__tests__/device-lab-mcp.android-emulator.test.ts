@@ -247,13 +247,15 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         expect(flow.isError).not.toBe(true);
         const flowPayload = JSON.parse(((flow.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ok: boolean;
-            results: Array<{ label: string; isError: boolean; content: Array<{ type: string; value?: { found?: boolean }; bytes?: number }> }>;
+            results: Array<{ label: string; isError: boolean; contentIndex?: number; contentCount?: number; content: Array<{ type: string; value?: { found?: boolean }; bytes?: number }> }>;
         };
         expect(flowPayload.ok).toBe(true);
         expect(flowPayload.results.map((result) => result.label)).toEqual(["tap primary", "wait title", "capture"]);
         expect(flowPayload.results[1].content[0].value?.found).toBe(true);
-        expect(flowPayload.results[2].content[0]).toEqual(expect.objectContaining({ type: "image" }));
-        expect(typeof flowPayload.results[2].content[0].bytes).toBe("number");
+        expect(flowPayload.results[2]).toMatchObject({ contentIndex: 1, contentCount: 1 });
+        const captured = (flow.content as Array<{ type: string; data?: string }>)[flowPayload.results[2].contentIndex!];
+        expect(captured.type).toBe("image");
+        expect(Buffer.from(captured.data!, "base64").subarray(1, 4).toString()).toBe("PNG");
 
         const disallowedFlow = await client.callTool({
             name: "mobile_run_flow",
@@ -264,7 +266,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
                 ],
             },
         });
-        expect(disallowedFlow.isError).not.toBe(true);
+        expect(disallowedFlow.isError).toBe(true);
         const disallowedPayload = JSON.parse(((disallowedFlow.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ok: boolean;
             stoppedAt: number;
@@ -287,14 +289,14 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         expect(deviceFlow.isError).not.toBe(true);
         const deviceFlowPayload = JSON.parse(((deviceFlow.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ok: boolean;
-            results: Array<{ label: string; isError: boolean; content: Array<{ type: string; value?: { device?: { id?: string }; found?: boolean }; bytes?: number }> }>;
+            results: Array<{ label: string; isError: boolean; contentIndex?: number; contentCount?: number; content: Array<{ type: string; value?: { device?: { id?: string }; found?: boolean }; bytes?: number }> }>;
         };
         expect(deviceFlowPayload.ok).toBe(true);
         expect(deviceFlowPayload.results.map((result) => result.label)).toEqual(["status", "wait title", "capture"]);
         expect(deviceFlowPayload.results[0].content[0].value?.device?.id).toBe("android-pixel-owned");
         expect(deviceFlowPayload.results[1].content[0].value?.found).toBe(true);
-        expect(deviceFlowPayload.results[2].content[0]).toEqual(expect.objectContaining({ type: "image" }));
-        expect(typeof deviceFlowPayload.results[2].content[0].bytes).toBe("number");
+        expect(deviceFlowPayload.results[2]).toMatchObject({ contentIndex: 1, contentCount: 1 });
+        expect((deviceFlow.content as Array<{ type: string }>)[deviceFlowPayload.results[2].contentIndex!].type).toBe("image");
 
         const unsafeDeviceFlow = await client.callTool({
             name: "device_run_flow",
@@ -305,7 +307,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
                 ],
             },
         });
-        expect(unsafeDeviceFlow.isError).not.toBe(true);
+        expect(unsafeDeviceFlow.isError).toBe(true);
         const unsafeDeviceFlowPayload = JSON.parse(((unsafeDeviceFlow.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ok: boolean;
             stoppedAt: number;

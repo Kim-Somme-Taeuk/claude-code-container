@@ -108,7 +108,7 @@ describe("device-lab Linux VM foundation", () => {
     });
 
     it("reports unsupported by default and still stores named lab metadata", { timeout: TIMEOUT }, async () => {
-        const status = await client.callTool({ name: "device_inventory", arguments: { backend: "linux-vm" } });
+        const status = await client.callTool({ name: "device_inventory", arguments: { backend: "linux-vm", detail: true } });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}"));
         expect(statusPayload).toEqual(expect.objectContaining({
             ok: true,

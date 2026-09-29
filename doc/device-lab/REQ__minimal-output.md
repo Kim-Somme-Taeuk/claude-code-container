@@ -140,7 +140,7 @@ successful observation cannot erase a later failure's identity and cause.
 Detailed flow output remains original while it fits. Oversized failed flows keep
 step identities and outcomes, explicitly mark omitted successful content and
 bounded failure diagnostics, and retain actionable failure/recovery evidence.
-The final serialized UTF-8 failure response stays within 64 KiB. This does not
+The final serialized UTF-8 failed-flow JSON text stays within 64 KiB. This does not
 change standalone opaque command/UI results or other diagnostic size limits.
 
 ## Intuitive tool selection and verification flows

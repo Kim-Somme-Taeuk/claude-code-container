@@ -568,7 +568,7 @@ describe("device-lab MCP foundation and definitions", () => {
             name: "device_run_flow",
             arguments: { steps: [{ tool: "device_status", arguments: { deviceId: "/tmp/outside" } }] },
         });
-        expect(flow.isError).not.toBe(true);
+        expect(flow.isError).toBe(true);
         expect(JSON.parse((flow.content as Array<{ text?: string }>)[0].text ?? "{}")).toEqual(expect.objectContaining({
             ok: false,
             results: [expect.objectContaining({
@@ -636,7 +636,7 @@ describe("device-lab MCP foundation and definitions", () => {
                 ],
             },
         });
-        expect(stopped.isError).not.toBe(true);
+        expect(stopped.isError).toBe(true);
         const stoppedPayload = JSON.parse(((stopped.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ok: boolean;
             stoppedAt: number;
@@ -661,7 +661,7 @@ describe("device-lab MCP foundation and definitions", () => {
                 ],
             },
         });
-        expect(continued.isError).not.toBe(true);
+        expect(continued.isError).toBe(true);
         const continuedPayload = JSON.parse(((continued.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ok: boolean;
             results: Array<{ label: string; isError: boolean; error?: string; content?: Array<{ value?: { id?: string } }> }>;
@@ -684,7 +684,7 @@ describe("device-lab MCP foundation and definitions", () => {
                 ],
             },
         });
-        expect(recordingStatus.isError).not.toBe(true);
+        expect(recordingStatus.isError).toBe(true);
         const recordingStatusPayload = JSON.parse(((recordingStatus.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ok: boolean;
             stoppedAt: number;
@@ -709,7 +709,7 @@ describe("device-lab MCP foundation and definitions", () => {
                 ],
             },
         });
-        expect(clipboardFlow.isError).not.toBe(true);
+        expect(clipboardFlow.isError).toBe(true);
         const clipboardFlowPayload = JSON.parse(((clipboardFlow.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             results: Array<{ label: string; error?: string }>;
         };
@@ -725,7 +725,7 @@ describe("device-lab MCP foundation and definitions", () => {
                 ],
             },
         });
-        expect(semanticFailure.isError).not.toBe(true);
+        expect(semanticFailure.isError).toBe(true);
         const semanticFailurePayload = JSON.parse(((semanticFailure.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ok: boolean;
             stoppedAt: number;
@@ -1223,7 +1223,7 @@ describe("device-lab MCP foundation and definitions", () => {
                     .map((name) => ({ tool: name, arguments: samples[name] })),
             },
         });
-        expect(mobileFlow.isError).not.toBe(true);
+        expect(mobileFlow.isError).toBe(true);
         const mobileFlowPayload = JSON.parse(((mobileFlow.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             results: Array<{ tool?: string; error?: string }>;
         };
@@ -1267,7 +1267,7 @@ describe("device-lab MCP foundation and definitions", () => {
                 steps: deviceFlowAllowedMobileTools.map((name) => ({ tool: name, arguments: samples[name] })),
             },
         });
-        expect(deviceMobileFlow.isError).not.toBe(true);
+        expect(deviceMobileFlow.isError).toBe(true);
         const deviceMobileFlowPayload = JSON.parse(((deviceMobileFlow.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             results: Array<{ tool?: string; error?: string }>;
         };
@@ -1285,7 +1285,7 @@ describe("device-lab MCP foundation and definitions", () => {
                 steps: deviceFlowBlockedMobileTools.map((name) => ({ tool: name, arguments: samples[name] })),
             },
         });
-        expect(blockedDeviceMobileFlow.isError).not.toBe(true);
+        expect(blockedDeviceMobileFlow.isError).toBe(true);
         const blockedDeviceMobileFlowPayload = JSON.parse(((blockedDeviceMobileFlow.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             results: Array<{ tool?: string; error?: string }>;
         };

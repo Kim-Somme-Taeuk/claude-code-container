@@ -595,7 +595,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
             name: "mobile_home",
             arguments: { backend: "android-device", deviceId: sharedId },
         });
-        expect(mismatch.isError).not.toBe(true);
+        expect(mismatch.isError).toBe(true);
         const mismatchPayload = JSON.parse(((mismatch.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ok: boolean;
             error: string;

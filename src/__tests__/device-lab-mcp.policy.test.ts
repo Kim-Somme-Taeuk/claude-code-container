@@ -185,7 +185,7 @@ describe("device-lab destructive action policy", () => {
                 timeoutMs: 50,
             },
         });
-        expect(confirmedCommand.isError).not.toBe(true);
+        expect(confirmedCommand.isError).toBe(true);
         expect(jsonPayload(confirmedCommand)).toEqual(expect.objectContaining({
             ok: false,
             error: "broker-rpc-unavailable",
@@ -226,7 +226,7 @@ describe("device-lab destructive action policy", () => {
                 timeoutMs: 50,
             },
         });
-        expect(confirmedAppium.isError).not.toBe(true);
+        expect(confirmedAppium.isError).toBe(true);
         expect(jsonPayload(confirmedAppium)).toEqual(expect.objectContaining({
             ok: false,
             error: "broker-rpc-unavailable",
@@ -254,7 +254,7 @@ describe("device-lab destructive action policy", () => {
                 timeoutMs: 50,
             },
         });
-        expect(brokerPlan.isError).not.toBe(true);
+        expect(brokerPlan.isError).toBe(true);
         expect(jsonPayload(brokerPlan)).toEqual(expect.objectContaining({
             ok: false,
             error: "broker-rpc-unavailable",
@@ -283,7 +283,7 @@ describe("device-lab destructive action policy", () => {
                 ],
             },
         });
-        expect(denied.isError).not.toBe(true);
+        expect(denied.isError).toBe(true);
         expect(jsonPayload(denied)).toEqual(expect.objectContaining({
             ok: false,
             stoppedAt: 0,
@@ -316,7 +316,7 @@ describe("device-lab destructive action policy", () => {
                 ],
             },
         });
-        expect(confirmed.isError).not.toBe(true);
+        expect(confirmed.isError).toBe(true);
         const payload = jsonPayload(confirmed);
         expect(payload.ok).toBe(false);
         expect(JSON.stringify(payload)).not.toContain("destructive-action-confirmation-required");
@@ -333,7 +333,7 @@ describe("device-lab destructive action policy", () => {
                 steps: mobileExamples,
             },
         });
-        expect(denied.isError).not.toBe(true);
+        expect(denied.isError).toBe(true);
         const payload = jsonPayload(denied) as { ok: boolean; results: Array<{ tool: string; isError: boolean; content: Array<{ value?: { policy?: { error?: string; confirmationField?: string } } }> }> };
         expect(payload.ok).toBe(false);
         expect(payload.results.map((result) => result.tool)).toEqual(mobileExamples.map((step) => step.tool));

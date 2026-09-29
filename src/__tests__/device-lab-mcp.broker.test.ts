@@ -2175,7 +2175,7 @@ setInterval(() => {}, 1000);
                 launchTimeoutMs: 50,
             },
         });
-        expect(result.isError).not.toBe(true);
+        expect(result.isError).toBe(true);
         const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ok: boolean;
             error: string;
@@ -2495,7 +2495,7 @@ setInterval(() => {}, 1000);
                     timeoutMs: 300,
                 },
             });
-            expect(result.isError).not.toBe(true);
+            expect(result.isError).toBe(true);
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
                 ok: boolean;
                 error: string;
@@ -2548,7 +2548,7 @@ setInterval(() => {}, 1000);
                     timeoutMs: 300,
                 },
             });
-            expect(result.isError).not.toBe(true);
+            expect(result.isError).toBe(true);
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
                 ok: boolean;
                 error: string;
@@ -3016,7 +3016,7 @@ setInterval(() => {}, 1000);
                 name: "device_status",
                 arguments: { deviceId: "win-unmanaged-runtime-direct" },
             });
-            expect(result.isError).not.toBe(true);
+            expect(result.isError).toBe(true);
             expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 ok: false,
                 error: "broker-runtime-unavailable",
