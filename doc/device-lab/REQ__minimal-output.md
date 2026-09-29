@@ -149,3 +149,14 @@ errors, backend mismatch, policy refusals and successful results keep precedence
 Diagnostic lookup must not query providers or other owners, mutate state, mask
 corrupt state as absence, or add lookup work to successful calls. Local QEMU
 targets and the current display remain recognizable; ambiguous IDs are not guessed.
+
+## Image and inventory metadata
+
+Successful Linux VM image list/import responses omit owner IDs and generated
+image timestamps. Recognized container-qemu image records retain identity, format,
+size, copied state, artifact/source paths and unique diagnostic fields. Unknown or
+failed image records and failed envelopes remain intact, including in mixed lists.
+Empty lists still omit envelope ownership. Inventory applies the same compact
+provider-plan presentation as list/status, both directly and within backend
+entries. Failed plans, unavailable reasons and unique warnings remain; creation
+and dry-run plans stay reviewable. Detailed responses remain original.

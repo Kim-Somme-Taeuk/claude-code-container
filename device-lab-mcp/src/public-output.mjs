@@ -252,6 +252,17 @@ export function compactToolValue(name, value) {
             && ("selected" in value || Array.isArray(value.attempts) || object(value.launch));
         return brokerFailure ? transportFailure(value) : omit(value, ["routedBy"]);
     }
+    if (value.ok === true && value.backend === "linux-vm"
+        && ((name === "device_image_list" && Array.isArray(value.images))
+            || (name === "device_image_import" && object(value.image)))) {
+        const image = (entry) => object(entry) && !failed(entry)
+            && entry.provider === "container-qemu" && typeof entry.id === "string" && typeof entry.format === "string"
+            ? omit(entry, ["ownerId", "createdAt", "updatedAt"]) : entry;
+        const result = omit(value, ["ownerId"]);
+        if (name === "device_image_list") result.images = value.images.map(image);
+        else result.image = image(value.image);
+        return result;
+    }
     value = operationResult(name, value);
     if (name === "display_current") return target(value);
     const known = "routedBy" in value || "device" in value || "devices" in value
@@ -275,7 +286,7 @@ export function compactToolValue(name, value) {
             JSON.stringify(item) === JSON.stringify(value.device[key]))) delete result.lab;
     }
     if (Array.isArray(value.devices)) {
-        result.devices = value.devices.map((device) => target(device, { compactPlan: name === "device_list" }));
+        result.devices = value.devices.map((device) => target(device, { compactPlan: name === "device_list" || name === "device_inventory" }));
         if (Array.isArray(value.labs) && value.labs.length === value.devices.length
             && value.labs.every((lab, index) => object(lab) && object(value.devices[index])
                 && Object.entries(lab).every(([key, item]) => JSON.stringify(item) === JSON.stringify(value.devices[index][key])))) delete result.labs;
@@ -289,7 +300,7 @@ export function compactToolValue(name, value) {
     }
     if (name === "device_inventory" && Array.isArray(value.backends)) {
         result.backends = value.backends.map((entry) => object(entry)
-            ? { ...backend(entry), ...(Array.isArray(entry.devices) ? { devices: entry.devices.map(target) } : {}) }
+            ? { ...backend(entry), ...(Array.isArray(entry.devices) ? { devices: entry.devices.map((device) => target(device, { compactPlan: true })) } : {}) }
             : entry);
     }
     // Known broker RPC envelope. Do not descend into exec output or arbitrary RPC values.

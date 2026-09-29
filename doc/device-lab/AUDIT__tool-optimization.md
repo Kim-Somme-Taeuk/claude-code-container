@@ -117,3 +117,35 @@ Each row was reviewed for advertised inputs, routing/side effects, semantic succ
 ## Verification limits
 
 Source/fixture coverage is exhaustive for this inventory. Platform-specific tests use isolated provider fixtures; they do not certify real Windows, macOS, iOS or Android hardware from this Linux workspace. Read-only host smoke and final regression counts are recorded with delivery. Newly added tools/functions require a new audit baseline.
+
+## Current-goal review (baseline `0ed79c0f`)
+
+Independent request and response audits re-enumerated all 93 tools: 48 device,
+8 display and 37 mobile, with 57,211 characters in the serialized catalog. The
+historical table above proves inventory coverage, not complete minimization:
+partial fixture assertions and missing provider metadata hid additional gaps.
+
+The first correction recognizes successful container-QEMU image list/import
+envelopes and removes envelope ownership plus image ownership/timestamps. Image
+paths remain usable. Inventory now uses the existing compact provider-plan
+projection for direct devices and nested backend devices. Exact producer-shaped
+fixtures verify omissions, failed/unknown records, and original detailed output.
+
+The full goal remains open for these source-confirmed issues:
+
+- Mobile install/launch/screenshot duplicate canonical device actions. Rotation
+  shortcuts sound relative but set different absolute orientations on Android/iOS.
+- Flow schemas hide their allowed action set and require repeated target arguments;
+  their action sets differ and empty flows silently succeed.
+- Creation and mobile action inputs include unclear platform-specific alternatives;
+  some target-specific QEMU tools redundantly require the sole possible backend.
+- The computer-use quick start recommends generic inventory and extra status
+  calls despite IDs in creation/start results.
+- Sandbox/macOS inventory still exposes executable wiring and duplicate discovery.
+- QEMU stored directory maps and historical operations/readiness need a semantic
+  projection that preserves artifacts and failure/recovery evidence.
+- iOS and broker-Appium polling use independent command/request budgets.
+
+All final tool families require realistic success/failure and opaque-data
+verification after these changes; registry counts alone cannot close the goal.
+Native provider execution remains distinct from fixture and source coverage.
