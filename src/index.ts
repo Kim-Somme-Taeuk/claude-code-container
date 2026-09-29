@@ -39,6 +39,7 @@ import {
 import { ensureClipboardServer, hasAnyActiveSessionsExcept, retireClipboardServerFromPortFile } from "./clipboard-server.js";
 import { clipboardPortFile as clipboardPortFilePath, DEFAULT_PROFILE_NAME, defaultProfileDir, ensureDefaultProfileDir, migrateHomeLayout, normalizeProfile } from "./home-layout.js";
 import { prepareCodexLaunch } from "./codex-launch.js";
+import { ContainerRestartRequiredError, formatContainerStartupError } from "./container-restart-guidance.js";
 import { buildCodexResumeRecoveryCommand } from "./codex-resume-recovery.js";
 import { maybeAttachCodexClipboardImage } from "./codex-clipboard-image.js";
 import {
@@ -639,7 +640,7 @@ async function exec(
             getContainerStatus,
         );
         if (blockedReason) {
-            console.error(`[ccc] Automatic container replacement blocked: ${blockedReason}.`);
+            if (process.env.DEBUG) console.error(`[ccc] Automatic container replacement blocked: ${blockedReason}.`);
             return false;
         }
         recreate();
@@ -757,6 +758,7 @@ async function exec(
         ensureContainerManagerSocketAccess(readyContainerName);
         return readyContainerName;
     }).catch((error) => {
+        if (error instanceof ContainerRestartRequiredError) throw error;
         const detail = error instanceof Error ? `: ${error.message}` : "";
         throw new Error(`Container setup failed${detail}`, { cause: error });
     });
@@ -2116,7 +2118,7 @@ if (!process.env.VITEST) {
         try { cleanupSession(); } catch (cleanupError) {
             console.error(`[ccc] cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
         }
-        console.error(err);
+        console.error(formatContainerStartupError(err, Boolean(process.env.DEBUG)));
         process.exit(1);
     });
 }

@@ -24,6 +24,7 @@ import {
 import { homedir } from "os";
 import { dirname, join, normalize, posix, resolve } from "path";
 import { fileURLToPath } from "url";
+import { ContainerRestartRequiredError } from "./container-restart-guidance.js";
 import { clipboardFilesDir } from "./home-layout.js";
 import {
     getProjectId,
@@ -2694,10 +2695,7 @@ export function startProjectContainer(
                         projectMountIdentity,
                         (reason) => { unsafeDeferReason = reason; },
                     )) {
-                        throw new Error(
-                            `Running container contract failed safety validation (${unsafeDeferReason}); `
-                            + "preserving the existing running container without joining it.",
-                        );
+                        throw new ContainerRestartRequiredError(unsafeDeferReason, fullPath, runtimeCli(), profile);
                     }
                     if (!isContainerRunning(containerName)) {
                         throw new Error("Container contract update is required, but automatic replacement was not authorized.");

@@ -3,6 +3,7 @@ import type { SpawnSyncReturns } from "child_process";
 import { createHash } from "crypto";
 import { homedir } from "os";
 import { join } from "path";
+import { ContainerRestartRequiredError, formatContainerStartupError } from "../container-restart-guidance.js";
 
 // Mock child_process before importing
 const spawnSyncMock = vi.fn<(...args: unknown[]) => SpawnSyncReturns<string>>();
@@ -2598,7 +2599,7 @@ describe("docker.ts module exports", () => {
                 return makeResult(0);
             });
 
-            expect(() => startProjectContainer(
+            const start = () => startProjectContainer(
                 projectPath,
                 ensureDirs,
                 undefined,
@@ -2606,8 +2607,11 @@ describe("docker.ts module exports", () => {
                 undefined,
                 undefined,
                 () => false,
-            ))
-                .toThrow("contract failed safety validation");
+            );
+            let failure: unknown;
+            try { start(); } catch (error) { failure = error; }
+            expect(failure).toBeInstanceOf(ContainerRestartRequiredError);
+            expect(formatContainerStartupError(failure)).toContain("Container restart required");
             expect(mountChallengeContainerIds.has(TEST_CONTAINER_ID)).toBe(true);
             expect(spawnSyncMock.mock.calls.some((call) => {
                 const args = call[1] as string[];

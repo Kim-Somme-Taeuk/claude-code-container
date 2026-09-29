@@ -33,8 +33,15 @@ to `sudo`.
    earlier contract changes:
    - a stopped container is recreated on its next start;
    - a running container with no active sessions is recreated;
-   - a running container with active sessions is deferred until it stops. Run
-     `ccc stop` to apply the change sooner.
+   - a running container with active sessions is deferred until it stops. Finish
+     its CCC sessions, then run `ccc stop` from that workspace using the same
+     profile and runtime to apply the change sooner.
+
+   If replacement is blocked and the running container's mount contract cannot
+   be safely reused, startup prints concise restart guidance with the workspace,
+   profile and runtime. It exits without joining, stopping or replacing that
+   container. Detailed lock claims and the expected error stack are shown only
+   with `DEBUG`; unexpected failures retain their normal diagnostics.
 
    Recreating a container discards changes made inside it outside mounted paths.
 3. On every ccc start, before the session command runs, ccc runs one bounded probe
