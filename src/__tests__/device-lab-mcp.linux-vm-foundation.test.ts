@@ -93,14 +93,14 @@ describe("device-lab Linux VM foundation", () => {
         }));
         const guestAgentStatusTool = result.tools.find((tool) => tool.name === "device_guest_agent_status");
         expect(guestAgentStatusTool?.inputSchema).toEqual(expect.objectContaining({
-            required: ["backend", "deviceId"],
+            required: ["deviceId"],
             properties: expect.objectContaining({
                 timeoutMs: expect.objectContaining({ minimum: 1, maximum: 600000 }),
             }),
         }));
         const guestAgentProvisionTool = result.tools.find((tool) => tool.name === "device_guest_agent_provision");
         expect(guestAgentProvisionTool?.inputSchema).toEqual(expect.objectContaining({
-            required: ["backend", "deviceId"],
+            required: ["deviceId"],
             properties: expect.objectContaining({
                 timeoutMs: expect.objectContaining({ minimum: 1, maximum: 600000 }),
             }),

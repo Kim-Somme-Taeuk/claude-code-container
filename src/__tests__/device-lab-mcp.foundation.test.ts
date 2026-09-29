@@ -1,4 +1,4 @@
-import { ALL_TOOLS, TOOLS } from "../../device-lab-mcp/src/tools.mjs";
+import { ALL_TOOLS, TOOLS, SINGLE_BACKEND_TOOL_DEFAULTS } from "../../device-lab-mcp/src/tools.mjs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdirSync } from "fs";
 import { join } from "path";
@@ -453,9 +453,10 @@ describe("device-lab MCP foundation and definitions", () => {
             deviceType: expect.objectContaining({ type: "string" }),
             avdName: expect.objectContaining({ type: "string" }),
             port: expect.objectContaining({ type: "number" }),
-            options: expect.objectContaining({ type: "object" }),
         }));
         expectBackendProperty(createProperties, DEVICE_CREATE_BACKEND_ENUM);
+        expect(createProperties).not.toHaveProperty("options");
+        expect(toolProperties(ALL_TOOLS.find((tool: { name: string }) => tool.name === "device_create"))).toHaveProperty("options");
         expectRoutingProperties(createProperties, { port: false });
         const attachTool = result.tools.find((tool) => tool.name === "device_attach");
         const attachProperties = toolProperties(attachTool);
@@ -1199,7 +1200,8 @@ describe("device-lab MCP foundation and definitions", () => {
             const properties = toolProperties(tool);
             const sample = samples[tool.name] || {};
             return Object.keys(sample)
-                .filter((key) => !(key in properties) && !HIDDEN_LEGACY_TRANSPORT_KEYS.has(key))
+                .filter((key) => !(key in properties) && !HIDDEN_LEGACY_TRANSPORT_KEYS.has(key)
+                    && !(key === "backend" && Object.hasOwn(SINGLE_BACKEND_TOOL_DEFAULTS, tool.name)))
                 .map((key) => ({ name: tool.name, unknown: key }));
         });
         expect(unknownSampleKeys).toEqual([]);

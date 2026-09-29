@@ -1,5 +1,37 @@
 # Device Lab MCP computer use
 
+## Choose inputs for the target platform
+
+Container-QEMU image, target, readiness, session, workspace, artifact and guest-agent
+tools select their backend automatically. For example, `device_target_list({})`
+lists container-QEMU targets and `device_readiness_probe({deviceId:"my-vm"})`
+checks one. They do not inspect Hyper-V guests. macOS base-image create/clone
+also omit the redundant backend selector. Existing explicit selectors still work;
+a contradictory selector is rejected before provider execution.
+
+Creation uses typed top-level fields. Android AVD provisioning uses `createAvd`
+and `systemImage`; iOS provisioning uses `createSimulator`, `deviceType` and
+`runtime`. Without the provisioning flag, these backends record a definition.
+Hyper-V uses image/profile fields, macOS uses `image` and `ssh*`, and container QEMU uses
+`baseImageId` or `sourceImage` with `guest*` controls. Legacy `options` wrappers
+remain callable, but new calls should use the named fields directly. macOS
+`device_create` uses `image` for image-specific SSH defaults; its separate
+base-image create/clone tools use `sourceImage`.
+
+File transfers use `localPath` for the project file and `remotePath` for the device path.
+The host broker maps container project paths to the host project. On iOS Simulator,
+provide `bundleId`; `remotePath` is relative to that app container (for example,
+`Documents/report.txt`), and `containerType` defaults to `data`. App installation
+uses `path` for the app package in the project.
+
+Android apps use `packageName` or a launch `component`; iOS apps use `bundleId`.
+Permission tools pair Android `packageName` with `permission`, or iOS Simulator
+`bundleId` with privacy `service`. Mobile keys are ADB key names/codes on Android
+and Appium key values on iOS; use `mobile_home` for the Home button.
+Battery `charging` controls simulated AC connection separately from `status`:
+1 unknown, 2 charging, 3 discharging, 4 not charging, 5 full, following
+[Android BatteryManager constants](https://developer.android.com/reference/android/os/BatteryManager#BATTERY_STATUS_CHARGING).
+
 Use the same seven `device_*` tools for a supported desktop display. Use `device_list` to find an existing owned device and its current `incarnationId`. Check `device_backends` when prerequisites are unclear; `device_inventory` with an explicit backend finds host candidates. `windows-vm` and `linux-vm` mean Hyper-V only when `provider` is `hyper-v`; the container QEMU `linux-vm` provider has a different capability set.
 
 ## Screenshot → input → screenshot

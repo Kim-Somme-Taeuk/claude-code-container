@@ -17,7 +17,7 @@ import { flowJsonResult, jsonResult, textResult } from "./responses.mjs";
 import { compactToolResult, compactToolValue } from "./public-output.mjs";
 import { OWNER_DEVICE_ID_PATTERN } from "./state/owner-device-state.mjs";
 import { readOwnerDevices } from "./state/device-store.mjs";
-import { ALL_TOOLS, DEVICE_FLOW_TOOL_NAMES, TOOLS } from "./tools.mjs";
+import { ALL_TOOLS, DEVICE_FLOW_TOOL_NAMES, SINGLE_BACKEND_TOOL_DEFAULTS, TOOLS } from "./tools.mjs";
 import { flowStepArguments, normalizeToolArgs } from "./tool-arguments.mjs";
 
 const FLOW_MAX_STEPS = 50;
@@ -1434,7 +1434,16 @@ function unhandledDeviceToolResult(name, args) {
 }
 
 async function dispatchTool(name, rawArgs) {
-    const args = normalizeToolArgs(rawArgs);
+    const args = normalizeToolArgs(rawArgs, name);
+    if (Object.hasOwn(SINGLE_BACKEND_TOOL_DEFAULTS, name)
+        && args.backend !== SINGLE_BACKEND_TOOL_DEFAULTS[name]) {
+        return textResult(false, JSON.stringify({
+            ok: false,
+            error: "device-backend-unsupported",
+            tool: name,
+            backend: SINGLE_BACKEND_TOOL_DEFAULTS[name],
+        }));
+    }
     if (name === "mobile_key"
         && !(typeof args.key === "string" && args.key.length > 0)
         && !(typeof args.keyCode === "number" && Number.isFinite(args.keyCode))) {
@@ -1582,7 +1591,7 @@ export async function startServer() {
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { name, arguments: rawArgs = {} } = request.params;
-        const args = normalizeToolArgs(rawArgs);
+        const args = normalizeToolArgs(rawArgs, name);
         const result = await withBrokerOperation(async () => {
             try {
                 const policy = evaluateDestructivePolicy(name, args);

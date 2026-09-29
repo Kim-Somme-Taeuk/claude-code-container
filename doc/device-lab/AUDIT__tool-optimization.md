@@ -170,3 +170,19 @@ retain legacy names; default discovery omits capability arrays.
 
 Flow screenshot summaries still require a standalone call for image inspection;
 the full-goal response/flow verification must assess this remaining extra call.
+
+## Input clarity (baseline `06594d27`)
+
+Eleven single-backend tools hide the selector in discovery and apply a bounded
+tool-specific default after argument normalization. Accepted schemas retain old
+explicit selectors; malformed or contradictory selectors fail before providers.
+This also prevents owned QEMU IDs from overriding an explicitly different backend.
+The real-provider verifier uses the same tool-aware normalization. No discovery,
+owner lookup or authorization check is cached or broadened.
+
+Creation hides the generic options wrapper in discovery while retaining runtime
+flattening and top-level precedence. Named platform controls remain available.
+Concise descriptions explain creation alternatives, Android/iOS app identifiers,
+permissions, mobile keys and battery controls. These descriptions intentionally
+spend catalog text where it avoids guessing inputs; raw catalog bytes alone do
+not measure failed calls or repeated lookup costs.

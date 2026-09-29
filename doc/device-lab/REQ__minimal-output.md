@@ -1,5 +1,20 @@
 # Minimal Device Lab output
 
+## Inputs with one supported backend
+
+Discovery omits `backend` for container-QEMU image list/import, target list,
+readiness probe, session open, workspace sync, artifact export, guest-agent
+status/provision, and macOS base-image create/clone. The server supplies their
+sole backend only when the normalized argument is omitted. Compatible explicit
+backend arguments remain accepted; contradictory or malformed values fail before
+provider execution. These QEMU operations do not select host Hyper-V guests.
+Defaults are applied after flow target inheritance and do not broaden ownership.
+
+Creation advertises typed inputs instead of a generic `options` wrapper. Existing
+wrappers still work, with top-level values taking precedence. Descriptions identify
+platform-specific alternatives without implying unsupported defaults or key syntax.
+The real-provider test runner validates the same effective arguments as the server.
+
 Default MCP responses contain actionable state and operation results, without
 repeated transport traces, owner storage paths, protocol capability versions or
 duplicate status representations. Discovery returns one authoritative backend

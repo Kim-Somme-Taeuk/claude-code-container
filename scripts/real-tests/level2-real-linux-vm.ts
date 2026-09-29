@@ -39,9 +39,8 @@ export async function run() {
             assert.strictEqual(created.ok, true, JSON.stringify(created));
             assert.strictEqual(lifecycleDevice(created, "device_create").id, labId);
 
-            await callTool("device_image_list", { backend: "linux-vm" });
+            await callTool("device_image_list", {});
             markExpectedToolError(await callTool("device_image_import", {
-                backend: "linux-vm",
                 name: "Missing Linux VM smoke image",
                 sourcePath: "images/__missing-linux-vm-smoke__.qcow2",
             }));
@@ -50,21 +49,19 @@ export async function run() {
                 deviceId: labId,
                 dryRun: true,
             }));
-            await callTool("device_target_list", { backend: "linux-vm", deviceId: labId });
-            markExpectedToolError(await callTool("device_readiness_probe", { backend: "linux-vm", deviceId: labId }));
+            await callTool("device_target_list", { deviceId: labId });
+            markExpectedToolError(await callTool("device_readiness_probe", { deviceId: labId }));
             await callTool("device_session_open", {
-                backend: "linux-vm",
                 deviceId: labId,
                 sessionType: "metadata",
             });
             markExpectedToolError(await callTool("device_workspace_sync", {
-                backend: "linux-vm",
                 deviceId: labId,
                 sourcePath: stateRoot,
             }));
-            markExpectedToolError(await callTool("device_artifacts_export", { backend: "linux-vm", deviceId: labId }));
-            markExpectedToolError(await callTool("device_guest_agent_status", { backend: "linux-vm", deviceId: labId }));
-            markExpectedToolError(await callTool("device_guest_agent_provision", { backend: "linux-vm", deviceId: labId }));
+            markExpectedToolError(await callTool("device_artifacts_export", { deviceId: labId }));
+            markExpectedToolError(await callTool("device_guest_agent_status", { deviceId: labId }));
+            markExpectedToolError(await callTool("device_guest_agent_provision", { deviceId: labId }));
             markExpectedToolError(await callTool("device_reboot", { backend: "linux-vm", deviceId: labId }));
 
             const started = parseToolPayload(await callTool("device_start", { backend: "linux-vm", deviceId: labId }));

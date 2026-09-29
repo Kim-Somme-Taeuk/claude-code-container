@@ -172,7 +172,7 @@ function validateSchemaValue(schema: any = {}, value: any, path = "arguments", o
 function validateToolArguments(tool, args) {
     const schema = toolSchemasByName.get(tool);
     if (!schema) return hiddenCompatibilityTools.has(tool) ? [] : [`${tool}:unadvertised`];
-    return validateSchemaValue(schema, normalizeToolArgs(args), "arguments", { allowHiddenTransportKeys: true });
+    return validateSchemaValue(schema, normalizeToolArgs(args, tool), "arguments", { allowHiddenTransportKeys: true });
 }
 
 function flowStepArgumentSchemaFailures(flowTool, rawArgs) {

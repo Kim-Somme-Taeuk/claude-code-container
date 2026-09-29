@@ -3838,6 +3838,40 @@ describe("test level runner", () => {
 
 
 describe("canonical and compatible real-runner argument interpretation", () => {
+    it("validates all eleven omitted defaults and legacy selectors while rejecting explicit invalid selectors", () => {
+        const dir = mkdtempSync(join(tmpdir(), "ccc-input-clarity-runner-"));
+        try {
+            const fixture = join(dir, "calls.mjs");
+            const summaryPath = join(dir, "summary.json");
+            const targets: Array<[string, string, Record<string, unknown>]> = [
+                ["device_image_list", "linux-vm", {}],
+                ["device_image_import", "linux-vm", { name: "base", sourcePath: "incoming/base.qcow2" }],
+                ["device_target_list", "linux-vm", {}],
+                ...["device_readiness_probe", "device_session_open", "device_workspace_sync", "device_artifacts_export", "device_guest_agent_status", "device_guest_agent_provision"]
+                    .map(name => [name, "linux-vm", { deviceId: "owned-target" }] as [string, string, Record<string, unknown>]),
+                ["device_base_image_create", "macos-vm", { name: "base", sourceImage: "registry/base" }],
+                ["device_base_image_clone", "macos-vm", { name: "clone", sourceDeviceId: "owned-target" }],
+            ];
+            const valid = targets.flatMap(([name, backend, args]) => [
+                { name, arguments: args }, { name, arguments: { ...args, backend } },
+                { name, arguments: { ...args, options: { backend } } },
+                { name, arguments: { ...args, backend, options: { backend: "wrong" } } },
+            ]);
+            valid.push({ name: "device_create", arguments: { options: { backend: "linux-vm", name: "legacy", cpus: 2 } } });
+            const invalid = targets.flatMap(([name, backend, args]) => ["", null, false, {}, "unsupported"].flatMap(wrong => [
+                { name, arguments: { ...args, backend: wrong } },
+                { name, arguments: { ...args, options: { backend: wrong } } },
+                { name, arguments: { ...args, backend: wrong, options: { backend } } },
+            ]));
+            writeFileSync(fixture, `export const name='input-clarity'; export async function run(){globalThis[Symbol.for('ccc.deviceLabRealTests.toolCalls')]=${JSON.stringify([...valid, ...invalid].map(call => ({ ...call, outcome: "ok", isError: false })))};return {status:'PASS'};}`);
+            const result = spawnSync(process.execPath, [join(repoRoot, "scripts/real-tests/run.ts"), "--json-summary-file", summaryPath, fixture], { cwd: repoRoot, encoding: "utf8", timeout: 30000 });
+            expect(result.status, result.stderr).toBe(0);
+            const coverage = JSON.parse(readFileSync(summaryPath, "utf8")).toolCoverage;
+            expect(coverage.calls.slice(0, valid.length).map((call: any) => call.schemaValid)).toEqual(valid.map(() => true));
+            expect(coverage.argumentSchemaFailureRecords).toHaveLength(invalid.length);
+            expect(coverage.calls.slice(valid.length).every((call: any) => call.schemaValid === false)).toBe(true);
+        } finally { rmSync(dir, { recursive: true, force: true }); }
+    });
     it("recognizes hidden aliases and validates normalized shared flow targets", () => {
         const dir = mkdtempSync(join(tmpdir(), "ccc-canonical-runner-"));
         try {

@@ -185,10 +185,8 @@ export async function runMacosVmE2E(options: any = {}) {
 
     return withDeviceLabMcp(async ({ callTool }) => {
         const direct = { backend: "macos-vm" };
-        const macosImage = { backend: "macos-vm" };
         try {
             const create = await timedStep(timings, "createMs", async () => parsePayload(await callTool("device_base_image_create", {
-                ...macosImage,
                 name,
                 deviceId,
                 sourceImage: cap.source,
@@ -368,7 +366,6 @@ export async function runMacosVmE2E(options: any = {}) {
         if (typedOptions.imageTools === true) {
             await timedStep(timings, "imageToolsMs", async () => {
                 const createViaBase = parsePayload(await callTool("device_base_image_create", {
-                    ...macosImage,
                     name: `Base create ${suffix}`,
                     deviceId: `${deviceId}-base-create`,
                     sourceImage: cap.source,
@@ -380,7 +377,6 @@ export async function runMacosVmE2E(options: any = {}) {
                 assert.ok(createViaBase.device.providerInstance);
 
                 const cloneViaBase = parsePayload(await callTool("device_base_image_clone", {
-                    ...macosImage,
                     name: `Base clone ${suffix}`,
                     deviceId: `${deviceId}-base-clone`,
                     sourceDeviceId: deviceId,

@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanupDeviceLabMcpTestContext, createDeviceLabMcpTestContext, TIMEOUT } from "./helpers/device-lab-mcp-fixture.js";
 
-// Baseline b8a8e6f5, excluding the six intentionally hidden aliases and changed
-// canonical flow. All other schemas retain their original constraints.
-const BASELINE_SCHEMA_HASH = "aaf5ae069441eea8ad6fcc16ca700549636f617c023da765256b981f66626189";
+// Derived from 06594d27 TOOLS (not the current implementation): remove only
+// backend property/requirement on the eleven single-backend tools and create.options.
+// Descriptions and canonical flow are excluded as in the prior guidance baseline.
+const BASELINE_SCHEMA_HASH = "9b95c8035de17364eb000eb6abfcfe98e5943eeb2acfe1923aa18e601454f232";
 function withoutDescriptions(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(withoutDescriptions);
     if (value && typeof value === "object") {
@@ -47,11 +48,47 @@ describe("public Device Lab tool guidance", () => {
     });
 
     it("separates definition creation, startup, and physical attachment", () => {
-        expect(description("device_create")).toMatch(/definition/);
+        expect(description("device_create")).toMatch(/definition|define/);
         expect(description("device_create")).toContain("device_start");
         expect(description("device_start")).toMatch(/start|boot/);
         expect(description("device_attach")).toMatch(/physical/);
         expect(description("device_attach")).toMatch(/connect|attach/);
+    });
+
+    it("identifies creation platforms, mobile app IDs, permissions and battery controls", () => {
+        const guidance = (name: string, field: string) => {
+            const properties = tool(name).inputSchema.properties as Record<string, { description?: string }>;
+            return (properties[field].description || "").toLowerCase();
+        };
+        expect(guidance("device_create", "image")).toMatch(/hyper-v.*macos.*ssh/);
+        expect(guidance("device_create", "sourceImage")).toMatch(/hyper-v.*qemu/);
+        expect(guidance("device_create", "sourceImage")).not.toMatch(/macos/);
+        for (const platform of [/android/, /ios/, /hyper-v/, /macos/, /qemu/]) expect(description("device_create")).toMatch(platform);
+        for (const name of ["device_launch_app", "mobile_uninstall_app", "mobile_stop_app", "mobile_wait_for_app"]) {
+            expect(guidance(name, "packageName")).toContain("android");
+            expect(guidance(name, "bundleId")).toContain("ios");
+        }
+        for (const name of ["mobile_grant_permission", "mobile_revoke_permission"]) {
+            expect(guidance(name, "permission")).toContain("android");
+            expect(guidance(name, "service")).toMatch(/ios.*simulator/);
+        }
+        for (const name of ["device_upload", "device_download"]) {
+            expect(guidance(name, "localPath")).toMatch(/project.*host/);
+            expect(guidance(name, "remotePath")).toMatch(/ios simulator.*relative.*bundleid/);
+            expect(guidance(name, "containerType")).toMatch(/ios simulator.*default.*data/);
+        }
+        expect(guidance("device_install_app", "path")).toMatch(/package.*project.*host/);
+        expect(guidance("device_launch_app", "component")).toMatch(/activity/);
+        expect(guidance("mobile_key", "key")).toMatch(/android/);
+        expect(guidance("mobile_key", "key")).toMatch(/ios/);
+        expect(guidance("mobile_key", "keyCode")).toMatch(/android.*numeric|numeric.*android/);
+        expect(guidance("mobile_set_battery", "level")).toMatch(/percent/);
+        expect(guidance("mobile_set_battery", "charging")).toMatch(/charger|ac/);
+        expect(guidance("mobile_set_battery", "status")).toMatch(/1.*unknown.*2.*charging.*3.*discharging.*4.*not charging.*5.*full/);
+    });
+
+    it.each(["device_image_list", "device_image_import", "device_target_list", "device_readiness_probe", "device_session_open", "device_workspace_sync", "device_artifacts_export", "device_guest_agent_status", "device_guest_agent_provision"])("%s identifies its container QEMU scope", name => {
+        expect(description(name)).toMatch(/container.*qemu/);
     });
 
     it("distinguishes recorded target state, active readiness, and optional Appium diagnostics", () => {
