@@ -347,17 +347,27 @@ Each workspace has its own container and can run simultaneously.
 
 ## SSH
 
-SSH keys and agent are auto-mounted from host. No setup required.
+SSH keys and agent are auto-mounted from host. On container creation, restart,
+and reuse, CCC prepares a private key copy readable by the container user even
+when its UID differs from the host. The host SSH directory stays read-only.
+Regular files and directories are supported; symlinks and special files cause
+a warning and leave the previous copy in place. Refresh removes deleted keys
+from the copy and retains container-learned `known_hosts` entries.
 
 Every local container invocation mounts the registered credential directories
 for all supported coding tools (Claude, Codex, Gemini, and OpenCode), regardless
 of which tool or shell command starts the container.
 
 ```bash
-# If SSH isn't working:
-ssh-add ~/.ssh/id_ed25519   # Add key to agent
-ccc rm && ccc               # Recreate container
+# Check Git SSH access inside CCC (uses CCC's configured key paths):
+git ls-remote git@github.com:YOUR_ACCOUNT/YOUR_REPOSITORY.git HEAD
+
+# If you use an encrypted key via a host SSH agent, load it on the host:
+ssh-add ~/.ssh/id_ed25519
 ```
+
+Run your usual CCC command again to refresh the key copy; container recreation
+is not required. Git author name/email do not authenticate GitHub access.
 
 ## Environment Variables
 

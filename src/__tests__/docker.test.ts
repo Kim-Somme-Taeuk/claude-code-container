@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { SpawnSyncReturns } from "child_process";
 import { createHash } from "crypto";
+import { SSH_COPY_SCRIPT } from "../ssh-credentials.js";
 
 // Mock child_process before importing
 const spawnSyncMock = vi.fn<(...args: unknown[]) => SpawnSyncReturns<string>>();
@@ -59,6 +60,7 @@ const {
     prepareCodexConfigForContainer,
     restoreCodexConfigHostOwnership,
     syncManagedMcpBundles,
+    fixSshPermissions,
     startProjectContainer,
     stopProjectContainer,
     removeProjectContainer,
@@ -955,6 +957,32 @@ describe("docker.ts module exports", () => {
         });
     });
 
+    describe("fixSshPermissions", () => {
+        it("reads mounted credentials as root but keeps socket handling unprivileged", () => {
+            fixSshPermissions("ccc-test");
+            expect(spawnSyncMock.mock.calls[0][1]).not.toContain("root");
+            expect(spawnSyncMock).toHaveBeenCalledWith("docker", [
+                "exec", "--user", "root", "-w", "/", "ccc-test", "/usr/bin/env", "-i",
+                "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "/bin/bash", "-c", SSH_COPY_SCRIPT,
+            ], { stdio: "ignore" });
+        });
+
+        it.each([1, null])("reports copy failure without disclosing raw output (status %s)", (status) => {
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            spawnSyncMock.mockReturnValueOnce({ ...makeResult(1), status, stderr: "secret sentinel" });
+            fixSshPermissions("ccc-test");
+            expect(console.error).toHaveBeenCalledWith(expect.stringContaining("unable to refresh SSH credentials"));
+            expect(console.error).not.toHaveBeenCalledWith(expect.stringContaining("secret sentinel"));
+        });
+
+        it("does not copy keys when host SSH directory is absent", () => {
+            mockExistsSync.mockReturnValue(false);
+            fixSshPermissions("ccc-test");
+            expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+            expect(spawnSyncMock.mock.calls[0][1]).not.toContain("root");
+        });
+    });
+
     describe("startProjectContainer", () => {
         const projectPath = "/home/user/my-project";
         const ensureDirs = vi.fn();
@@ -978,6 +1006,8 @@ describe("docker.ts module exports", () => {
             const name = startProjectContainer(projectPath, ensureDirs);
             expect(name).toMatch(/^ccc-/);
             expect(ensureDirs).toHaveBeenCalled();
+            expect(spawnSyncMock.mock.calls.some((call) => (call[1] as string[]).at(-1) === SSH_COPY_SCRIPT)).toBe(true);
+            expect(spawnSyncMock.mock.calls.some((call) => ["stop", "rm", "run"].includes((call[1] as string[])[0]))).toBe(false);
             expect(spawnSyncMock.mock.calls.filter((call: unknown[]) => {
                 const args = call[1] as string[];
                 return args[0] === "cp" && args[2]?.startsWith(`${name}:/tmp/ccc-managed-`);
@@ -1003,6 +1033,7 @@ describe("docker.ts module exports", () => {
                 (c: unknown[]) => c[0] === "docker" && (c[1] as string[])[0] === "start"
             );
             expect(startCall).toBeDefined();
+            expect(spawnSyncMock.mock.calls.some((call) => (call[1] as string[]).at(-1) === SSH_COPY_SCRIPT)).toBe(true);
             expect(spawnSyncMock.mock.calls.filter((call: unknown[]) => {
                 const args = call[1] as string[];
                 return args[0] === "cp" && args[2]?.startsWith(`${name}:/tmp/ccc-managed-`);
@@ -1255,10 +1286,10 @@ describe("docker.ts module exports", () => {
             const execCall = spawnSyncMock.mock.calls.find(
                 (c: unknown[]) => c[0] === "docker"
                     && (c[1] as string[])[0] === "exec"
-                    && (c[1] as string[]).at(-1)?.includes("chmod 666 /tmp/ssh-agent.sock")
+                    && (c[1] as string[]).at(-1) === SSH_COPY_SCRIPT
             );
             expect(execCall).toBeDefined();
-            expect((execCall![1] as string[])).toContain("sh");
+            expect((execCall![1] as string[])).toContain("root");
         });
 
         it("calls process.exit(1) when container creation fails", () => {

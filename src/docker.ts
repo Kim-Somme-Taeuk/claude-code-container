@@ -38,6 +38,7 @@ import { deviceLabContainerName } from "./device-lab-owner.js";
 import { getAllCredentialMounts } from "./tool-registry.js";
 import type { CredentialMount } from "./tool-registry.js";
 import { codexConfigFileAclScript } from "./codex-config-acl.js";
+import { SSH_COPY_SCRIPT } from "./ssh-credentials.js";
 
 const MANAGED_MCP_BUNDLES = ["x11-mcp", "device-lab-mcp", "lab-mcp"] as const;
 const MANAGED_MCP_BUNDLE_MAX_BYTES = 32 * 1024 * 1024;
@@ -821,7 +822,7 @@ function syncHostGitConfig(containerName: string): void {
     }
 }
 
-function fixSshPermissions(containerName: string): void {
+export function fixSshPermissions(containerName: string): void {
     const hostSshDir = join(homedir(), ".ssh");
     const cli = runtimeCli();
 
@@ -832,22 +833,27 @@ function fixSshPermissions(containerName: string): void {
     );
 
     if (existsSync(hostSshDir)) {
-        spawnSync(
+        const copied = spawnSync(
             cli,
             [
                 "exec",
+                "--user",
+                "root",
+                "-w",
+                "/",
                 containerName,
-                "sh",
+                "/usr/bin/env",
+                "-i",
+                "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+                "/bin/bash",
                 "-c",
-                "cp -r /home/ccc/.ssh /tmp/.ssh-copy && " +
-                    "chmod 700 /tmp/.ssh-copy && " +
-                    "chmod 600 /tmp/.ssh-copy/* 2>/dev/null; " +
-                    "chmod 644 /tmp/.ssh-copy/*.pub 2>/dev/null; " +
-                    "chmod 644 /tmp/.ssh-copy/known_hosts 2>/dev/null; " +
-                    "true",
+                SSH_COPY_SCRIPT,
             ],
             { stdio: "ignore" },
         );
+        if (copied.status !== 0) {
+            console.error("[ccc] WARNING: unable to refresh SSH credentials; previous copy retained. Check the SSH mount and ensure it contains only regular files and directories.");
+        }
     }
 }
 
@@ -1014,6 +1020,7 @@ export function startProjectContainer(
         if (canExecContainer(containerName)) {
             syncManagedMcpBundles(containerName);
             syncHostGitConfig(containerName);
+            fixSshPermissions(containerName);
             return containerName;
         }
         recreateContainer(containerName, "container exec failed", onRecreate);
