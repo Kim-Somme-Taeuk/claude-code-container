@@ -861,8 +861,13 @@ async function exec(
     const envFile = writeEnvFile(envEntries);
     execArgs.push("--env-file", envFile);
 
+    let preparationStatus: number | null = null;
     if (commandTool?.name === "codex" && options.interactive !== false) {
-        resolvedCmd = prepareCodexLaunch(runtimeCli(), [...execArgs, containerName], resolvedCmd);
+        const preparation = prepareCodexLaunch(runtimeCli(), [...execArgs, containerName], resolvedCmd);
+        if (!preparation.ok) {
+            console.error(`[ccc] ${preparation.error}`);
+            preparationStatus = preparation.status;
+        }
     }
 
     if (options.interactive !== false && process.stdin.isTTY && process.stdout.isTTY) {
@@ -878,8 +883,7 @@ async function exec(
         execArgs.push(...resolvedCmd);
     }
 
-    const result = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" });
-    const resultStatus = result.status ?? 1;
+    const resultStatus = preparationStatus ?? spawnSync(runtimeCli(), execArgs, { stdio: "inherit" }).status ?? 1;
     restoreCodexConfigHostOwnership(containerName);
     try { unlinkSync(envFile); } catch { /* ignore cleanup error */ }
 

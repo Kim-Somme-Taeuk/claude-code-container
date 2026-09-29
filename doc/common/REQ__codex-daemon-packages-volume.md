@@ -46,12 +46,16 @@ keeps the mise cache on `ccc-mise-cache`.
 5. Codex launch failures never offer or perform a state wipe. They also never
    trigger an automatic CLI update or blindly replay a failed command. For
    supported interactive launches (including `resume` and `fork`), a bounded
-   read-only check may select `--no-daemon` when the daemon executable is
-   missing and the installed CLI supports that option. Session arguments and
-   environment are preserved. Explicit remote/no-daemon invocations and
-   noninteractive commands are left unchanged. Uncertain or failed probes
-   leave the original invocation unchanged. The fallback does not modify the
-   shared packages or restart a daemon used by other projects.
+   check may invoke the installed CLI's bounded `app-server daemon start`
+   when the daemon executable is positively confirmed missing. The original
+   command, session arguments and environment are preserved; ccc never inserts
+   `--no-daemon` automatically. Explicit remote/no-daemon invocations and
+   noninteractive commands are left unchanged. Uncertain probes leave the
+   original invocation unchanged. Failed initialization stops before the TUI
+   while retaining normal cleanup. ccc never force-updates packages, restarts
+   an existing daemon or deletes history as recovery. Supported configuration
+   overrides are forwarded as arguments; unsupported profile selection must
+   not silently start a differently configured daemon.
 6. `ccc clean --volumes` removes `ccc-codex-packages` along with the other
    `ccc-` volumes.
 
@@ -87,7 +91,8 @@ keeps the mise cache on `ccc-mise-cache`.
 - `docker run --rm -v ccc-codex-packages:/v ccc ls /v/app-server-daemon`
   shows `releases/` and `current` after a codex launch.
 
-- With the daemon executable absent, supported interactive Codex launches use
-  `--no-daemon` while retaining `resume`/`fork` session arguments and history.
+- With the daemon executable absent, supported interactive Codex launches
+  initialize the daemon before running the original command, retaining
+  `resume`/`fork` session arguments and history.
 - An unrelated Codex failure exits once, without npm updates, automatic replay,
   or a state deletion question.
