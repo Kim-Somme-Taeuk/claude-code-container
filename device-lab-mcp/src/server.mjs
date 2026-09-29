@@ -17,63 +17,17 @@ import { flowJsonResult, jsonResult, textResult } from "./responses.mjs";
 import { compactToolResult, compactToolValue } from "./public-output.mjs";
 import { OWNER_DEVICE_ID_PATTERN } from "./state/owner-device-state.mjs";
 import { readOwnerDevices } from "./state/device-store.mjs";
-import { TOOLS } from "./tools.mjs";
+import { ALL_TOOLS, DEVICE_FLOW_TOOL_NAMES, TOOLS } from "./tools.mjs";
+import { flowStepArguments, normalizeToolArgs } from "./tool-arguments.mjs";
 
 const FLOW_MAX_STEPS = 50;
-const DEVICE_REQUIRED_TOOLS = new Set(TOOLS
+const DEVICE_REQUIRED_TOOLS = new Set(ALL_TOOLS
     .filter((tool) => tool.inputSchema?.required?.includes("deviceId"))
     .map((tool) => tool.name));
 const FLOW_BLOCKED_TOOLS = new Set(["mobile_run_flow", "device_run_flow"]);
-const MOBILE_FLOW_ALLOWED_DEVICE_TOOLS = new Set(["device_status", "device_screenshot"]);
-const DEVICE_FLOW_ALLOWED_TOOLS = new Set([
-    "device_inventory",
-    "device_record_video_status",
-    "device_status",
-    "device_screenshot",
-    "device_click",
-    "device_double_click",
-    "device_key",
-    "device_type",
-    "device_scroll",
-    "device_cursor_position",
-    "device_window_list",
-    "device_accessibility_snapshot",
-    "display_current",
-    "display_screenshot",
-    "display_click",
-    "display_double_click",
-    "display_key",
-    "display_type",
-    "display_scroll",
-    "display_cursor_position",
-]);
-const DEVICE_FLOW_ALLOWED_MOBILE_TOOLS = new Set([
-    "mobile_session_status",
-    "mobile_dump_ui",
-    "mobile_tap",
-    "mobile_double_tap",
-    "mobile_long_press",
-    "mobile_swipe",
-    "mobile_drag",
-    "mobile_type_text",
-    "mobile_key",
-    "mobile_home",
-    "mobile_back",
-    "mobile_forward",
-    "mobile_recents",
-    "mobile_power",
-    "mobile_lock",
-    "mobile_unlock",
-    "mobile_rotate_left",
-    "mobile_rotate_right",
-    "mobile_set_orientation",
-    "mobile_open_url",
-    "mobile_set_clipboard",
-    "mobile_get_clipboard",
-    "mobile_wait_for_text",
-    "mobile_wait_for_app",
-    "mobile_screenshot",
-]);
+const MOBILE_FLOW_ALLOWED_DEVICE_TOOLS = new Set(["device_status", "device_screenshot", "device_install_app", "device_launch_app"]);
+const DEVICE_FLOW_ALLOWED_TOOLS = new Set(DEVICE_FLOW_TOOL_NAMES);
+const LEGACY_DEVICE_FLOW_TOOLS = new Set(["mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right"]);
 const BROKER_LIFECYCLE_COMMANDS = new Set(["device_create", "device_status", "device_start", "device_stop", "device_reboot", "device_delete"]);
 const HYPER_V_LIFECYCLE_BACKENDS = new Set(["windows-vm", "linux-vm"]);
 const BROKER_READONLY_DEVICE_TOOLS = new Set([
@@ -176,13 +130,6 @@ const LIFECYCLE_STATE_BACKENDS = new Map([
     ["macos", "macos-vm"],
 ]);
 
-function normalizeToolArgs(args = {}) {
-    if (!args || typeof args !== "object" || Array.isArray(args)) return {};
-    const { options, detail: _detail, ...rest } = args;
-    if (!options || typeof options !== "object" || Array.isArray(options)) return rest;
-    const { detail: _optionDetail, ...providerOptions } = options;
-    return { ...providerOptions, ...rest };
-}
 
 const BROKER_MOBILE_ACTIONS = new Set([
     "mobile_session_status",
@@ -244,7 +191,7 @@ function mobileFlowToolAllowed(name) {
 
 function deviceFlowToolAllowed(name) {
     if (FLOW_BLOCKED_TOOLS.has(name)) return false;
-    if (DEVICE_FLOW_ALLOWED_MOBILE_TOOLS.has(name)) return true;
+    if (LEGACY_DEVICE_FLOW_TOOLS.has(name)) return true;
     return DEVICE_FLOW_ALLOWED_TOOLS.has(name);
 }
 
@@ -1581,6 +1528,7 @@ async function handleRunFlow(args, { toolName, toolAllowed, detail }) {
         : flowJsonResult(detail ? value : compactToolValue(toolName, value), { detail });
     const { steps, stopOnError = true } = args;
     if (!Array.isArray(steps)) return finish(`${toolName} requires steps array`);
+    if (steps.length === 0) return finish(`${toolName} requires at least one step`);
     if (steps.length > FLOW_MAX_STEPS) return finish(`${toolName} supports at most ${FLOW_MAX_STEPS} steps`);
 
     const results = [];
@@ -1601,8 +1549,13 @@ async function handleRunFlow(args, { toolName, toolAllowed, detail }) {
             continue;
         }
 
+        if (step.arguments !== undefined && (!step.arguments || typeof step.arguments !== "object" || Array.isArray(step.arguments))) {
+            results.push({ index, label, tool, isError: true, error: "Flow step arguments must be an object" });
+            if (stopOnError) return finish({ ok: false, stoppedAt: index, results });
+            continue;
+        }
         // A preceding step may have changed the broker or device state.
-        const result = await withBrokerOperation(() => dispatchTool(tool, step.arguments || {}));
+        const result = await withBrokerOperation(() => dispatchTool(tool, flowStepArguments(tool, args, step.arguments)));
         const summary = { index, label, tool, ...summarizeToolResult(tool, result) };
         results.push(summary);
         if (summary.isError && stopOnError) return finish({ ok: false, stoppedAt: index, results });

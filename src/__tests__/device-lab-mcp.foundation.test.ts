@@ -1,3 +1,4 @@
+import { ALL_TOOLS, TOOLS } from "../../device-lab-mcp/src/tools.mjs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdirSync } from "fs";
 import { join } from "path";
@@ -214,6 +215,8 @@ describe("device-lab MCP foundation and definitions", () => {
     it("lists foundation device-lab and current display tools", { timeout: TIMEOUT }, async () => {
         const result = await client.listTools();
         const names = result.tools.map((tool) => tool.name);
+        expect(names).toEqual(TOOLS.map((tool: { name: string }) => tool.name));
+        expect(names).toHaveLength(87);
         const requiredWithoutProperties = result.tools.flatMap((tool) => {
             const schema = tool.inputSchema as { required?: unknown; properties?: Record<string, unknown> } | undefined;
             const required = Array.isArray(schema?.required) ? schema.required.map(String) : [];
@@ -297,12 +300,12 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(names).toContain("mobile_power");
         expect(names).toContain("mobile_lock");
         expect(names).toContain("mobile_unlock");
-        expect(names).toContain("mobile_rotate_left");
-        expect(names).toContain("mobile_rotate_right");
+        expect(names).not.toContain("mobile_rotate_left");
+        expect(names).not.toContain("mobile_rotate_right");
         expect(names).toContain("mobile_set_orientation");
         expect(names).toContain("mobile_open_url");
-        expect(names).toContain("mobile_install_app");
-        expect(names).toContain("mobile_launch_app");
+        expect(names).not.toContain("mobile_install_app");
+        expect(names).not.toContain("mobile_launch_app");
         expect(names).toContain("mobile_uninstall_app");
         expect(names).toContain("mobile_stop_app");
         expect(names).toContain("mobile_clear_app_data");
@@ -316,8 +319,8 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(names).toContain("mobile_get_clipboard");
         expect(names).toContain("mobile_wait_for_text");
         expect(names).toContain("mobile_wait_for_app");
-        expect(names).toContain("mobile_screenshot");
-        expect(names).toContain("mobile_run_flow");
+        expect(names).not.toContain("mobile_screenshot");
+        expect(names).not.toContain("mobile_run_flow");
         expect(names).toContain("device_run_flow");
         const backendsTool = result.tools.find((tool) => tool.name === "device_backends");
         expectRoutingProperties(toolProperties(backendsTool));
@@ -326,16 +329,15 @@ describe("device-lab MCP foundation and definitions", () => {
             required: ["steps"],
             properties: expect.objectContaining({
                 stopOnError: expect.objectContaining({ type: "boolean" }),
-                steps: expect.objectContaining({ type: "array", maxItems: 50 }),
+                steps: expect.objectContaining({ type: "array", minItems: 1, maxItems: 50 }),
             }),
         }));
         const stepSchema = ((toolProperties(deviceRunFlowTool).steps as { items?: unknown }).items || {}) as { anyOf?: unknown[]; properties?: Record<string, unknown> };
         expect(stepSchema).toEqual(expect.objectContaining({
-            anyOf: [{ required: ["tool"] }, { required: ["name"] }],
+            required: ["tool"],
             properties: expect.objectContaining({
                 arguments: expect.objectContaining({ type: "object" }),
                 label: expect.objectContaining({ type: "string" }),
-                name: expect.objectContaining({ type: "string" }),
                 tool: expect.objectContaining({ type: "string" }),
             }),
         }));
@@ -357,14 +359,14 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(brokerProperties).not.toHaveProperty("shutdown");
         expectRoutingProperties(brokerProperties);
         for (const name of BROKER_CAPABLE_DEVICE_TOOLS) {
-            const tool = result.tools.find((candidate) => candidate.name === name);
-            expect(tool, `${name} should be advertised`).toBeTruthy();
+            const tool = ALL_TOOLS.find((candidate: { name: string }) => candidate.name === name);
+            expect(tool, `${name} should remain accepted`).toBeTruthy();
             expectRoutingProperties(toolProperties(tool), { port: !DEVICE_ROUTE_PORT_COLLISION_TOOLS.has(name) });
             expectBackendProperty(toolProperties(tool), expectedDeviceToolBackends(name));
         }
         for (const name of BROKER_CAPABLE_MOBILE_TOOLS) {
-            const tool = result.tools.find((candidate) => candidate.name === name);
-            expect(tool, `${name} should be advertised`).toBeTruthy();
+            const tool = ALL_TOOLS.find((candidate: { name: string }) => candidate.name === name);
+            expect(tool, `${name} should remain accepted`).toBeTruthy();
             expectRoutingProperties(toolProperties(tool), { mobile: true });
             expectBackendProperty(toolProperties(tool), expectedMobileToolBackends(name));
         }
@@ -385,7 +387,7 @@ describe("device-lab MCP foundation and definitions", () => {
         }));
         expectRoutingProperties(mobileTapProperties, { mobile: true });
         for (const name of ["mobile_forward", "mobile_recents", "mobile_power", "mobile_rotate_left", "mobile_rotate_right"]) {
-            const mobileControlTool = result.tools.find((tool) => tool.name === name);
+            const mobileControlTool = ALL_TOOLS.find((tool: { name: string }) => tool.name === name);
             const mobileControlProperties = toolProperties(mobileControlTool);
             expect(mobileControlTool?.inputSchema).toEqual(expect.objectContaining({ required: ["deviceId"] }));
             expect(mobileControlProperties).toEqual(expect.objectContaining({
@@ -394,7 +396,7 @@ describe("device-lab MCP foundation and definitions", () => {
             expectRoutingProperties(mobileControlProperties, { mobile: true });
         }
         for (const name of ["mobile_screenshot", "mobile_open_url", "mobile_install_app", "mobile_launch_app", "mobile_uninstall_app", "mobile_stop_app", "mobile_clear_app_data", "mobile_set_location", "mobile_set_clipboard", "mobile_get_clipboard", "mobile_wait_for_app"]) {
-            const mobileAppTool = result.tools.find((tool) => tool.name === name);
+            const mobileAppTool = ALL_TOOLS.find((tool: { name: string }) => tool.name === name);
             const mobileAppProperties = toolProperties(mobileAppTool);
             expect(mobileAppTool?.inputSchema).toEqual(expect.objectContaining({ required: expect.arrayContaining(["deviceId"]) }));
             expect(mobileAppProperties).toEqual(expect.objectContaining({
@@ -495,7 +497,7 @@ describe("device-lab MCP foundation and definitions", () => {
         expectAnyOfRequired(result.tools.find((tool) => tool.name === "device_snapshot_delete"), [["snapshotName"], ["snapshotId"]]);
         expectAnyOfRequired(result.tools.find((tool) => tool.name === "device_reset"), [["packageName"], ["bundleId"], ["eraseSimulator"]]);
         expectAnyOfRequired(result.tools.find((tool) => tool.name === "device_launch_app"), [["packageName"], ["bundleId"], ["component"]]);
-        expectAnyOfRequired(result.tools.find((tool) => tool.name === "mobile_launch_app"), [["packageName"], ["bundleId"], ["component"]]);
+        expectAnyOfRequired(ALL_TOOLS.find((tool: { name: string }) => tool.name === "mobile_launch_app"), [["packageName"], ["bundleId"], ["component"]]);
         expectAnyOfRequired(result.tools.find((tool) => tool.name === "mobile_uninstall_app"), [["packageName"], ["bundleId"]]);
         expectAnyOfRequired(result.tools.find((tool) => tool.name === "mobile_stop_app"), [["packageName"], ["bundleId"]]);
         expectAnyOfRequired(result.tools.find((tool) => tool.name === "mobile_clear_app_data"), [["packageName"], ["bundleId"]]);
@@ -791,12 +793,12 @@ describe("device-lab MCP foundation and definitions", () => {
             "macos-vm",
             "linux-vm",
         ]);
-        const advertisedTools = new Set((await client.listTools()).tools.map((tool) => tool.name));
-        const unadvertisedCapabilities = (payload.backends || []).flatMap((backend) => (backend.capabilities || [])
-            .filter((capability) => !advertisedTools.has(capability))
+        const acceptedTools = new Set(ALL_TOOLS.map((tool: { name: string }) => tool.name));
+        const unknownCapabilities = (payload.backends || []).flatMap((backend) => (backend.capabilities || [])
+            .filter((capability) => !acceptedTools.has(capability))
             .map((capability) => ({ backend: backend.name, capability })));
-        expect(unadvertisedCapabilities).toEqual([]);
-        const toolBackendEnums = new Map((await client.listTools()).tools.map((tool) => [
+        expect(unknownCapabilities).toEqual([]);
+        const toolBackendEnums = new Map(ALL_TOOLS.map((tool: { name: string }) => [
             tool.name,
             ((toolProperties(tool).backend as { enum?: unknown[] } | undefined)?.enum || []).map(String),
         ]));
@@ -1053,9 +1055,9 @@ describe("device-lab MCP foundation and definitions", () => {
         ]);
     });
 
-    it("dispatches every advertised tool name through a safe MCP smoke path", { timeout: 120000 }, async () => {
+    it("dispatches every accepted tool name including hidden aliases through a safe MCP smoke path", { timeout: 120000 }, async () => {
         const listed = await client.listTools();
-        const toolNames = listed.tools.map((tool) => tool.name).sort();
+        const toolNames = ALL_TOOLS.map((tool: { name: string }) => tool.name).sort();
         const brokerProbe = { hostCandidates: ["127.0.0.1"], port: 9, timeoutMs: 1, launchTimeoutMs: 1 };
         const direct = { implicitBroker: false };
         const androidId = "android-exhaustive-smoke";
@@ -1252,6 +1254,9 @@ describe("device-lab MCP foundation and definitions", () => {
             "mobile_wait_for_text",
             "mobile_wait_for_app",
             "mobile_screenshot",
+            "mobile_uninstall_app", "mobile_stop_app", "mobile_clear_app_data",
+            "mobile_grant_permission", "mobile_revoke_permission", "mobile_set_location",
+            "mobile_set_battery", "mobile_set_network", "mobile_toggle_airplane_mode",
         ];
         const deviceMobileFlow = await client.callTool({
             name: "device_run_flow",

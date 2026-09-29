@@ -4,7 +4,7 @@ import {
     hasDeviceLabOutputContract,
     validateDeviceLabToolOutput,
 } from "../../device-lab-mcp/src/contracts/tool-contracts.mjs";
-import { TOOLS } from "../../device-lab-mcp/src/tools.mjs";
+import { ALL_TOOLS, TOOLS } from "../../device-lab-mcp/src/tools.mjs";
 
 describe("device-lab public output contracts", () => {
     it("maps lifecycle and mobile session tools to explicit contracts", () => {
@@ -21,11 +21,13 @@ describe("device-lab public output contracts", () => {
         expect(hasDeviceLabOutputContract("not_a_public_tool")).toBe(false);
     });
 
-    it("covers every advertised public tool exactly once", () => {
-        const advertised = TOOLS.map((tool: { name: string }) => tool.name).sort();
+    it("covers every accepted tool including hidden compatibility names exactly once", () => {
+        const accepted = ALL_TOOLS.map((tool: { name: string }) => tool.name).sort();
         const contracted = Object.keys(DEVICE_LAB_OUTPUT_CONTRACTS).sort();
-        expect(contracted).toEqual(advertised);
+        expect(contracted).toEqual(accepted);
         expect(contracted).toHaveLength(93);
+        expect(TOOLS).toHaveLength(87);
+        expect(TOOLS.every((tool: { name: string }) => contracted.includes(tool.name))).toBe(true);
     });
 
     it("returns typed lifecycle and session payloads", () => {

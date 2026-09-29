@@ -7,6 +7,7 @@ import { parse } from "acorn";
 import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import { describe, expect, it } from "vitest";
 import { DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES, evaluateDestructivePolicy } from "../../device-lab-mcp/src/policy/destructive.mjs";
+import { ALL_TOOLS, DEVICE_FLOW_TOOL_NAMES, TOOLS } from "../../device-lab-mcp/src/tools.mjs";
 import { LINUX_VM_CAPABILITIES } from "../../device-lab-mcp/src/backends/linux-vm.mjs";
 import { androidDeviceE2EPrerequisites, prepareAndroidDeviceApp } from "../../scripts/real-tests/android-device-e2e.ts";
 import { androidEmulatorAppSelection, androidEmulatorCreateRequest, deviceFromPayload } from "../../scripts/real-tests/android-emulator-e2e.ts";
@@ -41,6 +42,7 @@ const HIDDEN_LEGACY_TRANSPORT_KEYS = new Set([
     "launchTimeoutMs",
 ]);
 const HIDDEN_COMPATIBILITY_TOOLS = new Set([
+    "mobile_install_app", "mobile_launch_app", "mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right", "mobile_run_flow",
     "device_broker_shutdown",
     "device_broker_rpc",
     "device_broker_lease",
@@ -643,7 +645,9 @@ function backendAdvertisedSupportDrift() {
     const underAdvertised: Array<{ tool: string; backend: string; advertised: string[] }> = [];
     for (const [tool, advertised] of schemas.entries()) {
         if (advertised.length === 0 || tool.startsWith("device_broker_")) continue;
-        const actual = backends.filter((backend) => capabilityCases.get(backend)?.has(tool));
+        const actual = backends.filter((backend) => tool === "device_run_flow"
+            ? DEVICE_FLOW_TOOL_NAMES.some((step) => capabilityCases.get(backend)?.has(step))
+            : capabilityCases.get(backend)?.has(tool));
         for (const backend of advertised) {
             if (!actual.includes(backend)) overAdvertised.push({ tool, backend, actual });
         }
@@ -1311,8 +1315,8 @@ describe("test level runner", () => {
         expect(mcpBrokerText).not.toContain("device_broker_service");
     });
 
-    it("keeps device-lab server literal tool sets deduplicated and advertised", () => {
-        const advertised = new Set(advertisedDeviceLabTools());
+    it("keeps device-lab server literal tool sets deduplicated and accepted", () => {
+        const advertised = new Set(ALL_TOOLS.map((tool) => tool.name));
         const setIssues = deviceLabServerLiteralSets().flatMap(({ name, values }) => {
             const duplicates = values.filter((value, index) => values.indexOf(value) !== index)
                 .map((value) => ({ name, value, issue: "duplicate" }));
@@ -1596,18 +1600,15 @@ describe("test level runner", () => {
         expect(publicBrokerRpcMethodKeys()).toEqual(["broker.backends", "broker.echo", "broker.inventory", "broker.status"]);
     });
 
-    it("keeps device_run_flow free of tools that require destructive confirmation", () => {
-        const sets = new Map(deviceLabServerLiteralSets().map(({ name, values }) => [name, values]));
-        const deviceFlowTools = new Set([
-            ...(sets.get("DEVICE_FLOW_ALLOWED_TOOLS") || []),
-            ...(sets.get("DEVICE_FLOW_ALLOWED_MOBILE_TOOLS") || []),
+    it("keeps newly admitted destructive flow actions guarded by per-step confirmation", () => {
+        const actions = DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES.filter(({ name }) => DEVICE_FLOW_TOOL_NAMES.includes(name));
+        expect(actions.map(({ name }) => name)).toEqual([
+            "mobile_uninstall_app", "mobile_clear_app_data", "mobile_set_battery", "mobile_set_network", "mobile_toggle_airplane_mode",
         ]);
-        const schemas = deviceLabToolSchemaPropertyMap();
-        const confirmTools = [...schemas.entries()]
-            .filter(([, properties]) => properties.includes("confirmDestructive"))
-            .map(([name]) => name);
-        const unsafe = confirmTools.filter((tool) => deviceFlowTools.has(tool));
-        expect(unsafe).toEqual([]);
+        for (const { name, args } of actions) {
+            expect(evaluateDestructivePolicy(name, args).ok).toBe(false);
+            expect(evaluateDestructivePolicy(name, { ...args, confirmDestructive: true }).ok).toBe(true);
+        }
     });
 
     it("covers safe Android mobile controls in the real emulator E2E through MCP calls", () => {
@@ -2235,10 +2236,10 @@ describe("test level runner", () => {
         expect(unadvertised).toEqual([]);
     });
 
-    it("keeps provider real E2E scripts on public device-lab MCP tool names", () => {
+    it("keeps provider real E2E scripts on accepted public or legacy device-lab tools", () => {
         const hiddenProviderCalls = realTestCallToolArgumentKeys()
             .filter((call) => call.file !== "level2-broker-e2e.ts")
-            .filter((call) => HIDDEN_COMPATIBILITY_TOOLS.has(call.tool));
+            .filter((call) => HIDDEN_COMPATIBILITY_TOOLS.has(call.tool) && !ALL_TOOLS.some((tool) => tool.name === call.tool));
         expect(hiddenProviderCalls).toEqual([]);
     });
 
@@ -2489,7 +2490,7 @@ describe("test level runner", () => {
                 encoding: "utf-8",
             });
             expect(strictResult.status).toBe(1);
-            expect(strictResult.stdout).toContain("SUMMARY real-tests total=1 pass=1 skip=0 fail=0 failOnSkip=false strictCoverageFailures=94");
+            expect(strictResult.stdout).toContain(`SUMMARY real-tests total=1 pass=1 skip=0 fail=0 failOnSkip=false strictCoverageFailures=${TOOLS.length + 1}`);
         } finally {
             rmSync(tempDir, { recursive: true, force: true });
         }
@@ -2652,7 +2653,7 @@ describe("test level runner", () => {
                 encoding: "utf-8",
             });
             expect(result.status).toBe(1);
-            expect(result.stdout).toContain("strictCoverageFailures=101");
+            expect(result.stdout).toContain(`strictCoverageFailures=${TOOLS.length + 8}`);
             const summary = JSON.parse(readFileSync(summaryFile, "utf-8")) as {
                 toolCoverage: {
                     invalidScriptedArgumentFacets: string[];
@@ -3832,5 +3833,46 @@ describe("test level runner", () => {
         } finally {
             rmSync(tempDir, { recursive: true, force: true });
         }
+    });
+});
+
+
+describe("canonical and compatible real-runner argument interpretation", () => {
+    it("recognizes hidden aliases and validates normalized shared flow targets", () => {
+        const dir = mkdtempSync(join(tmpdir(), "ccc-canonical-runner-"));
+        try {
+            const fixture = join(dir, "calls.mjs");
+            const summaryPath = join(dir, "summary.json");
+            const valid = [
+                { name: "device_run_flow", arguments: { deviceId: "android-test", backend: "android-emulator", incarnationId: "a".repeat(32), steps: [{ tool: "mobile_tap", arguments: { x: 1, y: 2 } }] } },
+                { name: "mobile_install_app", arguments: { deviceId: "android-test", path: "/app.apk" } },
+                { name: "mobile_launch_app", arguments: { deviceId: "android-test", packageName: "com.example" } },
+                ...["mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right"].map((name) => ({ name, arguments: { deviceId: "android-test" } })),
+                { name: "mobile_run_flow", arguments: { deviceId: "android-test", steps: [{ name: "mobile_home" }] } },
+                { name: "device_run_flow", arguments: { options: { deviceId: "vm-a", backend: "windows-vm", incarnationId: "a".repeat(32) }, steps: [
+                    { tool: "device_click", arguments: { x: 1, y: 2 } },
+                    { name: "device_click", arguments: { options: { deviceId: "vm-b", backend: "linux-vm", incarnationId: "b".repeat(32) }, x: 3, y: 4 } },
+                ] } },
+            ];
+            const invalid = [
+                { name: "mobile_install_app", arguments: { deviceId: "android-test" } },
+                { name: "device_run_flow", arguments: { deviceId: "vm-a", steps: [] } },
+                { name: "device_run_flow", arguments: { deviceId: "vm-a", backend: "windows-vm", steps: [
+                    { tool: "device_click", arguments: { backend: "linux-vm", x: 1, y: 2 } },
+                ] } },
+                { name: "device_run_flow", arguments: { deviceId: "vm-a", steps: [{ tool: "device_click", arguments: null }] } },
+            ];
+            writeFileSync(fixture, `export const name='canonical-arguments'; export async function run(){globalThis[Symbol.for('ccc.deviceLabRealTests.toolCalls')]=${JSON.stringify([...valid, ...invalid].map((call) => ({ ...call, outcome: "ok", isError: false })))}; return {status:'PASS'};}`);
+            const result = spawnSync(process.execPath, [join(repoRoot, "scripts/real-tests/run.ts"), "--json-summary-file", summaryPath, fixture], { cwd: repoRoot, encoding: "utf8", timeout: 30000 });
+            expect(result.status, result.stderr).toBe(0);
+            const coverage = JSON.parse(readFileSync(summaryPath, "utf8")).toolCoverage;
+            expect(coverage.unadvertisedTools).toEqual([]);
+            expect(coverage.calledHiddenCompatibilityTools).toHaveLength(6);
+            expect(coverage.calls.slice(0, valid.length).every((call: any) => call.schemaValid)).toBe(true);
+            expect(coverage.argumentSchemaFailureRecords).toHaveLength(3);
+            expect(coverage.flowStepArgumentSchemaFailures).toHaveLength(2);
+            expect(coverage.flowStepArgumentSchemaFailures[0].schemaErrors).toContain("arguments.deviceId:required");
+            expect(coverage.flowStepArgumentSchemaFailures[1].schemaErrors).toContain("arguments:type=object");
+        } finally { rmSync(dir, { recursive: true, force: true }); }
     });
 });

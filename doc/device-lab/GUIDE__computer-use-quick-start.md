@@ -1,10 +1,10 @@
 # Device Lab MCP computer use
 
-Use the same seven `device_*` tools for a supported desktop display. Start by asking `device_backends` which provider is available on this host, then use `device_inventory` to find the device and its current `incarnationId`. `windows-vm` and `linux-vm` mean Hyper-V only when `provider` is `hyper-v`; the container QEMU `linux-vm` provider has a different capability set.
+Use the same seven `device_*` tools for a supported desktop display. Use `device_list` to find an existing owned device and its current `incarnationId`. Check `device_backends` when prerequisites are unclear; `device_inventory` with an explicit backend finds host candidates. `windows-vm` and `linux-vm` mean Hyper-V only when `provider` is `hyper-v`; the container QEMU `linux-vm` provider has a different capability set.
 
 ## Screenshot → input → screenshot
 
-1. Create and start the VM with `device_create` and `device_start`. Find its `deviceId` and `incarnationId` with `device_inventory` or `device_status`. On the first start of a default Hyper-V `linux-vm` guest, `device_start` installs Xfce and starts a graphical desktop automatically. This can add about 15 minutes; the response reports GUI readiness or the failed stage. The persistent console auto-login uses a dedicated unprivileged `ccc-desktop` guest account, separate from the sudo SSH account. Later starts and reboots check readiness and repair the desktop if needed.
+1. Create and start the VM with `device_create` and `device_start`. Reuse the returned device ID and current `incarnationId`; request `device_status` only if they are missing or stale. On the first start of a default Hyper-V `linux-vm` guest, `device_start` installs Xfce and starts a graphical desktop automatically. This can add about 15 minutes; the response reports GUI readiness or the failed stage. The persistent console auto-login uses a dedicated unprivileged `ccc-desktop` guest account, separate from the sudo SSH account. Later starts and reboots check readiness and repair the desktop if needed.
 2. Call `device_screenshot` with `{ "backend": "windows-vm", "deviceId": "dev-windows", "incarnationId": "<current incarnationId>" }` (or use `linux-vm`). The result is a PNG plus its width and height. The top-left pixel is `(0,0)`; the bottom-right pixel is `(width-1,height-1)`.
 3. Call `device_click` with that device, incarnation, and `x,y` measured on the returned image. `button` defaults to `left`; `right` is available. Use `device_double_click` for two clicks.
 4. Use `device_key` for one key or combination, such as `Enter`, `Ctrl+A`, or `Alt+Tab`. Hyper-V key names are case insensitive. `device_type` sends text to the focused control; on Hyper-V `windows-vm` only ASCII text is verified. Use `device_scroll` with `direction: "up"` or `"down"`, `x,y`, and optional `amount`. On Hyper-V, `device_cursor_position` reads the current cursor when `x,y` are omitted, or moves it when both screenshot pixel coordinates are supplied.
@@ -30,6 +30,36 @@ To check both guests on a Windows Hyper-V host, run `npm run test:level3:hyper-v
 
 - `hyper-v-display-unavailable`: start the VM and wait for its graphical session. For the default `ubuntu-lts` server image, wait for `device_start` to finish; its first run can take about 15 extra minutes and reports the failed setup stage if the desktop cannot be prepared. SSH readiness alone does not mean the desktop is ready.
 - Windows evaluation VM at the sign-in screen: the unattended bootstrap uses a one-time auto-login; after reboot, interactive sign-in may be needed before GUI automation can reach the desktop. The default Windows Level 3 GUI proof runs during that first desktop session.
-- Identity conflict or stale incarnation: call `device_inventory` or `device_status`, use the current `incarnationId`, then capture a new screenshot before input.
+- Identity conflict or stale incarnation: call `device_status` for that device, use the current `incarnationId`, then capture a new screenshot before input.
 - `device-cursor-move-backend-unsupported`: only Hyper-V `windows-vm` and `linux-vm` move the cursor. Other providers only read it, so omit `x,y` there, or move the pointer with `device_click` where that is acceptable.
 - Native console device or permission error: check Hyper-V host support and permissions for the exact VM. These tools do not redirect input to the host desktop or another VM.
+
+## Multiple actions on one device
+
+Use `device_run_flow` for supported desktop or mobile steps. Its step-tool enum
+lists the accepted canonical actions. For example, install and launch an Android
+app, then wait until its UI is ready:
+
+```json
+{
+  "deviceId": "android-my-app",
+  "backend": "android-emulator",
+  "steps": [
+    { "tool": "device_install_app", "arguments": { "path": "/project/app.apk" } },
+    { "tool": "device_launch_app", "arguments": { "packageName": "com.example.app" } },
+    { "tool": "mobile_wait_for_text", "arguments": { "text": "Welcome" } }
+  ]
+}
+```
+
+Steps stop on failure by default. Take a standalone `device_screenshot` when an
+image needs inspection; flow screenshots currently return summaries. Arguments
+are literal, with no result interpolation. Set `incarnationId` at the flow level
+when the target requires it; only step tools accepting that field inherit it. A step changing `deviceId` or `backend` must supply
+its complete new target: none of the old target fields are inherited. Each
+destructive step requires its own `confirmDestructive:true`; routing controls
+and confirmations are never inherited from the flow.
+
+Use `device_install_app`, `device_launch_app`, `device_screenshot` and
+`mobile_set_orientation` in new calls. Old mobile aliases and `mobile_run_flow`
+remain callable for existing workflows but are absent from tool discovery.

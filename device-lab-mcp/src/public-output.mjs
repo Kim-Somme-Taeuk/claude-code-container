@@ -1,6 +1,6 @@
-import { TOOLS } from "./tools.mjs";
+import { ALL_TOOLS } from "./tools.mjs";
 
-const TOOL_NAMES = new Set(TOOLS.map((tool) => tool.name));
+const TOOL_NAMES = new Set(ALL_TOOLS.map((tool) => tool.name));
 
 // Presentation only: provider contracts and opaque user payloads stay untouched.
 function object(value) {

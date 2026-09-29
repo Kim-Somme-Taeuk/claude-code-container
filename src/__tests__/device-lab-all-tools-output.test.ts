@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TOOLS } from "../../device-lab-mcp/src/tools.mjs";
+import { ALL_TOOLS, TOOLS } from "../../device-lab-mcp/src/tools.mjs";
 import { cleanupDeviceLabMcpTestContext, createDeviceLabMcpTestContext } from "./helpers/device-lab-mcp-fixture.js";
 import { compactToolResult } from "../../device-lab-mcp/src/public-output.mjs";
 
@@ -100,8 +100,9 @@ function project(name: string, value: unknown) { return JSON.parse(compactToolRe
 
 describe("every advertised Device Lab tool has a minimal public contract", () => {
     it("covers exactly the full advertised registry with tool-specific success data", () => {
-        expect([...Object.keys(fixtures), ...imageTools].sort()).toEqual(TOOLS.map((tool: { name: string }) => tool.name).sort());
-        expect(TOOLS).toHaveLength(93);
+        expect([...Object.keys(fixtures), ...imageTools].sort()).toEqual(ALL_TOOLS.map((tool: { name: string }) => tool.name).sort());
+        expect(ALL_TOOLS).toHaveLength(93);
+        expect(TOOLS).toHaveLength(87);
     });
     it.each(Object.entries(fixtures))("%s preserves semantic success data and removes known transport echoes", (name, fixture) => {
         const original = structuredClone(fixture.input);
@@ -114,7 +115,7 @@ describe("every advertised Device Lab tool has a minimal public contract", () =>
         const result = { content: [image, { type: "resource", resource: { uri: "file:///image", mimeType: "image/png", blob: image.data } }] };
         expect(compactToolResult(name, result)).toEqual(result);
     });
-    it.each(TOOLS.map((tool: { name: string }) => tool.name))("%s preserves actionable failure and partial cleanup evidence", (name) => {
+    it.each(ALL_TOOLS.map((tool: { name: string }) => tool.name))("%s preserves actionable failure and partial cleanup evidence", (name) => {
         // Policy/ownership/transport failures share this structured server envelope,
         // unlike the distinct per-tool success payloads above.
         const failed = { ok: false, error: "owner-device-state-conflict", tool: name, deviceId: id,

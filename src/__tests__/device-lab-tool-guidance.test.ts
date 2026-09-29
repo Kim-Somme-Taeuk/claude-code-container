@@ -2,10 +2,9 @@ import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanupDeviceLabMcpTestContext, createDeviceLabMcpTestContext, TIMEOUT } from "./helpers/device-lab-mcp-fixture.js";
 
-// Baseline 9b1db42b: all 93 identities and schemas, recursively sorted with
-// description fields removed. This pins constraints without copying the catalog
-// or requiring Git history to be present when the tests run.
-const BASELINE_SCHEMA_HASH = "d5f856ac4535e0b3723626e974c1ae7101caef7b08fa663f8e1d42c53465398c";
+// Baseline b8a8e6f5, excluding the six intentionally hidden aliases and changed
+// canonical flow. All other schemas retain their original constraints.
+const BASELINE_SCHEMA_HASH = "aaf5ae069441eea8ad6fcc16ca700549636f617c023da765256b981f66626189";
 function withoutDescriptions(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(withoutDescriptions);
     if (value && typeof value === "object") {
@@ -32,11 +31,11 @@ describe("public Device Lab tool guidance", () => {
     }, TIMEOUT);
     afterAll(async () => { await cleanupDeviceLabMcpTestContext(context); });
 
-    it("preserves tool identities and all non-description constraints within the original byte budget", () => {
-        expect(tools).toHaveLength(93);
-        expect(createHash("sha256").update(JSON.stringify(withoutDescriptions(tools))).digest("hex"))
+    it("preserves unchanged schemas and reduces the advertised catalog byte budget", () => {
+        expect(tools).toHaveLength(87);
+        expect(createHash("sha256").update(JSON.stringify(withoutDescriptions(tools.filter((tool) => tool.name !== "device_run_flow")))).digest("hex"))
             .toBe(BASELINE_SCHEMA_HASH);
-        expect(Buffer.byteLength(JSON.stringify(tools), "utf8")).toBeLessThanOrEqual(57496);
+        expect(Buffer.byteLength(JSON.stringify(tools), "utf8")).toBeLessThan(57211);
     });
 
     it("distinguishes owned targets, backend prerequisites, and single-backend inventory", () => {
@@ -74,7 +73,7 @@ describe("public Device Lab tool guidance", () => {
         expect(guidance).not.toMatch(/defaults? to true[.;]|defaults? to false[.;]/);
     });
 
-    it.each(["mobile_run_flow", "device_run_flow"])("%s explains static arguments, image summaries, and unmet waits", (name) => {
+    it.each(["device_run_flow"])("%s explains static arguments, image summaries, and unmet waits", (name) => {
         const entry = tool(name);
         const guidance = JSON.stringify(entry).toLowerCase();
         expect(guidance).toMatch(/literal|fixed|static/);

@@ -3,11 +3,13 @@ import { spawn, spawnSync } from "child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
-import { TOOLS as DEVICE_LAB_MCP_TOOLS } from "../../device-lab-mcp/src/tools.mjs";
+import { ALL_TOOLS as ACCEPTED_DEVICE_LAB_MCP_TOOLS, TOOLS as DEVICE_LAB_MCP_TOOLS } from "../../device-lab-mcp/src/tools.mjs";
 import { consumeDeviceLabMcpToolCalls, consumeDeviceLabMcpToolSessions } from "./device-lab-mcp-client.ts";
 import { normalizeProviderConcurrency, partitionProviderFiles, runResourceAware } from "./provider-parallelism.ts";
 import { aggregateStepResult } from "./result-status.ts";
 import { compactMessage } from "./compact-message.ts";
+
+import { flowStepArguments, normalizeToolArgs } from "../../device-lab-mcp/src/tool-arguments.mjs";
 
 let failed = false;
 const counts = { PASS: 0, SKIP: 0, FAIL: 0 };
@@ -17,6 +19,7 @@ const toolCallRecords: any[] = [];
 const toolSessionRecords: any[] = [];
 
 const hiddenCompatibilityTools = new Set([
+    ...ACCEPTED_DEVICE_LAB_MCP_TOOLS.filter((tool) => !DEVICE_LAB_MCP_TOOLS.some((visible) => visible.name === tool.name)).map((tool) => tool.name),
     "device_broker_shutdown",
     "device_broker_rpc",
     "device_broker_lease",
@@ -40,7 +43,7 @@ const hiddenLegacyTransportKeys = new Set([
     "rpcTimeoutMs",
     "launchTimeoutMs",
 ]);
-const toolSchemasByName = new Map<string, any>(DEVICE_LAB_MCP_TOOLS.map((tool) => [tool.name, tool.inputSchema || {}]));
+const toolSchemasByName = new Map<string, any>(ACCEPTED_DEVICE_LAB_MCP_TOOLS.map((tool) => [tool.name, tool.inputSchema || {}]));
 
 function canonicalToolSurface() {
     const tools = DEVICE_LAB_MCP_TOOLS.map((tool) => ({
@@ -140,6 +143,7 @@ function validateSchemaValue(schema: any = {}, value: any, path = "arguments", o
     if (Array.isArray(schema.enum) && !schema.enum.includes(value)) errors.push(`${path}:enum`);
     if (typeof schema.minimum === "number" && typeof value === "number" && value < schema.minimum) errors.push(`${path}:minimum=${schema.minimum}`);
     if (typeof schema.maximum === "number" && typeof value === "number" && value > schema.maximum) errors.push(`${path}:maximum=${schema.maximum}`);
+    if (typeof schema.minItems === "number" && Array.isArray(value) && value.length < schema.minItems) errors.push(`${path}:minItems=${schema.minItems}`);
     if (typeof schema.maxItems === "number" && Array.isArray(value) && value.length > schema.maxItems) errors.push(`${path}:maxItems=${schema.maxItems}`);
     if (Array.isArray(value) && schema.items) {
         value.forEach((item, index) => errors.push(...validateSchemaValue(schema.items, item, `${path}[${index}]`, options)));
@@ -166,18 +170,19 @@ function validateSchemaValue(schema: any = {}, value: any, path = "arguments", o
 }
 
 function validateToolArguments(tool, args) {
-    if (hiddenCompatibilityTools.has(tool)) return [];
     const schema = toolSchemasByName.get(tool);
-    if (!schema) return [`${tool}:unadvertised`];
-    return validateSchemaValue(schema, args || {}, "arguments", { allowHiddenTransportKeys: true });
+    if (!schema) return hiddenCompatibilityTools.has(tool) ? [] : [`${tool}:unadvertised`];
+    return validateSchemaValue(schema, normalizeToolArgs(args), "arguments", { allowHiddenTransportKeys: true });
 }
 
-function flowStepArgumentSchemaFailures(flowTool, args) {
+function flowStepArgumentSchemaFailures(flowTool, rawArgs) {
+    const args = normalizeToolArgs(rawArgs);
     if ((flowTool !== "device_run_flow" && flowTool !== "mobile_run_flow") || !Array.isArray(args?.steps)) return [];
     return args.steps.flatMap((step, index) => {
         const tool = String(step?.tool || step?.name || "");
         if (!tool) return [];
-        const errors = validateToolArguments(tool, step?.arguments || {});
+        const malformed = step?.arguments !== undefined && (!step.arguments || typeof step.arguments !== "object" || Array.isArray(step.arguments));
+        const errors = malformed ? ["arguments:type=object"] : validateToolArguments(tool, flowStepArguments(tool, args, step?.arguments));
         return errors.length > 0 ? [{ index, tool, schemaErrors: errors, schemaErrorCount: errors.length }] : [];
     });
 }

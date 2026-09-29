@@ -114,10 +114,11 @@ Tool descriptions distinguish owned-device listing, backend prerequisites, and
 single-backend inventory; recorded status does not promise universal live
 readiness. Creation, startup and physical attachment remain separate actions.
 Boot-wait guidance must match boolean polarity and platform-dependent defaults.
-Descriptions expose flow limitations: fixed arguments, no previous-result
+The initial description-only review exposed flow limitations: fixed arguments, no previous-result
 interpolation, and image summaries; inspecting screenshots requires a standalone
-screenshot call. These clarifications must not increase the serialized tool
-catalog above the 57,496-byte baseline or change tool identities/schema constraints.
+screenshot call. That description-only pass preserved tool identities and constraints within its
+57,496-byte baseline. The canonical catalog contract below supersedes that
+identity freeze for consolidation.
 
 Within either flow, an explicit unmet condition from mobile_wait_for_text
 (found:false) or mobile_wait_for_app (found:false or running:false) is a failed
@@ -160,3 +161,28 @@ Empty lists still omit envelope ownership. Inventory applies the same compact
 provider-plan presentation as list/status, both directly and within backend
 entries. Failed plans, unavailable reasons and unique warnings remain; creation
 and dry-run plans stay reviewable. Detailed responses remain original.
+
+## Canonical tools and shared flow target
+
+Advertise canonical device install/launch/screenshot, explicit mobile orientation,
+and one device_run_flow. The six legacy mobile aliases (install_app, launch_app,
+screenshot, rotate_left, rotate_right, run_flow) remain callable through their
+original routes but are omitted from tools/list. Accepted-tool diagnostics and
+projection still cover those names; detailed raw capabilities may include them.
+The canonical catalog must shrink from its 57,211-byte starting size.
+
+The canonical flow schema enumerates supported visible step tools, including
+mobile app/system actions and canonical app install/launch. Existing allowed
+legacy screenshot/rotation steps remain accepted. Device lifecycle, arbitrary
+commands, broker management and nested flows remain disallowed. Every destructive
+step requires its own confirmation. Empty flows and malformed step arguments fail.
+Legacy mobile flows and step.name remain accepted; the advertised step field is tool.
+
+Optional flow-level deviceId/backend/incarnationId apply only to device-targeted
+steps. Normalize legacy nested step options first. If an explicit step deviceId
+or backend differs from a provided default, inherit none of the target group.
+Otherwise fill only omitted target fields supported by that step tool (mobile
+actions do not receive an inherited incarnationId). Explicit invalid values still fail
+validation. Never inherit confirmation, credentials, force or routing controls.
+Target-neutral display/inventory steps receive no defaults. Each step retains
+fresh broker/ownership checks, stopping semantics and compact/detail output.

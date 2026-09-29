@@ -130,31 +130,107 @@ const RESET_TARGET_ANY_OF = [{ required: ["packageName"] }, { required: ["bundle
 const BATTERY_CONTROL_ANY_OF = [{ required: ["level"] }, { required: ["status"] }, { required: ["charging"] }];
 const NETWORK_CONTROL_ANY_OF = [{ required: ["wifi"] }, { required: ["data"] }];
 
+export const DEVICE_FLOW_TOOL_NAMES = [
+    "device_inventory",
+    "device_record_video_status",
+    "device_status",
+    "device_screenshot",
+    "device_click",
+    "device_double_click",
+    "device_key",
+    "device_type",
+    "device_scroll",
+    "device_cursor_position",
+    "device_window_list",
+    "device_accessibility_snapshot",
+    "display_current",
+    "display_screenshot",
+    "display_click",
+    "display_double_click",
+    "display_key",
+    "display_type",
+    "display_scroll",
+    "display_cursor_position",
+    "device_install_app",
+    "device_launch_app",
+    "mobile_session_status",
+    "mobile_dump_ui",
+    "mobile_tap",
+    "mobile_double_tap",
+    "mobile_long_press",
+    "mobile_swipe",
+    "mobile_drag",
+    "mobile_type_text",
+    "mobile_key",
+    "mobile_home",
+    "mobile_back",
+    "mobile_forward",
+    "mobile_recents",
+    "mobile_power",
+    "mobile_lock",
+    "mobile_unlock",
+    "mobile_set_orientation",
+    "mobile_open_url",
+    "mobile_uninstall_app",
+    "mobile_stop_app",
+    "mobile_clear_app_data",
+    "mobile_grant_permission",
+    "mobile_revoke_permission",
+    "mobile_set_location",
+    "mobile_set_battery",
+    "mobile_set_network",
+    "mobile_toggle_airplane_mode",
+    "mobile_set_clipboard",
+    "mobile_get_clipboard",
+    "mobile_wait_for_text",
+    "mobile_wait_for_app",
+];
+
 const RUN_FLOW_INPUT_SCHEMA = {
     type: "object",
     properties: {
+        deviceId: { ...DEVICE_ID_PROPERTY, description: "Shared target for device steps. Changing a step deviceId or backend clears inherited target fields." },
+        ...DEVICE_WITH_DISPLAY_BACKEND_PROPERTY,
+        incarnationId: INCARNATION_ID_PROPERTY,
         stopOnError: { type: "boolean", description: "Stop after the first rejected or failing step; defaults to true." },
         steps: {
             type: "array",
+            minItems: 1,
             maxItems: 50,
             description: "Ordered MCP tool steps to dispatch. Each step names a permitted tool and passes that tool's normal arguments.",
             items: {
                 type: "object",
                 properties: {
-                    tool: { type: "string", description: "Tool name to dispatch." },
-                    name: { type: "string", description: "Alias for tool." },
+                    tool: { type: "string", enum: DEVICE_FLOW_TOOL_NAMES },
                     label: { type: "string", description: "Optional label copied into the flow result." },
                     arguments: { type: "object", description: "Arguments forwarded to the selected tool." },
                 },
-                anyOf: [
-                    { required: ["tool"] },
-                    { required: ["name"] },
-                ],
-                required: [],
+                required: ["tool"],
             },
         },
     },
     required: ["steps"],
+};
+
+// Accepted legacy flows keep name aliases and legacy step names; discovery is canonical.
+const LEGACY_RUN_FLOW_INPUT_SCHEMA = {
+    ...RUN_FLOW_INPUT_SCHEMA,
+    properties: {
+        ...RUN_FLOW_INPUT_SCHEMA.properties,
+        steps: {
+            ...RUN_FLOW_INPUT_SCHEMA.properties.steps,
+            items: {
+                ...RUN_FLOW_INPUT_SCHEMA.properties.steps.items,
+                properties: {
+                    ...RUN_FLOW_INPUT_SCHEMA.properties.steps.items.properties,
+                    tool: { type: "string" },
+                    name: { type: "string" },
+                },
+                required: [],
+                anyOf: [{ required: ["tool"] }, { required: ["name"] }],
+            },
+        },
+    },
 };
 
 const DEVICE_BASE_IMAGE_CREATE_INPUT_SCHEMA = {
@@ -248,7 +324,7 @@ const DEVICE_CREATE_INPUT_SCHEMA = {
     required: ["backend", "name"],
 };
 
-export const TOOLS = [
+export const ALL_TOOLS = [
     { name: "device_backends", description: "Check backend prerequisites without starting devices; detail:true adds capabilities. Use device_list for owned IDs.", inputSchema: { type: "object", properties: {}, required: [] } },
     { name: "device_broker_status", description: "Inspect the zero-configuration host broker contract without starting devices", inputSchema: { type: "object", properties: { probe: { type: "boolean" } }, required: [] } },
     { name: "device_list", description: "Find owned device IDs and the current display. Use device_backends for prerequisites or device_inventory for host candidates.", inputSchema: { type: "object", properties: {}, required: [] } },
@@ -340,8 +416,8 @@ export const TOOLS = [
     { name: "mobile_wait_for_text", description: "Wait for UI text. An unmet condition returns found:false; observation errors fail. Unmet waits fail flow steps.", inputSchema: { type: "object", properties: mobileBrokerProperties({ deviceId: DEVICE_ID_PROPERTY, text: { type: "string", minLength: 1 }, timeoutMs: BOUNDED_WAIT_TIMEOUT_PROPERTY, intervalMs: BOUNDED_WAIT_INTERVAL_PROPERTY }), required: ["deviceId", "text"] } },
     { name: "mobile_wait_for_app", description: "Wait for the backend’s app-running/foreground condition, not UI readiness. An unmet condition returns found:false or running:false; unmet waits fail flow steps.", inputSchema: { type: "object", properties: mobileBrokerProperties({ deviceId: DEVICE_ID_PROPERTY, packageName: { type: "string" }, bundleId: { type: "string" }, timeoutMs: BOUNDED_WAIT_TIMEOUT_PROPERTY, intervalMs: BOUNDED_WAIT_INTERVAL_PROPERTY }), required: ["deviceId"], anyOf: APP_ID_ANY_OF } },
     { name: "mobile_screenshot", description: "Capture a mobile screenshot", inputSchema: { type: "object", properties: mobileBrokerProperties({ deviceId: DEVICE_ID_PROPERTY }), required: ["deviceId"] } },
-    { name: "mobile_run_flow", description: "Run mobile actions plus device_status/device_screenshot; no nested flows. Fixed arguments, no result interpolation. Unmet waits fail steps. Screenshots are summaries; call separately to view images.", inputSchema: RUN_FLOW_INPUT_SCHEMA },
-    { name: "device_run_flow", description: "Run display, desktop and mobile verification actions; no device lifecycle or nested flows. Fixed arguments, no result interpolation. Unmet waits fail steps. Screenshots are summaries; call separately to view images.", inputSchema: RUN_FLOW_INPUT_SCHEMA },
+    { name: "mobile_run_flow", description: "Run mobile actions plus device_status/device_screenshot; no nested flows. Fixed arguments, no result interpolation. Unmet waits fail steps. Screenshots are summaries; call separately to view images.", inputSchema: LEGACY_RUN_FLOW_INPUT_SCHEMA },
+    { name: "device_run_flow", description: "Run desktop/mobile actions in order; share deviceId/backend/incarnationId once. Each destructive step needs confirmation. No lifecycle or nested flows. Fixed arguments, no result interpolation. Unmet waits fail. Screenshots are summaries; call separately to view images.", inputSchema: LEGACY_RUN_FLOW_INPUT_SCHEMA },
 ].map((tool) => ({
     ...tool,
     inputSchema: {
@@ -352,3 +428,13 @@ export const TOOLS = [
         },
     },
 }));
+
+const LEGACY_TOOL_NAMES = new Set(["mobile_install_app", "mobile_launch_app", "mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right", "mobile_run_flow"]);
+export const TOOLS = ALL_TOOLS.filter((tool) => !LEGACY_TOOL_NAMES.has(tool.name)).map((tool) =>
+    tool.name !== "device_run_flow" ? tool : {
+        ...tool,
+        inputSchema: {
+            ...RUN_FLOW_INPUT_SCHEMA,
+            properties: { ...RUN_FLOW_INPUT_SCHEMA.properties, detail: tool.inputSchema.properties.detail },
+        },
+    });

@@ -149,3 +149,24 @@ The full goal remains open for these source-confirmed issues:
 All final tool families require realistic success/failure and opaque-data
 verification after these changes; registry counts alone cannot close the goal.
 Native provider execution remains distinct from fixture and source coverage.
+
+## Canonical catalog and flow consolidation (baseline `b8a8e6f5`)
+
+The accepted registry retains 93 operations while discovery advertises 87. Six
+legacy mobile names no longer compete with device install/launch/screenshot,
+explicit orientation and the canonical flow. Accepted registries still drive
+legacy diagnostics, projection and raw broker capability checks. Legacy dispatch
+is unchanged because explicit mobile broker aliases use Appium while canonical
+device actions use native routing.
+
+The canonical flow exposes its finite 53-action enum and shared target fields;
+its serialized catalog measures 55,050 bytes versus 57,211 before consolidation.
+Step normalization precedes atomic target inheritance, avoiding stale backend or
+incarnation when a step switches targets. Confirmation and transport controls
+are never inherited. Empty and malformed flows fail before affected execution.
+The quick start now reuses returned identities and avoids unconditional
+prerequisite/inventory/status chains. Detailed raw capability diagnostics may
+retain legacy names; default discovery omits capability arrays.
+
+Flow screenshot summaries still require a standalone call for image inspection;
+the full-goal response/flow verification must assess this remaining extra call.
