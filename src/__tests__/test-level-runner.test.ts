@@ -1492,6 +1492,7 @@ describe("test level runner", () => {
         ]);
         const forwarded = new Set(brokerDeviceToolForwardedInputKeys());
         const routeOnlyKeys = new Set([
+            "detail", // Public response formatting, never a provider argument.
             "broker",
             "viaBroker",
             "implicitBroker",
