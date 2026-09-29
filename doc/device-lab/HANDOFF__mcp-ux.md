@@ -32,24 +32,31 @@ Investigation history: [AUDIT__wait-flow-followup.md](AUDIT__wait-flow-followup.
 
 ## Verification and environment
 
-The ten focused suites passed 378 tests. New tests are
+Implementation commit: `ae6924e4` (following `9b1db42b`). Build and lint passed;
+the ten focused suites passed 378 tests. New tests are
 `src/__tests__/device-lab-tool-guidance.test.ts` and
 `src/__tests__/device-lab-flow-wait.test.ts`. The latter exercises the actual
 public request handler with deterministic provider observations; it is not a
 physical-device test. Existing flow-output tests exercise source stdio MCP.
 
 Use `CCC_E2E_SKIP_BUILD=1 npm test -- <test paths>` after a build to avoid repeated
-builds. Run `npm run build` and `npm run lint` for delivery. Fresh generated-bundle
-QA and independent reviews are recorded in the task's final results; do not infer
-a native Windows/macOS device pass from Linux fixture tests.
+builds. Run `npm run build` and `npm run lint` for delivery. Independent code/security
+reviews and QA returned PASS. QA reran the three guidance/wait/flow-output suites
+(48 tests) and exercised a fresh generated bundle: both flows stopped before a
+key action on an unmet text condition, executed it on explicit continuation, and
+retained successful/invalid/standalone behavior. Use a 5-second timeout with
+matching polling interval for a clean fixture nonmatch; tiny budgets may instead
+test observation timeout. Do not infer a native Windows/macOS device pass from
+Linux fixture tests.
 
 An already-running MCP process retains old loaded code. Rebuilding the bundle
 alone does not update that process; restart the connection after installation.
 Do not kill user sessions or mutate real devices merely to verify presentation.
 
-Harness task: `TASK__device-lab-intuitive-tool-flows`. Earlier tasks lacked
-hook-owned review/QA receipts despite substantive PASS results. Check current
-task state; do not fabricate receipts or confuse formal close with test success.
+Harness task: `TASK__device-lab-intuitive-tool-flows`. After substantive review
+and QA PASS, verification still found no hook-owned receipts. The task was parked
+as BLOCKED_ENV for receipt collection only. Do not fabricate receipts, repeat
+lenses solely to collect them, or confuse formal close with test success.
 
 ## Known follow-ups, not implemented here
 
