@@ -48,6 +48,7 @@ test("Windows source checkout invokes npm CLI through Node instead of spawning n
             "devices",
             "broker",
             "status",
+            "--verbose",
         ]);
     } finally {
         rmSync(root, { recursive: true, force: true });
@@ -127,7 +128,7 @@ test("Windows real-provider launcher repairs the broker after build and before e
         });
         assert.equal(status, 0);
         assert.equal(calls.length, 3);
-        assert.deepEqual(calls[1].slice(-3), ["devices", "broker", "status"]);
+        assert.deepEqual(calls[1].slice(-4), ["devices", "broker", "status", "--verbose"]);
     } finally {
         rmSync(root, { recursive: true, force: true });
     }

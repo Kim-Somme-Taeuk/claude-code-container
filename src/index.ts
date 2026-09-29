@@ -1773,7 +1773,7 @@ CONTAINER MANAGEMENT:
     ccc devices prune       Remove stopped current-project device definitions
     ccc devices prune --all-projects
                             Remove stopped definitions across all projects
-    ccc devices broker status
+    ccc devices broker status [--verbose]
     ccc labs                Show lab-runner container VM readiness
     ccc labs smoke          Non-starting lab-runner VM readiness smoke check
     ccc labs shell          Open bash in the built-in lab-runner profile

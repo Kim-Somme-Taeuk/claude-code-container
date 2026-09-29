@@ -14,6 +14,7 @@ import { ownerId } from "./context.mjs";
 import { currentDisplayTarget, handleDisplayTool, x11Available } from "./display/x11.mjs";
 import { evaluateDestructivePolicy } from "./policy/destructive.mjs";
 import { jsonResult, textResult } from "./responses.mjs";
+import { compactToolResult } from "./public-output.mjs";
 import { OWNER_DEVICE_ID_PATTERN } from "./state/owner-device-state.mjs";
 import { TOOLS } from "./tools.mjs";
 
@@ -173,9 +174,10 @@ const LIFECYCLE_STATE_BACKENDS = new Map([
 
 function normalizeToolArgs(args = {}) {
     if (!args || typeof args !== "object" || Array.isArray(args)) return {};
-    const { options, ...rest } = args;
-    if (!options || typeof options !== "object" || Array.isArray(options)) return args;
-    return { ...options, ...rest };
+    const { options, detail: _detail, ...rest } = args;
+    if (!options || typeof options !== "object" || Array.isArray(options)) return rest;
+    const { detail: _optionDetail, ...providerOptions } = options;
+    return { ...providerOptions, ...rest };
 }
 
 const BROKER_MOBILE_ACTIONS = new Set([
@@ -1572,55 +1574,57 @@ export async function startServer() {
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { name, arguments: rawArgs = {} } = request.params;
         const args = normalizeToolArgs(rawArgs);
+        const result = await (async () => {
+            try {
+                const policy = evaluateDestructivePolicy(name, args);
+                if (!policy.ok) return policyDeniedResult(policy);
 
-        try {
-            const policy = evaluateDestructivePolicy(name, args);
-            if (!policy.ok) return policyDeniedResult(policy);
+                switch (name) {
+                    case "device_backends":
+                        return handleDeviceBackends(args);
 
-            switch (name) {
-                case "device_backends":
-                    return handleDeviceBackends(args);
+                    case "device_broker_status":
+                        return jsonResult(await brokerStatus(args));
 
-                case "device_broker_status":
-                    return jsonResult(await brokerStatus(args));
+                    case "device_broker_shutdown":
+                        return jsonResult(await brokerShutdown(args));
 
-                case "device_broker_shutdown":
-                    return jsonResult(await brokerShutdown(args));
+                    case "device_broker_rpc":
+                        return jsonResult(await brokerRpc(args));
 
-                case "device_broker_rpc":
-                    return jsonResult(await brokerRpc(args));
+                    case "device_broker_lease":
+                        return jsonResult(await brokerLease(args));
 
-                case "device_broker_lease":
-                    return jsonResult(await brokerLease(args));
+                    case "device_broker_attach":
+                        return jsonResult(await brokerPhysical(args));
 
-                case "device_broker_attach":
-                    return jsonResult(await brokerPhysical(args));
+                    case "device_broker_apple":
+                        return jsonResult(await brokerApple(args));
 
-                case "device_broker_apple":
-                    return jsonResult(await brokerApple(args));
+                    case "device_broker_command":
+                        return jsonResult(await brokerCommand(args));
 
-                case "device_broker_command":
-                    return jsonResult(await brokerCommand(args));
+                    case "device_broker_appium":
+                        return jsonResult(await brokerAppium(args));
 
-                case "device_broker_appium":
-                    return jsonResult(await brokerAppium(args));
+                    case "device_list":
+                        return handleDeviceList(args);
 
-                case "device_list":
-                    return handleDeviceList(args);
+                    case "mobile_run_flow":
+                        return handleMobileRunFlow(args);
 
-                case "mobile_run_flow":
-                    return handleMobileRunFlow(args);
+                    case "device_run_flow":
+                        return handleDeviceRunFlow(args);
 
-                case "device_run_flow":
-                    return handleDeviceRunFlow(args);
-
-                default: {
-                    return dispatchTool(name, args);
+                    default: {
+                        return dispatchTool(name, args);
+                    }
                 }
+            } catch (err) {
+                return textResult(false, `Unexpected error: ${err.message}`);
             }
-        } catch (err) {
-            return textResult(false, `Unexpected error: ${err.message}`);
-        }
+        })();
+        return rawArgs?.detail === true ? result : compactToolResult(name, result);
     });
 
     const transport = new StdioServerTransport();

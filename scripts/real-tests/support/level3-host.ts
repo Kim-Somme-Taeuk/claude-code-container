@@ -186,7 +186,7 @@ export async function ensureHostBrokerReady(repoRoot, options: any = {}) {
     const remainingMs = () => Math.max(1, deadlineAt - Date.now());
     const runStatus = () => spawn(
         process.execPath,
-        [join(repoRoot, "dist", "index.js"), "devices", "broker", "status"],
+        [join(repoRoot, "dist", "index.js"), "devices", "broker", "status", "--verbose"],
         {
             cwd: repoRoot,
             env: options.env || process.env,

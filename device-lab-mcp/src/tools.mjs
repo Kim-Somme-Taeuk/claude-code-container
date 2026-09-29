@@ -290,7 +290,7 @@ const DEVICE_CREATE_INPUT_SCHEMA = {
 };
 
 export const TOOLS = [
-    { name: "device_backends", description: "List device-lab backends, availability, and capabilities without starting devices", inputSchema: { type: "object", properties: brokerManagementProperties({}), required: [] } },
+    { name: "device_backends", description: "List backend availability without starting devices; detail:true includes capabilities", inputSchema: { type: "object", properties: brokerManagementProperties({}), required: [] } },
     { name: "device_broker_status", description: "Inspect the zero-configuration host broker contract without starting devices", inputSchema: { type: "object", properties: brokerManagementProperties({ probe: { type: "boolean" } }), required: [] } },
     { name: "device_list", description: "List devices and current display targets owned by this CCC container", inputSchema: { type: "object", properties: {}, required: [] } },
     { name: "device_inventory", description: "List owner-scoped device definitions and backend host inventory without starting devices", inputSchema: { type: "object", properties: deviceBrokerProperties({ backend: { type: "string", enum: ["android-emulator", "android-device", "ios-simulator", "ios-device", "windows-sandbox", "windows-vm", "macos-vm", "linux-vm"] } }), required: [] } },
@@ -383,4 +383,13 @@ export const TOOLS = [
     { name: "mobile_screenshot", description: "Capture a mobile screenshot where supported", inputSchema: { type: "object", properties: mobileBrokerProperties({ deviceId: DEVICE_ID_PROPERTY }), required: ["deviceId"] } },
     { name: "mobile_run_flow", description: "Run a bounded sequence of mobile verification actions through existing device handlers", inputSchema: RUN_FLOW_INPUT_SCHEMA },
     { name: "device_run_flow", description: "Run a bounded sequence of target-neutral verification actions through existing display, desktop, and mobile handlers", inputSchema: RUN_FLOW_INPUT_SCHEMA },
-];
+].map((tool) => ({
+    ...tool,
+    inputSchema: {
+        ...tool.inputSchema,
+        properties: {
+            ...tool.inputSchema.properties,
+            detail: { type: "boolean", description: "Include full diagnostic output. Defaults to false." },
+        },
+    },
+}));

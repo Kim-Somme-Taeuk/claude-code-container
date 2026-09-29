@@ -60,6 +60,7 @@ const BROKER_DEVICE_TOOL_ROUTABLE_TOOLS = new Set([
 ]);
 
 const BROKER_ROUTE_ONLY_PROPERTIES = new Set([
+    "detail", // Presentation-only: stripped before provider dispatch.
     "broker",
     "viaBroker",
     "implicitBroker",

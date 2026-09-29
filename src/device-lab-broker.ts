@@ -17082,8 +17082,9 @@ export function createDeviceBrokerServer(options: DeviceBrokerOptions = {}): Ser
     return server;
 }
 
-export function formatDeviceBrokerStatus(options: DeviceBrokerOptions = {}): string {
+export function formatDeviceBrokerStatus(options: DeviceBrokerOptions = {}, verbose = false): string {
     const status = deviceBrokerStatus(options);
+    if (!verbose) return `Broker: not checked\n${status.url}\n`;
     const containerContext = process.env.container === "docker";
     const wiringIncomplete = containerContext
         ? status.state.rootExists !== true
@@ -17233,7 +17234,7 @@ export function startDeviceBrokerServe(
 export function deviceBrokerCli(args: string[], cwd = process.cwd(), profile?: string): number {
     const command = args[0] || "status";
     if (command === "status") {
-        console.log(formatDeviceBrokerStatus({ cwd, profile }));
+        console.log(formatDeviceBrokerStatus({ cwd, profile }, args.includes("--verbose")));
         return 0;
     }
     if (command === "serve") {
@@ -17262,13 +17263,27 @@ export async function deviceBrokerCliAsync(
     const ensure = hooks.ensureHostBroker || ensureHostDeviceBroker;
     const readiness = await ensure({ cwd, profile });
     const readinessRecord = readiness as Record<string, unknown>;
+    if (!args.includes("--verbose")) {
+        if (!readiness.ok) {
+            const reason = "error" in readiness ? readiness.error : readiness.reason || "unknown";
+            console.error(`Broker: unavailable (${reason})`);
+            if ("diagnostics" in readiness && Array.isArray(readiness.diagnostics)) {
+                for (const diagnostic of new Set(readiness.diagnostics)) console.error(String(diagnostic));
+            }
+            return 1;
+        }
+        const host = typeof readinessRecord.host === "string" ? readinessRecord.host : DEVICE_BROKER_DEFAULT_HOST;
+        const port = Number.isInteger(readinessRecord.port) ? Number(readinessRecord.port) : DEVICE_BROKER_DEFAULT_PORT;
+        console.log(`Broker: ready${readiness.launched === true ? " (started)" : ""}\nhttp://${host}:${port}`);
+        return 0;
+    }
     console.log(formatDeviceBrokerStatus({
         cwd,
         profile,
         ...(typeof readinessRecord.host === "string" ? { host: readinessRecord.host } : {}),
         ...(Number.isInteger(readinessRecord.port) ? { port: Number(readinessRecord.port) } : {}),
         ...(typeof readinessRecord.ownerId === "string" ? { ownerId: readinessRecord.ownerId } : {}),
-    }));
+    }, true));
     if (!readiness.ok) {
         console.error(`brokerReady: false`);
         console.error(`brokerRepairError: ${"error" in readiness ? readiness.error : readiness.reason || "unknown"}`);

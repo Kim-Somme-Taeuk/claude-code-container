@@ -979,8 +979,34 @@ describe("device-lab host broker physical attach and CLI", () => {
         }
     });
 
-    it("formats broker status and routes through ccc devices broker status", () => {
-        const direct = formatDeviceBrokerStatus({ cwd: "/project/broker-cli-test" });
+    it("keeps unverified broker status concise without claiming readiness", () => {
+        const status = formatDeviceBrokerStatus({ cwd: "/project/broker-cli-test" });
+        expect(status).toBe("Broker: not checked\nhttp://127.0.0.1:17373\n");
+    });
+
+    it("returns only verified readiness and endpoint by default", async () => {
+        const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+        const ensureHostBroker = vi.fn(async () => ({
+            ok: true, launched: true, reused: false, host: "127.0.0.1", port: 54321,
+            verifiedCapabilities: ["internal-v123"], verifiedBrokerPid: 4321,
+        }));
+        expect(await deviceBrokerCliAsync(["status"], "/project/minimal-cli", undefined, { ensureHostBroker })).toBe(0);
+        expect(log.mock.calls).toEqual([["Broker: ready (started)\nhttp://127.0.0.1:54321"]]);
+    });
+
+    it("keeps default broker failures actionable with a failing exit status", async () => {
+        const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+        const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+        const ensureHostBroker = vi.fn(async () => ({
+            ok: false, error: "host-broker-incompatible", diagnostics: ["Restart the host broker.", "Restart the host broker."],
+        }));
+        expect(await deviceBrokerCliAsync(["status"], "/project/minimal-cli", undefined, { ensureHostBroker })).toBe(1);
+        expect(log).not.toHaveBeenCalled();
+        expect(error.mock.calls).toEqual([["Broker: unavailable (host-broker-incompatible)"], ["Restart the host broker."]]);
+    });
+
+    it("formats verbose broker status and routes through ccc devices broker status", () => {
+        const direct = formatDeviceBrokerStatus({ cwd: "/project/broker-cli-test" }, true);
         expect(direct).toContain("=== CCC Device Broker ===");
         expect(direct).toContain("mode: host-broker-daemon");
         expect(direct).toContain(`cliProcessPid: ${process.pid}`);
@@ -998,18 +1024,18 @@ describe("device-lab host broker physical attach and CLI", () => {
         expect(direct).toContain("host-ccc-auto-start-compatible");
 
         const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-        const exitCode = deviceBrokerCli(["status"], "/project/broker-cli-test");
+        const exitCode = deviceBrokerCli(["status", "--verbose"], "/project/broker-cli-test");
         expect(exitCode).toBe(0);
         expect(log).toHaveBeenCalledWith(expect.stringContaining("=== CCC Device Broker ==="));
 
         log.mockClear();
-        const routedExitCode = devicesCli(["broker", "status"], "/project/broker-cli-test");
+        const routedExitCode = devicesCli(["broker", "status", "--verbose"], "/project/broker-cli-test");
         expect(routedExitCode).toBe(0);
         expect(log).toHaveBeenCalledWith(expect.stringContaining("mode: host-broker-daemon"));
 
         log.mockClear();
         const profileCwd = "/project/broker-cli-profile-test";
-        const profiledExitCode = devicesCli(["broker", "status"], profileCwd, "work");
+        const profiledExitCode = devicesCli(["broker", "status", "--verbose"], profileCwd, "work");
         expect(profiledExitCode).toBe(0);
         expect(log).toHaveBeenCalledWith(expect.stringContaining(`owner: ${deviceLabOwnerId(profileCwd, "work")}`));
         expect(log).not.toHaveBeenCalledWith(expect.stringContaining(`owner: ${deviceLabOwnerId(profileCwd)}`));
@@ -1032,7 +1058,7 @@ describe("device-lab host broker physical attach and CLI", () => {
             attempts: [],
         }));
 
-        const exitCode = await deviceBrokerCliAsync(["status"], "/project/broker-cli-async-test", undefined, { ensureHostBroker });
+        const exitCode = await deviceBrokerCliAsync(["status", "--verbose"], "/project/broker-cli-async-test", undefined, { ensureHostBroker });
 
         expect(exitCode).toBe(0);
         expect(ensureHostBroker).toHaveBeenCalledWith({ cwd: "/project/broker-cli-async-test", profile: undefined });
@@ -1060,7 +1086,7 @@ describe("device-lab host broker physical attach and CLI", () => {
             attempts: [],
         }));
 
-        const exitCode = await devicesCliAsync(["broker", "status"], "/project/devices-broker-cli-async-test", "work", { ensureHostBroker });
+        const exitCode = await devicesCliAsync(["broker", "status", "--verbose"], "/project/devices-broker-cli-async-test", "work", { ensureHostBroker });
 
         expect(exitCode).toBe(0);
         expect(ensureHostBroker).toHaveBeenCalledWith({ cwd: "/project/devices-broker-cli-async-test", profile: "work" });
@@ -1973,7 +1999,7 @@ describe("device-lab host broker physical attach and CLI", () => {
             ],
         }));
 
-        const exitCode = await deviceBrokerCliAsync(["status"], "/project/broker-cli-async-fail-test", undefined, { ensureHostBroker });
+        const exitCode = await deviceBrokerCliAsync(["status", "--verbose"], "/project/broker-cli-async-fail-test", undefined, { ensureHostBroker });
 
         expect(exitCode).toBe(1);
         expect(log).toHaveBeenCalledWith(expect.stringContaining("=== CCC Device Broker ==="));
@@ -1987,7 +2013,7 @@ describe("device-lab host broker physical attach and CLI", () => {
         const cwd = "/project/broker-cli-wired-test";
         mkdirSync(join(homedir(), ".ccc/devices"), { recursive: true });
 
-        const status = formatDeviceBrokerStatus({ cwd });
+        const status = formatDeviceBrokerStatus({ cwd }, true);
 
         expect(status).toContain("stateExists: true");
         expect(status).toContain("ownerResolution: host-broker-resolve");
@@ -2005,7 +2031,7 @@ describe("device-lab host broker physical attach and CLI", () => {
         mkdirSync(join(homedir(), ".ccc/devices"), { recursive: true });
 
         try {
-            const status = formatDeviceBrokerStatus({ cwd });
+            const status = formatDeviceBrokerStatus({ cwd }, true);
 
             expect(status).toContain("stateExists: true");
             expect(status).toContain("ownerResolution: host-broker-resolve");

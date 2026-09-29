@@ -43,7 +43,7 @@ export function durabilityLaunchPlan(mode, args, options = {}) {
         sourceCheckout,
         build,
         brokerRepair: mode === "real" && platform === "win32" && !informational
-            ? { command: process.execPath, args: [distCli, "devices", "broker", "status"] }
+            ? { command: process.execPath, args: [distCli, "devices", "broker", "status", "--verbose"] }
             : null,
         run: { command: process.execPath, args: [runner, ...args] },
     };

@@ -275,6 +275,8 @@ export async function runBrokerE2E(options: any = {}) {
         launchTimeoutMs: 5000,
     };
     const publicRoute = {
+        // This suite asserts internal routing diagnostics; normal MCP calls stay compact.
+        detail: true,
         autolaunch: true,
         brokerPort: port,
         hostCandidates: ["127.0.0.1"],

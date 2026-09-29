@@ -37,9 +37,13 @@ export function installDefaultImplicitBroker(client: Client, value: boolean) {
             ? request.arguments as Record<string, unknown>
             : {};
         const hasRouteDecision = "broker" in args || "viaBroker" in args || "implicitBroker" in args || "autolaunch" in args;
-        const nextRequest = hasRouteDecision
-            ? request
-            : { ...request, arguments: { ...args, implicitBroker: value } };
+        // Provider/routing suites inspect diagnostic contracts. Public-output suites
+        // override detail:false (or use a raw client) to exercise the minimal surface.
+        const nextRequest = { ...request, arguments: {
+            detail: true,
+            ...args,
+            ...(!hasRouteDecision ? { implicitBroker: value } : {}),
+        } };
         return originalCallTool(nextRequest, ...rest);
     }) as Client["callTool"];
 }
