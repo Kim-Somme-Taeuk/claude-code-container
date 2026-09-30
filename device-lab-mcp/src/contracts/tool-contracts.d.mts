@@ -42,6 +42,7 @@ export interface DeviceLabToolOutputMap {
     permission: ObjectOutput;
     clipboard: ActionOutput;
     ui: ObjectOutput;
+    list_files: { entries: Array<{ name: string; type: "file" | "directory" | "symlink" | "other"; size?: number }>; truncated?: true };
     backends: ObjectOutput;
     list_devices: DeviceListOutput | DeviceRecord[];
     inventory: ObjectOutput;

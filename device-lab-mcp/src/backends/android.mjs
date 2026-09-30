@@ -159,6 +159,7 @@ export function androidBackend(discovery = androidDiscovery()) {
             missing: discovery.provisioningMissing,
         },
         capabilities: [
+            "device_list_files",
             "device_inventory", "device_create", "device_delete", "device_start", "device_stop",
             "device_status", "device_exec", "device_screenshot",
             "device_record_video_start", "device_record_video_stop", "device_record_video_status",

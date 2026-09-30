@@ -18,7 +18,7 @@ describe("public Device Lab tool guidance", () => {
     afterAll(async () => { await cleanupDeviceLabMcpTestContext(context); });
 
     it("advertises unique unprefixed names within the catalog byte budget", () => {
-        expect(tools).toHaveLength(60);
+        expect(tools).toHaveLength(61);
         expect(new Set(tools.map(tool => tool.name)).size).toBe(tools.length);
         expect(tools.every(tool => !/^(device_|mobile_|display_)/.test(tool.name))).toBe(true);
         expect(Buffer.byteLength(JSON.stringify(tools), "utf8")).toBeLessThan(45579);

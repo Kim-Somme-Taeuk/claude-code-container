@@ -131,6 +131,7 @@ const BATTERY_CONTROL_ANY_OF = [{ required: ["level"] }, { required: ["status"] 
 const NETWORK_CONTROL_ANY_OF = [{ required: ["wifi"] }, { required: ["data"] }];
 
 export const DEVICE_FLOW_TOOL_NAMES = [
+    "device_list_files",
     "device_inventory",
     "device_record_video_status",
     "device_status",
@@ -318,6 +319,22 @@ export const SINGLE_BACKEND_TOOL_DEFAULTS = Object.freeze({
 
 
 export const TOOLS = [
+    {
+        name: "device_list_files",
+        description: "List immediate device directory entries, including hidden files, without recursion. Returns names, types and available file sizes; truncated means the entry or byte bound was reached. iOS Simulator requires bundleId and an app-container-relative path (use / for its root). Current-display and physical iOS adapters do not support listing. Hyper-V requires incarnationId.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                deviceId: DEVICE_ID_PROPERTY,
+                path: { type: "string", minLength: 1, maxLength: 4096 },
+                limit: { type: "integer", minimum: 1, maximum: 500, default: 100 },
+                bundleId: { type: "string", minLength: 1, maxLength: 255, description: "Required for iOS Simulator app-container listing." },
+                containerType: { type: "string", enum: ["data", "app", "groups"], default: "data" },
+                incarnationId: INCARNATION_ID_PROPERTY,
+            },
+            required: ["deviceId", "path"],
+        },
+    },
     { name: "device_backends", description: "Check backend prerequisites without starting devices; detail:true adds capabilities. Use device_list for owned IDs.", inputSchema: { type: "object", properties: {}, required: [] } },
     { name: "device_broker_status", description: "Inspect the zero-configuration host broker contract without starting devices", inputSchema: { type: "object", properties: { probe: { type: "boolean" } }, required: [] } },
     { name: "device_list", description: "Find owned device IDs and the current display. Use device_backends for prerequisites or device_inventory for host candidates.", inputSchema: { type: "object", properties: {}, required: [] } },

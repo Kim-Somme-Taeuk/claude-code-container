@@ -2,6 +2,7 @@ import { commandPath } from "../commands.mjs";
 import { readWindowsVmDevices } from "../state/windows-vm-state.mjs";
 
 const CAPABILITIES = [
+    "device_list_files",
     "device_inventory",
     "device_create",
     "device_delete",

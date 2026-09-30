@@ -1,3 +1,4 @@
+import { validateListFilesArgs } from "./file-listing.mjs";
 import { TOOLS, SINGLE_BACKEND_TOOL_DEFAULTS, GROUP_OPERATIONS, toolOperation } from "./tools.mjs";
 import { SINGLE_BACKEND_TOOL_DEFAULTS as OPERATION_DEFAULTS } from "./operation-tools.mjs";
 
@@ -22,6 +23,7 @@ export function toolInputError(name, args = {}) {
     }
     if (name === "permission" && ![[args.packageName, args.permission], [args.bundleId, args.service]].some((pair) => pair.every((value) => typeof value === "string" && value.trim()))) return "permission requires packageName and permission, or bundleId and service";
     if (name === "clipboard" && Object.hasOwn(args, "text") && typeof args.text !== "string") return "clipboard text must be a string";
+    if (name === "list_files") return validateListFilesArgs(args);
     if (name === "key" && !(typeof args.key === "string" && args.key.length > 0)
         && !(Number.isInteger(args.keyCode) && args.keyCode >= 0)) return "key requires key or keyCode";
     if (name === "move" && (!Number.isInteger(args.x) || args.x < 0 || !Number.isInteger(args.y) || args.y < 0)) return "move requires nonnegative integer x and y";

@@ -23,9 +23,10 @@ vi.mock("../../device-lab-mcp/src/broker.mjs", async (importOriginal) => {
 });
 vi.mock("../../device-lab-mcp/src/backends/android.mjs", async (importOriginal) => ({
     ...await importOriginal<Record<string, unknown>>(),
+    listAndroidDevices: () => [{ id: "target-a" }],
     handleAndroidTool: async (name: string, args: Record<string, any>) => {
         fixture.calls.push({ name, args, scope: fixture.scope });
-        return { content: [{ type: "text", text: JSON.stringify({ ok: true, status: 0, stdout: "", stderr: "", provider: "fixture" }) }], isError: false };
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, status: 0, stdout: name === "device_exec" && args.command?.includes("CCC-LIST-V1") ? "CCC-LIST-V1\0END\u00000\0" : "", stderr: "", provider: "fixture" }) }], isError: false };
     },
 }));
 vi.mock("../../device-lab-mcp/src/backends/linux-vm.mjs", async (importOriginal) => ({
@@ -89,7 +90,7 @@ describe("canonical public contract", () => {
         const arguments_ = { ...(tool === "record_video" ? { action: "status" } : tool === "permission" ? { action: "grant", permission: "android.permission.CAMERA" } : {}), ...direct, key: "HOME", text: "needle", packageName: "example.app", path: "/fixture/app.apk", confirmDestructive: true };
         const result = parse(await flow([{ tool, arguments: arguments_ }]));
         expect(result.ok, JSON.stringify(result)).toBe(true);
-        expect(fixture.calls.map(call => publicToolName(call.name))).toEqual([tool]);
+        expect(fixture.calls.map(call => publicToolName(call.name))).toEqual([tool === "list_files" ? "exec" : tool]);
     });
     it.each(["mobile_install_app", "mobile_launch_app", "start", "exec", "backends", "run_flow", "mobile_run_flow", "unknown_action"])("rejects %s in the canonical flow before dispatch", async (name) => {
         const result = parse(await flow([step({}, name)]));

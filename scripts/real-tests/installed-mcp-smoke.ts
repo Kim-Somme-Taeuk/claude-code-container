@@ -37,6 +37,7 @@ export function installedMcpSmokeSample(toolName) {
     const byName = {
         backends: { ...direct },
         list_devices: {},
+        list_files: { ...direct, deviceId: androidId, path: "/", limit: 2 },
         inventory: { ...direct, backend: "android-emulator" },
         image_list: { },
         image_import: { name: "Missing image smoke", sourcePath: "missing-smoke.qcow2" },

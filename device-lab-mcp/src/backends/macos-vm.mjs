@@ -128,6 +128,7 @@ export function macosBackend(discovery = macosDiscovery()) {
         missing: discovery.missing,
         providers: discovery.providers,
         capabilities: [
+            "device_list_files",
             "device_inventory",
             "device_create",
             "device_delete",

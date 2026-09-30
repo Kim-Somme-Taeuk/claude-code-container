@@ -516,6 +516,9 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             assertReportedLocalPath(upload.uploaded.localPath, uploadSource, options.brokerOnly);
             assert.strictEqual(upload.uploaded.remotePath, uploadRemote);
 
+            const listing = parsePayload(await callTool("list_files", { detail: true, deviceId, path: "C:\\Users\\WDAGUtilityAccount\\Desktop", limit: 500 }));
+            assert.ok(listing.entries.some((entry: any) => entry.name === "ccc-upload.txt" && entry.type === "file"));
+
             currentStep = "verify uploaded file";
             const uploadVerificationTarget = join(tempDir, "upload-verification.txt");
             parsePayload(await callTool("download", { detail: true,

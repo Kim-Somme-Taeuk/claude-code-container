@@ -264,6 +264,9 @@ export async function runMacosVmE2E(options: any = {}) {
                     assert.strictEqual(upload.uploaded.localPath, uploadLocalPath);
                     assert.strictEqual(upload.uploaded.remotePath, remotePath);
 
+                    const listing = parsePayload(await callTool("list_files", { detail: true, deviceId, path: "/tmp", limit: 500 }));
+                    assert.ok(listing.entries.some((entry: any) => entry.name === remotePath.split("/").at(-1) && entry.type === "file"));
+
                     const download = parsePayload(await callTool("download", { detail: true,
                         deviceId,
                         remotePath,

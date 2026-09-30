@@ -2,7 +2,7 @@
 
 ## Current canonical contract (2026-09-30)
 
-Discovery and public dispatch now share one 60-tool unprefixed catalog. The historical
+Discovery and public dispatch now share one 61-tool unprefixed catalog. The historical
 compatibility observations below are superseded: six mobile aliases and hidden
 broker/image operations are no longer public MCP calls. Creation arguments are
 flat, existing-device tools use deviceId without backend selectors, and flow steps require
@@ -17,11 +17,17 @@ Common mobile/desktop actions share click, double_click, type and key; the
 current display uses these same tools with deviceId. Move and cursor queries
 are separate. Simple successful actions return ok, while queries retain useful
 data/native images and errors/warnings retain actionable evidence.
-The 76-tool intermediate catalog is reduced to 60 tools by grouping snapshot,
+The 76-tool intermediate catalog was reduced to 60 tools by grouping snapshot,
 recording, permission and clipboard operations, sharing mobile/desktop `ui`, and
 removing eight standalone preparation or diagnostic calls. Group actions resolve
 before routing, policy and flow checks; recording start/stop remain disallowed in
 flows. An empty clipboard string means write, while omitted text means read.
+
+`list_files` adds bounded directory browsing as the 61st tool. It takes a device
+ID and path, infers the provider, and returns immediate names, types and available
+file sizes. The iOS Simulator route stays inside a selected app container;
+physical-iOS app file sharing is a platform capability without a Device Lab
+listing adapter yet. See [file listing requirements](REQ__file-listing.md).
 
 `status` includes read-only automation diagnostics and live readiness for running
 container QEMU guests. `backends` includes broker diagnostics. `start` prepares
@@ -32,7 +38,7 @@ Provider inference reads persisted iOS/macOS identities without running live
 inventory queries. The chosen provider still checks the actual target before
 operating; ordinary device-list queries retain live observations.
 
-Serialized discovery schemas measure 39,639 bytes versus 45,579 bytes for the
+Serialized discovery schemas measure 40,726 bytes (39,639 before `list_files`) versus 45,579 bytes for the
 76-tool intermediate catalog and 56,825 bytes for the earlier 87-tool catalog
 (JSON UTF-8 bytes, not model token counts).
 

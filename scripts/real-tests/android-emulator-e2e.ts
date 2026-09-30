@@ -294,6 +294,9 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             assertReportedLocalPath(upload.uploaded.localPath, uploadSource, options.brokerOnly);
             assert.strictEqual(upload.uploaded.remotePath, remotePath);
 
+            const listing = parsePayload(await callTool("list_files", { detail: true, deviceId, path: "/data/local/tmp", limit: 500 }));
+            assert.ok(listing.entries.some((entry: any) => entry.name === remotePath.split("/").at(-1) && entry.type === "file"));
+
             const download = parsePayload(await callTool("download", { detail: true, deviceId, remotePath, localPath: downloadTarget }));
             assert.strictEqual(download.provider, "adb");
             assert.strictEqual(download.downloaded.remotePath, remotePath);

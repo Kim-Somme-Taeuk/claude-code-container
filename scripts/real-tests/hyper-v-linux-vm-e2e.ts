@@ -286,6 +286,8 @@ export async function runHyperVLinuxVmE2E(options: any = {}) {
             writeFileSync(uploadPath, "ccc-hyper-v-linux-transfer-ok", "utf8");
             prepareHyperVLinuxDownloadDestination(downloadPath);
             resultValue(hyperVLinuxToolPayload(await callTool("upload", { detail: true, ...direct, localPath: uploadPath, remotePath })));
+            const listing = hyperVLinuxToolPayload(await callTool("list_files", { detail: true, ...direct, path: "/tmp", limit: 500 }));
+            assert.ok(listing.entries.some((entry: any) => entry.name === "ccc-hyper-v-linux-e2e.txt" && entry.type === "file"));
             resultValue(hyperVLinuxToolPayload(await callTool("download", { detail: true, ...direct, remotePath, localPath: downloadPath })));
             assert.strictEqual(readFileSync(downloadPath, "utf8"), "ccc-hyper-v-linux-transfer-ok");
 

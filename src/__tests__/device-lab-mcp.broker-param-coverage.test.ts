@@ -3,6 +3,7 @@ import { BROKER_DEVICE_TOOL_PARAM_KEYS } from "../../device-lab-mcp/src/broker.m
 import { TOOLS } from "../../device-lab-mcp/src/tools.mjs";
 
 const BROKER_DEVICE_TOOL_ROUTABLE_TOOLS = new Set([
+    "list_files",
     "exec",
     "screenshot",
     "click",

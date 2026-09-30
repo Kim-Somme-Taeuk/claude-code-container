@@ -273,6 +273,7 @@ export function windowsBackend() {
         missing: discovery.missing,
         tools: { wsb: discovery.wsb },
         capabilities: [
+            "device_list_files",
             "device_inventory",
             "device_create",
             "device_delete",

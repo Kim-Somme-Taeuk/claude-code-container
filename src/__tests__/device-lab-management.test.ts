@@ -41,9 +41,9 @@ beforeAll(() => startServer());
 beforeEach(() => { fixture.calls.length = 0; });
 
 describe("focused management tools", () => {
-    it("advertises 60 unique tools without removed preparation or redundant management tools", () => {
-        expect(TOOLS).toHaveLength(60);
-        expect(new Set(TOOLS.map(t => t.name)).size).toBe(60);
+    it("advertises 61 unique tools without removed preparation or redundant management tools", () => {
+        expect(TOOLS).toHaveLength(61);
+        expect(new Set(TOOLS.map(t => t.name)).size).toBe(61);
         for (const old of ["disk_materialize", "session_open", "guest_agent_provision", "readiness_probe", "target_list", "guest_agent_status", "broker_status", "automation_status", "snapshot_list", "record_video_start", "get_clipboard", "dump_ui", "accessibility_snapshot"]) {
             expect(toolInputError(old, {})).toContain("Unknown tool");
         }

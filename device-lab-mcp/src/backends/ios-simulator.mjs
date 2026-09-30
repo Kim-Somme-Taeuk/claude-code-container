@@ -1,3 +1,4 @@
+import { listContainedDirectory, validateListFilesArgs, LIST_FILES_DEFAULT_LIMIT } from "../file-listing.mjs";
 import { createWaitBudget } from "../wait-budget.mjs";
 import { spawn } from "child_process";
 import { createHash, randomUUID } from "crypto";
@@ -117,6 +118,7 @@ export function iosBackend(discovery = iosDiscovery()) {
         missing: discovery.missing,
         tools: { xcrun: discovery.xcrun },
         capabilities: [
+            "device_list_files",
             "device_inventory",
             "device_create",
             "device_delete",
@@ -1353,6 +1355,28 @@ async function handleIosToolUnlocked(name, args) {
                 recording: { ...pending, active: false, localPath: safeLocalPath, stoppedAt: now() },
                 device: updated,
             });
+        }
+
+        case "device_list_files": {
+            const device = findIosDevice(args.deviceId);
+            if (!device) return undefined;
+            const error = validateListFilesArgs(args);
+            if (error) return jsonResult({ ok: false, error });
+            if (!args.bundleId) return jsonResult({ ok: false, error: "list-files-bundle-id-required", detail: "iOS Simulator listing requires bundleId to select an app container." });
+            const discovery = iosDiscovery();
+            if (!discovery.available) return missingPrereqResult(discovery);
+            const ownedTarget = resolveOwnedSimulatorTarget(discovery.xcrun, device);
+            if (ownedTarget.error) return textResult(false, ownedTarget.error);
+            const container = resolveIosAppContainer(discovery.xcrun, ownedTarget.target, args.bundleId, iosContainerType(args.containerType));
+            if (container.error) return fail(container.error);
+            const requested = args.path.replace(/^[/\\]+/, "") || ".";
+            if (requested.split(/[/\\]/).includes("..")) return jsonResult({ ok: false, error: "list-files-container-escape" });
+            const target = requested === "." ? { path: container.containerRoot } : pathInsideContainer(container.containerRoot, requested);
+            if (target.error) return textResult(false, target.error);
+            const contained = ensureContainerPathForRead(container.containerRoot, target.path);
+            if (contained.error) return textResult(false, contained.error);
+            try { return jsonResult(listContainedDirectory(container.containerRoot, requested, args.limit ?? LIST_FILES_DEFAULT_LIMIT)); }
+            catch (error) { return jsonResult({ ok: false, error: "list-files-container-read-failed", detail: error.code || error.message }); }
         }
 
         case "device_upload": {

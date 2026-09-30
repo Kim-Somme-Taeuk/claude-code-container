@@ -247,6 +247,9 @@ export async function runIosSimulatorE2E(options: any = {}) {
                 assert.strictEqual(upload.uploaded.remotePath, remotePath);
                 assert.strictEqual(upload.uploaded.bundleId, appBundleId);
 
+                const listing = parsePayload(await callTool("list_files", { detail: true, deviceId, path: "Documents", limit: 500, bundleId: appBundleId }));
+                assert.ok(listing.entries.some((entry: any) => entry.name === remotePath.split("/").at(-1) && entry.type === "file"));
+
                 const download = parsePayload(await callTool("download", { detail: true,
                     deviceId,
                     bundleId: appBundleId,

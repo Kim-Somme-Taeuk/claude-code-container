@@ -13,6 +13,8 @@ const success = { status: 0, stdout: "", stderr: "" };
 const image = { type: "image", data: "aW1hZ2UtYnl0ZXM=", mimeType: "image/png" };
 const tree = { name: "Editor", children: [{ name: "Unique text", provider: "user field", runtime: { pid: 82 }, ownerId: "UI content", source: "user document" }] };
 const fixtures: Record<string, Fixture> = {};
+const listing = { entries: [{ name: ".hidden", type: "file", size: 0 }, { name: "Documents", type: "directory" }], truncated: true };
+add("device_list_files", listing, listing);
 function add(name: string, input: Data, keep: Data, absent?: string[]) { fixtures[name] = { input, keep, absent }; }
 function action(name: string, data: Data, provider = "adb") {
     add(name, { ...data, provider, ...success }, data, ["stdout", "stderr", "status"]);

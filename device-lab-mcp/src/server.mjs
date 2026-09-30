@@ -1,3 +1,4 @@
+import { buildListFilesCommand, listFilesFromExecResult } from "./file-listing.mjs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -31,6 +32,7 @@ const DEVICE_FLOW_ALLOWED_TOOLS = new Set(DEVICE_FLOW_TOOL_NAMES);
 const BROKER_LIFECYCLE_COMMANDS = new Set(["device_create", "device_status", "device_start", "device_stop", "device_reboot", "device_delete"]);
 const HYPER_V_LIFECYCLE_BACKENDS = new Set(["windows-vm", "linux-vm"]);
 const BROKER_READONLY_DEVICE_TOOLS = new Set([
+    "device_list_files",
     "device_inventory",
     "device_snapshot_list",
     "device_record_video_status",
@@ -87,6 +89,7 @@ const BROKER_DEVICE_TOOL_RPC_BUFFER_MS = 30000;
 const MAX_DEVICE_TOOL_RPC_TIMEOUT_MS = MAX_DEVICE_OPERATION_TIMEOUT_MS + BROKER_DEVICE_TOOL_RPC_BUFFER_MS;
 const BROKER_BOUNDED_WAIT_TOOLS = new Set(["mobile_wait_for_text", "mobile_wait_for_app"]);
 const DIRECT_DEVICE_BACKEND_HINT_TOOLS = new Set([
+    "device_list_files",
     ...BROKER_LIFECYCLE_COMMANDS,
     "device_exec",
     "device_screenshot",
@@ -1111,13 +1114,21 @@ async function maybeHandleImplicitBrokerDeviceTool(name, args) {
             ...args, ...selectedBrokerProbeOptions(probe, inventory), backend: brokerBackend,
         });
     }
+    const listing = name === "device_list_files";
+    if (listing && brokerBackend === "ios-device") return jsonResult({ ok: false, error: "list-files-unsupported", detail: "The current Device Lab physical iOS adapter does not implement file listing.", deviceId: args.deviceId });
+    const composedListing = listing && brokerBackend !== "ios-simulator";
+    const listingCommand = composedListing ? buildListFilesCommand(brokerBackend, args) : undefined;
+    const executionArgs = { ...routedArgs };
+    if (composedListing) for (const key of ["path", "limit", "bundleId", "containerType"]) delete executionArgs[key];
     const result = await brokerDeviceTool({
-        ...routedArgs,
+        ...executionArgs,
         ...selectedBrokerProbeOptions(probe, inventory),
         ...brokerDeviceToolExecutionTimeout(name, args),
         ...(brokerBackend ? { backend: brokerBackend } : {}),
-        tool: common.name,
+        tool: composedListing ? "device_exec" : common.name,
+        ...(composedListing ? { command: listingCommand } : {}),
     });
+    if (composedListing) return listFilesFromExecResult(result.ok && result.result?.mcpResult?.content ? result.result.mcpResult : jsonResult(result), args);
     if (result.ok && result.result?.mcpResult?.content) return result.result.mcpResult;
     const routedBy = BROKER_MUTATING_DEVICE_TOOLS.has(name) ? "device-mutating-broker-implicit" : "device-readonly-broker-implicit";
     if (result.ok && BROKER_RECORDING_DEVICE_TOOLS.has(name) && result.result && typeof result.result === "object") {
@@ -1506,6 +1517,7 @@ async function dispatchTool(name, rawArgs) {
         ? inferLifecycleBackend(args.deviceId) : null;
     if (directTarget?.error === "ambiguous-device-backend") return jsonResult(directTarget);
 
+    if (name === "device_list_files" && args.deviceId === CURRENT_DISPLAY_DEVICE_ID) return jsonResult({ ok: false, error: "list-files-unsupported", detail: "Current-display targets do not provide a filesystem adapter." });
     const hyperVLinuxResult = await maybeHandleHyperVLinuxVmTool(name, args);
     if (hyperVLinuxResult) return hyperVLinuxResult;
 
@@ -1550,6 +1562,15 @@ async function dispatchTool(name, rawArgs) {
         name = common.name;
     }
 
+    if (name === "device_list_files") {
+        const owner = directTarget || inferLifecycleBackend(args.deviceId);
+        if (!owner.ok) return unhandledDeviceToolResult(name, args) || jsonResult(owner);
+        if (owner.backend === "ios-device") return jsonResult({ ok: false, error: "list-files-unsupported", detail: "The current Device Lab physical iOS adapter does not implement file listing.", deviceId: args.deviceId });
+        if (owner.backend !== "ios-simulator") {
+            const command = buildListFilesCommand(owner.backend, args);
+            return listFilesFromExecResult(await dispatchTool("device_exec", { ...args, command }), args);
+        }
+    }
     const androidResult = await handleAndroidTool(name, args);
     if (androidResult) return androidResult;
 

@@ -673,6 +673,7 @@ const DEVICE_BROKER_BACKEND_STATE_KEYS = ["android", "android-device", "ios", "i
 const DEVICE_BROKER_PHYSICAL_BACKENDS = new Set(["android-device", "ios-device"]);
 const DEVICE_BROKER_MACOS_PROVIDERS = new Set(["tart", "vz", "utmctl"]);
 const ANDROID_EMULATOR_CAPABILITIES = [
+    "device_list_files",
     "device_inventory", "device_create", "device_delete", "device_start", "device_stop",
     "device_status", "device_exec", "device_screenshot",
     "device_record_video_start", "device_record_video_stop", "device_record_video_status",
@@ -693,6 +694,7 @@ const ANDROID_EMULATOR_CAPABILITIES = [
     "mobile_screenshot",
 ];
 const ANDROID_REAL_CAPABILITIES = [
+    "device_list_files",
     "device_inventory", "device_attach", "device_detach", "device_start", "device_stop",
     "device_status", "device_wireless", "device_exec", "device_screenshot",
     "device_record_video_start", "device_record_video_stop", "device_record_video_status",
@@ -711,6 +713,7 @@ const ANDROID_REAL_CAPABILITIES = [
     "mobile_screenshot",
 ];
 const IOS_SIMULATOR_CAPABILITIES = [
+    "device_list_files",
     "device_inventory", "device_create", "device_delete", "device_start", "device_stop",
     "device_status", "device_exec", "device_screenshot",
     "device_record_video_start", "device_record_video_stop", "device_record_video_status",
@@ -736,6 +739,7 @@ const IOS_REAL_CAPABILITIES = [
     "mobile_stop_app",
 ];
 const DESKTOP_DEVICE_CAPABILITIES = [
+    "device_list_files",
     "device_inventory", "device_create", "device_delete", "device_start", "device_stop",
     "device_status", "device_exec", "device_screenshot", "device_click",
     "device_double_click", "device_key", "device_type", "device_scroll",
@@ -749,6 +753,7 @@ const MACOS_VM_CAPABILITIES = [
     "device_snapshot_create", "device_snapshot_restore", "device_snapshot_delete",
 ];
 const HYPER_V_VM_CAPABILITIES = [
+    "device_list_files",
     "device_inventory", "device_create", "device_delete", "device_start", "device_stop", "device_reboot", "device_status",
     "device_exec", "device_upload", "device_download",
     "device_screenshot", "device_click", "device_double_click", "device_key", "device_type", "device_scroll", "device_cursor_position",
@@ -872,6 +877,7 @@ const DEVICE_BROKER_ANDROID_DEVICE_TOOL_METHODS = new Set(
     ["device_wireless", ...DEVICE_BROKER_ANDROID_TOOL_METHODS].filter((tool) => !DEVICE_BROKER_ANDROID_PHYSICAL_UNSAFE_BASE_TOOLS.has(tool)),
 );
 const DEVICE_BROKER_IOS_SIMULATOR_TOOL_METHODS = new Set([
+    "device_list_files",
     "device_status",
     "device_exec",
     "device_screenshot",
@@ -952,6 +958,7 @@ const DEVICE_BROKER_BACKEND_TOOL_METHODS = new Set([
 const DEVICE_BROKER_UNATTACHED_TOOL_METHODS = new Set(["device_wireless"]);
 const DEVICE_BROKER_TOOL_METHODS = new Set(["device_inventory", "device_record_video_status", "device_record_video_start", "device_record_video_stop", ...DEVICE_BROKER_BACKEND_TOOL_METHODS]);
 const DEVICE_BROKER_READ_ONLY_TOOL_METHODS = new Set([
+    "device_list_files",
     "device_inventory",
     "device_status",
     "device_snapshot_list",
@@ -4700,7 +4707,7 @@ function translateContainerProjectPathForHost(value: unknown, normalized: Normal
 
 function translateDeviceToolPathsForHost(parsed: DeviceToolParamSuccess, normalized: NormalizedBrokerOptions): DeviceToolParamSuccess | BrokerRpcResult {
     const params = { ...parsed.params };
-    for (const key of ["localPath", "path"]) {
+    for (const key of parsed.tool === "device_list_files" ? ["localPath"] : ["localPath", "path"]) {
         if (typeof params[key] === "string") {
             const translated = translateContainerProjectPathForHost(params[key], normalized);
             if (!translated.ok) {
@@ -11414,6 +11421,7 @@ function deviceLabBackendToolArgs(parsed: DeviceToolParamSuccess): Record<string
         "component",
         "bundleId",
         "containerType",
+        "limit",
         "snapshotName",
         "snapshotId",
         "force",

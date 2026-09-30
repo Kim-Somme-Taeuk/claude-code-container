@@ -48,7 +48,7 @@ const OPERATION_TOOLS = new Map([
     ])],
     ["ios", new Set([
         "device_create", "device_delete", "device_start", "device_stop",
-        "device_exec", "device_screenshot", "device_record_video_start", "device_record_video_stop",
+        "device_exec", "device_list_files", "device_screenshot", "device_record_video_start", "device_record_video_stop",
         "device_upload", "device_download", "device_install_app", "device_launch_app", "device_reset",
         "mobile_dump_ui", "mobile_get_clipboard", "mobile_screenshot",
         ...COMMON_MOBILE_MUTATIONS,

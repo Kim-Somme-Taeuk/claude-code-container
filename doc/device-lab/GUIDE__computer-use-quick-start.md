@@ -14,6 +14,32 @@ There is no remembered device selection shared between agents. To perform severa
 known actions, put `deviceId` once on `run_flow` and finish with a screenshot;
 start a new call when you need to inspect the result before deciding what to do.
 
+## Browse and transfer files
+
+Use `list_files({deviceId,path})` to see immediate directory entries, including
+hidden files. Each entry has `name`, `type`, and file `size` when available.
+An empty directory returns `entries:[]`; failures remain errors. Results default
+to 100 entries (`limit` accepts 1–500) and have a fixed byte cap;
+`truncated:true` means more entries exist. Listing does not recurse or read file
+contents. POSIX directory globs expand before the bounded output loop, so a very
+large directory may still hit the transport deadline.
+
+Use `upload` and `download` to transfer files. On iOS Simulator, specify
+`bundleId` and an app-relative `path`, such as `Documents`; `containerType`
+defaults to `data`. Paths cannot escape that app container. Actual iPhones can
+expose file-sharing-enabled app Documents, but Device Lab does not yet implement
+that physical-iOS listing adapter. This is not unrestricted iPhone filesystem
+access.
+
+## Preparation tools that remain
+
+`create` defines a device; `attach` and `wireless` connect physical devices;
+`start` boots a device. `image_import`, `base_image_create` and `base_image_clone`
+manage image inputs, while `workspace_sync` prepares working files. These are
+intentional resource changes. `backends` and `inventory` are queries. Internal
+disk, guest-agent and automation-session preparation runs through the operation
+that needs it, without a separate prerequisite tool call.
+
 ## Choose inputs for the target platform
 
 Use `status({deviceId})` for device state and automation diagnostics. For a running

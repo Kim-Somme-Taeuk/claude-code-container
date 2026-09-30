@@ -1,3 +1,4 @@
+import { buildListFilesCommand, listFilesFromExecResult } from "../file-listing.mjs";
 import { randomUUID } from "crypto";
 import { spawn, spawnSync } from "child_process";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "fs";
@@ -2194,6 +2195,7 @@ export function guestAgentProvision(args = {}, options = {}) {
 }
 
 export const LINUX_VM_CAPABILITIES = [
+    "device_list_files",
     "device_inventory",
     "device_create",
     "device_delete",
@@ -2308,6 +2310,7 @@ function handleLinuxVmToolUnlocked(name, args = {}, options = {}) {
     else if (name === "device_session_open") result = openSession(linuxArgs, options);
     else if (name === "device_workspace_sync") result = syncWorkspace(linuxArgs, options);
     else if (name === "device_artifacts_export") result = exportArtifacts(linuxArgs, options);
+    else if (name === "device_list_files") return listFilesFromExecResult(linuxVmMcpResult(guestExec({ ...linuxArgs, command: buildListFilesCommand("linux-vm", args), timeoutMs: 30000 }, options)), args);
     else if (name === "device_exec") result = guestExec({ ...linuxArgs, timeoutMs: args.helperTimeoutMs ?? args.timeoutMs }, options);
     else if (name === "device_upload") result = guestPush(linuxArgs, options);
     else if (name === "device_download") {

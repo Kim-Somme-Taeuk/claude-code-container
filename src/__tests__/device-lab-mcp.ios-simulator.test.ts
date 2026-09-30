@@ -350,6 +350,24 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         expect(uploadPayload.containerRoot).toBe(iosContainerRoot);
         expect(readFileSync(join(iosContainerRoot, "Documents/uploaded.txt"), "utf-8")).toBe("ios upload content");
 
+        writeFileSync(join(iosContainerRoot, "Documents/.hidden"), "abc");
+        const files = await client.callTool({ name: "list_files", arguments: {
+            deviceId: ownedDeviceId, path: "Documents", bundleId: "com.example.Test",
+        } });
+        expect(files.isError, JSON.stringify(files)).not.toBe(true);
+        expect(parseToolJson(files)).toEqual({ entries: expect.arrayContaining([
+            expect.objectContaining({ name: "uploaded.txt", type: "file" }),
+            expect.objectContaining({ name: ".hidden", type: "file" }),
+        ]) });
+        const limitedFiles = await client.callTool({ name: "list_files", arguments: {
+            deviceId: ownedDeviceId, path: "Documents", bundleId: "com.example.Test", limit: 1,
+        } });
+        expect(parseToolJson(limitedFiles)).toMatchObject({ entries: [expect.any(Object)], truncated: true });
+        for (const invalid of [{ path: "Documents" }, { path: "../", bundleId: "com.example.Test" }, { path: "absent", bundleId: "com.example.Test" }]) {
+            const refused = await client.callTool({ name: "list_files", arguments: { deviceId: ownedDeviceId, ...invalid } });
+            expect(refused.isError, JSON.stringify(refused)).toBe(true);
+        }
+
         const download = await client.callTool({
             name: "download",
             arguments: { deviceId: ownedDeviceId, remotePath: "Documents/uploaded.txt", localPath: localDownloadPath, bundleId: "com.example.Test" },
@@ -401,6 +419,12 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         });
         expect(symlinkDownload.isError).toBe(true);
         expect((symlinkDownload.content as Array<{ text?: string }>)[0].text).toContain("escapes the container");
+
+        const escapedFiles = await client.callTool({ name: "list_files", arguments: {
+            deviceId: ownedDeviceId, path: "Links", bundleId: "com.example.Test",
+        } });
+        expect(escapedFiles.isError, JSON.stringify(escapedFiles)).toBe(true);
+        expect(JSON.stringify(escapedFiles)).not.toContain('"entries"');
 
         const reset = await client.callTool({
             name: "reset",

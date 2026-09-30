@@ -24,6 +24,7 @@ const ANDROID_TRANSFER_TIMEOUT_MS = 300_000;
 const ANDROID_HELPER_MAX_TIMEOUT_MS = 300_000;
 
 const ANDROID_REAL_CAPABILITIES = [
+    "device_list_files",
     "device_inventory", "device_attach", "device_detach", "device_start", "device_stop",
     "device_status", "device_wireless", "device_exec", "device_screenshot",
     "device_record_video_start", "device_record_video_stop", "device_record_video_status",

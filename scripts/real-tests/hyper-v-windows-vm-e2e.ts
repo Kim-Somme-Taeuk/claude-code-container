@@ -510,6 +510,8 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
             writeFileSync(uploadPath, "ccc-hyper-v-transfer-ok", "utf8");
             resultValue(payload(await callTool("upload", { detail: true, ...direct, localPath: uploadPath, remotePath })));
             ensureHyperVWindowsDownloadDestination(repoRoot, downloadPath);
+            const listing = payload(await callTool("list_files", { detail: true, ...direct, path: "C:\\ccc", limit: 500 }));
+            assert.ok(listing.entries.some((entry: any) => entry.name === "hyper-v-e2e.txt" && entry.type === "file"));
             resultValue(payload(await callTool("download", { detail: true, ...direct, remotePath, localPath: downloadPath })));
             assert.strictEqual(readFileSync(downloadPath, "utf8"), "ccc-hyper-v-transfer-ok");
 

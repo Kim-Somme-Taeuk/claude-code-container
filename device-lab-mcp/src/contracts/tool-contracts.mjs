@@ -10,6 +10,7 @@ function contractError(tool, detail, payload) {
 }
 
 const contractGroups = {
+    "file-list-v1": ["device_list_files"],
     "backend-catalog-v1": ["device_backends"],
     "broker-status-v1": ["device_broker_status"],
     "device-list-v1": ["device_list"],
@@ -74,6 +75,7 @@ export const DEVICE_LAB_OUTPUT_CONTRACTS = Object.freeze(Object.fromEntries(
 ));
 
 const requiredFieldsByContract = {
+    "file-list-v1": ["entries"],
     "device-list-v1": ["devices"],
     "vm-image-list-v1": ["images"],
     "vm-image-import-v1": ["image"],
@@ -104,7 +106,7 @@ const requiredFieldsByContract = {
 };
 
 const deviceObjectContracts = new Set(["lifecycle-device-v1", "physical-attach-v1", "base-image-device-v1", "snapshot-restore-v1"]);
-const arrayFields = new Set(["devices", "images", "results", "targets"]);
+const arrayFields = new Set(["devices", "images", "results", "targets", "entries"]);
 
 export function validateDeviceLabToolOutput(tool, payload, args = {}) {
     let contract = DEVICE_LAB_OUTPUT_CONTRACTS[tool];
