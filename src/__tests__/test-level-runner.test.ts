@@ -93,13 +93,12 @@ function canonicalDeviceLabToolSurface() {
     return JSON.parse(result.stdout) as { toolCount: number; sha256: string };
 }
 
+function schemaBranches(schema: any): any[] {
+    return [schema, ...[...(schema?.oneOf || []), ...(schema?.anyOf || []), ...(schema?.allOf || [])].flatMap(schemaBranches)];
+}
+
 function advertisedDeviceLabToolSchemas() {
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", "import { TOOLS } from './device-lab-mcp/src/tools.mjs'; console.log(JSON.stringify(TOOLS.map((tool) => [tool.name, Object.keys(tool.inputSchema?.properties || {})])));"], {
-        cwd: repoRoot,
-        encoding: "utf-8",
-    });
-    expect(result.status).toBe(0);
-    return new Map((JSON.parse(result.stdout) as Array<[string, string[]]>).map(([name, properties]) => [name, new Set(properties)]));
+    return new Map(TOOLS.map(tool => [tool.name, new Set(schemaBranches(tool.inputSchema).flatMap(branch => Object.keys(branch.properties || {})))]));
 }
 
 function advertisedDeviceLabToolAnyOfRequired() {
@@ -112,12 +111,15 @@ function advertisedDeviceLabToolAnyOfRequired() {
 }
 
 function advertisedDeviceLabToolEnums() {
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", "import { TOOLS } from './device-lab-mcp/src/tools.mjs'; console.log(JSON.stringify(TOOLS.map((tool) => [tool.name, Object.fromEntries(Object.entries(tool.inputSchema?.properties || {}).filter(([, schema]) => Array.isArray(schema?.enum)).map(([key, schema]) => [key, schema.enum]))])));"], {
-        cwd: repoRoot,
-        encoding: "utf-8",
-    });
-    expect(result.status).toBe(0);
-    return new Map(JSON.parse(result.stdout) as Array<[string, Record<string, string[]>]>);
+    return new Map(TOOLS.map(tool => {
+        const enums: Record<string, string[]> = {};
+        for (const branch of schemaBranches(tool.inputSchema)) {
+            for (const [key, value] of Object.entries(branch.properties || {}) as Array<[string, any]>) {
+                if (Array.isArray(value.enum)) enums[key] = [...new Set([...(enums[key] || []), ...value.enum])];
+            }
+        }
+        return [tool.name, enums];
+    }));
 }
 
 function astChildren(node: unknown): unknown[] {
@@ -566,7 +568,7 @@ function functionSwitchCaseLabels(file: string, functionName: string) {
 
 function deviceLabBackendHandlerCases() {
     const backendRoot = join(repoRoot, "device-lab-mcp", "src", "backends");
-    return new Map([
+    const handlers = new Map([
         ["android-emulator", functionSwitchCaseLabels(join(backendRoot, "android.mjs"), "handleAndroidToolUnlocked")],
         ["android-device", functionSwitchCaseLabels(join(backendRoot, "android-device.mjs"), "handleAndroidRealToolUnlocked")],
         ["ios-simulator", functionSwitchCaseLabels(join(backendRoot, "ios-simulator.mjs"), "handleIosToolUnlocked")],
@@ -576,6 +578,16 @@ function deviceLabBackendHandlerCases() {
         ["macos-vm", functionSwitchCaseLabels(join(backendRoot, "macos-vm.mjs"), "handleMacosToolUnlocked")],
         ["linux-vm", [...LINUX_VM_CAPABILITIES].map(publicToolName).sort()],
     ]);
+    const server = readFileSync(join(repoRoot, "device-lab-mcp/src/server.mjs"), "utf8");
+    expect(server).toContain('if (name === "device_list_files")');
+    expect(server).toContain('buildListFilesCommand(owner.backend, args)');
+    expect(server).toContain('listFilesFromExecResult(await dispatchTool("device_exec", { ...args, command }), args)');
+    for (const backend of ["android-emulator", "android-device", "windows-sandbox", "macos-vm"]) {
+        const cases = handlers.get(backend)!;
+        expect(cases).toContain("exec");
+        cases.push("list_files");
+    }
+    return handlers;
 }
 
 function quotedSetConstant(text: string, name: string) {
@@ -1404,7 +1416,9 @@ describe("test level runner", () => {
         const capabilities = deviceLabMcpBackendCapabilities();
         const handlerCases = deviceLabBackendHandlerCases();
         const expected = new Map<string, string[]>([
+            ["android-emulator", ["reset"]], // Private delegate used by public clear_app_data.
             ["android-device", [
+                "reset", // Private delegate used by public clear_app_data.
                 "set_battery",
                 "set_location",
                 "set_network",
@@ -1498,8 +1512,12 @@ describe("test level runner", () => {
         expect(missing).toEqual([]);
 
         const routedSchemaKeys = new Set([...routedTools].flatMap((tool) => schemas.get(tool) || []));
+        const translatedInputs = new Set(["eraseSimulator", "helperTimeoutMs"]);
+        const normalization = readFileSync(join(repoRoot, "device-lab-mcp/src/tool-arguments.mjs"), "utf8");
+        expect(normalization).toContain('if (name === "reset") normalized.eraseSimulator = true');
+        expect(normalization).toContain("normalized.helperTimeoutMs");
         const hidden = [...forwarded]
-            .filter((key) => !routeOnlyKeys.has(key) && !routedSchemaKeys.has(key))
+            .filter((key) => !routeOnlyKeys.has(key) && !translatedInputs.has(key) && !routedSchemaKeys.has(key))
             .map((key) => ({ hidden: key }));
         expect(hidden).toEqual([]);
     });
@@ -1646,7 +1664,7 @@ describe("test level runner", () => {
         }
     });
 
-    it("covers Android app install, launch, reset, and uninstall with a deterministic fixture or configured APK", () => {
+    it("covers Android app install, launch, app clearing, and uninstall with a deterministic fixture or configured APK", () => {
         const text = readFileSync(join(repoRoot, "scripts", "real-tests", "android-emulator-e2e.ts"), "utf-8");
         expect(text).toContain("CCC_REAL_ANDROID_APK");
         expect(text).toContain("CCC_REAL_ANDROID_PACKAGE");
@@ -1657,7 +1675,6 @@ describe("test level runner", () => {
         for (const tool of [
             "install_app",
             "launch_app",
-            "reset",
             "install_app",
             "launch_app",
             "uninstall_app",
@@ -1720,7 +1737,6 @@ describe("test level runner", () => {
             "permission",
             "permission",
             "stop_app",
-            "reset",
             "clear_app_data",
             "uninstall_app",
             "stop",
@@ -1728,10 +1744,10 @@ describe("test level runner", () => {
         ]) {
             expect(text).toContain(`callTool("${tool}"`);
         }
-        expect(text).toContain("install-launch-wait-permission-stop-reset-clear-uninstall verified");
+        expect(text).toContain("install-launch-wait-permission-stop-clear-uninstall verified");
     });
 
-    it("covers iOS Simulator app install, launch, reset, and uninstall when a disposable .app is configured", () => {
+    it("covers iOS Simulator app install, launch, app clearing, and uninstall when a disposable .app is configured", () => {
         const text = readFileSync(join(repoRoot, "scripts", "real-tests", "ios-e2e.ts"), "utf-8");
         expect(text).toContain("CCC_REAL_IOS_SIMULATOR_APP");
         expect(text).toContain("CCC_REAL_IOS_SIMULATOR_BUNDLE_ID");
@@ -1741,7 +1757,6 @@ describe("test level runner", () => {
         for (const tool of [
             "install_app",
             "launch_app",
-            "reset",
             "install_app",
             "launch_app",
             "uninstall_app",
@@ -1860,7 +1875,6 @@ describe("test level runner", () => {
             name: "Port Allocated Pixel",
             deviceId: "android-port-allocated",
             systemImage: "system-images;android-35;google_apis;x86_64",
-            createAvd: true,
         });
         expect(request).not.toHaveProperty("port");
     });
@@ -3811,18 +3825,28 @@ describe("canonical real-runner argument interpretation", () => {
             const targets: Array<[string, string, Record<string, unknown>]> = [
                 ["image_list", "linux-vm", {}],
                 ["image_import", "linux-vm", { name: "base", sourcePath: "incoming/base.qcow2" }],
-                ...["workspace_sync", "artifacts_export"]
-                    .map(name => [name, "linux-vm", { deviceId: "owned-target" }] as [string, string, Record<string, unknown>]),
                 ["base_image_create", "macos-vm", { name: "base", sourceImage: "registry/base" }],
                 ["base_image_clone", "macos-vm", { name: "clone", sourceDeviceId: "owned-target" }],
             ];
             const valid: Array<{ name: string; arguments: Record<string, unknown> }> = targets.map(([name, _backend, args]) => ({ name, arguments: { ...args, detail: true } }));
             valid.push({ name: "create", arguments: { backend: "linux-vm", name: "flat", cpus: 2, detail: true } });
+            valid.push(
+                { name: "create", arguments: { backend: "android-emulator", name: "new", systemImage: "system-images;android-35;google_apis;x86_64" } },
+                { name: "create", arguments: { backend: "android-emulator", name: "reuse", avdName: "owned-existing" } },
+                { name: "create", arguments: { backend: "ios-simulator", name: "new", deviceType: "iphone", runtime: "ios" } },
+                { name: "create", arguments: { backend: "ios-simulator", name: "reuse", udid: "owned-existing" } },
+            );
             const invalid = targets.flatMap(([name, backend, args]) => [backend, "", null, false, {}, "unsupported"].flatMap(selector => [
                 { name, arguments: { ...args, backend: selector } },
                 { name, arguments: { ...args, options: { backend: selector } } },
                 { name, arguments: { ...args, backend: selector, options: { backend } } },
             ]));
+            invalid.push(...["workspace_sync", "artifacts_export"].map(name => ({ name, arguments: { deviceId: "owned-target" } })));
+            invalid.push(
+                { name: "create", arguments: { backend: "android-emulator", name: "wrong-backend-field", avdName: "existing", guestSshHost: "localhost" } },
+                { name: "create", arguments: { backend: "ios-simulator", name: "conflicting-reuse", udid: "existing", runtime: "ios" } },
+                { name: "create", arguments: { backend: "android-emulator", name: "missing-image" } },
+            );
             writeFileSync(fixture, `export const name='input-clarity'; export async function run(){globalThis[Symbol.for('ccc.deviceLabRealTests.toolCalls')]=${JSON.stringify([...valid, ...invalid].map(call => ({ ...call, outcome: "ok", isError: false })))};return {status:'PASS'};}`);
             const result = spawnSync(process.execPath, [join(repoRoot, "scripts/real-tests/run.ts"), "--json-summary-file", summaryPath, fixture], { cwd: repoRoot, encoding: "utf8", timeout: 30000 });
             expect(result.status, result.stderr).toBe(0);

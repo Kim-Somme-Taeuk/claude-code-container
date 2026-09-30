@@ -33,7 +33,7 @@ export async function run() {
                 name: `Real Linux VM Test ${basename(cap.imagePath)}`,
                 deviceId: labId,
                 sourceImage: cap.sourceImage,
-                memoryMb: 512,
+                memoryMb: 1024,
                 cpus: 1,
             }));
             assert.strictEqual(created.ok, true, JSON.stringify(created));
@@ -47,13 +47,6 @@ export async function run() {
             const stopped = parseToolPayload(await callTool("status", { detail: true, deviceId: labId }));
             assert.strictEqual(stopped.ok, true, JSON.stringify(stopped));
             assert.strictEqual(stopped.readiness?.state, "stopped");
-            markExpectedToolError(await callTool("workspace_sync", { detail: true,
-                deviceId: labId,
-                sourcePath: stateRoot,
-            }));
-            markExpectedToolError(await callTool("artifacts_export", { detail: true, deviceId: labId }));
-            markExpectedToolError(await callTool("reboot", { detail: true, deviceId: labId }));
-
             const started = parseToolPayload(await callTool("start", { detail: true, deviceId: labId }));
             assert.strictEqual(started.ok, true, JSON.stringify(started));
             startedPid = Number(lifecycleDevice(started, "start").runtime?.pid || started.started?.pid || 0) || null;

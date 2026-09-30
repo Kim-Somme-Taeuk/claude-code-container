@@ -325,7 +325,7 @@ export async function runHyperVLinuxVmE2E(options: any = {}) {
             let guiConsole = "";
             if (currentStep === "prove Linux GUI screenshot and computer input" && created) {
                 try {
-                    const capture = await callTool("screenshot", { detail: true, ...direct, helperTimeoutMs: 10000 });
+                    const capture = await callTool("screenshot", { detail: true, ...direct, timeoutMs: 10000 });
                     const image = capture?.isError === true ? null : capture?.content?.find((item: any) => item?.type === "image" && item?.mimeType === "image/png");
                     const encoded = image?.data;
                     if (typeof encoded === "string" && encoded.length <= 4 * 1024 * 1024

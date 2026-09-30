@@ -141,8 +141,7 @@ describe("device-lab MCP backend definitions", () => {
                 backend: "ios-simulator",
                 name: "iPhone Test",
                 simulatorName: "iPhone 15",
-                deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
-                runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0",
+                udid: "existing-ios-fixture",
             },
         });
         expect(create.isError).not.toBe(true);
@@ -341,7 +340,7 @@ describe("device-lab MCP backend definitions", () => {
 
         const exec = await client.callTool({
             name: "exec",
-            arguments: { deviceId: "windows-win-test", command: "whoami", helperTimeoutMs: 50 },
+            arguments: { deviceId: "windows-win-test", command: "whoami", timeoutMs: 50 },
         });
         expect(exec.isError).toBe(true);
         expect((exec.content as Array<{ text?: string }>)[0].text).toContain("Windows Sandbox helper requires a running sandbox with a valid GUID sandboxId");

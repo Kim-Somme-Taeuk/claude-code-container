@@ -1,4 +1,5 @@
 import { TOOLS as OPERATIONS, DEVICE_FLOW_TOOL_NAMES as FLOW_OPERATIONS, SINGLE_BACKEND_TOOL_DEFAULTS as DEFAULTS } from "./operation-tools.mjs";
+import { createInputSchema } from "./creation-input.mjs";
 
 // Provider operation identities are private. MCP accepts only this action catalog.
 const merged = {
@@ -27,6 +28,7 @@ export const GROUP_OPERATIONS = Object.freeze({
     permission: { grant: "mobile_grant_permission", revoke: "mobile_revoke_permission" },
 });
 const selected = OPERATIONS.filter(({ name }) => !name.startsWith("display_") && !omitted.has(name)
+    && !["device_workspace_sync", "device_artifacts_export"].includes(name)
     && !["mobile_tap", "mobile_double_tap", "mobile_type_text", "mobile_key"].includes(name));
 const operationByName = new Map(selected.map(({ name }) => [publicToolName(name), name]));
 operationByName.set("move", "device_cursor_position");
@@ -92,6 +94,15 @@ export const TOOLS = selected.map((operation) => {
         schema.properties.deviceId.description = "Device ID inherited by steps that omit it. Each step resolves ownership independently.";
     }
     if (tool.name === "status") tool.description = "Read device state and read-only automation diagnostics. Running container QEMU devices include live readiness; stopped devices do not run guest probes. Appium is optional and is not started by status.";
+    if (tool.name === "create") {
+        tool.inputSchema = createInputSchema(schema);
+        tool.description = "Create a device, then start to boot. Android needs systemImage, or avdName to reuse; iOS needs deviceType and runtime, or udid to reuse. Hyper-V, macOS and container QEMU fields depend on backend. Physical devices use attach.";
+    }
+    if (tool.name === "reset") {
+        schema.properties = Object.fromEntries(Object.entries(schema.properties).filter(([key]) => ["deviceId", "confirmDestructive", "detail"].includes(key)));
+        delete schema.anyOf;
+        tool.description = "Erase an owned iOS Simulator completely. Requires confirmDestructive:true. To clear only one app, use clear_app_data.";
+    }
     return tool;
 });
 const move = structuredClone(TOOLS.find(({ name }) => name === "cursor_position"));
@@ -104,6 +115,11 @@ TOOLS.push(move);
 
 // Existing devices carry their provider identity; callers never select it again.
 for (const tool of TOOLS) {
+    if (tool.inputSchema.properties.detail) tool.inputSchema.properties.detail.description = "Include diagnostics.";
+    if (tool.inputSchema.properties.helperTimeoutMs) {
+        tool.inputSchema.properties.timeoutMs ||= { ...tool.inputSchema.properties.helperTimeoutMs, description: "Timeout (ms); default is automatic." };
+        delete tool.inputSchema.properties.helperTimeoutMs;
+    }
     if (tool.inputSchema.required?.includes("deviceId") || tool.name === "run_flow") {
         delete tool.inputSchema.properties.backend;
         tool.inputSchema.required = tool.inputSchema.required?.filter((key) => key !== "backend");

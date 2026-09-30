@@ -33,12 +33,34 @@ access.
 
 ## Preparation tools that remain
 
-`create` defines a device; `attach` and `wireless` connect physical devices;
+`create` creates a device; `attach` and `wireless` connect physical devices;
 `start` boots a device. `image_import`, `base_image_create` and `base_image_clone`
-manage image inputs, while `workspace_sync` prepares working files. These are
+manage image inputs. `upload` and `download` handle file transfer preparation. These are
 intentional resource changes. `backends` and `inventory` are queries. Internal
 disk, guest-agent and automation-session preparation runs through the operation
 that needs it, without a separate prerequisite tool call.
+
+For a new Android AVD, provide `systemImage` (and optionally its owner-scoped
+`avdName`); `avdName` alone reuses an existing AVD. For a new iOS Simulator,
+provide `deviceType` and `runtime`; `udid` reuses an existing simulator, with its
+matching `simulatorName` when needed. `createAvd` and `createSimulator` are no
+longer public inputs. Installed resource choices come from `inventory`; create
+does not silently download SDK images. Create fields remain flat but are grouped
+by backend in the schema, so unrelated platform fields are rejected.
+
+`clear_app_data` clears one app. `reset` erases an entire owned iOS Simulator;
+both require destructive confirmation. `reset` no longer accepts app IDs or an
+`eraseSimulator` switch. Caller-adjustable operation deadlines use `timeoutMs`;
+`helperTimeoutMs` is private. Omit timeoutMs to use existing automatic defaults.
+
+`workspace_sync` and `artifacts_export` are no longer public tools. They copied
+files within CCC management storage, not across the guest boundary. Their private
+storage operations remain available to the implementation.
+
+The catalog is stable across callers. An empty inventory, stopped device or broker
+outage does not hide setup/recovery tools. There is no shared selected device and
+no additional tool-selection call. MCP pagination alone would not guarantee fewer
+tools in client model context, so it is not used as a token-saving claim.
 
 ## Choose inputs for the target platform
 

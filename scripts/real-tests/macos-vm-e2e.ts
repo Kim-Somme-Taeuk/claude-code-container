@@ -164,7 +164,7 @@ export function macosVmE2ECapability(level = Number(process.env.CCC_TEST_LEVEL |
     return { available: true, reason: "ready", tart, source: source.source, sourceAuto: source.auto, sourceCandidates: source.candidates };
 }
 
-/** @param {{ level?: number; bootTimeoutMs?: number; helperTimeoutMs?: number; snapshot?: boolean; imageTools?: boolean; [key: string]: unknown }} options */
+/** @param {{ level?: number; bootTimeoutMs?: number; timeoutMs?: number; snapshot?: boolean; imageTools?: boolean; [key: string]: unknown }} options */
 export async function runMacosVmE2E(options: any = {}) {
     const typedOptions = macosVmE2EOptions(options);
     const level = Number(typedOptions.level || process.env.CCC_TEST_LEVEL || "0");
@@ -238,14 +238,14 @@ export async function runMacosVmE2E(options: any = {}) {
         let guest = { exercised: false, reason: ssh.available ? "missing SSH host/IP" : "SSH helper not enabled" };
         if (canExerciseGuest) {
             guest = await timedStep(timings, "guestMs", async () => {
-                const helperTimeoutMs = optionTimeoutMs(
-                    typedOptions.helperTimeoutMs,
+                const timeoutMs = optionTimeoutMs(
+                    typedOptions.timeoutMs,
                     Number(process.env.CCC_REAL_MACOS_VM_HELPER_TIMEOUT_MS || process.env.CCC_MACOS_VM_HELPER_TIMEOUT_MS || 30000),
                 );
                 const exec = parsePayload(await callTool("exec", { detail: true,
                     deviceId,
                     command: "printf ccc-macos-vm-e2e-ok",
-                    helperTimeoutMs,
+                    timeoutMs,
                 }));
                 assert.match(exec.stdout, /ccc-macos-vm-e2e-ok/);
 
@@ -258,7 +258,7 @@ export async function runMacosVmE2E(options: any = {}) {
                         deviceId,
                         localPath: uploadLocalPath,
                         remotePath,
-                        helperTimeoutMs,
+                        timeoutMs,
                     }));
                     assert.strictEqual(upload.provider, "scp");
                     assert.strictEqual(upload.uploaded.localPath, uploadLocalPath);
@@ -271,56 +271,56 @@ export async function runMacosVmE2E(options: any = {}) {
                         deviceId,
                         remotePath,
                         localPath: downloadLocalPath,
-                        helperTimeoutMs,
+                        timeoutMs,
                     }));
                     assert.strictEqual(download.provider, "scp");
                     assert.strictEqual(download.downloaded.remotePath, remotePath);
                     assert.strictEqual(download.downloaded.localPath, downloadLocalPath);
                     assert.strictEqual(readFileSync(downloadLocalPath, "utf-8"), `ccc-macos-vm-e2e-file-${suffix}`);
                 } finally {
-                    try { await callTool("exec", { detail: true, deviceId, command: `rm -f '${remotePath.replace(/'/g, "'\\''")}'`, helperTimeoutMs }); } catch { /* preserve primary failure */ }
+                    try { await callTool("exec", { detail: true, deviceId, command: `rm -f '${remotePath.replace(/'/g, "'\\''")}'`, timeoutMs }); } catch { /* preserve primary failure */ }
                     rmSync(uploadLocalPath, { force: true });
                     rmSync(downloadLocalPath, { force: true });
                 }
 
-                const screenshot = await callTool("screenshot", { detail: true, deviceId, helperTimeoutMs });
+                const screenshot = await callTool("screenshot", { detail: true, deviceId, timeoutMs });
                 assert.strictEqual(screenshot?.content?.[0]?.type, "image");
                 assert.ok(String(screenshot.content[0].data || "").length > 64);
 
                 for (const button of ["left", "right"]) {
-                    const click = parsePayload(await callTool("click", { detail: true, deviceId, x: 20, y: 20, button, helperTimeoutMs }));
+                    const click = parsePayload(await callTool("click", { detail: true, deviceId, x: 20, y: 20, button, timeoutMs }));
                     assert.strictEqual(click.provider, "ssh-macos-helper");
                     assert.deepStrictEqual(click.clicked, { x: 20, y: 20, button });
                 }
 
                 for (const button of ["left", "right"]) {
-                    const doubleClick = parsePayload(await callTool("double_click", { detail: true, deviceId, x: 30, y: 30, button, helperTimeoutMs }));
+                    const doubleClick = parsePayload(await callTool("double_click", { detail: true, deviceId, x: 30, y: 30, button, timeoutMs }));
                     assert.strictEqual(doubleClick.provider, "ssh-macos-helper");
                     assert.deepStrictEqual(doubleClick.doubleClicked, { x: 30, y: 30, button });
                 }
 
-                const key = parsePayload(await callTool("key", { detail: true, deviceId, key: "Escape", helperTimeoutMs }));
+                const key = parsePayload(await callTool("key", { detail: true, deviceId, key: "Escape", timeoutMs }));
                 assert.strictEqual(key.provider, "ssh-macos-helper");
                 assert.deepStrictEqual(key.key, { key: "Escape", keyCode: 53, modifiers: [] });
 
-                const type = parsePayload(await callTool("type", { detail: true, deviceId, text: "ccc-macos-type-e2e", helperTimeoutMs }));
+                const type = parsePayload(await callTool("type", { detail: true, deviceId, text: "ccc-macos-type-e2e", timeoutMs }));
                 assert.strictEqual(type.provider, "ssh-macos-helper");
                 assert.deepStrictEqual(type.typed, { text: "ccc-macos-type-e2e" });
 
                 for (const direction of ["up", "down", "left", "right"]) {
-                    const scroll = parsePayload(await callTool("scroll", { detail: true, deviceId, direction, amount: 1, helperTimeoutMs }));
+                    const scroll = parsePayload(await callTool("scroll", { detail: true, deviceId, direction, amount: 1, timeoutMs }));
                     assert.strictEqual(scroll.provider, "ssh-macos-helper");
                     assert.deepStrictEqual(scroll.scrolled, { direction, amount: 1 });
                 }
 
-                const windows = parsePayload(await callTool("window_list", { detail: true, deviceId, helperTimeoutMs }));
+                const windows = parsePayload(await callTool("window_list", { detail: true, deviceId, timeoutMs }));
                 assert.ok(Array.isArray(windows.windows));
 
-                const cursor = parsePayload(await callTool("cursor_position", { detail: true, deviceId, helperTimeoutMs }));
+                const cursor = parsePayload(await callTool("cursor_position", { detail: true, deviceId, timeoutMs }));
                 assert.strictEqual(cursor.provider, "ssh-macos-helper");
                 assert.ok(cursor.cursor === null || typeof cursor.cursor === "object");
 
-                const accessibility = parsePayload(await callTool("ui", { detail: true, deviceId, maxDepth: 1, maxNodes: 20, helperTimeoutMs }));
+                const accessibility = parsePayload(await callTool("ui", { detail: true, deviceId, maxDepth: 1, maxNodes: 20, timeoutMs }));
                 assert.ok(["macos-system-events", "ssh-macos-helper"].includes(accessibility.provider));
                 assert.ok(accessibility.accessibility === null || typeof accessibility.accessibility === "object");
 
@@ -333,7 +333,7 @@ export async function runMacosVmE2E(options: any = {}) {
                     sshUser: ssh.sshUser,
                     sshKeyPath: ssh.sshKeyPath || null,
                     generatedSshPublicKeyPath: ssh.generatedSshPublicKeyPath || null,
-                    helperTimeoutMs,
+                    timeoutMs,
                     uploadDownloaded: true,
                 };
             });

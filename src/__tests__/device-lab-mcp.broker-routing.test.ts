@@ -141,16 +141,6 @@ describe("device-lab MCP broker routing", () => {
                     sourceImage: "C:\\images\\windows-11.vhdx",
                     switchName: "CCC Device Lab",
                     secureBootTemplate: "MicrosoftWindows",
-                    baseImageId: "windows-base",
-                    guestSshHost: "guest.example.test",
-                    guestSshPort: 2222,
-                    guestSshUser: "ccc",
-                    guestSshKeyPath: "results/id_ed25519",
-                    guestReadinessCommand: "echo ready",
-                    guestAgentName: "ccc-agent",
-                    guestAgentHealthCommand: "echo healthy",
-                    guestAgentProvisionCommand: "echo provision",
-                    guestAgentAutoProvision: true,
                     viaBroker: true,
                     hostCandidates: ["127.0.0.1"],
                     brokerPort: address.port,
@@ -166,16 +156,6 @@ describe("device-lab MCP broker routing", () => {
                 sourceImage: "C:\\images\\windows-11.vhdx",
                 switchName: "CCC Device Lab",
                 secureBootTemplate: "MicrosoftWindows",
-                baseImageId: "windows-base",
-                guestSshHost: "guest.example.test",
-                guestSshPort: 2222,
-                guestSshUser: "ccc",
-                guestSshKeyPath: "results/id_ed25519",
-                guestReadinessCommand: "echo ready",
-                guestAgentName: "ccc-agent",
-                guestAgentHealthCommand: "echo healthy",
-                guestAgentProvisionCommand: "echo provision",
-                guestAgentAutoProvision: true,
             }));
 
             const reboot = await client.callTool({
@@ -1009,7 +989,7 @@ describe("device-lab MCP broker routing", () => {
             ["download", { remotePath: "C:\\ccc\\download.txt", localPath: projectTestPath("download.txt") }],
         ] as const;
         const androidCases = [
-            ["reset", { packageName: "com.example.route", confirmDestructive: true }],
+            ["clear_app_data", { packageName: "com.example.route", confirmDestructive: true }],
             ["install_app", { path: projectTestPath("Test.apk"), replace: true }],
             ["launch_app", { packageName: "com.example.route" }],
             ["clear_app_data", { packageName: "com.example.route", confirmDestructive: true }],
@@ -2693,7 +2673,6 @@ describe("device-lab MCP broker routing", () => {
                     name: "Slow AVD",
                     deviceId: "android-slow-avd",
                     systemImage: "system-images;android-35;google_apis;x86_64",
-                    createAvd: true,
                 },
             });
             expect(result.isError).not.toBe(true);
@@ -2923,7 +2902,7 @@ describe("device-lab MCP broker routing", () => {
         try {
             for (const [name, args] of [
                 ["status", {  }, "device-lifecycle-broker-implicit"],
-                ["screenshot", { helperTimeoutMs: 1 }, "device-readonly-broker-implicit"],
+                ["screenshot", { timeoutMs: 1 }, "device-readonly-broker-implicit"],
                 ["key", { key: "Return" }, "device-mutating-broker-implicit"],
             ] as const) {
                 const result = await client.callTool({
@@ -3222,7 +3201,7 @@ describe("device-lab MCP broker routing", () => {
                 name: "screenshot",
                 arguments: {
                     deviceId: "win-broker-failure",
-                    helperTimeoutMs: 45000,
+                    timeoutMs: 45000,
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
                 },

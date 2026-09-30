@@ -83,7 +83,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
     });
 
 
-    it("creates and deletes owner-prefixed AVDs through avdmanager only when requested", { timeout: TIMEOUT }, async () => {
+    it("creates and deletes owner-prefixed AVDs through avdmanager without a separate provisioning flag", { timeout: TIMEOUT }, async () => {
         const inventory = await client.callTool({
             name: "inventory",
             arguments: { backend: "android-emulator" },
@@ -100,7 +100,6 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
                 port: 5582,
                 systemImage: "system-images;android-35;google_apis;x86_64",
                 deviceProfile: "pixel_6",
-                createAvd: true,
             },
         });
         expect(create.isError).not.toBe(true);
@@ -567,7 +566,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             ["install_app", { deviceId: "android-pixel-owned", path: "/tmp/Test.apk" }, { provider: "adb", installed: "/tmp/Test.apk" }],
             ["launch_app", { deviceId: "android-pixel-owned", packageName: "com.example.test" }, { provider: "adb", launched: "com.example.test" }],
             ["launch_app", { deviceId: "android-pixel-owned", component: "com.example.test/.MainActivity" }, { provider: "adb", launched: "com.example.test/.MainActivity" }],
-            ["reset", { deviceId: "android-pixel-owned", packageName: "com.example.test", confirmDestructive: true }, { provider: "adb", reset: { packageName: "com.example.test" } }],
+            ["clear_app_data", { deviceId: "android-pixel-owned", packageName: "com.example.test", confirmDestructive: true }, { provider: "adb", reset: { packageName: "com.example.test" } }],
             ["install_app", { deviceId: "android-pixel-owned", path: "/tmp/Mobile.apk" }, { provider: "adb", installed: "/tmp/Mobile.apk" }],
             ["launch_app", { deviceId: "android-pixel-owned", packageName: "com.example.mobile" }, { provider: "adb", launched: "com.example.mobile" }],
             ["uninstall_app", { deviceId: "android-pixel-owned", packageName: "com.example.mobile", confirmDestructive: true }, { provider: "adb", uninstalled: "com.example.mobile" }],
@@ -738,7 +737,6 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
                     deviceId,
                     avdName,
                     systemImage: "system-images;android-35;google_apis;x86_64",
-                    createAvd: true,
                 },
             });
             expect(created.isError).toBe(true);
@@ -772,7 +770,6 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
                     deviceId,
                     avdName,
                     systemImage: "system-images;android-35;google_apis;x86_64",
-                    createAvd: true,
                 },
             });
             expect(created.isError).toBe(true);
@@ -789,7 +786,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
     it("assigns and persists a deterministic direct emulator port when none is requested", { timeout: TIMEOUT }, async () => {
         const create = await client.callTool({
             name: "create",
-            arguments: {
+            arguments: { systemImage: "system-images;android-35;google_apis;x86_64",
                 backend: "android-emulator",
                 name: "Auto Port",
                 deviceId: "android-auto-port",
@@ -819,7 +816,6 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
                 deviceId: "android-live-direct-conflict",
                 port: 5554,
                 systemImage: "system-images;android-35;google_apis;x86_64",
-                createAvd: true,
             },
         });
         expect(create.isError).toBe(true);
@@ -841,7 +837,6 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
                     name: "Unavailable Direct Live Inventory",
                     deviceId: "android-unavailable-direct-live-inventory",
                     systemImage: "system-images;android-35;google_apis;x86_64",
-                    createAvd: true,
                 },
             });
             expect(create.isError).toBe(true);
@@ -859,7 +854,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         const port = 5680;
         const create = await client.callTool({
             name: "create",
-            arguments: {
+            arguments: { systemImage: "system-images;android-35;google_apis;x86_64",
                 backend: "android-emulator",
                 name: "Direct Start Port Conflict",
                 deviceId,
@@ -907,7 +902,6 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
                     deviceId: "android-foreign-port-conflict",
                     port: 5682,
                     systemImage: "system-images;android-35;google_apis;x86_64",
-                    createAvd: true,
                 },
             });
             expect(create.isError).toBe(true);
@@ -933,7 +927,6 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
                     name: "Corrupt Inventory",
                     deviceId: "android-corrupt-inventory",
                     systemImage: "system-images;android-35;google_apis;x86_64",
-                    createAvd: true,
                 },
             });
             expect(create.isError).toBe(true);
@@ -970,7 +963,6 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
                 avdName,
                 port: 5680,
                 systemImage: "system-images;android-35;google_apis;x86_64",
-                createAvd: true,
             },
         }).then((result) => {
             settled = true;
@@ -1031,7 +1023,6 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
                     deviceId,
                     avdName: losingAvd,
                     systemImage: "system-images;android-35;google_apis;x86_64",
-                    createAvd: true,
                 },
             });
             expect(create.isError).toBe(true);
@@ -1058,7 +1049,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         const deviceId = "android-direct-start-race";
         const create = await client.callTool({
             name: "create",
-            arguments: {
+            arguments: { systemImage: "system-images;android-35;google_apis;x86_64",
                 backend: "android-emulator",
                 name: "Direct Start Race",
                 deviceId,
@@ -1129,7 +1120,7 @@ exec "${realAdbPath}" "$@"
         try {
             const create = await client.callTool({
                 name: "create",
-                arguments: { backend: "android-emulator", name: "Boot Process Exit", deviceId, port: 5664 },
+                arguments: { systemImage: "system-images;android-35;google_apis;x86_64", backend: "android-emulator", name: "Boot Process Exit", deviceId, port: 5664 },
             });
             expect(create.isError).not.toBe(true);
 
@@ -1173,7 +1164,7 @@ exec "${realAdbPath}" "$@"
         const deviceId = "android-force-delete-running";
         const create = await client.callTool({
             name: "create",
-            arguments: { backend: "android-emulator", name: "Force Delete Running", deviceId, port: 5666 },
+            arguments: { systemImage: "system-images;android-35;google_apis;x86_64", backend: "android-emulator", name: "Force Delete Running", deviceId, port: 5666 },
         });
         expect(create.isError).not.toBe(true);
         const start = await client.callTool({
@@ -1198,7 +1189,7 @@ exec "${realAdbPath}" "$@"
         const deviceId = "android-force-delete-stale-stopped";
         const create = await client.callTool({
             name: "create",
-            arguments: { backend: "android-emulator", name: "Force Delete Stale Stopped", deviceId, port: 5670 },
+            arguments: { systemImage: "system-images;android-35;google_apis;x86_64", backend: "android-emulator", name: "Force Delete Stale Stopped", deviceId, port: 5670 },
         });
         expect(create.isError).not.toBe(true);
         const beforeLog = readFileSync(logPath, "utf8");
@@ -1235,7 +1226,6 @@ exec "${realAdbPath}" "$@"
                 avdName,
                 port,
                 systemImage: "system-images;android-35;google_apis;x86_64",
-                createAvd: true,
             },
         });
         expect(create.isError).not.toBe(true);
@@ -1306,7 +1296,7 @@ exec "${realAdbPath}" "$@"
         const retriesPath = join(homeDir, "console-retry-calls");
         const create = await client.callTool({ name: "create", arguments: {
             backend: "android-emulator", name: "Console Retry", deviceId, avdName, port: 5672,
-            systemImage: "system-images;android-35;google_apis;x86_64", createAvd: true,
+            systemImage: "system-images;android-35;google_apis;x86_64",
         } });
         expect(create.isError).not.toBe(true);
         mkdirSync(artifact, { recursive: true });
@@ -1373,7 +1363,6 @@ exec "${savedAdb}" "$@"
                 avdName,
                 port: 5668,
                 systemImage: "system-images;android-35;google_apis;x86_64",
-                createAvd: true,
             },
         });
         expect(create.isError).not.toBe(true);
@@ -1451,7 +1440,6 @@ exec "${savedAdb}" "$@"
                 avdName,
                 port: 5670,
                 systemImage: "system-images;android-35;google_apis;x86_64",
-                createAvd: true,
             },
         });
         expect(created.isError).not.toBe(true);
@@ -1532,7 +1520,6 @@ exec "${realAvdmanagerPath}" "$@"
                     deviceId: "android-direct-state-limit-loser",
                     avdName: losingAvd,
                     systemImage: "system-images;android-35;google_apis;x86_64",
-                    createAvd: true,
                 },
             })).rejects.toThrow("owner-devices-file-too-large");
             expect(readFileSync(statePath, "utf8")).toBe(nearLimitState);
@@ -1568,12 +1555,12 @@ exec "${realAvdmanagerPath}" "$@"
         const metadataPayload = JSON.parse(((metadataWithSystemImage.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             device: { provisioned: boolean; systemImage: string };
         };
-        expect(metadataPayload.device.provisioned).toBe(false);
+        expect(metadataPayload.device.provisioned).toBe(true);
         expect(metadataPayload.device.systemImage).toBe("system-images;android-35;google_apis;x86_64");
 
         const metadataSystemImageDeleted = await client.callTool({
             name: "delete",
-            arguments: { deviceId: "android-metadata-system-image", confirmDestructive: true },
+            arguments: { deviceId: "android-metadata-system-image", deleteAvd: true, confirmDestructive: true },
         });
         expect(metadataSystemImageDeleted.isError).not.toBe(true);
 
@@ -1584,7 +1571,6 @@ exec "${realAvdmanagerPath}" "$@"
                 name: "Foreign Create",
                 avdName: "foreign-avd",
                 systemImage: "system-images;android-35;google_apis;x86_64",
-                createAvd: true,
             },
         });
         expect(create.isError).toBe(true);
@@ -1603,7 +1589,7 @@ exec "${realAvdmanagerPath}" "$@"
                 deviceId: "android-unsafe-system-image",
                 avdName: `ccc-${ownerId}-unsafe-system-image`,
                 systemImage: "system-images;android-35;%PATH%;x86_64",
-                expected: "systemImage must be a system-images package identifier",
+                expected: "systemImage must be an Android system-images package identifier",
             },
             {
                 name: "Unsafe Device Profile",
@@ -1618,9 +1604,8 @@ exec "${realAvdmanagerPath}" "$@"
             const { expected, ...unsafeArguments } = unsafe;
             const rejected = await client.callTool({
                 name: "create",
-                arguments: {
+                arguments: { systemImage: "system-images;android-35;google_apis;x86_64",
                     backend: "android-emulator",
-                    createAvd: true,
                     ...unsafeArguments,
                 },
             });
@@ -1692,7 +1677,7 @@ exec "${realAvdmanagerPath}" "$@"
         expect(metadataDeleted.isError).not.toBe(true);
 
         const log = readFileSync(logPath, "utf-8");
-        expect(log).not.toContain(`avdmanager create avd --name ${metadataOnlyAvd}`);
+        expect(log).toContain(`avdmanager create avd --name ${metadataOnlyAvd}`);
         expect(log).not.toContain("%PATH%");
         expect(log).not.toContain("emulator -avd foreign-avd");
     });
@@ -1724,7 +1709,7 @@ exec "${delegatedAdbPath}" "$@"
         try {
             const created = await client.callTool({
                 name: "create",
-                arguments: { backend: "android-emulator", name: "ADB Result Validation", deviceId, port: 5676 },
+                arguments: { systemImage: "system-images;android-35;google_apis;x86_64", backend: "android-emulator", name: "ADB Result Validation", deviceId, port: 5676 },
             });
             expect(created.isError, (created.content as Array<{ text?: string }>)[0]?.text).not.toBe(true);
             expect((await client.callTool({
@@ -1735,7 +1720,7 @@ exec "${delegatedAdbPath}" "$@"
             const startedAt = Date.now();
             const timedOutInstall = await client.callTool({
                 name: "install_app",
-                arguments: { deviceId, path: "/tmp/slow-install.apk", helperTimeoutMs: 25 },
+                arguments: { deviceId, path: "/tmp/slow-install.apk", timeoutMs: 25 },
             });
             expect(timedOutInstall.isError).toBe(true);
             expect(Date.now() - startedAt).toBeLessThan(750);

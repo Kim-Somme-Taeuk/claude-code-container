@@ -21,7 +21,7 @@ import { readOwnerDevices } from "./state/device-store.mjs";
 import { DEVICE_FLOW_TOOL_NAMES, TOOLS, toolOperation, flowOperationAllowed } from "./tools.mjs";
 import { TOOLS as OPERATION_TOOLS } from "./operation-tools.mjs";
 import { actionResult } from "./action-output.mjs";
-import { flowStepArguments, normalizeToolArgs, toolInputError } from "./tool-arguments.mjs";
+import { flowStepArguments, normalizeToolArgs, normalizePublicToolArgs, toolInputError } from "./tool-arguments.mjs";
 import { createWaitBudget } from "./wait-budget.mjs";
 
 const FLOW_MAX_STEPS = 50;
@@ -1641,7 +1641,7 @@ async function handleRunFlow(args, { toolName, toolAllowed, detail }) {
         // A preceding step may have changed the broker or device state.
         let result;
         try {
-            result = await withBrokerOperation(() => dispatchTool(toolOperation(tool, step.arguments), flowStepArguments(tool, args, step.arguments)));
+            result = await withBrokerOperation(() => dispatchTool(toolOperation(tool, step.arguments), normalizePublicToolArgs(tool, flowStepArguments(tool, args, step.arguments))));
         } catch (err) {
             result = textResult(false, `Unexpected error: ${err.message}`);
         }
@@ -1674,7 +1674,7 @@ export async function startServer() {
         const inputError = toolInputError(publicName, rawArgs);
         if (inputError) return jsonResult({ ok: false, error: inputError });
         const name = toolOperation(publicName, rawArgs);
-        const args = normalizeToolArgs(rawArgs, name);
+        const args = normalizePublicToolArgs(publicName, rawArgs);
         const result = await withBrokerOperation(async () => {
             try {
                 const policy = evaluateDestructivePolicy(name, args);

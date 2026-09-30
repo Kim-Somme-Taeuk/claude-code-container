@@ -146,7 +146,6 @@ export async function runIosSimulatorE2E(options: any = {}) {
                 deviceId,
                 deviceType: cap.deviceType.identifier,
                 runtime: cap.runtime.identifier,
-                createSimulator: true,
             }));
             created = true;
             const createdDevice = create.device;
@@ -297,7 +296,7 @@ export async function runIosSimulatorE2E(options: any = {}) {
                 }));
                 assert.strictEqual(mobileInstall.installed, appPath);
 
-                const deviceReset = parsePayload(await callTool("reset", { detail: true,
+                const deviceReset = parsePayload(await callTool("clear_app_data", { detail: true,
                     deviceId,
                     bundleId: appBundleId,
                     confirmDestructive: true,
@@ -425,6 +424,10 @@ export async function runIosSimulatorE2E(options: any = {}) {
             assert.strictEqual(stop.device.status, "stopped");
             const stoppedSimulator = findSimctlDevice(cap.discovery.xcrun, (device) => device?.udid === createdUdid);
             assert.strictEqual(stoppedSimulator?.state, "Shutdown", JSON.stringify(stoppedSimulator));
+
+            const erased = parsePayload(await callTool("reset", { detail: true, deviceId, confirmDestructive: true }));
+            assert.deepStrictEqual(erased.reset, { eraseSimulator: true });
+            assert.strictEqual(erased.device.status, "stopped");
 
             const del = parseContractToolPayload("delete", await callTool("delete", { detail: true,
                 deviceId,

@@ -558,7 +558,7 @@ exit 0
 
         const exec = await client.callTool({
             name: "exec",
-            arguments: { deviceId: "windows-win-helper", command: "whoami", helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", command: "whoami", timeoutMs: 1000 },
         });
         expect(exec.isError).not.toBe(true);
         expect(((exec.content as Array<{ text?: string }>)[0].text ?? "")).toContain("ran whoami");
@@ -574,7 +574,7 @@ exit 0
 
         const screenshot = await client.callTool({
             name: "screenshot",
-            arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", timeoutMs: 1000 },
         });
         expect(screenshot.isError).not.toBe(true);
         const screenshotContent = (screenshot.content as Array<{ type: string; data?: string }>)[0];
@@ -583,21 +583,21 @@ exit 0
 
         const mismatchedResponse = await client.callTool({
             name: "exec",
-            arguments: { deviceId: "windows-win-helper", command: "mismatched-response", helperTimeoutMs: 300 },
+            arguments: { deviceId: "windows-win-helper", command: "mismatched-response", timeoutMs: 300 },
         });
         expect(mismatchedResponse.isError).toBe(true);
         expect((mismatchedResponse.content as Array<{ text?: string }>)[0].text).toContain("response id or type mismatch");
 
         const oversizedResponse = await client.callTool({
             name: "exec",
-            arguments: { deviceId: "windows-win-helper", command: "oversized-response", helperTimeoutMs: 300 },
+            arguments: { deviceId: "windows-win-helper", command: "oversized-response", timeoutMs: 300 },
         });
         expect(oversizedResponse.isError).toBe(true);
         expect((oversizedResponse.content as Array<{ text?: string }>)[0].text).toContain("windows-helper-response-file-too-large");
 
         const click = await client.callTool({
             name: "click",
-            arguments: { deviceId: "windows-win-helper", x: 25, y: 40, button: "right", helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", x: 25, y: 40, button: "right", timeoutMs: 1000 },
         });
         expect(click.isError).not.toBe(true);
         expect(JSON.parse(((click.content as Array<{ text?: string }>)[0].text ?? "{}")).clicked).toEqual({
@@ -608,7 +608,7 @@ exit 0
 
         const doubleClick = await client.callTool({
             name: "double_click",
-            arguments: { deviceId: "windows-win-helper", x: 30, y: 50, helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", x: 30, y: 50, timeoutMs: 1000 },
         });
         expect(doubleClick.isError).not.toBe(true);
         expect(JSON.parse(((doubleClick.content as Array<{ text?: string }>)[0].text ?? "{}")).doubleClicked).toEqual({
@@ -619,7 +619,7 @@ exit 0
 
         const key = await client.callTool({
             name: "key",
-            arguments: { deviceId: "windows-win-helper", key: "Control+A", helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", key: "Control+A", timeoutMs: 1000 },
         });
         expect(key.isError).not.toBe(true);
         expect(JSON.parse(((key.content as Array<{ text?: string }>)[0].text ?? "{}")).key).toEqual({
@@ -629,7 +629,7 @@ exit 0
 
         const type = await client.callTool({
             name: "type",
-            arguments: { deviceId: "windows-win-helper", text: "hello from ccc", helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", text: "hello from ccc", timeoutMs: 1000 },
         });
         expect(type.isError).not.toBe(true);
         expect(JSON.parse(((type.content as Array<{ text?: string }>)[0].text ?? "{}")).typed).toEqual({
@@ -639,7 +639,7 @@ exit 0
 
         const literalType = await client.callTool({
             name: "type",
-            arguments: { deviceId: "windows-win-helper", text: "a+b {ok} 50% [x] (y) ~ ^", helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", text: "a+b {ok} 50% [x] (y) ~ ^", timeoutMs: 1000 },
         });
         expect(literalType.isError).not.toBe(true);
         expect(JSON.parse(((literalType.content as Array<{ text?: string }>)[0].text ?? "{}")).typed).toEqual({
@@ -649,7 +649,7 @@ exit 0
 
         const scroll = await client.callTool({
             name: "scroll",
-            arguments: { deviceId: "windows-win-helper", x: 10, y: 20, direction: "down", amount: 3, helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", x: 10, y: 20, direction: "down", amount: 3, timeoutMs: 1000 },
         });
         expect(scroll.isError).not.toBe(true);
         expect(JSON.parse(((scroll.content as Array<{ text?: string }>)[0].text ?? "{}")).scrolled).toEqual({
@@ -661,14 +661,14 @@ exit 0
 
         const cursor = await client.callTool({
             name: "cursor_position",
-            arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", timeoutMs: 1000 },
         });
         expect(cursor.isError).not.toBe(true);
         expect(JSON.parse(((cursor.content as Array<{ text?: string }>)[0].text ?? "{}")).cursor).toEqual({ x: 11, y: 22 });
 
         const windows = await client.callTool({
             name: "window_list",
-            arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", timeoutMs: 1000 },
         });
         expect(windows.isError).not.toBe(true);
         expect(JSON.parse(((windows.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -678,7 +678,7 @@ exit 0
 
         const accessibility = await client.callTool({
             name: "ui",
-            arguments: { deviceId: "windows-win-helper", maxDepth: 99, maxNodes: 5000, helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", maxDepth: 99, maxNodes: 5000, timeoutMs: 1000 },
         });
         expect(accessibility.isError).not.toBe(true);
         const accessibilityPayload = JSON.parse(((accessibility.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -697,7 +697,7 @@ exit 0
         writeFileSync(uploadSource, "upload");
         const upload = await client.callTool({
             name: "upload",
-            arguments: { deviceId: "windows-win-helper", localPath: uploadSource, remotePath: "C:\\Users\\WDAGUtilityAccount\\upload.txt", helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", localPath: uploadSource, remotePath: "C:\\Users\\WDAGUtilityAccount\\upload.txt", timeoutMs: 1000 },
         });
         expect(upload.isError).not.toBe(true);
         expect(JSON.parse(((upload.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -712,7 +712,7 @@ exit 0
         const downloadTarget = join(homeDir, "download.txt");
         const download = await client.callTool({
             name: "download",
-            arguments: { deviceId: "windows-win-helper", remotePath: "C:\\Users\\WDAGUtilityAccount\\remote.txt", localPath: downloadTarget, helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", remotePath: "C:\\Users\\WDAGUtilityAccount\\remote.txt", localPath: downloadTarget, timeoutMs: 1000 },
         });
         expect(download.isError).not.toBe(true);
         expect(JSON.parse(((download.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -728,7 +728,7 @@ exit 0
         writeFileSync(oversizedDownloadTarget, "preserved");
         const oversizedDownload = await client.callTool({
             name: "download",
-            arguments: { deviceId: "windows-win-helper", remotePath: "C:\\Users\\WDAGUtilityAccount\\oversized.bin", localPath: oversizedDownloadTarget, helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", remotePath: "C:\\Users\\WDAGUtilityAccount\\oversized.bin", localPath: oversizedDownloadTarget, timeoutMs: 1000 },
         });
         expect(oversizedDownload.isError).toBe(true);
         expect((oversizedDownload.content as Array<{ text?: string }>)[0].text).toContain("windows-helper-download-file-too-large");
@@ -737,19 +737,19 @@ exit 0
         const helperRequestCount = helperRequests.length;
         const rejectedHelperUpload = await client.callTool({
             name: "upload",
-            arguments: { deviceId: "windows-win-helper", localPath: uploadSource, remotePath: "C:\\ccc\\scratch\\inbox\\evil.txt", helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", localPath: uploadSource, remotePath: "C:\\ccc\\scratch\\inbox\\evil.txt", timeoutMs: 1000 },
         });
         expect(rejectedHelperUpload.isError).toBe(true);
         expect((rejectedHelperUpload.content as Array<{ text?: string }>)[0].text).toContain("upload-remote-path-helper-path-rejected");
         const rejectedNamespaceUpload = await client.callTool({
             name: "upload",
-            arguments: { deviceId: "windows-win-helper", localPath: uploadSource, remotePath: "\\\\?\\C:\\ccc\\scratch\\inbox\\evil.txt", helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", localPath: uploadSource, remotePath: "\\\\?\\C:\\ccc\\scratch\\inbox\\evil.txt", timeoutMs: 1000 },
         });
         expect(rejectedNamespaceUpload.isError).toBe(true);
         expect((rejectedNamespaceUpload.content as Array<{ text?: string }>)[0].text).toContain("upload-remote-path-device-namespace-rejected");
         const rejectedTraversalDownload = await client.callTool({
             name: "download",
-            arguments: { deviceId: "windows-win-helper", remotePath: "C:\\Users\\WDAGUtilityAccount\\..\\escape.txt", localPath: join(homeDir, "bad-download.txt"), helperTimeoutMs: 1000 },
+            arguments: { deviceId: "windows-win-helper", remotePath: "C:\\Users\\WDAGUtilityAccount\\..\\escape.txt", localPath: join(homeDir, "bad-download.txt"), timeoutMs: 1000 },
         });
         expect(rejectedTraversalDownload.isError).toBe(true);
         expect((rejectedTraversalDownload.content as Array<{ text?: string }>)[0].text).toContain("download-remote-path-traversal-rejected");
@@ -757,7 +757,7 @@ exit 0
 
         const recordStart = await client.callTool({
             name: "record_video",
-            arguments: { action: "start", deviceId: "windows-win-helper", localPath: join(homeDir, "windows-recording.zip"), timeLimitSec: 2, helperTimeoutMs: 1000 },
+            arguments: { action: "start", deviceId: "windows-win-helper", localPath: join(homeDir, "windows-recording.zip"), timeLimitSec: 2, timeoutMs: 1000 },
         });
         expect(recordStart.isError).not.toBe(true);
         const recordStartPayload = JSON.parse(((recordStart.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -773,14 +773,14 @@ exit 0
 
         const duplicateRecordStart = await client.callTool({
             name: "record_video",
-            arguments: { action: "start", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            arguments: { action: "start", deviceId: "windows-win-helper", timeoutMs: 1000 },
         });
         expect(duplicateRecordStart.isError).toBe(true);
         expect((duplicateRecordStart.content as Array<{ text?: string }>)[0].text).toContain("Windows Sandbox recording already active");
 
         const invalidRecordStop = await client.callTool({
             name: "record_video",
-            arguments: { action: "stop", deviceId: "windows-win-helper", localPath: join(homeDir, ".env"), helperTimeoutMs: 1000 },
+            arguments: { action: "stop", deviceId: "windows-win-helper", localPath: join(homeDir, ".env"), timeoutMs: 1000 },
         });
         expect(invalidRecordStop.isError).toBe(true);
         expect((invalidRecordStop.content as Array<{ text?: string }>)[0].text).toContain("recording-local-path-secret-looking-file");
@@ -797,7 +797,7 @@ exit 0
 
         const recordStop = await client.callTool({
             name: "record_video",
-            arguments: { action: "stop", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            arguments: { action: "stop", deviceId: "windows-win-helper", timeoutMs: 1000 },
         });
         expect(recordStop.isError).not.toBe(true);
         const recordStopPayload = JSON.parse(((recordStop.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -813,7 +813,7 @@ exit 0
 
         const stopWithoutRecording = await client.callTool({
             name: "record_video",
-            arguments: { action: "stop", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            arguments: { action: "stop", deviceId: "windows-win-helper", timeoutMs: 1000 },
         });
         expect(stopWithoutRecording.isError).toBe(true);
         expect((stopWithoutRecording.content as Array<{ text?: string }>)[0].text).toContain("No Windows Sandbox recording active");
@@ -821,25 +821,25 @@ exit 0
         const failedStopRecordingPath = join(homeDir, "failed-stop-windows-recording.zip");
         const failedStopRecordStart = await client.callTool({
             name: "record_video",
-            arguments: { action: "start", deviceId: "windows-win-helper", localPath: failedStopRecordingPath, helperTimeoutMs: 1000 },
+            arguments: { action: "start", deviceId: "windows-win-helper", localPath: failedStopRecordingPath, timeoutMs: 1000 },
         });
         expect(failedStopRecordStart.isError).not.toBe(true);
         failRecordStop = true;
         const failedRecordStop = await client.callTool({
             name: "record_video",
-            arguments: { action: "stop", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            arguments: { action: "stop", deviceId: "windows-win-helper", timeoutMs: 1000 },
         });
         expect(failedRecordStop.isError).toBe(true);
         expect((failedRecordStop.content as Array<{ text?: string }>)[0].text).toContain("recording state preserved for retry");
         const statusAfterFailedRecordStop = await client.callTool({
             name: "record_video",
-            arguments: { action: "status", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            arguments: { action: "status", deviceId: "windows-win-helper", timeoutMs: 1000 },
         });
         expect(JSON.parse(((statusAfterFailedRecordStop.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toEqual(expect.objectContaining({ active: true }));
         failRecordStop = false;
         const retriedFailedRecordStop = await client.callTool({
             name: "record_video",
-            arguments: { action: "stop", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            arguments: { action: "stop", deviceId: "windows-win-helper", timeoutMs: 1000 },
         });
         expect(retriedFailedRecordStop.isError).not.toBe(true);
         expect(readFileSync(failedStopRecordingPath, "utf8")).toBe("fakezip");
@@ -847,14 +847,14 @@ exit 0
         const retryRecordingPath = join(homeDir, "retry-windows-recording.zip");
         const retryRecordStart = await client.callTool({
             name: "record_video",
-            arguments: { action: "start", deviceId: "windows-win-helper", localPath: retryRecordingPath, helperTimeoutMs: 1000 },
+            arguments: { action: "start", deviceId: "windows-win-helper", localPath: retryRecordingPath, timeoutMs: 1000 },
         });
         expect(retryRecordStart.isError).not.toBe(true);
         writeFileSync(retryRecordingPath, "preserved");
         omitRecordStopArchive = true;
         const missingArchiveStop = await client.callTool({
             name: "record_video",
-            arguments: { action: "stop", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            arguments: { action: "stop", deviceId: "windows-win-helper", timeoutMs: 1000 },
         });
         expect(missingArchiveStop.isError).toBe(true);
         expect((missingArchiveStop.content as Array<{ text?: string }>)[0].text).toContain("recording state preserved for retry");
@@ -862,7 +862,7 @@ exit 0
         omitRecordStopArchive = false;
         const retriedArchiveStop = await client.callTool({
             name: "record_video",
-            arguments: { action: "stop", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            arguments: { action: "stop", deviceId: "windows-win-helper", timeoutMs: 1000 },
         });
         expect(retriedArchiveStop.isError).not.toBe(true);
         expect(readFileSync(retryRecordingPath, "utf8")).toBe("fakezip");
@@ -871,7 +871,7 @@ exit 0
         const unsafeStatusTarget = join(homeDir, "unsafe-status-target.zip");
         const unsafeStatusRecordStart = await client.callTool({
             name: "record_video",
-            arguments: { action: "start", deviceId: "windows-win-helper", localPath: unsafeStatusPath, timeLimitSec: 1, helperTimeoutMs: 1000 },
+            arguments: { action: "start", deviceId: "windows-win-helper", localPath: unsafeStatusPath, timeLimitSec: 1, timeoutMs: 1000 },
         });
         expect(unsafeStatusRecordStart.isError).not.toBe(true);
         writeFileSync(unsafeStatusTarget, "do-not-overwrite");
@@ -879,7 +879,7 @@ exit 0
         forceInactiveRecordStatus = true;
         const unsafeInactiveRecordStatus = await client.callTool({
             name: "record_video",
-            arguments: { action: "status", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            arguments: { action: "status", deviceId: "windows-win-helper", timeoutMs: 1000 },
         });
         expect(unsafeInactiveRecordStatus.isError).not.toBe(true);
         const unsafeInactivePayload = JSON.parse(((unsafeInactiveRecordStatus.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -893,33 +893,33 @@ exit 0
         rmSync(unsafeStatusPath, { force: true });
         const unsafeStatusRecordStop = await client.callTool({
             name: "record_video",
-            arguments: { action: "stop", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            arguments: { action: "stop", deviceId: "windows-win-helper", timeoutMs: 1000 },
         });
         expect(unsafeStatusRecordStop.isError).not.toBe(true);
         expect(readFileSync(unsafeStatusPath, "utf-8")).toBe("fakezip");
 
         const boundedRecordStart = await client.callTool({
             name: "record_video",
-            arguments: { action: "start", deviceId: "windows-win-helper", localPath: join(homeDir, "bounded-windows-recording.zip"), timeLimitSec: 1, helperTimeoutMs: 1000 },
+            arguments: { action: "start", deviceId: "windows-win-helper", localPath: join(homeDir, "bounded-windows-recording.zip"), timeLimitSec: 1, timeoutMs: 1000 },
         });
         expect(boundedRecordStart.isError).not.toBe(true);
         forceInactiveRecordStatus = true;
         const inactiveRecordStatus = await client.callTool({
             name: "record_video",
-            arguments: { action: "status", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            arguments: { action: "status", deviceId: "windows-win-helper", timeoutMs: 1000 },
         });
         expect(inactiveRecordStatus.isError).not.toBe(true);
         expect(JSON.parse(((inactiveRecordStatus.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toBeNull();
         expect(readFileSync(join(homeDir, "bounded-windows-recording.zip"), "utf-8")).toBe("boundedzip");
         const restartAfterInactiveStatus = await client.callTool({
             name: "record_video",
-            arguments: { action: "start", deviceId: "windows-win-helper", localPath: join(homeDir, "restart-windows-recording.zip"), helperTimeoutMs: 1000 },
+            arguments: { action: "start", deviceId: "windows-win-helper", localPath: join(homeDir, "restart-windows-recording.zip"), timeoutMs: 1000 },
         });
         expect(restartAfterInactiveStatus.isError).not.toBe(true);
         forceInactiveRecordStatus = false;
         const restartStop = await client.callTool({
             name: "record_video",
-            arguments: { action: "stop", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            arguments: { action: "stop", deviceId: "windows-win-helper", timeoutMs: 1000 },
         });
         expect(restartStop.isError).not.toBe(true);
         clearInterval(responder);
@@ -1110,7 +1110,7 @@ exit 0
 
             const exec = await client.callTool({
                 name: "exec",
-                arguments: { deviceId: "windows-one-shot", command: "whoami", helperTimeoutMs: 350 },
+                arguments: { deviceId: "windows-one-shot", command: "whoami", timeoutMs: 350 },
             });
             expect(exec.isError).toBe(true);
             const text = (exec.content as Array<{ text?: string }>)[0].text ?? "";
@@ -1134,7 +1134,7 @@ exit 0
                     deviceId: "windows-one-shot",
                     localPath: uploadSource,
                     remotePath: "C:\\Users\\WDAGUtilityAccount\\late-upload.txt",
-                    helperTimeoutMs: 350,
+                    timeoutMs: 350,
                 },
             });
             expect(upload.isError).toBe(true);
@@ -1186,7 +1186,7 @@ exit 0
 
             const exec = await client.callTool({
                 name: "exec",
-                arguments: { deviceId: "windows-existing-login-retry", command: "whoami", helperTimeoutMs: 350 },
+                arguments: { deviceId: "windows-existing-login-retry", command: "whoami", timeoutMs: 350 },
             });
             expect(exec.isError).toBe(true);
             const text = (exec.content as Array<{ text?: string }>)[0].text ?? "";

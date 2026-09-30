@@ -191,7 +191,6 @@ export function androidEmulatorCreateRequest({ name, deviceId, systemImage }) {
         name,
         deviceId,
         systemImage,
-        createAvd: true,
     };
 }
 
@@ -461,14 +460,6 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
                 }));
                 assert.strictEqual(mobileStop.provider, "adb");
                 assert.strictEqual(mobileStop.stopped, appPackage);
-
-                const deviceReset = parsePayload(await callTool("reset", { detail: true,
-                    deviceId,
-                    packageName: appPackage,
-                    confirmDestructive: true,
-                }));
-                assert.strictEqual(deviceReset.provider, "adb");
-                assert.deepStrictEqual(deviceReset.reset, { packageName: appPackage });
 
                 const clearAppData = parsePayload(await callTool("clear_app_data", { detail: true,
                     deviceId,

@@ -1,4 +1,5 @@
 import { validateListFilesArgs } from "./file-listing.mjs";
+import { createInputError, normalizeCreateArgs } from "./creation-input.mjs";
 import { TOOLS, SINGLE_BACKEND_TOOL_DEFAULTS, GROUP_OPERATIONS, toolOperation } from "./tools.mjs";
 import { SINGLE_BACKEND_TOOL_DEFAULTS as OPERATION_DEFAULTS } from "./operation-tools.mjs";
 
@@ -12,7 +13,17 @@ const TOOL_NAMES = new Set(TOOLS.map((tool) => tool.name));
 export function toolInputError(name, args = {}) {
     if (!TOOL_NAMES.has(name)) return `Unknown tool: ${name}`;
     if (!args || typeof args !== "object" || Array.isArray(args)) return "Tool arguments must be an object";
+    if (Object.hasOwn(args, "helperTimeoutMs")) return "Use timeoutMs; helperTimeoutMs is an internal option";
+    const timeout = TOOLS.find(tool => tool.name === name)?.inputSchema.properties.timeoutMs;
+    if (timeout && args.timeoutMs !== undefined && (!Number.isFinite(args.timeoutMs) || args.timeoutMs < timeout.minimum || args.timeoutMs > timeout.maximum)) return `timeoutMs must be between ${timeout.minimum} and ${timeout.maximum}`;
+    if (name === "reset" && ["packageName", "bundleId", "containerType", "eraseSimulator"].some(key => Object.hasOwn(args, key))) return "reset erases an iOS Simulator; use clear_app_data for an app";
     if (Object.hasOwn(args, "options")) return "Use flat tool arguments; options is not supported";
+    if (name === "create") {
+        const error = createInputError(args);
+        if (error) return error;
+        if (args.dryRun === true && args.backend === "linux-vm" && args.provider !== "hyper-v") return "create dryRun on Linux requires provider:hyper-v; container QEMU does not support dryRun";
+        return null;
+    }
     if ((DEVICE_TARGET_PROPERTIES.has(name) || name === "run_flow") && Object.hasOwn(args, "backend")) {
         return "deviceId determines the backend; omit backend";
     }
@@ -32,6 +43,20 @@ export function toolInputError(name, args = {}) {
         return `${name} selects its backend automatically; omit backend`;
     }
     return null;
+}
+
+// Public translation happens once; provider/internal calls retain their own contract.
+export function normalizePublicToolArgs(name, args = {}) {
+    const normalized = normalizeToolArgs(args, toolOperation(name, args));
+    if (name === "create") return normalizeCreateArgs(normalized);
+    if (name === "reset") normalized.eraseSimulator = true;
+    const schema = TOOLS.find(tool => tool.name === name)?.inputSchema;
+    if (schema?.properties.timeoutMs && args.timeoutMs !== undefined
+        && !["wait_for_text", "wait_for_app", "wireless"].includes(name)) {
+        normalized.helperTimeoutMs = Math.min(Number(args.timeoutMs), 300000);
+        normalized.rpcTimeoutMs ??= Math.min(Number(args.timeoutMs) + 30000, 630000);
+    }
+    return normalized;
 }
 
 export function normalizeToolArgs(args = {}, toolName) {

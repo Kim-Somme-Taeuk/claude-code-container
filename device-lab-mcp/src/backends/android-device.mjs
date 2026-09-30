@@ -28,7 +28,7 @@ const ANDROID_REAL_CAPABILITIES = [
     "device_inventory", "device_attach", "device_detach", "device_start", "device_stop",
     "device_status", "device_wireless", "device_exec", "device_screenshot",
     "device_record_video_start", "device_record_video_stop", "device_record_video_status",
-    "device_upload", "device_download", "device_reset",
+    "device_upload", "device_download",
     "device_install_app", "device_launch_app",
     "mobile_session_status", "mobile_dump_ui", "mobile_tap",
     "mobile_double_tap", "mobile_long_press", "mobile_swipe",

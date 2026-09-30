@@ -93,7 +93,7 @@ export async function proveHyperVLinuxGuiKeyboardFile(
         let stage = "rpc-failed";
         for (let attempt = 0; attempt < 6; attempt++) {
             try {
-                const result = accepted(await callTool("exec", { detail: true, ...direct, command, helperTimeoutMs: 5000 }), "exec");
+                const result = accepted(await callTool("exec", { detail: true, ...direct, command, timeoutMs: 5000 }), "exec");
                 const marker = String(result.stdout || "").trim();
                 if (marker === "ccc-terminal-focused") return { focused: true, stage: "focused" };
                 if (/^ccc-focus-(?:tool-missing|display-unavailable|window-missing|activate-failed|active-mismatch)$/.test(marker)) {

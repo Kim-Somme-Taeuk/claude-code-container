@@ -96,12 +96,16 @@ function toolArgumentFacets(tool, value) {
     return uniqueSorted(facets);
 }
 
+function schemaBranches(schema: any): any[] {
+    return [schema, ...[...(schema?.oneOf || []), ...(schema?.anyOf || []), ...(schema?.allOf || [])].flatMap(schemaBranches)];
+}
+
 function advertisedArgumentEnumFacets() {
-    return uniqueSorted(DEVICE_LAB_MCP_TOOLS.flatMap((tool) => (Object.entries(tool.inputSchema?.properties || {}) as Array<[string, any]>)
+    return uniqueSorted(DEVICE_LAB_MCP_TOOLS.flatMap((tool) => schemaBranches(tool.inputSchema).flatMap(branch => (Object.entries(branch?.properties || {}) as Array<[string, any]>)
         .filter(([key, schema]) => ARGUMENT_FACET_KEYS.includes(key) && Array.isArray(schema?.enum))
         .flatMap(([key, schema]) => schema.enum
             .filter((value) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
-            .map((value) => `${tool.name}:${key}=${String(value)}`))));
+            .map((value) => `${tool.name}:${key}=${String(value)}`)))));
 }
 
 function isProviderArgumentEnumFacet(facet) {
@@ -118,6 +122,7 @@ function schemaTypeMatches(type, value) {
     if (type === "array") return Array.isArray(value);
     if (type === "object") return value !== null && typeof value === "object" && !Array.isArray(value);
     if (type === "number") return typeof value === "number" && Number.isFinite(value);
+    if (type === "integer") return Number.isInteger(value);
     if (type === "string") return typeof value === "string";
     if (type === "boolean") return typeof value === "boolean";
     return true;
@@ -129,6 +134,19 @@ function validateSchemaValue(schema: any = {}, value: any, path = "arguments", o
         errors.push(`${path}:type=${schema.type}`);
         return errors;
     }
+    if (Object.hasOwn(schema, "const") && schema.const !== value) errors.push(`${path}:const`);
+    if (typeof value === "string") {
+        if (typeof schema.minLength === "number" && value.length < schema.minLength) errors.push(`${path}:minLength=${schema.minLength}`);
+        if (typeof schema.maxLength === "number" && value.length > schema.maxLength) errors.push(`${path}:maxLength=${schema.maxLength}`);
+        if (typeof schema.pattern === "string" && !new RegExp(schema.pattern).test(value)) errors.push(`${path}:pattern`);
+    }
+    for (const keyword of ["anyOf", "oneOf"]) {
+        if (!Array.isArray(schema[keyword])) continue;
+        const matches = schema[keyword].filter(branch => validateSchemaValue(branch, value, path, options).length === 0).length;
+        if (keyword === "oneOf" ? matches !== 1 : matches === 0) errors.push(`${path}:${keyword}`);
+    }
+    if (schema.not && validateSchemaValue(schema.not, value, path, options).length === 0) errors.push(`${path}:not`);
+    if (Array.isArray(schema.allOf)) for (const branch of schema.allOf) errors.push(...validateSchemaValue(branch, value, path, options));
     if (Array.isArray(schema.enum) && !schema.enum.includes(value)) errors.push(`${path}:enum`);
     if (typeof schema.minimum === "number" && typeof value === "number" && value < schema.minimum) errors.push(`${path}:minimum=${schema.minimum}`);
     if (typeof schema.maximum === "number" && typeof value === "number" && value > schema.maximum) errors.push(`${path}:maximum=${schema.maximum}`);
@@ -139,18 +157,14 @@ function validateSchemaValue(schema: any = {}, value: any, path = "arguments", o
     }
     if (value && typeof value === "object" && !Array.isArray(value)) {
         const properties = schema.properties || {};
-        const propertyNames = Object.keys(properties);
+        const propertyNames = schemaBranches(schema).flatMap(branch => Object.keys(branch.properties || {}));
         for (const key of Array.isArray(schema.required) ? schema.required : []) {
             if (!(key in value)) errors.push(`${path}.${key}:required`);
-        }
-        if (Array.isArray(schema.anyOf) && schema.anyOf.length > 0) {
-            const matched = schema.anyOf.some((item) => (Array.isArray(item?.required) ? item.required : []).every((key) => key in value));
-            if (!matched) errors.push(`${path}:anyOf`);
         }
         for (const key of Object.keys(value)) {
             if (key in properties) {
                 errors.push(...validateSchemaValue(properties[key], value[key], `${path}.${key}`, options));
-            } else if (propertyNames.length > 0 && !(options.allowHiddenTransportKeys && internalTransportKeys.has(key))) {
+            } else if ((schema.additionalProperties === false || (schema.type === "object" && propertyNames.length > 0 && !propertyNames.includes(key))) && !(options.allowHiddenTransportKeys && internalTransportKeys.has(key))) {
                 errors.push(`${path}.${key}:unknown`);
             }
         }

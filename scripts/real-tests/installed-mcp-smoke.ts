@@ -42,7 +42,7 @@ export function installedMcpSmokeSample(toolName) {
         image_list: { },
         image_import: { name: "Missing image smoke", sourcePath: "missing-smoke.qcow2" },
         wireless: { backend: "android-device", action: "status", timeoutMs: 1 },
-        create: { ...direct, backend: "android-emulator", name: "Dist Android smoke", deviceId: androidId },
+        create: { ...direct, backend: "android-emulator", name: "Dist Android smoke", avdName: "dist-existing-smoke", deviceId: androidId },
         attach: { ...direct, backend: "android-device", name: "Dist attach smoke", serial: "SERIAL-SMOKE" },
         detach: { ...brokerProbe, broker: true, deviceId: "missing-detach-smoke" },
         delete: { ...brokerProbe, broker: true, deviceId: "missing-delete-smoke", confirmDestructive: true },
@@ -50,22 +50,20 @@ export function installedMcpSmokeSample(toolName) {
         stop: { ...direct, deviceId: androidId },
         reboot: { deviceId: linuxId },
         status: { ...direct, deviceId: androidId },
-        workspace_sync: { deviceId: linuxId },
-        artifacts_export: { deviceId: linuxId },
-        exec: { ...direct, deviceId: androidId, command: "true", helperTimeoutMs: 1 },
-        screenshot: { ...direct, deviceId: androidId, helperTimeoutMs: 1 },
-        scroll: { ...direct, deviceId: windowsId, x: 1, y: 1, direction: "down", amount: 1, helperTimeoutMs: 1 },
+        exec: { ...direct, deviceId: androidId, command: "true", timeoutMs: 1 },
+        screenshot: { ...direct, deviceId: androidId, timeoutMs: 1 },
+        scroll: { ...direct, deviceId: windowsId, x: 1, y: 1, direction: "down", amount: 1, timeoutMs: 1 },
         move: { deviceId: "x11-current-display", x: 1, y: 1 },
-        cursor_position: { ...direct, deviceId: windowsId, helperTimeoutMs: 1 },
-        window_list: { ...direct, deviceId: windowsId, helperTimeoutMs: 1 },
-        ui: { ...direct, deviceId: windowsId, maxDepth: 1, maxNodes: 1, helperTimeoutMs: 1 },
+        cursor_position: { ...direct, deviceId: windowsId, timeoutMs: 1 },
+        window_list: { ...direct, deviceId: windowsId, timeoutMs: 1 },
+        ui: { ...direct, deviceId: windowsId, maxDepth: 1, maxNodes: 1, timeoutMs: 1 },
         base_image_create: { name: "Base image smoke", sourceImage: "missing-source" },
         base_image_clone: { name: "Base clone smoke", sourceDeviceId: macosId },
         snapshot: { action: "list", ...direct, deviceId: linuxId },
         record_video: { action: "start", ...direct, deviceId: androidId, remotePath: "/sdcard/smoke.mp4", timeLimitSec: 1 },
-        upload: { ...direct, deviceId: androidId, localPath: "/tmp/missing-smoke.txt", remotePath: "/sdcard/missing-smoke.txt", helperTimeoutMs: 1 },
-        download: { ...direct, deviceId: androidId, remotePath: "/sdcard/missing-smoke.txt", localPath: "/tmp/device-lab-smoke-download.txt", helperTimeoutMs: 1 },
-        reset: { ...direct, deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
+        upload: { ...direct, deviceId: androidId, localPath: "/tmp/missing-smoke.txt", remotePath: "/sdcard/missing-smoke.txt", timeoutMs: 1 },
+        download: { ...direct, deviceId: androidId, remotePath: "/sdcard/missing-smoke.txt", localPath: "/tmp/device-lab-smoke-download.txt", timeoutMs: 1 },
+        reset: { ...direct, deviceId: iosId, confirmDestructive: true },
         install_app: { ...direct, deviceId: androidId, path: "/tmp/missing-smoke.apk" },
         launch_app: { ...direct, deviceId: androidId, packageName: "com.example.smoke" },
         click: { ...direct, deviceId: androidId, x: 1, y: 1 },
@@ -110,7 +108,7 @@ function recordDispatchMismatch(failures, name, result) {
 }
 
 function schemaProperties(inputSchema) {
-    return inputSchema?.properties || {};
+    return Object.assign({}, inputSchema?.properties, ...(inputSchema?.oneOf || []).map(schemaProperties));
 }
 
 function resolveServerPath(options: any = {}) {

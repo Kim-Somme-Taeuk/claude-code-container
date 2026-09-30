@@ -310,7 +310,7 @@ export async function run(options: any = {}) {
                 const deviceInstall = parsePayload(await callTool("install_app", { detail: true,
                     deviceId,
                     path: appApk,
-                    helperTimeoutMs: ANDROID_DEVICE_INSTALL_TIMEOUT_MS,
+                    timeoutMs: ANDROID_DEVICE_INSTALL_TIMEOUT_MS,
                 }));
                 assert.strictEqual(deviceInstall.provider, "adb");
                 assert.strictEqual(androidDeviceReportedPathMatches(deviceInstall.installed, appApk), true);
@@ -322,7 +322,7 @@ export async function run(options: any = {}) {
                 const install = parsePayload(await callTool("install_app", { detail: true,
                     deviceId,
                     path: appApk,
-                    helperTimeoutMs: ANDROID_DEVICE_INSTALL_TIMEOUT_MS,
+                    timeoutMs: ANDROID_DEVICE_INSTALL_TIMEOUT_MS,
                 }));
                 assert.strictEqual(install.provider, "adb");
                 assert.strictEqual(androidDeviceReportedPathMatches(install.installed, appApk), true);
@@ -351,7 +351,7 @@ export async function run(options: any = {}) {
                 assert.strictEqual(stopApp.provider, "adb");
                 assert.strictEqual(stopApp.packageName, appPackage);
 
-                const reset = parsePayload(await callTool("reset", { detail: true, deviceId, packageName: appPackage, confirmDestructive: true }));
+                const reset = parsePayload(await callTool("clear_app_data", { detail: true, deviceId, packageName: appPackage, confirmDestructive: true }));
                 assert.strictEqual(reset.provider, "adb");
                 assert.deepStrictEqual(reset.reset, { packageName: appPackage });
 
@@ -373,10 +373,10 @@ export async function run(options: any = {}) {
 
             return {
                 status: "PASS",
-                detail: `device=${deviceId} serial=${cap.serial} app=${appSelection.source}:install-launch-wait-permission-stop-reset-clear-uninstall verified wireless=status-actions-device verified`,
+                detail: `device=${deviceId} serial=${cap.serial} app=${appSelection.source}:install-launch-wait-permission-stop-clear-uninstall verified wireless=status-actions-device verified`,
                 serial: cap.serial,
                 deviceId,
-                appCoverage: "install-launch-wait-permission-stop-reset-clear-uninstall verified",
+                appCoverage: "install-launch-wait-permission-stop-clear-uninstall verified",
                 wirelessCoverage: "status-actions-device verified",
             };
         } catch (error) {

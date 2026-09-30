@@ -67,11 +67,11 @@ export function realMcpToolRequestTimeoutMs(name: string, args: Record<string, a
     if (Number.isFinite(explicitRpcTimeoutMs)) {
         return Math.min(MAX_REAL_MCP_TOOL_TIMEOUT_MS, Math.max(DEFAULT_REAL_MCP_TOOL_TIMEOUT_MS, explicitRpcTimeoutMs + 15000));
     }
-    const helperTimeoutMs = Number(args?.helperTimeoutMs);
-    if (Number.isFinite(helperTimeoutMs)) {
-        return Math.min(MAX_REAL_MCP_TOOL_TIMEOUT_MS, Math.max(DEFAULT_REAL_MCP_TOOL_TIMEOUT_MS, helperTimeoutMs + 30000));
+    const timeoutMs = Number(args?.timeoutMs);
+    if (Number.isFinite(timeoutMs)) {
+        return Math.min(MAX_REAL_MCP_TOOL_TIMEOUT_MS, Math.max(DEFAULT_REAL_MCP_TOOL_TIMEOUT_MS, timeoutMs + 30000));
     }
-    if (name === "create" && args?.createAvd === true) return LONG_REAL_MCP_TOOL_TIMEOUT_MS;
+    if (name === "create" && args?.backend === "android-emulator" && Boolean(args?.systemImage)) return LONG_REAL_MCP_TOOL_TIMEOUT_MS;
     if (name === "start" && args?.waitForBoot === true) {
         const bootTimeoutMs = Number(args?.bootTimeoutMs);
         return Number.isFinite(bootTimeoutMs)

@@ -18,7 +18,7 @@ describe("public Device Lab tool guidance", () => {
     afterAll(async () => { await cleanupDeviceLabMcpTestContext(context); });
 
     it("advertises unique unprefixed names within the catalog byte budget", () => {
-        expect(tools).toHaveLength(61);
+        expect(tools).toHaveLength(59);
         expect(new Set(tools.map(tool => tool.name)).size).toBe(tools.length);
         expect(tools.every(tool => !/^(device_|mobile_|display_)/.test(tool.name))).toBe(true);
         expect(Buffer.byteLength(JSON.stringify(tools), "utf8")).toBeLessThan(45579);
@@ -33,7 +33,7 @@ describe("public Device Lab tool guidance", () => {
     });
 
     it("separates definition creation, startup, and physical attachment", () => {
-        expect(description("create")).toMatch(/definition|define/);
+        expect(description("create")).toMatch(/create/);
         expect(description("create")).toContain("start");
         expect(description("start")).toMatch(/start|boot/);
         expect(description("attach")).toMatch(/physical/);
@@ -42,7 +42,8 @@ describe("public Device Lab tool guidance", () => {
 
     it("identifies creation platforms, mobile app IDs, permissions and battery controls", () => {
         const guidance = (name: string, field: string) => {
-            const properties = tool(name).inputSchema.properties as Record<string, { description?: string }>;
+            const schema = tool(name).inputSchema as any;
+            const properties = Object.assign({}, schema.properties, ...(schema.oneOf || []).map((branch: any) => branch.properties));
             return (properties[field].description || "").toLowerCase();
         };
         expect(guidance("create", "image")).toMatch(/hyper-v.*macos.*ssh/);
@@ -72,7 +73,7 @@ describe("public Device Lab tool guidance", () => {
         expect(guidance("set_battery", "status")).toMatch(/1.*unknown.*2.*charging.*3.*discharging.*4.*not charging.*5.*full/);
     });
 
-    it.each(["image_list", "image_import", "workspace_sync", "artifacts_export"])("%s identifies its container QEMU scope", name => {
+    it.each(["image_list", "image_import"])("%s identifies its container QEMU scope", name => {
         expect(description(name)).toMatch(/container.*qemu/);
     });
 
@@ -85,7 +86,8 @@ describe("public Device Lab tool guidance", () => {
     });
 
     it.each(["start", "reboot"])("%s explains waitForBoot polarity without claiming a universal default", (name) => {
-        const properties = tool(name).inputSchema.properties as Record<string, { description?: string }>;
+        const schema = tool(name).inputSchema as any;
+            const properties = Object.assign({}, schema.properties, ...(schema.oneOf || []).map((branch: any) => branch.properties));
         const guidance = properties.waitForBoot.description!.toLowerCase();
         expect(guidance).toMatch(/false[^.;]*(skip|disable)|(?:skip|disable)[^.;]*false/);
         expect(guidance).toMatch(/linux-vm/);

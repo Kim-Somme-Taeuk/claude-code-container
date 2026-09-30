@@ -198,7 +198,6 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
                 simulatorName,
                 deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
                 runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0",
-                createSimulator: true,
             },
         });
         expect(create.isError).not.toBe(true);
@@ -427,7 +426,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         expect(JSON.stringify(escapedFiles)).not.toContain('"entries"');
 
         const reset = await client.callTool({
-            name: "reset",
+            name: "clear_app_data",
             arguments: { deviceId: ownedDeviceId, bundleId: "com.example.Test", confirmDestructive: true },
         });
         expect(reset.isError).not.toBe(true);
@@ -837,7 +836,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
 
         const eraseReset = await client.callTool({
             name: "reset",
-            arguments: { deviceId: ownedDeviceId, eraseSimulator: true, confirmDestructive: true },
+            arguments: { deviceId: ownedDeviceId, confirmDestructive: true },
         });
         expect(eraseReset.isError).not.toBe(true);
         const erasePayload = JSON.parse(((eraseReset.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -866,7 +865,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
 
         const eraseWithRecording = await client.callTool({
             name: "reset",
-            arguments: { deviceId: ownedDeviceId, eraseSimulator: true, confirmDestructive: true },
+            arguments: { deviceId: ownedDeviceId, confirmDestructive: true },
         });
         expect(eraseWithRecording.isError).toBe(true);
         expect((eraseWithRecording.content as Array<{ text?: string }>)[0].text).toContain("recording is active or pending finalization");
@@ -941,7 +940,6 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
                 simulatorName,
                 deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
                 runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0",
-                createSimulator: true,
             },
         });
         expect(create.isError).not.toBe(true);
@@ -996,7 +994,6 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
                 simulatorName,
                 deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
                 runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0",
-                createSimulator: true,
             },
         });
         expect(create.isError).not.toBe(true);
@@ -1055,7 +1052,6 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
                 simulatorName: `ccc-${ownerId}-shutdown-failure`,
                 deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
                 runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0",
-                createSimulator: true,
             },
         });
         expect(create.isError).not.toBe(true);
@@ -1095,7 +1091,6 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
                 simulatorName: `ccc-${ownerId}-stop-recorder-mismatch`,
                 deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
                 runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0",
-                createSimulator: true,
             },
         });
         expect(create.isError).not.toBe(true);
@@ -1143,7 +1138,6 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
                 simulatorName: `ccc-${ownerId}-stop-partial-cleanup`,
                 deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
                 runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0",
-                createSimulator: true,
             },
         })).isError).not.toBe(true);
         expect((await client.callTool({ name: "start", arguments: { deviceId, bootTimeoutMs: 1000 } })).isError).not.toBe(true);
@@ -1207,7 +1201,6 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
                 simulatorName: `ccc-${ownerId}-delete-appium-mismatch`,
                 deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
                 runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0",
-                createSimulator: true,
             },
         });
         expect(create.isError).not.toBe(true);
@@ -1262,7 +1255,6 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
                 simulatorName: `ccc-${ownerId}-delete-partial-simctl`,
                 deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
                 runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0",
-                createSimulator: true,
             },
         })).isError).not.toBe(true);
         expect((await client.callTool({ name: "start", arguments: { deviceId, bootTimeoutMs: 1000 } })).isError).not.toBe(true);
@@ -1311,7 +1303,6 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
                 simulatorName: `ccc-${ownerId}-delete-partial-stage`,
                 deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
                 runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0",
-                createSimulator: true,
             },
         })).isError).not.toBe(true);
         expect((await client.callTool({ name: "start", arguments: { deviceId, bootTimeoutMs: 1000 } })).isError).not.toBe(true);
@@ -1344,7 +1335,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
     });
 
 
-    it("keeps metadata-only iOS definitions lazy and refuses non-owned simulator operations", { timeout: TIMEOUT }, async () => {
+    it("provisions iOS simulators by default and refuses non-owned simulator operations", { timeout: TIMEOUT }, async () => {
         const inventory = await client.callTool({
             name: "inventory",
             arguments: { backend: "ios-simulator" },
@@ -1366,12 +1357,12 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         const metadataPayload = JSON.parse(((metadataOnly.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             device: { provisioning: string; udid: string | null };
         };
-        expect(metadataPayload.device.provisioning).toBe("definition-only");
-        expect(metadataPayload.device.udid).toBeNull();
+        expect(metadataPayload.device.provisioning).toBe("created");
+        expect(metadataPayload.device.udid).toBeTruthy();
 
         const metadataDeleted = await client.callTool({
             name: "delete",
-            arguments: { deviceId: "ios-ios-metadata-only", confirmDestructive: true },
+            arguments: { deviceId: "ios-ios-metadata-only", deleteSimulator: true, confirmDestructive: true },
         });
         expect(metadataDeleted.isError).not.toBe(true);
 
@@ -1413,7 +1404,6 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
                 simulatorName: "foreign-ios",
                 deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
                 runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0",
-                createSimulator: true,
             },
         });
         expect(foreignCreate.isError).toBe(true);
@@ -1453,7 +1443,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         expect((foreignDownload.content as Array<{ text?: string }>)[0].text).toContain("Refusing iOS Simulator download for non-owned simulator name");
 
         const foreignAppReset = await client.callTool({
-            name: "reset",
+            name: "clear_app_data",
             arguments: { deviceId: "ios-foreign-ios-metadata", bundleId: "com.example.Test", confirmDestructive: true },
         });
         expect(foreignAppReset.isError).toBe(true);
@@ -1461,7 +1451,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
 
         const eraseSimulator = await client.callTool({
             name: "reset",
-            arguments: { deviceId: "ios-foreign-ios-metadata", eraseSimulator: true, confirmDestructive: true },
+            arguments: { deviceId: "ios-foreign-ios-metadata", confirmDestructive: true },
         });
         expect(eraseSimulator.isError).toBe(true);
         expect((eraseSimulator.content as Array<{ text?: string }>)[0].text).toContain("non-owned simulator name");
@@ -1480,7 +1470,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         expect(foreignDeleted.isError).not.toBe(true);
 
         const log = readFileSync(logPath, "utf-8");
-        expect(log).not.toContain(`xcrun simctl create ${metadataOnlyName}`);
+        expect(log).toContain(`xcrun simctl create ${metadataOnlyName}`);
         expect(log).not.toContain("xcrun simctl boot FOREIGN-UDID");
         expect(log).not.toContain("xcrun simctl boot HOST-UDID");
         expect(log).not.toContain("xcrun simctl spawn HOST-UDID /bin/sh -lc echo unsafe");

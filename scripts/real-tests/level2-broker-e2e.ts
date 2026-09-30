@@ -1,3 +1,5 @@
+import { toolInputError } from "../../device-lab-mcp/src/tool-arguments.mjs";
+import { createInputError } from "../../device-lab-mcp/src/creation-input.mjs";
 import { toolOperation } from "../../device-lab-mcp/src/tools.mjs";
 import { createBrokerApiClient } from "./broker-api-client.ts";
 import assert from "assert";
@@ -29,9 +31,6 @@ const scriptedArgumentFacets = [
     "launch_app:component=com.example.missing/.MainActivity",
     "launch_app:packageName=com.example.missing",
     "reset:confirmDestructive=true",
-    "reset:bundleId=com.example.missing",
-    "reset:eraseSimulator=true",
-    "reset:packageName=com.example.missing",
     "snapshot:confirmDestructive=true",
     "snapshot:snapshotId=missing-snapshot-id",
     "snapshot:snapshotName=missing",
@@ -140,13 +139,25 @@ function brokerEnumSample(toolName, route, facetKey, facetValue, index) {
     delete args.implicitBroker;
 
     if (toolName === "create") {
+        // Every enum probe remains a broker plan, never resource creation.
+        for (const key of ["avdName", "systemImage", "deviceType", "runtime", "udid", "image", "provider"]) delete args[key];
         args.name = `Level 2 enum ${facetKey} ${facetValue}`;
         args.deviceId = `level2-enum-${facetKey}-${facetValue}-${index}`;
         args.dryRun = true;
         if (facetKey === "provider") {
-            args.backend = "macos-vm";
+            args.backend = ["auto", "hyper-v"].includes(facetValue) ? "windows-vm" : "macos-vm";
+            if (facetValue === "container-qemu") args.backend = "linux-vm";
             args.provider = facetValue;
-            args.image = "missing-image";
+        }
+        if (args.backend === "linux-vm" && facetKey === "backend") args.provider = "hyper-v";
+        if (args.backend === "android-emulator") args.systemImage = "system-images;android-35;google_apis;x86_64";
+        else if (args.backend === "ios-simulator") {
+            args.deviceType = "com.apple.CoreSimulator.SimDeviceType.iPhone-16";
+            args.runtime = "com.apple.CoreSimulator.SimRuntime.iOS-18-0";
+        } else if (["windows-vm", "linux-vm", "macos-vm"].includes(args.backend)) args.image = "missing-image";
+        if (args.provider === "container-qemu") {
+            delete args.image;
+            args.sourceImage = "/tmp/ccc-level2-missing-image.qcow2";
         }
     }
     if (toolName === "delete") args.confirmDestructive = true;
@@ -156,7 +167,6 @@ function brokerEnumSample(toolName, route, facetKey, facetValue, index) {
     }
     if (toolName === "reset") {
         args.confirmDestructive = true;
-        args.packageName ||= "com.example.missing";
     }
     if ((toolOperation(toolName)?.startsWith("mobile_") || ["click", "double_click", "key", "type"].includes(toolName)) && /ios/.test(String(facetValue))) {
         if ("packageName" in args && !("bundleId" in args)) {
@@ -174,9 +184,9 @@ function brokerEnumSample(toolName, route, facetKey, facetValue, index) {
 function backendProviderEnumDiagnostics(route) {
     const diagnostics = [];
     for (const tool of DEVICE_LAB_MCP_TOOLS) {
-        const properties = tool.inputSchema?.properties || {};
+        const schemas = [tool.inputSchema, ...(tool.inputSchema?.oneOf || [])];
         for (const facetKey of ["backend", "provider"]) {
-            const enumValues = Array.isArray(properties[facetKey]?.enum) ? properties[facetKey].enum.map(String) : [];
+            const enumValues = [...new Set(schemas.flatMap(schema => schema?.properties?.[facetKey]?.enum || []).map(String))];
             for (const facetValue of enumValues) {
                 diagnostics.push([
                     tool.name,
@@ -753,9 +763,10 @@ export async function runBrokerE2E(options: any = {}) {
             const fakeWindows = "level2-broker-e2e-public-windows";
             const createPlan = parseToolPayload(await callTool("create", { detail: true,
                 ...publicRoute,
-                backend: "android-emulator",
+                backend: "windows-vm",
                 name: "Level 2 public dry-run create",
-                deviceId: fakeAndroid,
+                deviceId: fakeWindows,
+                image: "ccc-level2-missing-image",
                 dryRun: true,
             }));
             assert.strictEqual(createPlan.ok, true, JSON.stringify(createPlan));
@@ -768,21 +779,21 @@ export async function runBrokerE2E(options: any = {}) {
                 ["delete", { ...publicRoute, deviceId: fakeWindows, confirmDestructive: true }],
                 ["attach", { ...publicRoute, backend: "android-device", name: "Level 2 public attach diagnostic", deviceId: `${fakeAndroid}-attach`, serial: "ccc-level2-definitely-missing-android-serial" }],
                 ["detach", { ...publicRoute, deviceId: `${fakeAndroid}-detach` }],
-                ["exec", { ...publicRoute, deviceId: fakeAndroid, command: "true", helperTimeoutMs: 1 }],
+                ["exec", { ...publicRoute, deviceId: fakeAndroid, command: "true", timeoutMs: 1 }],
                 ["record_video", { action: "start", ...publicRoute, deviceId: fakeAndroid, remotePath: "/sdcard/level2-public.mp4", timeLimitSec: 1 }],
-                ["record_video", { action: "status", ...publicRoute, deviceId: fakeAndroid, helperTimeoutMs: 1 }],
-                ["record_video", { action: "stop", ...publicRoute, deviceId: fakeAndroid, helperTimeoutMs: 1 }],
-                ["upload", { ...publicRoute, deviceId: fakeAndroid, localPath: "/tmp/ccc-missing-public-upload.txt", remotePath: "/sdcard/ccc-missing-public-upload.txt", helperTimeoutMs: 1 }],
-                ["download", { ...publicRoute, deviceId: fakeAndroid, remotePath: "/sdcard/ccc-missing-public-download.txt", localPath: "/tmp/ccc-missing-public-download.txt", helperTimeoutMs: 1 }],
-                ["reset", { ...publicRoute, deviceId: fakeAndroid, packageName: "com.example.missing", confirmDestructive: true }],
-                ["reset", { ...publicRoute, deviceId: fakeAndroid, bundleId: "com.example.missing", confirmDestructive: true }],
-                ["reset", { ...publicRoute, deviceId: fakeAndroid, eraseSimulator: true, confirmDestructive: true }],
+                ["record_video", { action: "status", ...publicRoute, deviceId: fakeAndroid, timeoutMs: 1 }],
+                ["record_video", { action: "stop", ...publicRoute, deviceId: fakeAndroid, timeoutMs: 1 }],
+                ["upload", { ...publicRoute, deviceId: fakeAndroid, localPath: "/tmp/ccc-missing-public-upload.txt", remotePath: "/sdcard/ccc-missing-public-upload.txt", timeoutMs: 1 }],
+                ["download", { ...publicRoute, deviceId: fakeAndroid, remotePath: "/sdcard/ccc-missing-public-download.txt", localPath: "/tmp/ccc-missing-public-download.txt", timeoutMs: 1 }],
+                ["clear_app_data", { ...publicRoute, deviceId: fakeAndroid, packageName: "com.example.missing", confirmDestructive: true }],
+                ["clear_app_data", { ...publicRoute, deviceId: "level2-broker-e2e-public-ios", bundleId: "com.example.missing", confirmDestructive: true }],
+                ["reset", { ...publicRoute, deviceId: "level2-broker-e2e-public-ios", confirmDestructive: true }],
                 ["install_app", { ...publicRoute, deviceId: fakeAndroid, path: "/tmp/ccc-missing-public.apk" }],
                 ["launch_app", { ...publicRoute, deviceId: fakeAndroid, packageName: "com.example.missing" }],
                 ["launch_app", { ...publicRoute, deviceId: fakeAndroid, bundleId: "com.example.missing" }],
                 ["launch_app", { ...publicRoute, deviceId: fakeAndroid, component: "com.example.missing/.MainActivity" }],
-                ["window_list", { ...publicRoute, deviceId: fakeWindows, helperTimeoutMs: 1 }],
-                ["ui", { ...publicRoute, deviceId: fakeWindows, maxDepth: 1, maxNodes: 1, helperTimeoutMs: 1 }],
+                ["window_list", { ...publicRoute, deviceId: fakeWindows, timeoutMs: 1 }],
+                ["ui", { ...publicRoute, deviceId: fakeWindows, maxDepth: 1, maxNodes: 1, timeoutMs: 1 }],
             ]);
             for (const [tool, args] of publicDeviceDiagnostics) {
                 const result = await callTool(tool, { detail: true, ...args });
@@ -913,7 +924,20 @@ export async function runBrokerE2E(options: any = {}) {
 
             try {
             const diagnostics = scriptedToolCases(backendProviderEnumDiagnostics(publicRoute));
+            let inputRejections = 0;
             for (const [tool, args, facet] of diagnostics) {
+                if (tool === "create" && !["windows-vm", "linux-vm"].includes(args.backend)) {
+                    // These backends cannot promise direct-provider dry-run behavior.
+                    // Prove rejection rather than creating resources for enum coverage.
+                    assert.strictEqual(createInputError(args), `create ${args.backend} does not support dryRun`);
+                    inputRejections++;
+                    continue;
+                }
+                if (tool === "create" && args.backend === "linux-vm" && args.provider !== "hyper-v") {
+                    assert.strictEqual(toolInputError(tool, args), "create dryRun on Linux requires provider:hyper-v; container QEMU does not support dryRun");
+                    inputRejections++;
+                    continue;
+                }
                 const result = markExpectedToolError(await callTool(tool, { detail: true, ...args }));
                 const text = result?.content?.map((item) => item?.text || "").join("\n") || "";
                 assert.ok(Array.isArray(result?.content) && result.content.length > 0, `${facet}: missing MCP response content`);
@@ -922,7 +946,7 @@ export async function runBrokerE2E(options: any = {}) {
                     assert.ok(typeof payload === "object" && payload !== null, `${facet}: ${text}`);
                 }
             }
-            steps.push({ name: "public backend/provider enum diagnostics", status: "PASS", detail: `facets=${diagnostics.length}` });
+            steps.push({ name: "public backend/provider enum diagnostics and input validation", status: "PASS", detail: `facets=${diagnostics.length}, inputRejections=${inputRejections}; local-only create validation is not MCP or provider execution proof` });
         } catch (error) {
             steps.push(failStep("public backend/provider enum diagnostics", error));
         }

@@ -168,7 +168,8 @@ const BROKER_CAPABLE_MOBILE_TOOLS = [
 ] as const;
 
 function toolProperties(tool: { inputSchema?: unknown } | undefined) {
-    return ((tool?.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties || {}) as Record<string, unknown>;
+    const schema = tool?.inputSchema as any;
+    return Object.assign({}, ...(schema?.oneOf || []).map((branch: any) => branch.properties), schema?.properties);
 }
 
 function expectNoRoutingProperties(properties: Record<string, unknown>, extraKeys: string[] = []) {
@@ -440,7 +441,7 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(createTool?.inputSchema).toEqual(expect.objectContaining({ required: ["backend", "name"] }));
         expect(createProperties).toEqual(expect.objectContaining({
             name: expect.objectContaining({ type: "string" }),
-            provider: expect.objectContaining({ enum: ["auto", "hyper-v", "tart", "vz", "utmctl", "container-qemu"] }),
+            provider: expect.objectContaining({ enum: ["auto", "hyper-v", "container-qemu"] }),
             image: expect.objectContaining({ type: "string" }),
             sshHost: expect.objectContaining({ type: "string" }),
             sshUser: expect.objectContaining({ type: "string" }),
@@ -494,7 +495,8 @@ describe("device-lab MCP foundation and definitions", () => {
             const schema = result.tools.find(tool => tool.name === "snapshot")!.inputSchema as any;
             expectAnyOfRequired({ inputSchema: schema.oneOf.find((variant: any) => variant.properties.action.const === action) } as any, [["snapshotName"], ["snapshotId"]]);
         }
-        expectAnyOfRequired(result.tools.find((tool) => tool.name === "reset"), [["packageName"], ["bundleId"], ["eraseSimulator"]]);
+        expectAnyOfRequired(result.tools.find((tool) => tool.name === "reset"), []);
+        expect(Object.keys(toolProperties(result.tools.find(tool => tool.name === "reset"))).sort()).toEqual(["confirmDestructive", "detail", "deviceId"]);
         expectAnyOfRequired(result.tools.find((tool) => tool.name === "launch_app"), [["packageName"], ["bundleId"], ["component"]]);
         expectAnyOfRequired(TOOLS.find((tool: { name: string }) => tool.name === "launch_app"), [["packageName"], ["bundleId"], ["component"]]);
         expectAnyOfRequired(result.tools.find((tool) => tool.name === "uninstall_app"), [["packageName"], ["bundleId"]]);
@@ -520,25 +522,25 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(desktopExecTool?.inputSchema).toEqual(expect.objectContaining({ required: ["deviceId", "command"] }));
         expect(desktopExecProperties).toEqual(expect.objectContaining({
             deviceId: expect.objectContaining({ type: "string" }),
-            helperTimeoutMs: expect.objectContaining({ type: "number" }),
+            timeoutMs: expect.objectContaining({ type: "number" }),
         }));
         expectRoutingProperties(desktopExecProperties);
         const uploadTool = result.tools.find((tool) => tool.name === "upload");
         const uploadProperties = toolProperties(uploadTool);
         expect(uploadProperties).toEqual(expect.objectContaining({
-            helperTimeoutMs: expect.objectContaining({ type: "number" }),
+            timeoutMs: expect.objectContaining({ type: "number" }),
         }));
         expectRoutingProperties(uploadProperties);
         const downloadTool = result.tools.find((tool) => tool.name === "download");
         const downloadProperties = toolProperties(downloadTool);
         expect(downloadProperties).toEqual(expect.objectContaining({
-            helperTimeoutMs: expect.objectContaining({ type: "number" }),
+            timeoutMs: expect.objectContaining({ type: "number" }),
         }));
         expectRoutingProperties(downloadProperties);
         const recordStopTool = result.tools.find((tool) => tool.name === "record_video");
         const recordStopProperties = toolProperties(recordStopTool);
         expect(recordStopProperties).toEqual(expect.objectContaining({
-            helperTimeoutMs: expect.objectContaining({ type: "number" }),
+            timeoutMs: expect.objectContaining({ type: "number" }),
         }));
         expectRoutingProperties(recordStopProperties);
         const scrollTool = result.tools.find((tool) => tool.name === "scroll");
@@ -1069,7 +1071,7 @@ describe("device-lab MCP foundation and definitions", () => {
         const linuxId = "linux-exhaustive-smoke";
 
         for (const args of [
-            { backend: "android-emulator", name: "Android exhaustive smoke", deviceId: androidId },
+            { backend: "android-emulator", name: "Android exhaustive smoke", avdName: "existing-smoke", deviceId: androidId },
             { backend: "ios-simulator", name: "iOS exhaustive smoke", deviceId: iosId },
             { backend: "windows-sandbox", name: "Windows exhaustive smoke", deviceId: windowsId },
             { backend: "macos-vm", name: "macOS exhaustive smoke", deviceId: macosId, image: "missing-image" },
@@ -1081,11 +1083,12 @@ describe("device-lab MCP foundation and definitions", () => {
         const samples: Record<string, Record<string, unknown>> = {
             backends: { ...direct },
             list_devices: {},
+            list_files: { ...direct, deviceId: androidId, path: "/", limit: 2 },
             inventory: { ...direct, backend: "android-emulator" },
             image_list: { },
             image_import: { name: "Missing Linux image", sourcePath: "images/missing-linux-smoke.qcow2" },
             wireless: { backend: "android-device", action: "status", timeoutMs: 1 },
-            create: { ...direct, backend: "android-emulator", name: "Android exhaustive smoke", deviceId: androidId },
+            create: { ...direct, backend: "android-emulator", name: "Android exhaustive smoke", avdName: "existing-smoke", deviceId: androidId },
             attach: { ...direct, backend: "android-device", name: "Android attach smoke", serial: "SERIAL-SMOKE" },
             detach: { ...brokerProbe, broker: true, deviceId: "missing-detach-smoke" },
             delete: { ...brokerProbe, broker: true, deviceId: "missing-delete-smoke", confirmDestructive: true },
@@ -1093,21 +1096,19 @@ describe("device-lab MCP foundation and definitions", () => {
             stop: { ...direct, deviceId: androidId },
             status: { ...direct, deviceId: androidId },
             reboot: { deviceId: linuxId },
-            workspace_sync: { deviceId: linuxId, sourcePath: "missing-workspace-smoke" },
-            artifacts_export: { deviceId: linuxId },
-            exec: { ...direct, deviceId: androidId, command: "true", helperTimeoutMs: 1 },
-            screenshot: { ...direct, deviceId: androidId, helperTimeoutMs: 1 },
-            scroll: { ...direct, deviceId: windowsId, x: 1, y: 1, direction: "down", amount: 1, helperTimeoutMs: 1 },
-            cursor_position: { ...direct, deviceId: windowsId, helperTimeoutMs: 1 },
-            window_list: { ...direct, deviceId: windowsId, helperTimeoutMs: 1 },
-            ui: { ...direct, deviceId: windowsId, maxDepth: 1, maxNodes: 1, helperTimeoutMs: 1 },
+            exec: { ...direct, deviceId: androidId, command: "true", timeoutMs: 1 },
+            screenshot: { ...direct, deviceId: androidId, timeoutMs: 1 },
+            scroll: { ...direct, deviceId: windowsId, x: 1, y: 1, direction: "down", amount: 1, timeoutMs: 1 },
+            cursor_position: { ...direct, deviceId: windowsId, timeoutMs: 1 },
+            window_list: { ...direct, deviceId: windowsId, timeoutMs: 1 },
+            ui: { ...direct, deviceId: windowsId, maxDepth: 1, maxNodes: 1, timeoutMs: 1 },
             base_image_create: { name: "Base image smoke", sourceImage: "missing-source" },
             base_image_clone: { name: "Base clone smoke", sourceDeviceId: macosId },
             snapshot: { action: "create", ...direct, deviceId: macosId, snapshotName: "smoke" },
             record_video: { action: "start", ...direct, deviceId: androidId, remotePath: "/sdcard/smoke.mp4", timeLimitSec: 1 },
-            upload: { ...direct, deviceId: androidId, localPath: "/tmp/missing-smoke.txt", remotePath: "/sdcard/missing-smoke.txt", helperTimeoutMs: 1 },
-            download: { ...direct, deviceId: androidId, remotePath: "/sdcard/missing-smoke.txt", localPath: "/tmp/device-lab-smoke-download.txt", helperTimeoutMs: 1 },
-            reset: { ...direct, deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
+            upload: { ...direct, deviceId: androidId, localPath: "/tmp/missing-smoke.txt", remotePath: "/sdcard/missing-smoke.txt", timeoutMs: 1 },
+            download: { ...direct, deviceId: androidId, remotePath: "/sdcard/missing-smoke.txt", localPath: "/tmp/device-lab-smoke-download.txt", timeoutMs: 1 },
+            reset: { ...direct, deviceId: iosId, confirmDestructive: true },
             install_app: { ...direct, deviceId: androidId, path: "/tmp/missing-smoke.apk" },
             launch_app: { ...direct, deviceId: androidId, packageName: "com.example.smoke" },
             click: { ...direct, deviceId: androidId, x: 1, y: 1 },

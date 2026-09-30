@@ -12,7 +12,7 @@ export interface IosRealDeviceE2EOptions {
 export interface MacosVmE2EOptions {
     level?: number;
     bootTimeoutMs?: number;
-    helperTimeoutMs?: number;
+    timeoutMs?: number;
     snapshot?: boolean;
     imageTools?: boolean;
     [key: string]: unknown;

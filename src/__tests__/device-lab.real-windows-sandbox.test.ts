@@ -40,7 +40,7 @@ function createCleanupEvidence(homeDir: string, owner: string, device: Record<st
 
 describe.runIf(enabled)("level 2 real Windows Sandbox helper E2E", () => {
     it.skipIf(!cap.available)(title, async () => {
-        const result = await runWindowsSandboxE2E({ level, helperTimeoutMs: 30000 });
+        const result = await runWindowsSandboxE2E({ level, timeoutMs: 30000 });
         expect(result).toEqual(expect.objectContaining({
             status: "PASS",
             deviceId: expect.stringMatching(/^windows-real-sandbox-/),

@@ -39,8 +39,8 @@ import { normalizeToolArgs, flowStepArguments } from "../../device-lab-mcp/src/t
 import { createLab, ownerId } from "../../device-lab-mcp/src/backends/linux-vm.mjs";
 
 const defaults = {
-    image_list: "linux-vm", image_import: "linux-vm", workspace_sync: "linux-vm",
-    artifacts_export: "linux-vm", base_image_create: "macos-vm", base_image_clone: "macos-vm",
+    image_list: "linux-vm", image_import: "linux-vm",
+    base_image_create: "macos-vm", base_image_clone: "macos-vm",
 };
 const entries = Object.entries(defaults);
 const ownedActions = ["workspace_sync", "artifacts_export"];
@@ -50,7 +50,7 @@ const call = (name: string, args: any) => fixture.handlers[1]({ params: { name, 
 describe("bounded single-backend argument contract", () => {
     beforeAll(async () => { await startServer(); });
     beforeEach(() => { fixture.calls.length = 0; });
-    it("uses exactly the six public intentional defaults", () => { expect(SINGLE_BACKEND_TOOL_DEFAULTS).toEqual(defaults); });
+    it("uses exactly the four public intentional defaults", () => { expect(SINGLE_BACKEND_TOOL_DEFAULTS).toEqual(defaults); });
     it.each(entries)("%s exposes no redundant backend selector", (name) => {
         const schema = TOOLS.find((tool: any) => tool.name === name)!.inputSchema;
         expect(schema.properties).not.toHaveProperty("backend");
@@ -86,8 +86,8 @@ describe("bounded single-backend argument contract", () => {
     });
     it("inherits only declared target fields before deriving the selected backend", () => {
         const shared = { deviceId: "a", backend: "macos-vm", incarnationId: "a".repeat(32) };
-        expect(flowStepArguments("workspace_sync", shared, {})).toEqual({ deviceId: "a" });
-        expect(normalizeToolArgs(flowStepArguments("workspace_sync", shared, { deviceId: "b" }), "device_workspace_sync")).toEqual({ deviceId: "b", backend: "linux-vm" });
+        expect(flowStepArguments("clear_app_data", shared, {})).toEqual({ deviceId: "a" });
+        expect(flowStepArguments("clear_app_data", shared, { deviceId: "b" })).toEqual({ deviceId: "b" });
     });
 });
 
@@ -113,11 +113,11 @@ describe("single-backend QEMU owner isolation through MCP", () => {
     afterAll(async () => { await cleanupDeviceLabMcpTestContext(context); });
     it("creates from flat inputs and imports an image without backend", async () => {
         const created = parse(await context.client.callTool({ name: "create", arguments: {
-            backend: "linux-vm", name: "Flat Inputs", cpus: 3, memoryMb: 512,
+            backend: "linux-vm", name: "Flat Inputs", cpus: 3, memoryMb: 1024,
         } }));
         expect(created.ok).toBe(true);
         const metadata = JSON.parse(readFileSync(join(root, "owners", created.device.ownerId, "labs", "flat-inputs", "lab.json"), "utf8"));
-        expect(metadata.resources).toMatchObject({ cpus: 3, memoryMb: 512 });
+        expect(metadata.resources).toMatchObject({ cpus: 3, memoryMb: 1024 });
         mkdirSync(join(root, "incoming"), { recursive: true });
         writeFileSync(join(root, "incoming", "base.qcow2"), "fixture-image");
         const imported = parse(await context.client.callTool({ name: "image_import", arguments: { name: "Input Base", sourcePath: "incoming/base.qcow2" } }));
@@ -144,7 +144,7 @@ describe("single-backend QEMU owner isolation through MCP", () => {
         for (const backend of ["linux-vm", "macos-vm", null, ""]) {
             const result = await context.client.callTool({ name, arguments: { deviceId: "owned-target", backend } });
             expect(result.isError).toBe(true);
-            expect(result.content[0].text).toContain("omit backend");
+            expect(result.content[0].text).toContain("Unknown tool");
             expect(readFileSync(ownedMetadata, "utf8")).toBe(before);
         }
     });
@@ -153,7 +153,7 @@ describe("single-backend QEMU owner isolation through MCP", () => {
         for (const deviceId of ["foreign-target", "missing-target"]) {
             const result = await context.client.callTool({ name, arguments: { deviceId } });
             expect(result.isError).toBe(true);
-            expect(parse(result)).toMatchObject({ ok: false, error: "lab-not-found" });
+            expect(parse(result)).toMatchObject({ ok: false, error: `Unknown tool: ${name}` });
         }
         expect(readFileSync(foreignMetadata, "utf8")).toBe(before);
     });
@@ -175,7 +175,7 @@ describe("single-backend QEMU owner isolation through MCP", () => {
                     deviceId: "host-only", broker: true, hostCandidates: ["127.0.0.1"], port,
                 } });
                 expect(result.isError).toBe(true);
-                expect(parse(result)).toMatchObject({ error: "lab-not-found" });
+                expect(parse(result)).toMatchObject({ error: `Unknown tool: ${name}` });
             }
             const duplicate = await context.client.callTool({ name: "artifacts_export", arguments: {
                 deviceId: "owned-target", broker: true, hostCandidates: ["127.0.0.1"], port,
@@ -188,8 +188,8 @@ describe("single-backend QEMU owner isolation through MCP", () => {
         const path = join(root, "owners", JSON.parse(readFileSync(ownedMetadata, "utf8")).ownerId, "labs", "corrupt-target", "lab.json");
         mkdirSync(join(path, ".."), { recursive: true });
         writeFileSync(path, "{broken");
-        await expect(context.client.callTool({ name: "workspace_sync", arguments: { deviceId: "corrupt-target" } }))
-            .rejects.toThrow(/JSON|parse|corrupt|invalid/i);
+        const refused = await context.client.callTool({ name: "workspace_sync", arguments: { deviceId: "corrupt-target" } });
+        expect(parse(refused)).toMatchObject({ error: "Unknown tool: workspace_sync" });
         expect(readFileSync(path, "utf8")).toBe("{broken");
     });
 });

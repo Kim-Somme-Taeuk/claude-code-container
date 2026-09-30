@@ -785,7 +785,7 @@ exec "${delegatedAdbPath}" "$@"
             const startedAt = Date.now();
             const timedOutInstall = await client.callTool({
                 name: "install_app",
-                arguments: { deviceId, path: "/tmp/slow-real-install.apk", helperTimeoutMs: 25 },
+                arguments: { deviceId, path: "/tmp/slow-real-install.apk", timeoutMs: 25 },
             });
             expect(timedOutInstall.isError).toBe(true);
             expect(Date.now() - startedAt).toBeLessThan(750);
