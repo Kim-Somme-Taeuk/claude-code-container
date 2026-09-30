@@ -7,6 +7,12 @@ use `tool`, `arguments`, and optional `label`. Old names, `options` wrappers,
 redundant backend selectors and `name` flow keys fail before device operations.
 This intentionally breaks old calls in favor of one intuitive interface.
 Screenshots, native flow content, ownership and destructive confirmation remain.
+Every standalone device operation keeps an explicit `deviceId`; there is no
+shared selected-device state. A flow may share its target within that request.
+
+Provider coverage now checks canonical public tools and recognizes the declared
+backend of single-backend tools without requiring removed input fields. Diagnostic
+smokes request `detail` explicitly when asserting provider capabilities.
 
 ## Known ceiling
 

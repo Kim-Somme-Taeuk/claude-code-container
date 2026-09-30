@@ -2,7 +2,7 @@ import { spawnSync } from "child_process";
 import { readFileSync } from "fs";
 import { basename, resolve } from "path";
 import { fileURLToPath } from "url";
-import { TOOLS as DEVICE_LAB_MCP_TOOLS } from "../../device-lab-mcp/src/tools.mjs";
+import { TOOLS as DEVICE_LAB_MCP_TOOLS, SINGLE_BACKEND_TOOL_DEFAULTS } from "../../device-lab-mcp/src/tools.mjs";
 import { androidBackend } from "../../device-lab-mcp/src/backends/android.mjs";
 import { windowsBackend } from "../../device-lab-mcp/src/backends/windows-sandbox.mjs";
 import { windowsVmBackend } from "../../device-lab-mcp/src/backends/windows-vm.mjs";
@@ -11,9 +11,10 @@ const scriptPath = fileURLToPath(import.meta.url);
 const assertJsonPath = resolve(scriptPath, "../assert-json.ts");
 const requiredToolSources = ["source", "dist"];
 const requiredProviderSources = ["dist"];
+const publicToolNames = new Set(DEVICE_LAB_MCP_TOOLS.map((tool) => tool.name));
 
 export const PROVIDER_RESULT_SPECS = [
-    { id: "android-emulator", files: ["level2-android-emulator-e2e.ts", "level3-real-destructive.ts"], tools: androidBackend().capabilities },
+    { id: "android-emulator", files: ["level2-android-emulator-e2e.ts", "level3-real-destructive.ts"], tools: androidBackend().capabilities.filter((tool) => publicToolNames.has(tool)) },
     { id: "android-device", files: ["level2-android-device-e2e.ts"], tools: ["device_attach", "device_status", "mobile_tap", "device_screenshot", "device_detach"] },
     { id: "ios-simulator", files: ["level2-ios-e2e.ts"], tools: ["device_create", "device_start", "mobile_tap", "device_screenshot", "device_delete"] },
     { id: "ios-device", files: ["level2-ios-e2e.ts"], tools: ["device_attach", "device_status", "mobile_tap", "device_screenshot", "device_detach"] },
@@ -47,7 +48,9 @@ function matchingProviderCalls(shards, spec, source) {
             && call?.outcome === "ok"
             && files.has(callFile(call))
             && Array.isArray(call?.facets)
-            && call.facets.includes(`${call.tool}:backend=${backend}`)
+            && (call.facets.includes(`${call.tool}:backend=${backend}`)
+                || (SINGLE_BACKEND_TOOL_DEFAULTS[call.tool] === backend
+                    && !call.facets.some((facet) => facet.startsWith(`${call.tool}:backend=`))))
         ));
     });
 }

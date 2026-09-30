@@ -889,13 +889,14 @@ export async function runBrokerE2E(options: any = {}) {
                 assertFailureDiagnostic(tool, diagnostic, expectedPublicDeviceRoutedBy(tool));
             }
             const directMacosImageDiagnostics = scriptedToolCases([
-                ["device_base_image_create", { backend: "macos-vm", name: "Level 2 public missing base image", sourceImage: "missing-source" }],
-                ["device_base_image_clone", { backend: "macos-vm", name: "Level 2 public missing clone", sourceDeviceId: "level2-public-missing-source" }],
+                ["device_base_image_create", { name: "Level 2 public missing base image", sourceImage: "missing-source" }],
+                ["device_base_image_clone", { name: "Level 2 public missing clone", sourceDeviceId: "level2-public-missing-source" }],
             ]);
             for (const [tool, args] of directMacosImageDiagnostics) {
                 const diagnostic = markExpectedToolError(await callTool(tool, args));
                 assert.strictEqual(diagnostic?.isError, true, `${tool} unexpectedly succeeded: ${diagnostic?.content?.[0]?.text || ""}`);
                 assert.ok(String(diagnostic.content?.[0]?.text || "").length > 0, `${tool}: missing diagnostic text`);
+                assert.ok(!String(diagnostic.content?.[0]?.text || "").includes("omit backend"), `${tool}: selector rejection did not reach provider diagnostics`);
             }
             steps.push({ name: "public macOS image and snapshot diagnostics", status: "PASS", detail: `tools=${publicMacosDiagnostics.length + directMacosImageDiagnostics.length}` });
         } catch (error) {

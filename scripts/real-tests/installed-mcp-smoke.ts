@@ -152,7 +152,9 @@ export async function runInstalledMcpSmoke(options: any = {}) {
     const homeDir = options.homeDir || mkdtempSync(join(tmpdir(), "ccc-installed-device-lab-mcp-"));
     const cleanupHome = !options.homeDir;
     try {
-        const result = await withDeviceLabMcp(async ({ client, callTool }) => {
+        const result = await withDeviceLabMcp(async ({ client, callTool: rawCallTool }) => {
+            // This diagnostic smoke checks provider capability and state details.
+            const callTool = (name: string, args: Record<string, any> = {}) => rawCallTool(name, { detail: true, ...args });
             const failures = [];
             const listed = await client.listTools();
             const toolNames = listed.tools.map((tool) => tool.name);
