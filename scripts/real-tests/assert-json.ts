@@ -40,9 +40,9 @@ const providerValues = new Set(["auto", "tart", "vz", "utmctl"]);
 const directOkExemptDiagnosticTools = new Set([
     "base_image_clone",
     "base_image_create",
-    "snapshot_create",
-    "snapshot_delete",
-    "snapshot_restore",
+    "snapshot",
+    "snapshot",
+    "snapshot",
     "wireless",
 ]);
 function canonicalToolSurface() {

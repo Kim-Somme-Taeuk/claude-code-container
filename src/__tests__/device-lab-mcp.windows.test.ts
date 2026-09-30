@@ -677,7 +677,7 @@ exit 0
         }));
 
         const accessibility = await client.callTool({
-            name: "accessibility_snapshot",
+            name: "ui",
             arguments: { deviceId: "windows-win-helper", maxDepth: 99, maxNodes: 5000, helperTimeoutMs: 1000 },
         });
         expect(accessibility.isError).not.toBe(true);
@@ -756,8 +756,8 @@ exit 0
         expect(helperRequests).toHaveLength(helperRequestCount);
 
         const recordStart = await client.callTool({
-            name: "record_video_start",
-            arguments: { deviceId: "windows-win-helper", localPath: join(homeDir, "windows-recording.zip"), timeLimitSec: 2, helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "start", deviceId: "windows-win-helper", localPath: join(homeDir, "windows-recording.zip"), timeLimitSec: 2, helperTimeoutMs: 1000 },
         });
         expect(recordStart.isError).not.toBe(true);
         const recordStartPayload = JSON.parse(((recordStart.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -772,22 +772,22 @@ exit 0
         }));
 
         const duplicateRecordStart = await client.callTool({
-            name: "record_video_start",
-            arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "start", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(duplicateRecordStart.isError).toBe(true);
         expect((duplicateRecordStart.content as Array<{ text?: string }>)[0].text).toContain("Windows Sandbox recording already active");
 
         const invalidRecordStop = await client.callTool({
-            name: "record_video_stop",
-            arguments: { deviceId: "windows-win-helper", localPath: join(homeDir, ".env"), helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "stop", deviceId: "windows-win-helper", localPath: join(homeDir, ".env"), helperTimeoutMs: 1000 },
         });
         expect(invalidRecordStop.isError).toBe(true);
         expect((invalidRecordStop.content as Array<{ text?: string }>)[0].text).toContain("recording-local-path-secret-looking-file");
 
         const activeRecordStatus = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "windows-win-helper" },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "windows-win-helper" },
         });
         expect(activeRecordStatus.isError).not.toBe(true);
         expect(JSON.parse(((activeRecordStatus.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toEqual(expect.objectContaining({
@@ -796,8 +796,8 @@ exit 0
         }));
 
         const recordStop = await client.callTool({
-            name: "record_video_stop",
-            arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "stop", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(recordStop.isError).not.toBe(true);
         const recordStopPayload = JSON.parse(((recordStop.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -812,57 +812,57 @@ exit 0
         expect(readFileSync(join(homeDir, "windows-recording.zip"), "utf-8")).toBe("fakezip");
 
         const stopWithoutRecording = await client.callTool({
-            name: "record_video_stop",
-            arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "stop", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(stopWithoutRecording.isError).toBe(true);
         expect((stopWithoutRecording.content as Array<{ text?: string }>)[0].text).toContain("No Windows Sandbox recording active");
 
         const failedStopRecordingPath = join(homeDir, "failed-stop-windows-recording.zip");
         const failedStopRecordStart = await client.callTool({
-            name: "record_video_start",
-            arguments: { deviceId: "windows-win-helper", localPath: failedStopRecordingPath, helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "start", deviceId: "windows-win-helper", localPath: failedStopRecordingPath, helperTimeoutMs: 1000 },
         });
         expect(failedStopRecordStart.isError).not.toBe(true);
         failRecordStop = true;
         const failedRecordStop = await client.callTool({
-            name: "record_video_stop",
-            arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "stop", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(failedRecordStop.isError).toBe(true);
         expect((failedRecordStop.content as Array<{ text?: string }>)[0].text).toContain("recording state preserved for retry");
         const statusAfterFailedRecordStop = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(JSON.parse(((statusAfterFailedRecordStop.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toEqual(expect.objectContaining({ active: true }));
         failRecordStop = false;
         const retriedFailedRecordStop = await client.callTool({
-            name: "record_video_stop",
-            arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "stop", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(retriedFailedRecordStop.isError).not.toBe(true);
         expect(readFileSync(failedStopRecordingPath, "utf8")).toBe("fakezip");
 
         const retryRecordingPath = join(homeDir, "retry-windows-recording.zip");
         const retryRecordStart = await client.callTool({
-            name: "record_video_start",
-            arguments: { deviceId: "windows-win-helper", localPath: retryRecordingPath, helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "start", deviceId: "windows-win-helper", localPath: retryRecordingPath, helperTimeoutMs: 1000 },
         });
         expect(retryRecordStart.isError).not.toBe(true);
         writeFileSync(retryRecordingPath, "preserved");
         omitRecordStopArchive = true;
         const missingArchiveStop = await client.callTool({
-            name: "record_video_stop",
-            arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "stop", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(missingArchiveStop.isError).toBe(true);
         expect((missingArchiveStop.content as Array<{ text?: string }>)[0].text).toContain("recording state preserved for retry");
         expect(readFileSync(retryRecordingPath, "utf8")).toBe("preserved");
         omitRecordStopArchive = false;
         const retriedArchiveStop = await client.callTool({
-            name: "record_video_stop",
-            arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "stop", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(retriedArchiveStop.isError).not.toBe(true);
         expect(readFileSync(retryRecordingPath, "utf8")).toBe("fakezip");
@@ -870,16 +870,16 @@ exit 0
         const unsafeStatusPath = join(homeDir, "unsafe-status-recording.zip");
         const unsafeStatusTarget = join(homeDir, "unsafe-status-target.zip");
         const unsafeStatusRecordStart = await client.callTool({
-            name: "record_video_start",
-            arguments: { deviceId: "windows-win-helper", localPath: unsafeStatusPath, timeLimitSec: 1, helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "start", deviceId: "windows-win-helper", localPath: unsafeStatusPath, timeLimitSec: 1, helperTimeoutMs: 1000 },
         });
         expect(unsafeStatusRecordStart.isError).not.toBe(true);
         writeFileSync(unsafeStatusTarget, "do-not-overwrite");
         symlinkSync(unsafeStatusTarget, unsafeStatusPath);
         forceInactiveRecordStatus = true;
         const unsafeInactiveRecordStatus = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(unsafeInactiveRecordStatus.isError).not.toBe(true);
         const unsafeInactivePayload = JSON.parse(((unsafeInactiveRecordStatus.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -892,34 +892,34 @@ exit 0
         forceInactiveRecordStatus = false;
         rmSync(unsafeStatusPath, { force: true });
         const unsafeStatusRecordStop = await client.callTool({
-            name: "record_video_stop",
-            arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "stop", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(unsafeStatusRecordStop.isError).not.toBe(true);
         expect(readFileSync(unsafeStatusPath, "utf-8")).toBe("fakezip");
 
         const boundedRecordStart = await client.callTool({
-            name: "record_video_start",
-            arguments: { deviceId: "windows-win-helper", localPath: join(homeDir, "bounded-windows-recording.zip"), timeLimitSec: 1, helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "start", deviceId: "windows-win-helper", localPath: join(homeDir, "bounded-windows-recording.zip"), timeLimitSec: 1, helperTimeoutMs: 1000 },
         });
         expect(boundedRecordStart.isError).not.toBe(true);
         forceInactiveRecordStatus = true;
         const inactiveRecordStatus = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(inactiveRecordStatus.isError).not.toBe(true);
         expect(JSON.parse(((inactiveRecordStatus.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toBeNull();
         expect(readFileSync(join(homeDir, "bounded-windows-recording.zip"), "utf-8")).toBe("boundedzip");
         const restartAfterInactiveStatus = await client.callTool({
-            name: "record_video_start",
-            arguments: { deviceId: "windows-win-helper", localPath: join(homeDir, "restart-windows-recording.zip"), helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "start", deviceId: "windows-win-helper", localPath: join(homeDir, "restart-windows-recording.zip"), helperTimeoutMs: 1000 },
         });
         expect(restartAfterInactiveStatus.isError).not.toBe(true);
         forceInactiveRecordStatus = false;
         const restartStop = await client.callTool({
-            name: "record_video_stop",
-            arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
+            name: "record_video",
+            arguments: { action: "stop", deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(restartStop.isError).not.toBe(true);
         clearInterval(responder);

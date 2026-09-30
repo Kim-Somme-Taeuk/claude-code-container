@@ -317,11 +317,11 @@ export async function runMacosVmE2E(options: any = {}) {
                 assert.strictEqual(cursor.provider, "ssh-macos-helper");
                 assert.ok(cursor.cursor === null || typeof cursor.cursor === "object");
 
-                const accessibility = parsePayload(await callTool("accessibility_snapshot", { detail: true, deviceId, maxDepth: 1, maxNodes: 20, helperTimeoutMs }));
+                const accessibility = parsePayload(await callTool("ui", { detail: true, deviceId, maxDepth: 1, maxNodes: 20, helperTimeoutMs }));
                 assert.ok(["macos-system-events", "ssh-macos-helper"].includes(accessibility.provider));
                 assert.ok(accessibility.accessibility === null || typeof accessibility.accessibility === "object");
 
-                const recordingStatus = parsePayload(await callTool("record_video_status", { detail: true, deviceId }));
+                const recordingStatus = parsePayload(await callTool("record_video", { action: "status", detail: true, deviceId }));
                 assert.strictEqual(recordingStatus.provider, "ssh-screencapture-video");
                 assert.strictEqual(recordingStatus.deviceId, deviceId);
                 return {
@@ -346,13 +346,13 @@ export async function runMacosVmE2E(options: any = {}) {
         let snapshot = null;
         if (typedOptions.snapshot === true) {
             snapshot = await timedStep(timings, "snapshotMs", async () => {
-                const createdSnapshot = parsePayload(await callTool("snapshot_create", { detail: true, deviceId, snapshotName })).snapshot;
+                const createdSnapshot = parsePayload(await callTool("snapshot", { action: "create", detail: true, deviceId, snapshotName })).snapshot;
                 assert.ok(createdSnapshot.providerInstance);
                 managedProviderInstances.push(createdSnapshot.providerInstance);
-                const snapshotRestore = parsePayload(await callTool("snapshot_restore", { detail: true, deviceId, snapshotName, force: true, confirmDestructive: true }));
+                const snapshotRestore = parsePayload(await callTool("snapshot", { action: "restore", detail: true, deviceId, snapshotName, force: true, confirmDestructive: true }));
                 assert.strictEqual(snapshotRestore.device.restoredFrom.id, createdSnapshot.id);
                 assert.strictEqual(snapshotRestore.device.restoredFrom.name, snapshotName);
-                const snapshotDelete = parsePayload(await callTool("snapshot_delete", { detail: true, deviceId, snapshotName, confirmDestructive: true }));
+                const snapshotDelete = parsePayload(await callTool("snapshot", { action: "delete", detail: true, deviceId, snapshotName, confirmDestructive: true }));
                 assert.strictEqual(snapshotDelete.deleted, createdSnapshot.id);
                 managedProviderInstances.splice(managedProviderInstances.indexOf(createdSnapshot.providerInstance), 1);
                 return createdSnapshot;

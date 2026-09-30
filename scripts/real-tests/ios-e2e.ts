@@ -180,8 +180,9 @@ export async function runIosSimulatorE2E(options: any = {}) {
             }));
             assert.match(exec.stdout, /ccc-ios-simulator-e2e-ok/);
 
-            const session = parseContractToolPayload("automation_status", await callTool("automation_status", { detail: true, deviceId }));
-            assert.strictEqual(session.deviceId, deviceId, JSON.stringify(session));
+            const session = parseContractToolPayload("status", await callTool("status", { detail: true, deviceId }));
+            assert.ok("device" in session && session.device && typeof session.device === "object");
+            assert.strictEqual(lifecycleDevice(session, "status").id, deviceId, JSON.stringify(session));
 
             const mobileScreenshot = await callTool("screenshot", { detail: true, deviceId });
             assert.strictEqual(mobileScreenshot?.content?.[0]?.type, "image");
@@ -318,39 +319,39 @@ export async function runIosSimulatorE2E(options: any = {}) {
             assertSimulatorMobileProvider(location, "set_location");
             assert.deepStrictEqual(location.location, { latitude: 37.3349, longitude: -122.009 });
 
-            const grantPermission = parsePayload(await callTool("grant_permission", { detail: true,
+            const grantPermission = parsePayload(await callTool("permission", { action: "grant", detail: true,
                 deviceId,
                 bundleId: "com.apple.mobilesafari",
                 service: "location",
             }));
-            assertSimulatorMobileProvider(grantPermission, "grant_permission");
+            assertSimulatorMobileProvider(grantPermission, "permission");
             assert.deepStrictEqual(grantPermission.permission, { bundleId: "com.apple.mobilesafari", service: "location", action: "grant" });
 
-            const revokePermission = parsePayload(await callTool("revoke_permission", { detail: true,
+            const revokePermission = parsePayload(await callTool("permission", { action: "revoke", detail: true,
                 deviceId,
                 bundleId: "com.apple.mobilesafari",
                 service: "location",
             }));
-            assertSimulatorMobileProvider(revokePermission, "revoke_permission");
+            assertSimulatorMobileProvider(revokePermission, "permission");
             assert.deepStrictEqual(revokePermission.permission, { bundleId: "com.apple.mobilesafari", service: "location", action: "revoke" });
 
-            const setClipboard = parsePayload(await callTool("set_clipboard", { detail: true, deviceId, text: "ccc-ios-clipboard-e2e-ok" }));
-            assertSimulatorMobileProvider(setClipboard, "set_clipboard");
-            const getClipboard = parsePayload(await callTool("get_clipboard", { detail: true, deviceId }));
-            assertSimulatorMobileProvider(getClipboard, "get_clipboard");
+            const setClipboard = parsePayload(await callTool("clipboard", { detail: true, deviceId, text: "ccc-ios-clipboard-e2e-ok" }));
+            assertSimulatorMobileProvider(setClipboard, "clipboard");
+            const getClipboard = parsePayload(await callTool("clipboard", { detail: true, deviceId }));
+            assertSimulatorMobileProvider(getClipboard, "clipboard");
             assert.match(getClipboard.text, /ccc-ios-clipboard-e2e-ok/);
 
-            const recordStart = parsePayload(await callTool("record_video_start", { detail: true, deviceId }));
+            const recordStart = parsePayload(await callTool("record_video", { action: "start", detail: true, deviceId }));
             recordingActive = true;
             assert.strictEqual(recordStart.recording.provider, "simctl-recordVideo");
             assert.strictEqual(recordStart.recording.active, true, `recording start failed: ${JSON.stringify(recordStart)}`);
             await new Promise((resolve) => setTimeout(resolve, 1000));
 
-            const recordingStatus = parsePayload(await callTool("record_video_status", { detail: true, deviceId }));
+            const recordingStatus = parsePayload(await callTool("record_video", { action: "status", detail: true, deviceId }));
             assert.strictEqual(recordingStatus.provider, "simctl-recordVideo");
             assert.strictEqual(recordingStatus.recording.active, true, `recording status failed: ${JSON.stringify(recordingStatus)}`);
 
-            const recordStop = parsePayload(await callTool("record_video_stop", { detail: true, deviceId }));
+            const recordStop = parsePayload(await callTool("record_video", { action: "stop", detail: true, deviceId }));
             recordingActive = false;
             assert.strictEqual(recordStop.provider, "simctl-recordVideo");
             assert.strictEqual(recordStop.stopped, true, `recording stop failed: ${JSON.stringify(recordStop)}`);
@@ -359,7 +360,7 @@ export async function runIosSimulatorE2E(options: any = {}) {
 
             const appium = iosAppiumDiscovery();
             if (appium.available) {
-                const dumpUi = parsePayload(await callTool("dump_ui", { detail: true, deviceId }));
+                const dumpUi = parsePayload(await callTool("ui", { detail: true, deviceId }));
                 assert.strictEqual(dumpUi.provider, "appium-xcuitest");
                 assert.ok(typeof dumpUi.source === "string");
 
@@ -444,7 +445,7 @@ export async function runIosSimulatorE2E(options: any = {}) {
             };
         } finally {
             if (recordingActive) {
-                try { await callTool("record_video_stop", { detail: true, deviceId }); } catch { /* preserve primary failure */ }
+                try { await callTool("record_video", { action: "stop", detail: true, deviceId }); } catch { /* preserve primary failure */ }
             }
             if (created && !stopped) {
                 try { await callTool("stop", { detail: true, deviceId }); } catch { /* preserve primary failure */ }
@@ -507,12 +508,13 @@ export async function runIosRealDeviceE2E(options: any = {}) {
             const start = parseContractToolPayload("start", await callTool("start", { detail: true, deviceId }));
             assert.strictEqual(start.alreadyAttached, true);
 
-            const mobileSession = parseContractToolPayload("automation_status", await callTool("automation_status", { detail: true, deviceId }));
-            assert.strictEqual(mobileSession.deviceId, deviceId);
+            const mobileSession = parseContractToolPayload("status", await callTool("status", { detail: true, deviceId }));
+            assert.ok("device" in mobileSession && mobileSession.device && typeof mobileSession.device === "object");
+            assert.strictEqual(lifecycleDevice(mobileSession, "status").id, deviceId);
 
             const appium = iosAppiumDiscovery();
             if (appium.available) {
-                const dumpUi = parsePayload(await callTool("dump_ui", { detail: true, deviceId }));
+                const dumpUi = parsePayload(await callTool("ui", { detail: true, deviceId }));
                 assert.strictEqual(dumpUi.provider, "appium-xcuitest");
                 assert.strictEqual(dumpUi.physical, true);
                 assert.ok(typeof dumpUi.source === "string");

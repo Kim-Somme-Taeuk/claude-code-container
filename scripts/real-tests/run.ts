@@ -3,7 +3,7 @@ import { spawn, spawnSync } from "child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
-import { TOOLS as DEVICE_LAB_MCP_TOOLS, SIMPLE_ACTIONS } from "../../device-lab-mcp/src/tools.mjs";
+import { TOOLS as DEVICE_LAB_MCP_TOOLS, SIMPLE_ACTIONS, isSimpleAction, toolOperation } from "../../device-lab-mcp/src/tools.mjs";
 import { consumeDeviceLabMcpToolCalls, consumeDeviceLabMcpToolSessions } from "./device-lab-mcp-client.ts";
 import { normalizeProviderConcurrency, partitionProviderFiles, runResourceAware } from "./provider-parallelism.ts";
 import { aggregateStepResult } from "./result-status.ts";
@@ -89,6 +89,7 @@ function toolArgumentFacets(tool, value) {
         }
     };
     collect(value);
+    if (tool === "clipboard") facets.push(`clipboard:action=${Object.hasOwn(value, "text") ? "write" : "read"}`);
     if (tool === "run_flow" && Array.isArray(value.steps)) {
         for (const step of value.steps) collect(step?.arguments);
     }
@@ -324,9 +325,9 @@ const macosProviderValues = new Set(["auto", "tart", "vz", "utmctl"]);
 const directOkExemptDiagnosticTools = new Set([
     "base_image_clone",
     "base_image_create",
-    "snapshot_create",
-    "snapshot_delete",
-    "snapshot_restore",
+    "snapshot",
+    "snapshot",
+    "snapshot",
     "wireless",
 ]);
 
@@ -565,6 +566,7 @@ function collectExecution(execution) {
                 ...(call.okPayloadShape ? { okPayloadShape: call.okPayloadShape } : {}),
                 ...(call.error ? { error: call.error } : {}),
                 ...(Array.isArray(call.flowSteps) ? { flowSteps: call.flowSteps } : {}),
+                ...(isSimpleAction(call.name, toolOperation(call.name, call.arguments)) ? { simpleAction: true } : {}),
                 ...(call.observedBackend ? { observedBackend: call.observedBackend } : {}),
                 facets: uniqueSorted([...toolArgumentFacets(call.name, call.arguments), ...(call.observedBackend ? [`${call.name}:backend=${call.observedBackend}`] : [])]),
             });
@@ -740,7 +742,7 @@ const okPublicPayloadFailures = toolCallRecords.filter((record) => (
     && advertisedTools.includes(record.tool)
     && record.okPayloadJson !== true
     && record.okPayloadImage !== true
-    && !(SIMPLE_ACTIONS.has(record.tool) && record.okPayloadAction === true)
+    && !((SIMPLE_ACTIONS.has(record.tool) || (record.tool === "clipboard" && record.simpleAction === true)) && record.okPayloadAction === true)
 ));
 function emptyPayloadShape(shape) {
     if (shape?.kind === "object") return !Array.isArray(shape.keys) || shape.keys.length === 0;
@@ -760,6 +762,7 @@ const flowStepRecords = toolCallRecords.flatMap((record) => (Array.isArray(recor
     flowTool: record.tool,
     index,
     tool: step.tool,
+    simpleAction: step.simpleAction === true,
     isError: step.isError === true,
     expectedError: step.expectedError === true,
     ...(Array.isArray(step.contentTypes) ? { contentTypes: step.contentTypes } : {}),
@@ -786,7 +789,7 @@ const okPublicFlowStepPayloadFailures = flowStepRecords.filter((record) => (
     && advertisedTools.includes(record.tool)
     && record.okPayloadJson !== true
     && record.okPayloadImage !== true
-    && !(SIMPLE_ACTIONS.has(record.tool) && record.okPayloadAction === true)
+    && !((SIMPLE_ACTIONS.has(record.tool) || (record.tool === "clipboard" && record.simpleAction === true)) && record.okPayloadAction === true)
 ));
 const emptyOkPublicFlowStepPayloadRecords = flowStepRecords.filter((record) => (
     record.isError !== true

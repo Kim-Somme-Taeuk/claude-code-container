@@ -308,13 +308,13 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             const home = parsePayload(await callTool("home", { detail: true, deviceId }));
             assert.strictEqual(home.status, 0);
 
-            const session = parsePayload(await callTool("automation_status", { detail: true, deviceId }));
+            const session = parsePayload(await callTool("status", { detail: true, deviceId }));
             const sessionResult = session.result || session;
             assert.strictEqual(sessionResult.authority, "host-broker");
             assert.strictEqual(sessionResult.device.id, deviceId);
 
-            const ui = parsePayload(await callTool("dump_ui", { detail: true, deviceId }));
-            assertProvider(ui, "adb-uiautomator", "dump_ui");
+            const ui = parsePayload(await callTool("ui", { detail: true, deviceId }));
+            assertProvider(ui, "adb-uiautomator", "ui");
             assert.ok(typeof ui.source === "string");
 
             const waitText = stableAndroidUiText(ui.source);
@@ -427,7 +427,7 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
                 assert.match(String(waitForApp.pid), /^\d+$/);
 
                 {
-                    const grantPermission = parsePayload(await callTool("grant_permission", { detail: true,
+                    const grantPermission = parsePayload(await callTool("permission", { action: "grant", detail: true,
                         deviceId,
                         packageName: appPackage,
                         permission: appPermission,
@@ -439,7 +439,7 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
                         action: "grant",
                     });
 
-                    const revokePermission = parsePayload(await callTool("revoke_permission", { detail: true,
+                    const revokePermission = parsePayload(await callTool("permission", { action: "revoke", detail: true,
                         deviceId,
                         packageName: appPackage,
                         permission: appPermission,
@@ -546,7 +546,7 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             }
 
             const recordingPath = join(tempDir, "recording.mp4");
-            const recordStart = parsePayload(await callTool("record_video_start", { detail: true,
+            const recordStart = parsePayload(await callTool("record_video", { action: "start", detail: true,
                 deviceId,
                 localPath: recordingPath,
                 timeLimitSec: 10,
@@ -556,20 +556,20 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             assert.strictEqual(recordStart.recording.active, true);
             await new Promise((resolve) => setTimeout(resolve, 1000));
 
-            const recordingStatus = parsePayload(await callTool("record_video_status", { detail: true, deviceId }));
+            const recordingStatus = parsePayload(await callTool("record_video", { action: "status", detail: true, deviceId }));
             assert.strictEqual(recordingStatus.provider, "adb-screenrecord");
             assert.strictEqual(recordingStatus.recording.active, true);
 
             const mobileFlow = parsePayload(await callTool("run_flow", { detail: true,
                 steps: [
-                    { tool: "automation_status", arguments: { deviceId } },
+                    { tool: "status", arguments: { deviceId } },
                     { tool: "home", arguments: { deviceId } },
                 ],
             }));
             assert.strictEqual(mobileFlow.ok, true);
             assert.strictEqual(mobileFlow.results.length, 2);
 
-            const recordStop = parsePayload(await callTool("record_video_stop", { detail: true, deviceId }));
+            const recordStop = parsePayload(await callTool("record_video", { action: "stop", detail: true, deviceId }));
             confirmRecordingStopped(recordStop);
             recordingActive = false;
             assert.strictEqual(recordStop.provider, "adb-screenrecord");
@@ -581,10 +581,10 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             assert.strictEqual(mobileScreenshot?.content?.[0]?.type, "image");
             assert.ok(String(mobileScreenshot.content[0].data || "").length > 64);
 
-            const setClipboard = parsePayload(await callTool("set_clipboard", { detail: true, deviceId, text: "ccc-clipboard-e2e-ok" }));
-            assertProvider(setClipboard, "broker-appium", "set_clipboard");
-            const getClipboard = parsePayload(await callTool("get_clipboard", { detail: true, deviceId }));
-            assertProvider(getClipboard, "broker-appium", "get_clipboard");
+            const setClipboard = parsePayload(await callTool("clipboard", { detail: true, deviceId, text: "ccc-clipboard-e2e-ok" }));
+            assertProvider(setClipboard, "broker-appium", "clipboard");
+            const getClipboard = parsePayload(await callTool("clipboard", { detail: true, deviceId }));
+            assertProvider(getClipboard, "broker-appium", "clipboard");
             assert.match(getClipboard.text, /ccc-clipboard-e2e-ok/);
 
             const screenshot = await callTool("screenshot", { detail: true, deviceId });
@@ -630,7 +630,7 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             const cleanupErrors = [];
             if (recordingActive) {
                 try {
-                    confirmRecordingStopped(parsePayload(await callTool("record_video_stop", { detail: true, deviceId })));
+                    confirmRecordingStopped(parsePayload(await callTool("record_video", { action: "stop", detail: true, deviceId })));
                     recordingActive = false;
                 } catch (error) {
                     cleanupErrors.push(`recording stop: ${error.message}`);

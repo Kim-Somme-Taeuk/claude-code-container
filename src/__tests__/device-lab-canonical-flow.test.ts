@@ -63,7 +63,7 @@ describe("canonical public contract", () => {
         expect(new Set(DEVICE_FLOW_TOOL_NAMES).size).toBe(DEVICE_FLOW_TOOL_NAMES.length);
         for (const key of ["deviceId", "incarnationId"]) expect(schema.properties).toHaveProperty(key);
         expect(DEVICE_FLOW_TOOL_NAMES.every(name => TOOLS.some(tool => tool.name === name))).toBe(true);
-        for (const name of [...hidden, "start", "exec", "run_flow", "broker_status"]) expect(DEVICE_FLOW_TOOL_NAMES).not.toContain(name);
+        for (const name of [...hidden, "start", "exec", "run_flow", "backends"]) expect(DEVICE_FLOW_TOOL_NAMES).not.toContain(name);
     });
     it.each([...hidden, "device_broker_shutdown", "device_broker_rpc", "device_broker_lease", "device_broker_attach", "device_broker_apple", "device_broker_command", "device_broker_appium", "device_image_create", "device_image_clone"])("rejects removed public tool %s before any broker scope or provider", async (name) => {
         const result = await call(name, { ...shared, ...direct, confirmDestructive: true });
@@ -86,12 +86,12 @@ describe("canonical public contract", () => {
         expect(fixture.calls).toHaveLength(1);
     });
     it.each(DEVICE_FLOW_TOOL_NAMES.filter(name => name !== "move"))("dispatches advertised flow choice %s through the existing handler", async (tool) => {
-        const arguments_ = { ...direct, key: "HOME", text: "needle", packageName: "example.app", path: "/fixture/app.apk", confirmDestructive: true };
+        const arguments_ = { ...(tool === "record_video" ? { action: "status" } : tool === "permission" ? { action: "grant", permission: "android.permission.CAMERA" } : {}), ...direct, key: "HOME", text: "needle", packageName: "example.app", path: "/fixture/app.apk", confirmDestructive: true };
         const result = parse(await flow([{ tool, arguments: arguments_ }]));
         expect(result.ok, JSON.stringify(result)).toBe(true);
         expect(fixture.calls.map(call => publicToolName(call.name))).toEqual([tool]);
     });
-    it.each(["mobile_install_app", "mobile_launch_app", "start", "exec", "broker_status", "run_flow", "mobile_run_flow", "unknown_action"])("rejects %s in the canonical flow before dispatch", async (name) => {
+    it.each(["mobile_install_app", "mobile_launch_app", "start", "exec", "backends", "run_flow", "mobile_run_flow", "unknown_action"])("rejects %s in the canonical flow before dispatch", async (name) => {
         const result = parse(await flow([step({}, name)]));
         expect(result).toMatchObject({ ok: false, stoppedAt: 0 });
         expect(result.results[0].error).toContain("does not allow step tool");

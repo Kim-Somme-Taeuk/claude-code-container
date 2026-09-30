@@ -155,10 +155,10 @@ export async function run(options: any = {}) {
             assert.strictEqual(exec.status, 0);
             assert.match(exec.stdout, /ccc-android-device-e2e-ok/);
 
-            const session = parsePayload(await callTool("automation_status", { detail: true, deviceId }));
+            const session = parsePayload(await callTool("status", { detail: true, deviceId }));
             assert.strictEqual(session.deviceId, deviceId);
 
-            const ui = parsePayload(await callTool("dump_ui", { detail: true, deviceId }));
+            const ui = parsePayload(await callTool("ui", { detail: true, deviceId }));
             assert.strictEqual(ui.provider, "adb-uiautomator");
             assert.ok(typeof ui.source === "string");
 
@@ -245,11 +245,11 @@ export async function run(options: any = {}) {
             assert.strictEqual(openedUrl.provider, "adb");
             assert.strictEqual(openedUrl.openedUrl, "https://example.invalid/");
 
-            const setClipboard = parsePayload(await callTool("set_clipboard", { detail: true, deviceId, text: "ccc-android-device-clipboard" }));
+            const setClipboard = parsePayload(await callTool("clipboard", { detail: true, deviceId, text: "ccc-android-device-clipboard" }));
             assert.strictEqual(setClipboard.provider, "broker-appium");
             assert.ok(setClipboard.requests >= 1);
 
-            const getClipboard = parsePayload(await callTool("get_clipboard", { detail: true, deviceId }));
+            const getClipboard = parsePayload(await callTool("clipboard", { detail: true, deviceId }));
             assert.strictEqual(getClipboard.provider, "broker-appium");
             assert.ok(getClipboard.requests >= 1);
             assert.strictEqual(getClipboard.text, "ccc-android-device-clipboard");
@@ -264,7 +264,7 @@ export async function run(options: any = {}) {
             assert.strictEqual(deviceScreenshot.content[0].mimeType, "image/png");
             assert.ok(String(deviceScreenshot.content[0].data || "").length > 64);
 
-            const recordStart = parsePayload(await callTool("record_video_start", { detail: true,
+            const recordStart = parsePayload(await callTool("record_video", { action: "start", detail: true,
                 deviceId,
                 localPath: recordingPath,
                 timeLimitSec: 10,
@@ -274,11 +274,11 @@ export async function run(options: any = {}) {
             assert.strictEqual(recordStart.recording.active, true);
             await new Promise((resolve) => setTimeout(resolve, 1000));
 
-            const recordingStatus = parsePayload(await callTool("record_video_status", { detail: true, deviceId }));
+            const recordingStatus = parsePayload(await callTool("record_video", { action: "status", detail: true, deviceId }));
             assert.strictEqual(recordingStatus.provider, "adb-screenrecord");
             assert.strictEqual(recordingStatus.recording.active, true);
 
-            const recordStop = parsePayload(await callTool("record_video_stop", { detail: true, deviceId }));
+            const recordStop = parsePayload(await callTool("record_video", { action: "stop", detail: true, deviceId }));
             recordingActive = false;
             assert.strictEqual(recordStop.provider, "adb-screenrecord");
             assert.strictEqual(recordStop.stopped, true);
@@ -339,9 +339,9 @@ export async function run(options: any = {}) {
                 assert.strictEqual(waitForApp.running, true);
                 assert.ok(String(waitForApp.pid || "").trim());
 
-                const grant = parsePayload(await callTool("grant_permission", { detail: true, deviceId, packageName: appPackage, permission: appPermission }));
+                const grant = parsePayload(await callTool("permission", { action: "grant", detail: true, deviceId, packageName: appPackage, permission: appPermission }));
                 assert.deepStrictEqual(grant.permission, { packageName: appPackage, permission: appPermission, action: "grant" });
-                const revoke = parsePayload(await callTool("revoke_permission", { detail: true, deviceId, packageName: appPackage, permission: appPermission }));
+                const revoke = parsePayload(await callTool("permission", { action: "revoke", detail: true, deviceId, packageName: appPackage, permission: appPermission }));
                 assert.deepStrictEqual(revoke.permission, { packageName: appPackage, permission: appPermission, action: "revoke" });
 
                 const stopApp = parsePayload(await callTool("stop_app", { detail: true, deviceId, packageName: appPackage }));
@@ -382,7 +382,7 @@ export async function run(options: any = {}) {
         } finally {
             const cleanupErrors = [];
             if (recordingActive) {
-                try { await callTool("record_video_stop", { detail: true, deviceId }); } catch (error) {
+                try { await callTool("record_video", { action: "stop", detail: true, deviceId }); } catch (error) {
                     cleanupErrors.push(`recording stop: ${error.message}`);
                 }
             }

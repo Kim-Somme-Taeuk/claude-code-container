@@ -168,15 +168,14 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         expect((await serializedExec).isError).not.toBe(true);
 
         const sessionStatus = await client.callTool({
-            name: "automation_status",
+            name: "status",
             arguments: { deviceId: "android-pixel-owned" },
         });
         expect(sessionStatus.isError).not.toBe(true);
         expect(parseToolJson(sessionStatus)).toEqual(expect.objectContaining({
-            deviceId: "android-pixel-owned",
+            automation: expect.objectContaining({ deviceId: "android-pixel-owned", provider: "adb", lazy: true }),
             device: expect.objectContaining({ id: "android-pixel-owned", status: "running" }),
-            provider: "adb",
-            lazy: true,
+
         }));
 
         const primitiveCalls: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
@@ -197,14 +196,14 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             ["set_orientation", { deviceId: "android-pixel-owned", orientation: "landscape" }, { provider: "adb", orientation: "landscape", rotation: "1" }],
             ["set_orientation", { orientation: "reverse-landscape", deviceId: "android-pixel-owned" }, { provider: "adb", orientation: "reverse-landscape", rotation: "3" }],
             ["open_url", { deviceId: "android-pixel-owned", url: "https://example.test/path" }, { provider: "adb", openedUrl: "https://example.test/path" }],
-            ["grant_permission", { deviceId: "android-pixel-owned", packageName: "com.example.mobile", permission: "android.permission.CAMERA" }, { provider: "adb", permission: { packageName: "com.example.mobile", permission: "android.permission.CAMERA", action: "grant" } }],
-            ["revoke_permission", { deviceId: "android-pixel-owned", packageName: "com.example.mobile", permission: "android.permission.CAMERA" }, { provider: "adb", permission: { packageName: "com.example.mobile", permission: "android.permission.CAMERA", action: "revoke" } }],
+            ["permission", { action: "grant", deviceId: "android-pixel-owned", packageName: "com.example.mobile", permission: "android.permission.CAMERA" }, { provider: "adb", permission: { packageName: "com.example.mobile", permission: "android.permission.CAMERA", action: "grant" } }],
+            ["permission", { action: "revoke", deviceId: "android-pixel-owned", packageName: "com.example.mobile", permission: "android.permission.CAMERA" }, { provider: "adb", permission: { packageName: "com.example.mobile", permission: "android.permission.CAMERA", action: "revoke" } }],
             ["set_location", { deviceId: "android-pixel-owned", latitude: 37.7749, longitude: -122.4194, altitude: 10 }, { provider: "adb-emulator", location: { latitude: 37.7749, longitude: -122.4194, altitude: 10 } }],
             ["set_battery", { deviceId: "android-pixel-owned", level: 42, charging: true, confirmDestructive: true }, { provider: "adb", battery: { level: 42, status: null, charging: true } }],
             ["set_network", { deviceId: "android-pixel-owned", wifi: false, data: true, confirmDestructive: true }, { provider: "adb", network: { wifi: false, data: true } }],
             ["toggle_airplane_mode", { deviceId: "android-pixel-owned", enabled: true, confirmDestructive: true }, { provider: "adb", airplaneMode: true }],
-            ["set_clipboard", { deviceId: "android-pixel-owned", text: "clip text" }, { provider: "adb", clipboard: { set: true } }],
-            ["get_clipboard", { deviceId: "android-pixel-owned" }, { provider: "adb", text: "ok\n", status: 0 }],
+            ["clipboard", { deviceId: "android-pixel-owned", text: "clip text" }, { provider: "adb", clipboard: { set: true } }],
+            ["clipboard", { deviceId: "android-pixel-owned" }, { provider: "adb", text: "ok\n", status: 0 }],
         ] as const;
         for (const [name, callArgs, expectedPayload] of primitiveCalls) {
             const action = await client.callTool({ name, arguments: callArgs });
@@ -361,8 +360,8 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         }
 
         const initialRecordStatus = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "android-pixel-owned" },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "android-pixel-owned" },
         });
         expect(initialRecordStatus.isError).not.toBe(true);
         const initialRecordPayload = JSON.parse(((initialRecordStatus.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -373,15 +372,15 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         expect(initialRecordPayload.provider).toBe("adb-screenrecord");
 
         const stopWithoutRecording = await client.callTool({
-            name: "record_video_stop",
-            arguments: { deviceId: "android-pixel-owned" },
+            name: "record_video",
+            arguments: { action: "stop", deviceId: "android-pixel-owned" },
         });
         expect(stopWithoutRecording.isError).toBe(true);
         expect((stopWithoutRecording.content as Array<{ text?: string }>)[0].text).toContain("No Android recording active");
 
         const recordStart = await client.callTool({
-            name: "record_video_start",
-            arguments: {
+            name: "record_video",
+            arguments: { action: "start",
                 deviceId: "android-pixel-owned",
                 remotePath: "/sdcard/custom-android-recording.mp4",
                 localPath: "/tmp/custom-android-recording.mp4",
@@ -407,15 +406,15 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         }));
 
         const duplicateRecordStart = await client.callTool({
-            name: "record_video_start",
-            arguments: { deviceId: "android-pixel-owned" },
+            name: "record_video",
+            arguments: { action: "start", deviceId: "android-pixel-owned" },
         });
         expect(duplicateRecordStart.isError).toBe(true);
         expect((duplicateRecordStart.content as Array<{ text?: string }>)[0].text).toContain("Android recording already active");
 
         const activeRecordStatus = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "android-pixel-owned" },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "android-pixel-owned" },
         });
         const activeRecordPayload = JSON.parse(((activeRecordStatus.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             recording: { active: boolean; provider: string };
@@ -423,8 +422,8 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         expect(activeRecordPayload.recording).toEqual(expect.objectContaining({ active: true, provider: "adb-screenrecord" }));
 
         const recordStop = await client.callTool({
-            name: "record_video_stop",
-            arguments: { deviceId: "android-pixel-owned" },
+            name: "record_video",
+            arguments: { action: "stop", deviceId: "android-pixel-owned" },
         });
         expect(recordStop.isError).not.toBe(true);
         const recordStopPayload = JSON.parse(((recordStop.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -445,8 +444,8 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         expect(recordStopPayload.device.recording).toBeNull();
 
         const finalRecordStatus = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "android-pixel-owned" },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "android-pixel-owned" },
         });
         expect(JSON.parse(((finalRecordStatus.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             recording: null,
@@ -454,8 +453,8 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         }));
 
         const failedRecordStart = await client.callTool({
-            name: "record_video_start",
-            arguments: {
+            name: "record_video",
+            arguments: { action: "start",
                 deviceId: "android-pixel-owned",
                 remotePath: "/sdcard/fail-immediate-recording.mp4",
                 localPath: "/tmp/fail-immediate-android-recording.mp4",
@@ -465,14 +464,14 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         expect(failedRecordStart.isError).toBe(true);
         expect((failedRecordStart.content as Array<{ text?: string }>)[0].text).toContain("recorder exited before it was ready");
         const statusAfterFailedStart = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "android-pixel-owned" },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "android-pixel-owned" },
         });
         expect(JSON.parse(((statusAfterFailedStart.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toBeNull();
 
         const naturalExitStart = await client.callTool({
-            name: "record_video_start",
-            arguments: {
+            name: "record_video",
+            arguments: { action: "start",
                 deviceId: "android-pixel-owned",
                 remotePath: "/sdcard/natural-exit-recording.mp4",
                 localPath: "/tmp/natural-exit-android-recording.mp4",
@@ -482,24 +481,24 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         expect(naturalExitStart.isError).not.toBe(true);
         await new Promise((resolve) => setTimeout(resolve, 500));
         const statusAfterNaturalExit = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "android-pixel-owned" },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "android-pixel-owned" },
         });
         expect(JSON.parse(((statusAfterNaturalExit.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toEqual(expect.objectContaining({
             active: false,
             remotePath: "/sdcard/natural-exit-recording.mp4",
         }));
         const naturalExitStop = await client.callTool({
-            name: "record_video_stop",
-            arguments: { deviceId: "android-pixel-owned" },
+            name: "record_video",
+            arguments: { action: "stop", deviceId: "android-pixel-owned" },
         });
         expect(naturalExitStop.isError).not.toBe(true);
 
         const retryDestination = "/tmp/fail-once-pull-android-recording.mp4";
         writeFileSync(retryDestination, "original");
         const pullFailStart = await client.callTool({
-            name: "record_video_start",
-            arguments: {
+            name: "record_video",
+            arguments: { action: "start",
                 deviceId: "android-pixel-owned",
                 remotePath: "/sdcard/fail-once-pull-recording.mp4",
                 localPath: retryDestination,
@@ -508,35 +507,35 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         });
         expect(pullFailStart.isError).not.toBe(true);
         const pullFailStop = await client.callTool({
-            name: "record_video_stop",
-            arguments: { deviceId: "android-pixel-owned" },
+            name: "record_video",
+            arguments: { action: "stop", deviceId: "android-pixel-owned" },
         });
         expect(pullFailStop.isError).toBe(true);
         expect((pullFailStop.content as Array<{ text?: string }>)[0].text).toContain("Android recording remains pending finalization");
         expect(readFileSync(retryDestination, "utf8")).toBe("original");
         const statusAfterPullFailure = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "android-pixel-owned" },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "android-pixel-owned" },
         });
         expect(JSON.parse(((statusAfterPullFailure.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toEqual(expect.objectContaining({
             active: false,
             remotePath: "/sdcard/fail-once-pull-recording.mp4",
         }));
         const pullRetryStop = await client.callTool({
-            name: "record_video_stop",
-            arguments: { deviceId: "android-pixel-owned" },
+            name: "record_video",
+            arguments: { action: "stop", deviceId: "android-pixel-owned" },
         });
         expect(pullRetryStop.isError).not.toBe(true);
         expect(readFileSync(retryDestination, "utf8")).toBe("downloaded");
         const statusAfterPullRetry = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "android-pixel-owned" },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "android-pixel-owned" },
         });
         expect(JSON.parse(((statusAfterPullRetry.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toBeNull();
 
         const stopCleanupRecordStart = await client.callTool({
-            name: "record_video_start",
-            arguments: {
+            name: "record_video",
+            arguments: { action: "start",
                 deviceId: "android-pixel-owned",
                 remotePath: "/sdcard/stop-cleanup-recording.mp4",
                 localPath: "/tmp/stop-cleanup-android-recording.mp4",
@@ -546,7 +545,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         expect(stopCleanupRecordStart.isError).not.toBe(true);
 
         const dumpUi = await client.callTool({
-            name: "dump_ui",
+            name: "ui",
             arguments: { deviceId: "android-pixel-owned" },
         });
         expect(dumpUi.isError).not.toBe(true);
@@ -638,8 +637,8 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         expect(stoppedPayload.device.recording).toBeNull();
 
         const statusAfterDeviceStop = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "android-pixel-owned" },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "android-pixel-owned" },
         });
         expect(JSON.parse(((statusAfterDeviceStop.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toBeNull();
 

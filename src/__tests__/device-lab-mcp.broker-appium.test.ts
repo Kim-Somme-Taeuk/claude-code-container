@@ -436,7 +436,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 rpcTimeoutMs: 750,
             };
             const dump = await client.callTool({
-                name: "dump_ui",
+                name: "ui",
                 arguments: baseArgs,
             });
             expect(dump.isError).not.toBe(true);
@@ -668,7 +668,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 ["stop_app", { bundleId: "com.example.Test" }],
                 ["uninstall_app", { bundleId: "com.example.Test", confirmDestructive: true }],
                 ["set_location", { latitude: 37.5, longitude: 127.0, altitude: 42 }],
-                ["set_clipboard", { text: "hello broker" }],
+                ["clipboard", { text: "hello broker" }],
             ] as const) {
                 const result = await client.callTool({ name, arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, ...args } });
                 expect(result.isError, `${name}: ${JSON.stringify(result)}`).not.toBe(true);
@@ -685,7 +685,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 "screenshot", "install_app", "launch_app",
             ]);
             expect(deviceCalls[0]).toMatchObject({ deviceId: baseArgs.deviceId });
-            const clipboard = await client.callTool({ name: "get_clipboard", arguments: baseArgs });
+            const clipboard = await client.callTool({ name: "clipboard", arguments: baseArgs });
             expect(JSON.parse(((clipboard.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 provider: "broker-appium",
                 backend: "ios-simulator",
@@ -935,7 +935,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 ["stop_app", { packageName: "com.example.android" }],
                 ["uninstall_app", { packageName: "com.example.android", confirmDestructive: true }],
                 ["set_location", { latitude: 35.1, longitude: 129.2 }],
-                ["set_clipboard", { text: "hello broker" }],
+                ["clipboard", { text: "hello broker" }],
             ] as const) {
                 const result = await client.callTool({ name, arguments: { deviceId: baseArgs.deviceId, broker: baseArgs.broker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, ...args } });
                 expect(result.isError, `${name}: ${JSON.stringify(result)}`).not.toBe(true);
@@ -952,7 +952,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 "screenshot", "install_app", "launch_app", "launch_app",
             ]);
             expect(deviceCalls[0]).toMatchObject({ deviceId: baseArgs.deviceId });
-            const clipboard = await client.callTool({ name: "get_clipboard", arguments: baseArgs });
+            const clipboard = await client.callTool({ name: "clipboard", arguments: baseArgs });
             expect(JSON.parse(((clipboard.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 provider: "broker-appium",
                 backend: "android-emulator",
@@ -1074,7 +1074,7 @@ describe("device-lab MCP broker Appium routing", () => {
         try {
 
         const result = await client.callTool({
-            name: "dump_ui",
+            name: "ui",
             arguments: {
                 deviceId: "not-owned-by-this-container",
                 viaBroker: true,
@@ -1086,9 +1086,8 @@ describe("device-lab MCP broker Appium routing", () => {
         expect(result.isError).toBe(true);
         expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: false,
-            error: "device-backend-not-found",
-            matches: [],
-            routedBy: "mobile-broker-appium",
+            error: "device-not-found",
+            routedBy: "device-readonly-broker-implicit",
             deviceId: "not-owned-by-this-container",
         }));
         } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }

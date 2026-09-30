@@ -356,9 +356,11 @@ export function compactToolValue(name, value) {
             && value.labs.every((lab, index) => object(lab) && object(value.devices[index])
                 && Object.entries(lab).every(([key, item]) => JSON.stringify(item) === JSON.stringify(value.devices[index][key])))) delete result.labs;
     }
+    if (object(value.target)) result.target = target(value.target, { compactPlan: name === "device_status" });
     if (Array.isArray(value.targets)) result.targets = value.targets.map(target);
     if (object(value.targetStatus) || (name === "device_status" && typeof value.id === "string")) result = target(result, { compactPlan: name === "device_status" });
     if (object(value.backend)) result.backend = backend(value.backend);
+    if (name === "device_status" && object(value.automation)) result.automation = automationStatus(value.automation);
     if (name === "device_status" && object(value.appium)) result.appium = automationStatus(value.appium);
     if (name === "device_inventory" && object(value.discovery) && !failed(value.discovery)) {
         result.discovery = omit(value.discovery, ["adb", "emulator", "avdmanager", "xcrun", "xcodebuild", "powershell", "ssh", "scp"]);

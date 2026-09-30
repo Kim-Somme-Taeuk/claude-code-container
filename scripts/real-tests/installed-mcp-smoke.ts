@@ -36,7 +36,6 @@ export function installedMcpSmokeSample(toolName) {
     const linuxId = "dist-linux-smoke";
     const byName = {
         backends: { ...direct },
-        broker_status: { ...brokerProbe },
         list_devices: {},
         inventory: { ...direct, backend: "android-emulator" },
         image_list: { },
@@ -50,37 +49,24 @@ export function installedMcpSmokeSample(toolName) {
         stop: { ...direct, deviceId: androidId },
         reboot: { deviceId: linuxId },
         status: { ...direct, deviceId: androidId },
-        disk_materialize: { deviceId: linuxId },
-        target_list: { },
-        readiness_probe: { deviceId: linuxId },
-        session_open: { deviceId: linuxId },
         workspace_sync: { deviceId: linuxId },
         artifacts_export: { deviceId: linuxId },
-        guest_agent_status: { deviceId: linuxId, timeoutMs: 1 },
-        guest_agent_provision: { deviceId: linuxId, timeoutMs: 1 },
         exec: { ...direct, deviceId: androidId, command: "true", helperTimeoutMs: 1 },
         screenshot: { ...direct, deviceId: androidId, helperTimeoutMs: 1 },
         scroll: { ...direct, deviceId: windowsId, x: 1, y: 1, direction: "down", amount: 1, helperTimeoutMs: 1 },
         move: { deviceId: "x11-current-display", x: 1, y: 1 },
         cursor_position: { ...direct, deviceId: windowsId, helperTimeoutMs: 1 },
         window_list: { ...direct, deviceId: windowsId, helperTimeoutMs: 1 },
-        accessibility_snapshot: { ...direct, deviceId: windowsId, maxDepth: 1, maxNodes: 1, helperTimeoutMs: 1 },
+        ui: { ...direct, deviceId: windowsId, maxDepth: 1, maxNodes: 1, helperTimeoutMs: 1 },
         base_image_create: { name: "Base image smoke", sourceImage: "missing-source" },
         base_image_clone: { name: "Base clone smoke", sourceDeviceId: macosId },
-        snapshot_list: { ...direct, deviceId: linuxId },
-        snapshot_create: { ...direct, deviceId: macosId, snapshotName: "smoke" },
-        snapshot_restore: { ...direct, deviceId: macosId, snapshotName: "smoke", force: true, confirmDestructive: true },
-        snapshot_delete: { ...direct, deviceId: macosId, snapshotName: "smoke", confirmDestructive: true },
-        record_video_start: { ...direct, deviceId: androidId, remotePath: "/sdcard/smoke.mp4", timeLimitSec: 1 },
-        record_video_stop: { ...direct, deviceId: androidId, helperTimeoutMs: 1 },
-        record_video_status: { ...direct, deviceId: androidId, helperTimeoutMs: 1 },
+        snapshot: { action: "list", ...direct, deviceId: linuxId },
+        record_video: { action: "start", ...direct, deviceId: androidId, remotePath: "/sdcard/smoke.mp4", timeLimitSec: 1 },
         upload: { ...direct, deviceId: androidId, localPath: "/tmp/missing-smoke.txt", remotePath: "/sdcard/missing-smoke.txt", helperTimeoutMs: 1 },
         download: { ...direct, deviceId: androidId, remotePath: "/sdcard/missing-smoke.txt", localPath: "/tmp/device-lab-smoke-download.txt", helperTimeoutMs: 1 },
         reset: { ...direct, deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
         install_app: { ...direct, deviceId: androidId, path: "/tmp/missing-smoke.apk" },
         launch_app: { ...direct, deviceId: androidId, packageName: "com.example.smoke" },
-        automation_status: { ...direct, deviceId: androidId },
-        dump_ui: { ...direct, deviceId: androidId },
         click: { ...direct, deviceId: androidId, x: 1, y: 1 },
         double_click: { ...direct, deviceId: androidId, x: 1, y: 1 },
         long_press: { ...direct, deviceId: androidId, x: 1, y: 1, durationMs: 1 },
@@ -100,17 +86,15 @@ export function installedMcpSmokeSample(toolName) {
         uninstall_app: { ...direct, deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
         stop_app: { ...direct, deviceId: androidId, packageName: "com.example.smoke" },
         clear_app_data: { ...direct, deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
-        grant_permission: { ...direct, deviceId: androidId, packageName: "com.example.smoke", permission: "android.permission.CAMERA" },
-        revoke_permission: { ...direct, deviceId: androidId, packageName: "com.example.smoke", permission: "android.permission.CAMERA" },
+        permission: { action: "grant", ...direct, deviceId: androidId, packageName: "com.example.smoke", permission: "android.permission.CAMERA" },
         set_location: { ...direct, deviceId: androidId, latitude: 1, longitude: 2 },
         set_battery: { ...direct, deviceId: androidId, level: 50, confirmDestructive: true },
         set_network: { ...direct, deviceId: androidId, wifi: true, confirmDestructive: true },
         toggle_airplane_mode: { ...direct, deviceId: androidId, enabled: false, confirmDestructive: true },
-        set_clipboard: { ...direct, deviceId: androidId, text: "smoke" },
-        get_clipboard: { ...direct, deviceId: androidId },
+        clipboard: { ...direct, deviceId: androidId, text: "smoke" },
         wait_for_text: { ...direct, deviceId: androidId, text: "smoke", timeoutMs: 1, intervalMs: 50 },
         wait_for_app: { ...direct, deviceId: androidId, packageName: "com.example.smoke", timeoutMs: 1, intervalMs: 50 },
-        run_flow: { steps: [{ tool: "automation_status", arguments: { ...direct, deviceId: androidId } }] },
+        run_flow: { steps: [{ tool: "status", arguments: { ...direct, deviceId: androidId } }] },
     };
     return byName[toolName] || {};
 }
@@ -240,7 +224,7 @@ export async function runInstalledMcpSmoke(options: any = {}) {
                 recordDispatchMismatch(failures, tool.name, result);
                 markExpectedToolError(result);
                 if (tool.name === "run_flow") {
-                    markExpectedFlowStepErrors(result, ["automation_status"]);
+                    markExpectedFlowStepErrors(result, ["status"]);
                 }
                 publicDispatchTools += 1;
             }

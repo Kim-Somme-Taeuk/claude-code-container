@@ -84,7 +84,7 @@ describe("owner device state validation", () => {
             const deviceId = tool.inputSchema?.properties?.deviceId;
             return deviceId ? [{ tool: tool.name, deviceId }] : [];
         });
-        expect(properties.length).toBeGreaterThan(60);
+        expect(properties).toHaveLength(54);
         for (const { tool, deviceId } of properties) {
             expect(deviceId, tool).toEqual(expect.objectContaining({
                 type: "string",

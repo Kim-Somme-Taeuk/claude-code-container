@@ -22,7 +22,7 @@ function matrix(tools = imageTools, change: (call: any) => any = (call) => call)
 describe("canonical provider result evidence", () => {
     it("requires only public tools, excluding internal provider aliases", () => {
         const names = new Set(TOOLS.map((tool) => tool.name));
-        expect(PROVIDER_RESULT_SPECS.flatMap((spec) => spec.tools).filter((tool) => !names.has(tool))).toEqual([]);
+        expect(PROVIDER_RESULT_SPECS.flatMap((spec) => spec.tools).filter((tool) => !names.has(tool.split(":")[0]))).toEqual([]);
     });
 
     it("credits successful sole-backend image calls without redundant backend input", () => {
@@ -38,6 +38,15 @@ describe("canonical provider result evidence", () => {
         });
         expect(result.providerEvidence["macos-vm"].dist.missingTools).toEqual(imageTools);
         expect(result.ok).toBe(false);
+    });
+
+    it("does not credit snapshot list for restore or delete on the same provider", () => {
+        const calls = ["source", "dist"].map(source => ({ tool: "snapshot", outcome: "ok", file: "provider-e2e.ts", mcpSessionId: source, facets: ["snapshot:backend=windows-vm", "snapshot:action=list"] }));
+        const result = assertResultMatrix([{ host: { platform: "win32" }, mcpSessions: ["source", "dist"].map(source => ({ id: source, serverSource: source })), toolCoverage: { advertisedTools: ["snapshot"], calls } }], {
+            advertisedTools: ["snapshot"], requireLinuxVm: false,
+            providerSpecs: [{ id: "windows-vm", files: ["provider-e2e.ts"], tools: ["snapshot:action=list", "snapshot:action=restore", "snapshot:action=delete"] }],
+        });
+        expect(result.providerEvidence["windows-vm"].dist.missingTools).toEqual(["snapshot:action=restore", "snapshot:action=delete"]);
     });
 
     it("requires explicit backend evidence for multi-backend tools", () => {

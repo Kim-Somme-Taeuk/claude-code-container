@@ -1,4 +1,4 @@
-import { TOOLS, toolOperation, SIMPLE_ACTIONS } from "../tools.mjs";
+import { TOOLS, toolOperation, SIMPLE_ACTIONS, GROUP_OPERATIONS, isSimpleAction } from "../tools.mjs";
 
 function objectValue(value) {
     return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
@@ -70,7 +70,7 @@ const OPERATION_CONTRACTS = Object.fromEntries(
     Object.entries(contractGroups).flatMap(([contract, tools]) => tools.map((tool) => [tool, contract])),
 );
 export const DEVICE_LAB_OUTPUT_CONTRACTS = Object.freeze(Object.fromEntries(
-    TOOLS.map(({ name }) => [name, SIMPLE_ACTIONS.has(name) ? "action-v1" : OPERATION_CONTRACTS[toolOperation(name)]]),
+    TOOLS.map(({ name }) => [name, Object.hasOwn(GROUP_OPERATIONS, name) || name === "clipboard" || name === "ui" ? `${name}-group-v1` : SIMPLE_ACTIONS.has(name) ? "action-v1" : OPERATION_CONTRACTS[toolOperation(name)]]),
 ));
 
 const requiredFieldsByContract = {
@@ -106,9 +106,16 @@ const requiredFieldsByContract = {
 const deviceObjectContracts = new Set(["lifecycle-device-v1", "physical-attach-v1", "base-image-device-v1", "snapshot-restore-v1"]);
 const arrayFields = new Set(["devices", "images", "results", "targets"]);
 
-export function validateDeviceLabToolOutput(tool, payload) {
+export function validateDeviceLabToolOutput(tool, payload, args = {}) {
     let contract = DEVICE_LAB_OUTPUT_CONTRACTS[tool];
     if (!contract) throw new Error(`No output contract registered for ${tool}`);
+    if (contract.endsWith("-group-v1")) {
+        const operation = toolOperation(tool, args);
+        if (isSimpleAction(tool, operation) && payload === "ok") return payload;
+        if (operation) contract = OPERATION_CONTRACTS[operation];
+        else throw contractError(tool, "action is required to validate grouped output", payload);
+        if (tool === "ui") contract = "ui-group-v1";
+    }
     if (contract === "action-v1") {
         if (payload === "ok") return payload;
         contract = OPERATION_CONTRACTS[toolOperation(tool)];
@@ -127,6 +134,7 @@ export function validateDeviceLabToolOutput(tool, payload) {
         const detail = providerDetail ? `: ${String(providerDetail).trim().slice(-512)}` : "";
         throw contractError(tool, `operation failed (${String(value.error || "unknown-error")})${detail}`, payload);
     }
+    if (tool === "ui" && !(typeof value.source === "string" || (objectValue(value.accessibility) && "root" in value.accessibility && typeof value.accessibility.nodeCount === "number"))) throw contractError(tool, "required mobile source or desktop accessibility tree is missing", payload);
     for (const field of requiredFieldsByContract[contract] || []) {
         if (!(field in value)) throw contractError(tool, `required ${field} field is missing`, payload);
         if (arrayFields.has(field) && !Array.isArray(value[field])) throw contractError(tool, `required ${field} array is invalid`, payload);

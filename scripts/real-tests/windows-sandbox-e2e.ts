@@ -262,7 +262,7 @@ export async function cleanupCurrentWindowsSandboxE2E(options: any = {}) {
 
     if (options.recordingActive === true) {
         try {
-            assertRecordingStoppedCleanupResult(await callTool("record_video_stop", { detail: true,
+            assertRecordingStoppedCleanupResult(await callTool("record_video", { action: "stop", detail: true,
                 deviceId,
                 helperTimeoutMs: options.recordingStopTimeoutMs || 10000,
             }));
@@ -556,13 +556,13 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             assert.ok(cursor.cursor === null || typeof cursor.cursor === "object");
 
             currentStep = "capture accessibility snapshot";
-            const accessibility = parsePayload(await callTool("accessibility_snapshot", { detail: true, deviceId, maxDepth: 1, maxNodes: 20, helperTimeoutMs }));
+            const accessibility = parsePayload(await callTool("ui", { detail: true, deviceId, maxDepth: 1, maxNodes: 20, helperTimeoutMs }));
             assert.strictEqual(accessibility.provider, "windows-uiautomation");
             assert.ok(accessibility.accessibility === null || typeof accessibility.accessibility === "object");
 
             currentStep = "start recording";
             const recordingPath = join(tempDir, "windows-recording.zip");
-            const recordingStart = windowsRecordingPayload(parsePayload(await callTool("record_video_start", { detail: true,
+            const recordingStart = windowsRecordingPayload(parsePayload(await callTool("record_video", { action: "start", detail: true,
                 deviceId,
                 localPath: recordingPath,
                 timeLimitSec: 10,
@@ -575,13 +575,13 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             await new Promise((resolve) => setTimeout(resolve, 1500));
 
             currentStep = "read recording status";
-            const recordingStatus = windowsRecordingPayload(parsePayload(await callTool("record_video_status", { detail: true, deviceId, helperTimeoutMs: 5000 })));
+            const recordingStatus = windowsRecordingPayload(parsePayload(await callTool("record_video", { action: "status", detail: true, deviceId, helperTimeoutMs: 5000 })));
             const recordingState = windowsRecordingState(recordingStatus);
             assert.ok(recordingState, `Windows Sandbox recording status returned no recording: ${JSON.stringify(recordingStatus)}`);
             assert.strictEqual(recordingState.active, true, `Windows Sandbox recording is not active: ${JSON.stringify(recordingStatus)}`);
 
             currentStep = "stop recording";
-            const recordingStop = windowsRecordingPayload(parsePayload(await callTool("record_video_stop", { detail: true,
+            const recordingStop = windowsRecordingPayload(parsePayload(await callTool("record_video", { action: "stop", detail: true,
                 deviceId,
                 localPath: recordingPath,
                 helperTimeoutMs,

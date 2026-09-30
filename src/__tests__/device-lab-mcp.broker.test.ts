@@ -446,7 +446,7 @@ describe("device-lab MCP", () => {
     });
 
     it("reports persistent device-lab storage boundaries without starting the broker", { timeout: TIMEOUT }, async () => {
-        const status = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
+        const status = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: false, autolaunch: false } });
         expect(status.isError).not.toBe(true);
         const payload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             available: boolean;
@@ -469,6 +469,11 @@ describe("device-lab MCP", () => {
         };
 
         expect(payload.available).toBe(false);
+        const discovery = await client.callTool({ name: "backends", arguments: { implicitBroker: false, detail: true } });
+        expect(discovery.isError).not.toBe(true);
+        const discovered = JSON.parse((discovery.content as Array<{ text?: string }>)[0].text || "{}");
+        expect(discovered.broker.state.ownerRoot).toBe(payload.state.ownerRoot);
+        expect(discovered.broker.available).toBe(false);
         expect(payload.persistence).toEqual(expect.objectContaining({
             durableAcrossContainerRecreation: true,
             environmentVariablesRequired: false,
@@ -506,7 +511,7 @@ describe("device-lab MCP", () => {
     });
 
     it("enables default implicit broker probing without runtime metadata", { timeout: TIMEOUT }, async () => {
-        const status = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
+        const status = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: false, autolaunch: false } });
         const payload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             state: { runtimeFile: string };
         };
@@ -1223,7 +1228,7 @@ describe("device-lab MCP", () => {
     });
 
     it("uses shared ccc-host runtime metadata for zero-config broker status", { timeout: TIMEOUT }, async () => {
-        const initial = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
+        const initial = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: false, autolaunch: false } });
         const initialPayload = JSON.parse(((initial.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             state: { runtimeFile: string };
         };
@@ -1257,7 +1262,7 @@ describe("device-lab MCP", () => {
         }));
 
         try {
-            const result = await client.callTool({ name: "broker_status", arguments: { probe: true } });
+            const result = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: true } });
             expect(result.isError).not.toBe(true);
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
                 mode: string;
@@ -1287,7 +1292,7 @@ describe("device-lab MCP", () => {
         // refused it and no device tool could run until the image was rebuilt.
         const newerFamilies = REQUIRED_CCC_HOST_BROKER_CAPABILITIES.map((capability: string) =>
             capability.replace(/-v(\d+)$/, (_match: string, version: string) => `-v${Number(version) + 1}`));
-        const initial = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
+        const initial = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: false, autolaunch: false } });
         const initialPayload = JSON.parse(((initial.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             state: { runtimeFile: string };
         };
@@ -1319,7 +1324,7 @@ describe("device-lab MCP", () => {
         }));
 
         try {
-            const result = await client.callTool({ name: "broker_status", arguments: { probe: true } });
+            const result = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: true } });
             expect(result.isError).not.toBe(true);
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
                 mode: string;
@@ -1337,7 +1342,7 @@ describe("device-lab MCP", () => {
     });
 
     it("rejects a ccc-host runtime missing required broker capabilities without version metadata", { timeout: TIMEOUT }, async () => {
-        const initial = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
+        const initial = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: false, autolaunch: false } });
         const initialPayload = JSON.parse(((initial.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             state: { runtimeFile: string };
         };
@@ -1368,7 +1373,7 @@ describe("device-lab MCP", () => {
         }));
 
         try {
-            const result = await client.callTool({ name: "broker_status", arguments: { probe: true } });
+            const result = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: true } });
             expect(result.isError).not.toBe(true);
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
                 mode: string;
@@ -1563,7 +1568,7 @@ describe("device-lab MCP", () => {
     }, TIMEOUT);
 
     it("does not signal a PID claimed by incompatible MCP runtime metadata", { timeout: TIMEOUT }, async () => {
-        const initial = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
+        const initial = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: false, autolaunch: false } });
         const initialPayload = JSON.parse(((initial.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -1596,8 +1601,7 @@ describe("device-lab MCP", () => {
         writeFileSync(initialPayload.state.runtimeFile, JSON.stringify(forgedRuntime));
 
         try {
-            const result = await client.callTool({
-                name: "broker_status",
+            const result = await callInternalBroker(client, { operation: "brokerStatus",
                 arguments: { probe: true, autolaunch: true, hostCandidates: ["127.0.0.1"], port, timeoutMs: 300 },
             });
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -1616,7 +1620,7 @@ describe("device-lab MCP", () => {
     });
 
     it.runIf(process.platform !== "win32")("atomically replaces a linked MCP runtime without mutating its target", { timeout: TIMEOUT }, async () => {
-        const initial = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
+        const initial = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: false, autolaunch: false } });
         const initialPayload = JSON.parse(((initial.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             state: { runtimeFile: string };
         };
@@ -1663,7 +1667,7 @@ describe("device-lab MCP", () => {
     });
 
     it.runIf(process.platform !== "win32")("refuses MCP broker autolaunch through a linked log directory", { timeout: TIMEOUT }, async () => {
-        const initial = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
+        const initial = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: false, autolaunch: false } });
         const initialPayload = JSON.parse(((initial.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             state: { runtimeFile: string; logsRoot: string };
         };
@@ -1766,8 +1770,7 @@ describe("device-lab MCP", () => {
             args: ["devices", "broker", "serve", "--host", "127.0.0.1", "--port", String(port)],
         }));
 
-        const status = await client.callTool({
-            name: "broker_status",
+        const status = await callInternalBroker(client, { operation: "brokerStatus",
             arguments: { probe: true, hostCandidates: ["127.0.0.1"], port, timeoutMs: 300 },
         });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -1946,8 +1949,7 @@ describe("device-lab MCP", () => {
             launch: { runtime: { pid: number } };
         };
         expect(launchedPayload.ok).toBe(true);
-        const status = await client.callTool({
-            name: "broker_status",
+        const status = await callInternalBroker(client, { operation: "brokerStatus",
             arguments: { probe: true, hostCandidates: ["127.0.0.1"], port, timeoutMs: 300 },
         });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as { state: { runtimeFile: string } };
@@ -1983,8 +1985,7 @@ describe("device-lab MCP", () => {
             launch: { runtime: { pid: number; ownerId: string } };
         };
         expect(launchedPayload.ok).toBe(true);
-        const status = await client.callTool({
-            name: "broker_status",
+        const status = await callInternalBroker(client, { operation: "brokerStatus",
             arguments: { probe: true, hostCandidates: ["127.0.0.1"], port, timeoutMs: 300 },
         });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as { state: { runtimeFile: string } };
@@ -2024,8 +2025,7 @@ describe("device-lab MCP", () => {
             launch: { runtime: { pid: number; ownerId: string } };
         };
         expect(launchedPayload.ok).toBe(true);
-        const status = await client.callTool({
-            name: "broker_status",
+        const status = await callInternalBroker(client, { operation: "brokerStatus",
             arguments: { probe: true, hostCandidates: ["127.0.0.1"], port, timeoutMs: 300 },
         });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as { state: { runtimeFile: string } };
@@ -2131,7 +2131,7 @@ setInterval(() => {}, 1000);
     });
 
     it("cleans stale broker runtime metadata and reports launch failures", { timeout: TIMEOUT }, async () => {
-        const status = await client.callTool({ name: "broker_status", arguments: {} });
+        const status = await callInternalBroker(client, { operation: "brokerStatus", arguments: {} });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -2171,7 +2171,7 @@ setInterval(() => {}, 1000);
     });
 
     it("relaunches an MCP-owned broker when runtime metadata points at a dead process", { timeout: TIMEOUT }, async () => {
-        const status = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
+        const status = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: false, autolaunch: false } });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -2225,7 +2225,7 @@ setInterval(() => {}, 1000);
     });
 
     it("refuses to autolaunch over another owner's broker runtime metadata", { timeout: TIMEOUT }, async () => {
-        const status = await client.callTool({ name: "broker_status", arguments: {} });
+        const status = await callInternalBroker(client, { operation: "brokerStatus", arguments: {} });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             state: { runtimeFile: string };
         };
@@ -2264,7 +2264,7 @@ setInterval(() => {}, 1000);
     });
 
     it("ignores another owner's broker runtime metadata on a different requested port", { timeout: TIMEOUT }, async () => {
-        const status = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
+        const status = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: false, autolaunch: false } });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -2314,7 +2314,7 @@ setInterval(() => {}, 1000);
     });
 
     it("refuses to shut down broker runtime metadata not managed by device-lab-mcp", { timeout: TIMEOUT }, async () => {
-        const status = await client.callTool({ name: "broker_status", arguments: {} });
+        const status = await callInternalBroker(client, { operation: "brokerStatus", arguments: {} });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -2396,7 +2396,7 @@ setInterval(() => {}, 1000);
         });
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
-        const status = await client.callTool({ name: "broker_status", arguments: {} });
+        const status = await callInternalBroker(client, { operation: "brokerStatus", arguments: {} });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -2752,7 +2752,7 @@ setInterval(() => {}, 1000);
         });
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
-        const status = await client.callTool({ name: "broker_status", arguments: {} });
+        const status = await callInternalBroker(client, { operation: "brokerStatus", arguments: {} });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -2829,7 +2829,7 @@ setInterval(() => {}, 1000);
             });
         });
         await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-        const status = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
+        const status = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: false, autolaunch: false } });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}"));
         mkdirSync(join(homeDir, ".ccc/devices/broker"), { recursive: true });
         writeFileSync(statusPayload.state.runtimeFile, JSON.stringify({
@@ -2918,7 +2918,7 @@ setInterval(() => {}, 1000);
         });
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
-        const status = await client.callTool({ name: "broker_status", arguments: {} });
+        const status = await callInternalBroker(client, { operation: "brokerStatus", arguments: {} });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -2974,7 +2974,7 @@ setInterval(() => {}, 1000);
         });
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
-        const status = await client.callTool({ name: "broker_status", arguments: {} });
+        const status = await callInternalBroker(client, { operation: "brokerStatus", arguments: {} });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -3024,8 +3024,7 @@ setInterval(() => {}, 1000);
 
     it("clamps explicit broker probe candidate count and timeout", { timeout: TIMEOUT }, async () => {
         const candidates = Array.from({ length: 12 }, (_, index) => `127.0.0.${index + 1}`);
-        const result = await client.callTool({
-            name: "broker_status",
+        const result = await callInternalBroker(client, { operation: "brokerStatus",
             arguments: { probe: false, hostCandidates: candidates, timeoutMs: 999999 },
         });
         expect(result.isError).not.toBe(true);
@@ -3054,8 +3053,7 @@ setInterval(() => {}, 1000);
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
         try {
-            const result = await client.callTool({
-                name: "broker_status",
+            const result = await callInternalBroker(client, { operation: "brokerStatus",
                 arguments: { probe: true, hostCandidates: ["127.0.0.1"], port: address.port, timeoutMs: 500 },
             });
             expect(result.isError).not.toBe(true);
@@ -3120,8 +3118,7 @@ setInterval(() => {}, 1000);
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
         try {
-            const result = await client.callTool({
-                name: "broker_status",
+            const result = await callInternalBroker(client, { operation: "brokerStatus",
                 arguments: { probe: true, hostCandidates: ["127.0.0.1"], port: address.port, timeoutMs: 500 },
             });
             expect(result.isError).not.toBe(true);

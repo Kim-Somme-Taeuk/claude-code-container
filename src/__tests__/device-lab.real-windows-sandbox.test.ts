@@ -281,7 +281,7 @@ describe("Windows Sandbox real E2E cleanup preflight", () => {
     });
 
     it.each([
-        { operation: "recording cleanup", recordingActive: true, needsStop: true, firstTool: "record_video_stop" },
+        { operation: "recording cleanup", recordingActive: true, needsStop: true, firstTool: "record_video" },
         { operation: "stop", recordingActive: false, needsStop: true, firstTool: "stop" },
     ])("preserves finally-path evidence when $operation fails", async ({ recordingActive, needsStop, firstTool }) => {
         const homeDir = join(tmpdir(), `ccc-windows-e2e-provider-failure-${Date.now()}-${Math.random().toString(16).slice(2)}`);

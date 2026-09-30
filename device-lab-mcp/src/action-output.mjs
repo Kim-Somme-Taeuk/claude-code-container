@@ -1,5 +1,5 @@
 import { compactToolResult } from "./public-output.mjs";
-import { SIMPLE_ACTIONS, TOOLS, publicToolName } from "./tools.mjs";
+import { isSimpleAction, TOOLS, publicToolName } from "./tools.mjs";
 import { jsonResult } from "./responses.mjs";
 const publicNames = new Set(TOOLS.map(({ name }) => name));
 
@@ -86,7 +86,7 @@ export function actionResult(name, operation, raw, { detail = false } = {}) {
     if (!Array.isArray(result?.content)) return result;
     let isError = Boolean(result.isError);
     // Do not allow presentation to hide a provider failure inside an envelope.
-    if (SIMPLE_ACTIONS.has(name)) {
+    if (isSimpleAction(name, operation)) {
         for (const item of raw.content || []) {
             if (item.type !== "text") continue;
             try { isError ||= actionEvidence(JSON.parse(item.text)).failed; } catch { /* Plain text has the MCP error flag. */ }
@@ -105,13 +105,13 @@ export function actionResult(name, operation, raw, { detail = false } = {}) {
             continue;
         }
         isError ||= object(value) && (value.ok === false || Boolean(value.error));
-        if (SIMPLE_ACTIONS.has(name)) {
+        if (isSimpleAction(name, operation)) {
             const observed = actionEvidence(value);
             isError ||= observed.failed;
             if (Object.keys(observed.evidence).length) content.push({ ...item, text: JSON.stringify(observed.evidence) });
             else if (isError) content.push({ ...item, text: JSON.stringify({ error: "Action failed" }) });
         } else content.push({ ...item, text: JSON.stringify(queryValue(name, value)) });
     }
-    if (!content.length && !isError && SIMPLE_ACTIONS.has(name)) content.push({ type: "text", text: "ok" });
+    if (!content.length && !isError && isSimpleAction(name, operation)) content.push({ type: "text", text: "ok" });
     return { ...result, content, ...(isError ? { isError: true } : {}) };
 }

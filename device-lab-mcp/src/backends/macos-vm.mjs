@@ -1174,8 +1174,9 @@ function sshBridge(device, toolName) {
     return { target, discovery };
 }
 
-export function listMacosDevices() {
+export function listMacosDevices({ identityOnly = false } = {}) {
     const devices = readMacosDevices();
+    if (identityOnly) return devices;
     if (!devices.length) return [];
     const discovery = macosDiscovery();
     return devices.map((device) => deviceWithPlan({ ...device, ownerId: ownerId() }, discovery));

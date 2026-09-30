@@ -78,7 +78,7 @@ describe.each(["run_flow"])("%s wait conditions", (name) => {
         ["wait_for_app", { found: true }],
         ["wait_for_text", { result: { found: false }, running: false }],
         ["wait_for_app", { result: { found: false, running: false } }],
-        ["get_clipboard", { found: false, running: false, text: "unchanged" }],
+        ["clipboard", { found: false, running: false, text: "unchanged" }],
         ["wait_for_text", { found: "false" }],
     ] as const)("does not misclassify %s %j", async (tool, observation) => {
         fixture.observations.set(tool, wrap(observation));
@@ -105,8 +105,8 @@ describe.each(["run_flow"])("%s wait conditions", (name) => {
         const failed = parse(await flow(name, "wait_for_app", false));
         expect(failed.results[0]).toMatchObject({ isError: true, content: [{ type: "json", value: { error: "Error: process observation failed" } }] });
         expect(failed.results[0].error).toBeUndefined();
-        fixture.observations.set("automation_status", wrap({ ok: false, error: "session-unavailable" }));
-        const status = parse(await flow(name, "automation_status", false));
+        fixture.observations.set("status", wrap({ ok: false, error: "session-unavailable" }));
+        const status = parse(await flow(name, "status", false));
         expect(status).toMatchObject({ ok: false, stoppedAt: 0 });
         expect(status.results[0].content[0].value.error).toBe("session-unavailable");
     });

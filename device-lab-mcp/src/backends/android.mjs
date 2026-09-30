@@ -1014,7 +1014,7 @@ async function handleAndroidToolUnlocked(name, args) {
             const device = findAndroidDevice(deviceId);
             if (!device) return undefined;
             const discovery = androidDiscovery();
-            return jsonResult({ device: publicAndroidDevice(device), backend: androidBackend(discovery), appium: appiumBackendStatus(discovery) });
+            return jsonResult({ device: publicAndroidDevice(device), backend: androidBackend(discovery), appium: appiumBackendStatus(discovery), automation: { deviceId, provider: "adb", session: device.appium || null, lazy: true } });
         }
 
         case "device_start": {

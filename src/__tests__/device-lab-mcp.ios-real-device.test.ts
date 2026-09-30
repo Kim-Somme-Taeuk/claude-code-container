@@ -213,11 +213,11 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         expect(statusPayload.appium).toEqual(expect.objectContaining({ automationName: "XCUITest", physical: true }));
 
         const realSession = await client.callTool({
-            name: "automation_status",
+            name: "status",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(realSession.isError).not.toBe(true);
-        const realSessionPayload = JSON.parse(((realSession.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
+        const realSessionPayload = JSON.parse(((realSession.content as Array<{ text?: string }>)[0].text ?? "{}")).appium as {
             automationName: string;
             physical: boolean;
             session: unknown;
@@ -232,7 +232,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         expect(realSessionPayload.appium.missing).toEqual([]);
 
         const realDump = await client.callTool({
-            name: "dump_ui",
+            name: "ui",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(realDump.isError, JSON.stringify(realDump)).not.toBe(true);
@@ -251,10 +251,10 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         expect(realDumpPayload.source).toContain("XCUIElementTypeApplication");
 
         const statusAfterRealDump = await client.callTool({
-            name: "automation_status",
+            name: "status",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
-        const statusAfterRealDumpPayload = JSON.parse(((statusAfterRealDump.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
+        const statusAfterRealDumpPayload = JSON.parse(((statusAfterRealDump.content as Array<{ text?: string }>)[0].text ?? "{}")).appium as {
             session: { sessionId: string; serverUrl: string; physical: boolean };
         };
         expect(statusAfterRealDumpPayload.session).toEqual(expect.objectContaining({
@@ -265,7 +265,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
 
         // A healthy session needs one fresh server check plus its session check.
         const beforeReadyReuse = readFileSync(logPath, "utf-8").length;
-        const healthyReuse = await client.callTool({ name: "dump_ui", arguments: { deviceId: "ios-device-real-iphone" } });
+        const healthyReuse = await client.callTool({ name: "ui", arguments: { deviceId: "ios-device-real-iphone" } });
         expect(healthyReuse.isError, JSON.stringify(healthyReuse)).not.toBe(true);
         const readyReuseLog = readFileSync(logPath, "utf-8").slice(beforeReadyReuse);
         expect((readyReuseLog.match(/appium-http GET \/status\n/g) || []).length).toBe(1);
@@ -288,7 +288,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         // owned server is started and must pass its own readiness check.
         writeFileSync(join(homeDir, "fail-ios-status-once"), "1");
         const beforeFailedStatus = readFileSync(logPath, "utf-8").length;
-        const healthRecovered = await client.callTool({ name: "dump_ui", arguments: { deviceId: "ios-device-real-iphone" } });
+        const healthRecovered = await client.callTool({ name: "ui", arguments: { deviceId: "ios-device-real-iphone" } });
         expect(healthRecovered.isError, JSON.stringify(healthRecovered)).not.toBe(true);
         const failedStatusLog = readFileSync(logPath, "utf-8").slice(beforeFailedStatus);
         expect((failedStatusLog.match(/appium-http GET \/status\n/g) || []).length).toBe(2);
@@ -365,7 +365,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
 
         writeFileSync(join(homeDir, "stale-ios-session"), "1");
         const realRecoveredDump = await client.callTool({
-            name: "dump_ui",
+            name: "ui",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(realRecoveredDump.isError, JSON.stringify(realRecoveredDump)).not.toBe(true);
@@ -374,10 +374,10 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         };
         expect(realRecoveredPayload.sessionId).toBe("IOS-SESSION-1");
         const recoveredSession = await client.callTool({
-            name: "automation_status",
+            name: "status",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
-        const recoveredSessionPayload = JSON.parse(((recoveredSession.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
+        const recoveredSessionPayload = JSON.parse(((recoveredSession.content as Array<{ text?: string }>)[0].text ?? "{}")).appium as {
             session: { runtimeId: string; processOwner: string; startedBy: string; serverPid: number; processIdentity: { pid: number; startToken: string; commandHash: string } };
         };
         expect(recoveredSessionPayload.session.runtimeId).toMatch(/^[0-9a-f-]{36}$/);
@@ -492,7 +492,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         const attached = parseToolJson(attachedResult).device as Record<string, unknown>;
         const statePath = join(homeDir, ".ccc", "devices", "owners", String(attached.ownerId), "ios-device", "devices.json");
         const ensureSession = async () => {
-            const session = await client.callTool({ name: "dump_ui", arguments: { deviceId } });
+            const session = await client.callTool({ name: "ui", arguments: { deviceId } });
             expect(session.isError, (session.content as Array<{ text?: string }>)[0]?.text).not.toBe(true);
         };
         const armConflict = (marker: string) => {

@@ -332,7 +332,7 @@ function validateGuestAgent(args = {}) {
             protocol: "bounded-ssh-health-command",
             healthCommand,
             provisionCommand,
-            autoProvision: input.autoProvision === true,
+            autoProvision: input.autoProvision === undefined ? Boolean(provisionCommand) : input.autoProvision === true,
         },
     };
 }
@@ -1522,6 +1522,23 @@ function defaultCommandRunner(command, args, runOptions) {
     return { ok: true, pid: child.pid, processIdentity, command, args };
 }
 
+function prepareStartedLab(lab, options, reused = false) {
+    const agent = lab.guest?.agent;
+    const prepare = agent?.autoProvision === true && Boolean(agent.provisionCommand)
+        && (!reused || agent.lastProvision?.ok !== true);
+    const provision = prepare ? guestAgentProvision({ labId: lab.id }, options) : null;
+    return {
+        ok: provision?.ok !== false,
+        ...(provision?.ok === false ? { error: "lab-guest-agent-provision-failed" } : {}),
+        lab: provision?.lab || publicLab(lab),
+        guestAgentProvision: provision ? {
+            ok: provision.ok,
+            ...(provision.error ? { error: provision.error } : {}),
+            ...(provision.status ? { status: provision.status } : {}),
+        } : undefined,
+    };
+}
+
 export function startLab(args = {}, options = {}) {
     const ctx = context(options);
     const loaded = readLab(ctx, String(args.labId || ""));
@@ -1549,7 +1566,7 @@ export function startLab(args = {}, options = {}) {
         return { ok: true, ownerId: ctx.owner, dryRun: true, lab: publicLab(planLab), command: status.qemu || "qemu-system-x86_64", args: publicQemuArgs(qemuArgs), providerStatus: status, materialized };
     }
     if (!status.available) return { ok: false, error: "lab-provider-unsupported", providerStatus: status };
-    if (loaded.lab.runtimeState === "running") return { ok: true, ownerId: ctx.owner, lab: publicLab(loaded.lab), reused: true };
+    if (loaded.lab.runtimeState === "running") return { ownerId: ctx.owner, reused: true, ...prepareStartedLab(loaded.lab, options, true) };
     const shouldMaterialize = Boolean(loaded.lab.image?.sourceImage);
     const materialized = !shouldMaterialize
         ? { ok: true, materialized: false, skipped: true, reason: "source-image-not-configured", lab: loaded.lab }
@@ -1577,9 +1594,7 @@ export function startLab(args = {}, options = {}) {
         },
     };
     writeLab(ctx, lab);
-    const shouldAutoProvision = lab.guest?.agent?.autoProvision === true && Boolean(lab.guest?.agent?.provisionCommand);
-    const provision = shouldAutoProvision ? guestAgentProvision({ labId: lab.id }, options) : null;
-    return { ok: true, ownerId: ctx.owner, lab: provision?.lab || publicLab(lab), materialized: publicMaterializedResult(materialized), started: publicExecution(started), guestAgentProvision: provision ? { ok: provision.ok, status: provision.status } : undefined };
+    return { ownerId: ctx.owner, ...prepareStartedLab(lab, options), materialized: publicMaterializedResult(materialized), started: publicExecution(started) };
 }
 
 export function rebootLab(args = {}, options = {}) {
@@ -1640,6 +1655,17 @@ export function probeReadiness(args = {}, options = {}) {
     const readiness = buildReadinessResult(loaded.lab, target, options);
     const lab = recordReadiness(ctx, loaded.lab, readiness);
     return { ok: readiness.state !== "failed", ownerId: ctx.owner, lab: publicLab(lab), target: targetForLab(lab), readiness };
+}
+
+export function inspectLab(args = {}, options = {}) {
+    const ctx = context(options);
+    const loaded = readLab(ctx, String(args.labId || ""));
+    if (!loaded.ok) return loaded;
+    if (loaded.lab.runtimeState !== "running") {
+        return { ok: true, ownerId: ctx.owner, lab: publicLab(loaded.lab), readiness: { state: "stopped" } };
+    }
+    const result = probeReadiness(args, options);
+    return { ...result, ...(!result.ok && !result.error ? { error: "lab-readiness-failed" } : {}) };
 }
 
 export function openSession(args = {}, options = {}) {
@@ -2267,8 +2293,7 @@ function handleLinuxVmToolUnlocked(name, args = {}, options = {}) {
 
     let result;
     if (name === "device_status") {
-        const device = listLinuxVmDevices(options).find((candidate) => candidate.id === args.deviceId);
-        result = device ? { ok: true, ownerId: device.ownerId, device } : { ok: false, error: "device-not-found", deviceId: args.deviceId };
+        result = inspectLab(linuxArgs, options);
     } else if (name === "device_start") result = startLab(linuxArgs, options);
     else if (name === "device_stop") result = stopLab(linuxArgs, options);
     else if (name === "device_delete") result = deleteLab(linuxArgs, options);
@@ -2293,7 +2318,7 @@ function handleLinuxVmToolUnlocked(name, args = {}, options = {}) {
     return linuxVmMcpResult(result);
 }
 
-const LINUX_VM_READ_ONLY_TOOLS = new Set(["device_inventory", "device_status", "device_target_list"]);
+const LINUX_VM_READ_ONLY_TOOLS = new Set(["device_inventory", "device_target_list"]);
 
 export async function handleLinuxVmTool(name, args = {}, options = {}) {
     if (LINUX_VM_READ_ONLY_TOOLS.has(name)) return handleLinuxVmToolUnlocked(name, args, options);

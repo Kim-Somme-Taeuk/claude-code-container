@@ -1164,6 +1164,7 @@ describe("device-lab Linux VM container-QEMU provider", () => {
         const provisionCommand = "install-ccc-agent --mode bounded";
         const created = createLab({
             name: "Guest Agent Provision VM",
+            guestAgentAutoProvision: false,
             guestSshHost: "127.0.0.1",
             guestSshUser: "ccc",
             guestSshKeyPath: keyPath,
@@ -1334,6 +1335,7 @@ describe("device-lab Linux VM container-QEMU provider", () => {
 
         const missingSsh = createLab({
             name: "Guest Agent Provision Missing SSH VM",
+            guestAgentAutoProvision: false,
             guestSshHost: "127.0.0.1",
             guestSshUser: "ccc",
             guestSshKeyPath: keyPath,

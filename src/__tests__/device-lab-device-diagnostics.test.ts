@@ -38,15 +38,15 @@ describe("public MCP terminal device diagnostics", () => {
         const ctx = await fixture();
         try {
             for (const detail of [false, true]) {
-                const missing = await ctx.client.callTool({ name: "dump_ui", arguments: { detail } });
+                const missing = await ctx.client.callTool({ name: "ui", arguments: { detail } });
                 expect(missing.isError).toBe(true);
                 expect(json(missing)).toMatchObject({ ok: false, error: "missing-device-id", detail: expect.stringContaining("list_devices") });
                 for (const deviceId of ["", "..", "../foreign", 7, null]) {
-                    const result = await ctx.client.callTool({ name: "dump_ui", arguments: { deviceId, detail } });
+                    const result = await ctx.client.callTool({ name: "ui", arguments: { deviceId, detail } });
                     expect(result.isError).toBe(true);
                     expect(json(result).error).toBe("device-id-invalid");
                 }
-                const absent = await ctx.client.callTool({ name: "dump_ui", arguments: { detail, deviceId: "absent-target" } });
+                const absent = await ctx.client.callTool({ name: "ui", arguments: { detail, deviceId: "absent-target" } });
                 expect(absent.isError).toBe(true);
                 expect(json(absent)).toMatchObject({ error: "device-not-found", deviceId: "absent-target", detail: expect.stringContaining("list_devices") });
             }
@@ -64,9 +64,9 @@ describe("public MCP terminal device diagnostics", () => {
             writeFileSync(lab, JSON.stringify({ id: "local-qemu", runtimeState: "stopped" }));
             for (const [deviceId, backend] of [["desktop", "windows-vm"], ["mac", "macos-vm"], ["x11-current-display", "x11-current-display"], ["local-qemu", "linux-vm"]]) {
                 ctx.clear();
-                const result = await ctx.client.callTool({ name: "dump_ui", arguments: { deviceId, detail: false } });
+                const result = await ctx.client.callTool({ name: "wait_for_text", arguments: { deviceId, text: "Ready", detail: false } });
                 expect(result.isError, text(result)).toBe(true);
-                expect(json(result)).toMatchObject({ error: "device-tool-unsupported", tool: "mobile_dump_ui", deviceId, backend });
+                expect(json(result)).toMatchObject({ error: "device-tool-unsupported", tool: "mobile_wait_for_text", deviceId, backend });
                 expect(ctx.activity().filter((entry) => entry.kind !== "state")).toEqual([]);
             }
         } finally { await cleanupDeviceLabMcpTestContext(ctx); }
@@ -78,10 +78,10 @@ describe("public MCP terminal device diagnostics", () => {
             store(ctx.homeDir, "windows-vm", ["foreign"], "another-owner");
             store(ctx.homeDir, "windows-vm", ["duplicate"]);
             store(ctx.homeDir, "linux-vm", ["duplicate"]);
-            const foreign = await ctx.client.callTool({ name: "dump_ui", arguments: { deviceId: "foreign" } });
+            const foreign = await ctx.client.callTool({ name: "ui", arguments: { deviceId: "foreign" } });
             expect(json(foreign).error).toBe("device-not-found");
             expect(text(foreign)).not.toContain("another-owner");
-            const ambiguous = await ctx.client.callTool({ name: "dump_ui", arguments: { deviceId: "duplicate" } });
+            const ambiguous = await ctx.client.callTool({ name: "ui", arguments: { deviceId: "duplicate" } });
             expect(ambiguous.isError).toBe(true);
             expect(json(ambiguous)).toMatchObject({ error: "ambiguous-device-backend", matches: expect.arrayContaining(["windows-vm", "linux-vm"]) });
             expect(ctx.activity().every((entry) => entry.kind === "state" && !entry.args[0].includes("another-owner"))).toBe(true);
@@ -93,7 +93,7 @@ describe("public MCP terminal device diagnostics", () => {
         try {
             const file = store(ctx.homeDir, "windows-vm", []);
             writeFileSync(file, "{broken");
-            await expect(ctx.client.callTool({ name: "dump_ui", arguments: { deviceId: "missing" } }))
+            await expect(ctx.client.callTool({ name: "ui", arguments: { deviceId: "missing" } }))
                 .rejects.toThrow("owner-devices-state-invalid");
         } finally { await cleanupDeviceLabMcpTestContext(ctx); }
     });
@@ -104,7 +104,7 @@ describe("public MCP terminal device diagnostics", () => {
             const lab = join(ctx.homeDir, ".ccc/labs/owners", owner, "labs/broken/lab.json");
             mkdirSync(dirname(lab), { recursive: true });
             writeFileSync(lab, "{private-corrupt-metadata");
-            const failure = await ctx.client.callTool({ name: "dump_ui", arguments: { deviceId: "missing" } }).catch((error: Error) => error);
+            const failure = await ctx.client.callTool({ name: "ui", arguments: { deviceId: "missing" } }).catch((error: Error) => error);
             expect(failure).toBeInstanceOf(Error);
             expect(String(failure)).toContain("lab-state-invalid");
             expect(String(failure)).not.toContain("private-corrupt-metadata");
@@ -117,10 +117,10 @@ describe("public MCP terminal device diagnostics", () => {
         try {
             for (const detail of [false, true]) {
                 const result = await ctx.client.callTool({ name, arguments: { detail, steps: [
-                    { tool: "dump_ui", arguments: { deviceId: "missing", implicitBroker: false } },
+                    { tool: "ui", arguments: { deviceId: "missing", implicitBroker: false } },
                     { tool: "key", arguments: { deviceId: "missing", implicitBroker: false } },
                 ] } });
-                expect(json(result)).toMatchObject({ ok: false, stoppedAt: 0, results: [{ index: 0, tool: "dump_ui", isError: true }] });
+                expect(json(result)).toMatchObject({ ok: false, stoppedAt: 0, results: [{ index: 0, tool: "ui", isError: true }] });
                 expect(json(result).results).toHaveLength(1);
                 expect(text(result)).toContain("device-not-found");
             }

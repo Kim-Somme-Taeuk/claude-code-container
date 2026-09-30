@@ -2,7 +2,7 @@ import { spawnSync } from "child_process";
 import { readFileSync } from "fs";
 import { basename, resolve } from "path";
 import { fileURLToPath } from "url";
-import { TOOLS as DEVICE_LAB_MCP_TOOLS, SINGLE_BACKEND_TOOL_DEFAULTS, publicToolName } from "../../device-lab-mcp/src/tools.mjs";
+import { TOOLS as DEVICE_LAB_MCP_TOOLS, SINGLE_BACKEND_TOOL_DEFAULTS, publicToolName, GROUP_OPERATIONS } from "../../device-lab-mcp/src/tools.mjs";
 import { androidBackend } from "../../device-lab-mcp/src/backends/android.mjs";
 import { windowsBackend } from "../../device-lab-mcp/src/backends/windows-sandbox.mjs";
 import { windowsVmBackend } from "../../device-lab-mcp/src/backends/windows-vm.mjs";
@@ -13,15 +13,23 @@ const requiredToolSources = ["source", "dist"];
 const requiredProviderSources = ["dist"];
 const publicToolNames = new Set(DEVICE_LAB_MCP_TOOLS.map((tool) => tool.name));
 
+function operationRequirement(operation) {
+    const name = publicToolName(operation);
+    const group = GROUP_OPERATIONS[name];
+    if (group) return `${name}:action=${Object.keys(group).find((action) => group[action] === operation)}`;
+    if (name === "clipboard") return `clipboard:action=${operation === "mobile_set_clipboard" ? "write" : "read"}`;
+    return name;
+}
+function providerRequirements(operations) { return [...new Set(operations.filter((operation) => publicToolNames.has(publicToolName(operation))).map(operationRequirement))]; }
 export const PROVIDER_RESULT_SPECS = [
-    { id: "android-emulator", files: ["level2-android-emulator-e2e.ts", "level3-real-destructive.ts"], tools: [...new Set(androidBackend().capabilities.map(publicToolName).filter((tool) => publicToolNames.has(tool)))] },
+    { id: "android-emulator", files: ["level2-android-emulator-e2e.ts", "level3-real-destructive.ts"], tools: providerRequirements(androidBackend().capabilities) },
     { id: "android-device", files: ["level2-android-device-e2e.ts"], tools: ["attach", "status", "click", "screenshot", "detach"] },
     { id: "ios-simulator", files: ["level2-ios-e2e.ts"], tools: ["create", "start", "click", "screenshot", "delete"] },
     { id: "ios-device", files: ["level2-ios-e2e.ts"], tools: ["attach", "status", "click", "screenshot", "detach"] },
-    { id: "windows-sandbox", files: ["level2-windows-sandbox.ts"], tools: windowsBackend().capabilities.map(publicToolName) },
-    { id: "windows-vm", files: ["hyper-v-windows-vm-e2e.ts"], tools: windowsVmBackend().capabilities.map(publicToolName) },
-    { id: "linux-vm-hyper-v", backend: "linux-vm", files: ["hyper-v-linux-vm-e2e.ts"], tools: windowsVmBackend().capabilities.map(publicToolName) },
-    { id: "macos-vm", files: ["level3-real-destructive.ts"], tools: ["base_image_create", "base_image_clone", "snapshot_create", "snapshot_restore", "snapshot_delete"] },
+    { id: "windows-sandbox", files: ["level2-windows-sandbox.ts"], tools: providerRequirements(windowsBackend().capabilities) },
+    { id: "windows-vm", files: ["hyper-v-windows-vm-e2e.ts"], tools: providerRequirements(windowsVmBackend().capabilities) },
+    { id: "linux-vm-hyper-v", backend: "linux-vm", files: ["hyper-v-linux-vm-e2e.ts"], tools: providerRequirements(windowsVmBackend().capabilities) },
+    { id: "macos-vm", files: ["level3-real-destructive.ts"], tools: ["base_image_create", "base_image_clone", "snapshot:action=create", "snapshot:action=restore", "snapshot:action=delete"] },
     { id: "android-wireless", backend: "android-device", filesBySource: { source: ["level1-real-provider-readiness.ts"], dist: ["level1-dist-real-provider-readiness.ts"] }, tools: ["wireless"] },
     { id: "ios-wireless", backend: "ios-device", filesBySource: { source: ["level1-real-provider-readiness.ts"], dist: ["level1-dist-real-provider-readiness.ts"] }, tools: ["wireless"] },
 ];
@@ -98,7 +106,7 @@ export function assertResultMatrix(shards, options: any = {}) {
         for (const source of requiredProviderSources) {
             const calls = matchingProviderCalls(shards, spec, source);
             const calledTools = new Set(calls.map((call) => call.tool));
-            const missingTools = spec.tools.filter((tool) => !calledTools.has(tool));
+            const missingTools = spec.tools.filter((tool) => tool.includes(":action=") ? !calls.some((call) => call.tool === tool.split(":")[0] && call.facets.includes(tool)) : !calledTools.has(tool));
             providerEvidence[spec.id][source] = {
                 files: filesForSource(spec, source),
                 calledTools: [...calledTools].sort(),

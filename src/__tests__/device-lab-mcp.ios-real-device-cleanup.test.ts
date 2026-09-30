@@ -145,7 +145,7 @@ describe("iOS physical runtime cleanup fencing", () => {
         const attached = await attach(context, "ios-partial-cleanup");
         const statePath = statePathFor(context.homeDir, attached);
         const leasePath = leasePathFor(context.homeDir, attached);
-        const session = await context.client.callTool({ name: "dump_ui", arguments: { deviceId: attached.id } });
+        const session = await context.client.callTool({ name: "ui", arguments: { deviceId: attached.id } });
         expect(session.isError, (session.content as Array<{ text?: string }>)[0]?.text).not.toBe(true);
 
         child = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore", windowsHide: true });
@@ -192,7 +192,7 @@ describe("iOS physical runtime cleanup fencing", () => {
         const attached = await attach(context, "ios-cleanup-successor", "00008111-001C195E0E91801F");
         const statePath = statePathFor(context.homeDir, attached);
         const leasePath = leasePathFor(context.homeDir, attached);
-        const session = await context.client.callTool({ name: "dump_ui", arguments: { deviceId: attached.id } });
+        const session = await context.client.callTool({ name: "ui", arguments: { deviceId: attached.id } });
         expect(session.isError, (session.content as Array<{ text?: string }>)[0]?.text).not.toBe(true);
 
         const currentState = readDevice(statePath, attached.id);

@@ -7,7 +7,7 @@ import { parse } from "acorn";
 import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import { describe, expect, it } from "vitest";
 import { DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES, evaluateDestructivePolicy } from "../../device-lab-mcp/src/policy/destructive.mjs";
-import { DEVICE_FLOW_TOOL_NAMES, TOOLS, publicToolName } from "../../device-lab-mcp/src/tools.mjs";
+import { DEVICE_FLOW_TOOL_NAMES, TOOLS, publicToolName, toolOperation, GROUP_OPERATIONS } from "../../device-lab-mcp/src/tools.mjs";
 import { LINUX_VM_CAPABILITIES } from "../../device-lab-mcp/src/backends/linux-vm.mjs";
 import { androidDeviceE2EPrerequisites, prepareAndroidDeviceApp } from "../../scripts/real-tests/android-device-e2e.ts";
 import { androidEmulatorAppSelection, androidEmulatorCreateRequest, deviceFromPayload } from "../../scripts/real-tests/android-emulator-e2e.ts";
@@ -275,8 +275,6 @@ const ALWAYS_DESTRUCTIVE_REAL_E2E_TOOLS = new Set([
     "device_broker_shutdown",
     "delete",
     "reset",
-    "snapshot_restore",
-    "snapshot_delete",
     "uninstall_app",
     "clear_app_data",
     "set_battery",
@@ -285,9 +283,9 @@ const ALWAYS_DESTRUCTIVE_REAL_E2E_TOOLS = new Set([
 ]);
 
 function realTestDestructiveCallsMissingConfirmation() {
-    return realTestCallToolArgumentKeys()
-        .filter((call) => ALWAYS_DESTRUCTIVE_REAL_E2E_TOOLS.has(call.tool))
-        .filter((call) => !call.keys.includes("confirmDestructive"))
+    return realTestCallToolLiteralValues()
+        .filter((call) => evaluateDestructivePolicy(toolOperation(call.tool, call.values) || call.tool, call.values).destructive)
+        .filter((call) => call.values.confirmDestructive !== true)
         .map((call) => ({ file: call.file, tool: call.tool }));
 }
 
@@ -305,6 +303,7 @@ function alwaysDestructivePolicyTools() {
     return [...new Set(DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES
         .filter(({ name }) => evaluateDestructivePolicy(name, {}).destructive === true)
         .map(({ name }) => name === "device_broker_shutdown" ? name : publicToolName(name)))]
+        .filter((name) => !GROUP_OPERATIONS[name] || Object.values(GROUP_OPERATIONS[name]).every((operation) => evaluateDestructivePolicy(operation, {}).destructive))
         .sort();
 }
 
@@ -1318,7 +1317,7 @@ describe("test level runner", () => {
         const sets = new Map(deviceLabServerLiteralSets().map(({ name, values }) => [name, values]));
         const directlyHandled = [
             "backends",
-            "broker_status",
+            "backends",
             "list_devices",
             "run_flow",
             "status",
@@ -1424,14 +1423,12 @@ describe("test level runner", () => {
                 "exec",
                 "back",
                 "forward",
-                "get_clipboard",
-                "grant_permission",
+                "clipboard",
+                "permission",
                 "open_url",
                 "power",
                 "recents",
-                "revoke_permission",
                 "set_battery",
-                "set_clipboard",
                 "set_location",
                 "set_network",
                 "toggle_airplane_mode",
@@ -1513,7 +1510,7 @@ describe("test level runner", () => {
         const backendProxyTools = new Set(sets.get("BROKER_BACKEND_MOBILE_TOOLS") || []);
         const appiumRequestTools = new Set(brokerMobileRequestToolKeys());
         const specialCases = new Set([
-            "automation_status",
+            "status",
             "wait_for_text",
         ]);
         const missing = [...actions]
@@ -1595,8 +1592,8 @@ describe("test level runner", () => {
         expect(text).toContain('}, providerMcpSessionOptions(options, "ccc-real-android-emulator-e2e"));');
         expect(text).not.toContain('new Promise((resolvePromise) => {\n        const server = createServer();\n        server.once("error", () => resolvePromise(false));\n        server.listen(port, "127.0.0.1", () => {\n            server.close(() => resolvePromise(true));\n        });\n    }, providerMcpSessionOptions');
         for (const tool of [
-            "automation_status",
-            "dump_ui",
+            "status",
+            "ui",
             "home",
             "click",
             "double_click",
@@ -1616,16 +1613,16 @@ describe("test level runner", () => {
             "open_url",
             "set_location",
             "set_battery",
-            "grant_permission",
-            "revoke_permission",
+            "permission",
+            "permission",
             "wait_for_app",
-            "record_video_start",
-            "record_video_status",
-            "record_video_stop",
+            "record_video",
+            "record_video",
+            "record_video",
             "run_flow",
             "screenshot",
-            "set_clipboard",
-            "get_clipboard",
+            "clipboard",
+            "clipboard",
             "upload",
             "download",
             "status",
@@ -1685,8 +1682,8 @@ describe("test level runner", () => {
             "status",
             "start",
             "exec",
-            "automation_status",
-            "dump_ui",
+            "status",
+            "ui",
             "wait_for_text",
             "click",
             "double_click",
@@ -1706,13 +1703,13 @@ describe("test level runner", () => {
             "set_orientation",
             "set_orientation",
             "open_url",
-            "set_clipboard",
-            "get_clipboard",
+            "clipboard",
+            "clipboard",
             "screenshot",
             "screenshot",
-            "record_video_start",
-            "record_video_status",
-            "record_video_stop",
+            "record_video",
+            "record_video",
+            "record_video",
             "upload",
             "download",
             "install_app",
@@ -1720,8 +1717,8 @@ describe("test level runner", () => {
             "install_app",
             "launch_app",
             "wait_for_app",
-            "grant_permission",
-            "revoke_permission",
+            "permission",
+            "permission",
             "stop_app",
             "reset",
             "clear_app_data",
@@ -1871,8 +1868,8 @@ describe("test level runner", () => {
     it("covers safe iOS Simulator mobile controls in the real simulator E2E through MCP calls", () => {
         const text = readFileSync(join(repoRoot, "scripts", "real-tests", "ios-e2e.ts"), "utf-8");
         for (const tool of [
-            "automation_status",
-            "dump_ui",
+            "status",
+            "ui",
             "click",
             "double_click",
             "long_press",
@@ -1888,14 +1885,14 @@ describe("test level runner", () => {
             "open_url",
             "stop_app",
             "set_location",
-            "grant_permission",
-            "revoke_permission",
-            "set_clipboard",
-            "get_clipboard",
+            "permission",
+            "permission",
+            "clipboard",
+            "clipboard",
             "wait_for_app",
-            "record_video_start",
-            "record_video_status",
-            "record_video_stop",
+            "record_video",
+            "record_video",
+            "record_video",
             "status",
         ]) {
             expect(text).toContain(`callTool("${tool}"`);
@@ -1910,8 +1907,8 @@ describe("test level runner", () => {
         expect(text).toContain("CCC_REAL_DEVICE_LAB_FAIL_ON_SKIP");
         expect(text).toContain("missing iOS real-device Appium/XCUITest prerequisites");
         for (const tool of [
-            "automation_status",
-            "dump_ui",
+            "status",
+            "ui",
             "screenshot",
             "click",
             "double_click",
@@ -1940,13 +1937,10 @@ describe("test level runner", () => {
 
     it("covers macOS VM snapshot restore in the destructive real E2E path", () => {
         const text = readFileSync(join(repoRoot, "scripts", "real-tests", "macos-vm-e2e.ts"), "utf-8");
-        for (const tool of [
-            "snapshot_create",
-            "snapshot_restore",
-            "snapshot_delete",
-        ]) {
-            expect(text).toContain(`callTool("${tool}"`);
-        }
+        const snapshotActions = realTestCallToolLiteralValues()
+            .filter(call => call.file === "macos-vm-e2e.ts" && call.tool === "snapshot")
+            .map(call => call.values.action);
+        expect(snapshotActions).toEqual(expect.arrayContaining(["create", "restore", "delete"]));
         expect(text).toContain("typedOptions.snapshot === true");
     });
 
@@ -2013,8 +2007,8 @@ describe("test level runner", () => {
                 "scroll",
                 "window_list",
                 "cursor_position",
-                "accessibility_snapshot",
-                "record_video_status",
+                "ui",
+                "record_video",
             ]) {
                 expect(text).toContain(`callTool("${tool}"`);
             }
@@ -2050,7 +2044,7 @@ describe("test level runner", () => {
         const text = readFileSync(join(repoRoot, "scripts", "real-tests", "level2-broker-e2e.ts"), "utf-8");
         const distText = readFileSync(join(repoRoot, "scripts", "real-tests", "level2-dist-broker-e2e.ts"), "utf-8");
         const helperText = readFileSync(join(repoRoot, "scripts", "real-tests", "helpers.ts"), "utf-8");
-        expect(text).toContain("broker_status");
+        expect(text).toContain("backends");
         expect(text).toContain('callInternal("brokerRpc"');
         expect(text).not.toContain('callTool("device_broker_rpc"');
         expect(text).toContain("broker.echo");
@@ -3817,8 +3811,7 @@ describe("canonical real-runner argument interpretation", () => {
             const targets: Array<[string, string, Record<string, unknown>]> = [
                 ["image_list", "linux-vm", {}],
                 ["image_import", "linux-vm", { name: "base", sourcePath: "incoming/base.qcow2" }],
-                ["target_list", "linux-vm", {}],
-                ...["readiness_probe", "session_open", "workspace_sync", "artifacts_export", "guest_agent_status", "guest_agent_provision"]
+                ...["workspace_sync", "artifacts_export"]
                     .map(name => [name, "linux-vm", { deviceId: "owned-target" }] as [string, string, Record<string, unknown>]),
                 ["base_image_create", "macos-vm", { name: "base", sourceImage: "registry/base" }],
                 ["base_image_clone", "macos-vm", { name: "clone", sourceDeviceId: "owned-target" }],

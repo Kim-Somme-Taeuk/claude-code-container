@@ -1,5 +1,27 @@
 # Minimal Device Lab output
 
+## Reduced public workflow
+
+Use focused management groups: snapshot (list/create/restore/delete), record_video
+(start/stop/status), permission (grant/revoke), clipboard (read without text,
+write with text, including empty text), and ui (device-selected UI hierarchy).
+Resolve the exact operation before policy, routing and output handling. Flow
+permissions remain per operation; grouping must not broaden them. Removed tool
+names are rejected, not retained as hidden aliases.
+
+Status incorporates automation and QEMU readiness information; backends includes
+broker diagnostics. Status must not start Appium or provision a guest. Running
+QEMU readiness refreshes use the existing owner operation lock; stopped devices
+are reported without probing their guests.
+
+QEMU start prepares its disk automatically without replacing an existing disk.
+For new configurations, a supplied guest-agent provisioning command enables
+automatic preparation unless explicitly disabled. Stored opt-outs remain valid.
+Dry runs perform no preparation. Failed provisioning reports failure while
+retaining the running VM identity; repeated start retries preparation without
+spawning a second VM, and skips preparation that already succeeded.
+Metadata-only session opening is not a public prerequisite for commands or files.
+
 ## Action-first public interface
 
 Public names have no device/mobile/display prefix. Common actions are

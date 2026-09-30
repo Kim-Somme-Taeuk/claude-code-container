@@ -28,7 +28,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
 
     it("reports missing explicit Android physical mobile targets instead of unknown tools", { timeout: TIMEOUT }, async () => {
         const result = await client.callTool({
-            name: "automation_status",
+            name: "status",
             arguments: { deviceId: "missing-android-real-device" },
         });
         const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -322,7 +322,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
             ["exec", { deviceId: "android-device-real-pixel", command: "echo ok" }, { stdout: "ok\n", stderr: "", status: 0 }],
             ["click", { deviceId: "android-device-real-pixel", x: 10, y: 20 }, { provider: "adb", tapped: { x: 10, y: 20 } }],
             ["back", { deviceId: "android-device-real-pixel" }, { provider: "adb", key: 4 }],
-            ["dump_ui", { deviceId: "android-device-real-pixel" }, { provider: "adb-uiautomator", source: expect.stringContaining("<hierarchy>"), remotePath: "/sdcard/window-android-device-real-pixel.xml" }],
+            ["ui", { deviceId: "android-device-real-pixel" }, { provider: "adb-uiautomator", source: expect.stringContaining("<hierarchy>"), remotePath: "/sdcard/window-android-device-real-pixel.xml" }],
             ["wait_for_text", { deviceId: "android-device-real-pixel", text: "Hello", timeoutMs: 100, intervalMs: 50 }, { provider: "adb-uiautomator", text: "Hello", found: true }],
             ["install_app", { deviceId: "android-device-real-pixel", path: "/tmp/Real.apk" }, { provider: "adb", installed: "/tmp/Real.apk" }],
             ["launch_app", { deviceId: "android-device-real-pixel", packageName: "com.example.real" }, { provider: "adb", launched: "com.example.real" }],
@@ -374,8 +374,8 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         const realRecordingPath = join(homeDir, "real-recording.mp4");
         writeFileSync(realRecordingPath, "original");
         const realRecordStart = await client.callTool({
-            name: "record_video_start",
-            arguments: {
+            name: "record_video",
+            arguments: { action: "start",
                 deviceId: "android-device-real-pixel",
                 remotePath: "/sdcard/fail-once-pull-real-recording.mp4",
                 localPath: realRecordingPath,
@@ -384,23 +384,23 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         });
         expect(realRecordStart.isError).not.toBe(true);
         const failedRealRecordStop = await client.callTool({
-            name: "record_video_stop",
-            arguments: { deviceId: "android-device-real-pixel" },
+            name: "record_video",
+            arguments: { action: "stop", deviceId: "android-device-real-pixel" },
         });
         expect(failedRealRecordStop.isError).toBe(true);
         expect((failedRealRecordStop.content as Array<{ text?: string }>)[0].text).toContain("remains pending finalization");
         expect(readFileSync(realRecordingPath, "utf8")).toBe("original");
         const pendingRealRecording = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "android-device-real-pixel" },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "android-device-real-pixel" },
         });
         expect(parseToolJson(pendingRealRecording).recording).toEqual(expect.objectContaining({
             active: false,
             remotePath: "/sdcard/fail-once-pull-real-recording.mp4",
         }));
         const retriedRealRecordStop = await client.callTool({
-            name: "record_video_stop",
-            arguments: { deviceId: "android-device-real-pixel" },
+            name: "record_video",
+            arguments: { action: "stop", deviceId: "android-device-real-pixel" },
         });
         expect(retriedRealRecordStop.isError).not.toBe(true);
         expect(readFileSync(realRecordingPath, "utf8")).toBe("downloaded");
@@ -655,8 +655,8 @@ exec "${originalAdbPath}" "$@"
         let stubbornPid: number | undefined;
         try {
             const started = await client.callTool({
-                name: "record_video_start",
-                arguments: { deviceId, remotePath: "/sdcard/cleanup-failure.mp4" },
+                name: "record_video",
+                arguments: { action: "start", deviceId, remotePath: "/sdcard/cleanup-failure.mp4" },
             });
             expect(started.isError).not.toBe(true);
 
@@ -687,13 +687,13 @@ exec "${originalAdbPath}" "$@"
             writeFileSync(statePath, JSON.stringify({
                 devices: stateBeforeRetry.devices.map((device) => device.id === deviceId ? { ...device, recording: originalRecording } : device),
             }, null, 2));
-            const finalized = await client.callTool({ name: "record_video_stop", arguments: { deviceId } });
+            const finalized = await client.callTool({ name: "record_video", arguments: { action: "stop", deviceId } });
             expect(finalized.isError).not.toBe(true);
 
             writeFileSync(ignoreSignalMarker, "1");
             const stubbornStart = await client.callTool({
-                name: "record_video_start",
-                arguments: { deviceId, remotePath: "/sdcard/stubborn-cleanup.mp4" },
+                name: "record_video",
+                arguments: { action: "start", deviceId, remotePath: "/sdcard/stubborn-cleanup.mp4" },
             });
             expect(stubbornStart.isError).not.toBe(true);
             stubbornPid = Number((parseToolJson(stubbornStart).recording as Record<string, unknown>).pid);

@@ -44,23 +44,14 @@ export async function run() {
                 name: "Missing Linux VM smoke image",
                 sourcePath: "images/__missing-linux-vm-smoke__.qcow2",
             }));
-            markExpectedToolError(await callTool("disk_materialize", { detail: true,
-                deviceId: labId,
-                dryRun: true,
-            }));
-            await callTool("target_list", { detail: true, deviceId: labId });
-            markExpectedToolError(await callTool("readiness_probe", { detail: true, deviceId: labId }));
-            await callTool("session_open", { detail: true,
-                deviceId: labId,
-                sessionType: "metadata",
-            });
+            const stopped = parseToolPayload(await callTool("status", { detail: true, deviceId: labId }));
+            assert.strictEqual(stopped.ok, true, JSON.stringify(stopped));
+            assert.strictEqual(stopped.readiness?.state, "stopped");
             markExpectedToolError(await callTool("workspace_sync", { detail: true,
                 deviceId: labId,
                 sourcePath: stateRoot,
             }));
             markExpectedToolError(await callTool("artifacts_export", { detail: true, deviceId: labId }));
-            markExpectedToolError(await callTool("guest_agent_status", { detail: true, deviceId: labId }));
-            markExpectedToolError(await callTool("guest_agent_provision", { detail: true, deviceId: labId }));
             markExpectedToolError(await callTool("reboot", { detail: true, deviceId: labId }));
 
             const started = parseToolPayload(await callTool("start", { detail: true, deviceId: labId }));

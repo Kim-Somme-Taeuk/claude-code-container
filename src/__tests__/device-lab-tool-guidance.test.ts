@@ -18,10 +18,10 @@ describe("public Device Lab tool guidance", () => {
     afterAll(async () => { await cleanupDeviceLabMcpTestContext(context); });
 
     it("advertises unique unprefixed names within the catalog byte budget", () => {
-        expect(tools).toHaveLength(76);
+        expect(tools).toHaveLength(60);
         expect(new Set(tools.map(tool => tool.name)).size).toBe(tools.length);
         expect(tools.every(tool => !/^(device_|mobile_|display_)/.test(tool.name))).toBe(true);
-        expect(Buffer.byteLength(JSON.stringify(tools), "utf8")).toBeLessThan(57211);
+        expect(Buffer.byteLength(JSON.stringify(tools), "utf8")).toBeLessThan(45579);
     });
 
     it("distinguishes owned targets, backend prerequisites, and single-backend inventory", () => {
@@ -53,7 +53,7 @@ describe("public Device Lab tool guidance", () => {
             expect(guidance(name, "packageName")).toContain("android");
             expect(guidance(name, "bundleId")).toContain("ios");
         }
-        for (const name of ["grant_permission", "revoke_permission"]) {
+        for (const name of ["permission"]) {
             expect(guidance(name, "permission")).toContain("android");
             expect(guidance(name, "service")).toMatch(/ios.*simulator/);
         }
@@ -72,16 +72,16 @@ describe("public Device Lab tool guidance", () => {
         expect(guidance("set_battery", "status")).toMatch(/1.*unknown.*2.*charging.*3.*discharging.*4.*not charging.*5.*full/);
     });
 
-    it.each(["image_list", "image_import", "target_list", "readiness_probe", "session_open", "workspace_sync", "artifacts_export", "guest_agent_status", "guest_agent_provision"])("%s identifies its container QEMU scope", name => {
+    it.each(["image_list", "image_import", "workspace_sync", "artifacts_export"])("%s identifies its container QEMU scope", name => {
         expect(description(name)).toMatch(/container.*qemu/);
     });
 
     it("distinguishes recorded target state, active readiness, and optional Appium diagnostics", () => {
-        expect(description("target_list")).toMatch(/recorded|stored/);
-        expect(description("readiness_probe")).toMatch(/probe|check/);
-        expect(description("readiness_probe")).toMatch(/running|live|active/);
-        expect(description("automation_status")).toMatch(/appium/);
-        expect(description("automation_status")).toMatch(/optional|not required|not needed|do not require/);
+        expect(description("status")).toMatch(/state/);
+        expect(description("status")).toMatch(/probe|check/);
+        expect(description("status")).toMatch(/running|live|active/);
+        expect(description("status")).toMatch(/appium/);
+        expect(description("status")).toMatch(/optional|not required|not needed|do not require/);
     });
 
     it.each(["start", "reboot"])("%s explains waitForBoot polarity without claiming a universal default", (name) => {

@@ -76,7 +76,7 @@ describe("device-lab MCP backend definitions", () => {
         expect(inspected.backend.missing).toEqual(["adb", "emulator"]);
 
         const mobileStatus = await client.callTool({
-            name: "automation_status",
+            name: "status",
             arguments: { deviceId: "android-pixel-test" },
         });
         expect(mobileStatus.isError).not.toBe(true);
@@ -85,8 +85,8 @@ describe("device-lab MCP backend definitions", () => {
             session: unknown;
             lazy: boolean;
         };
-        expect(mobile.lazy).toBe(true);
-        expect(mobile.session).toBeNull();
+        expect(mobile.automation.lazy).toBe(true);
+        expect(mobile.automation.session).toBeNull();
         expect(mobile.appium.available).toBe(false);
         expect(mobile.appium.missing).toContain("adb");
 
@@ -98,8 +98,8 @@ describe("device-lab MCP backend definitions", () => {
         expect((tap.content as Array<{ text?: string }>)[0].text).toContain("Android backend missing prerequisites: adb");
 
         const recordStatus = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "android-pixel-test" },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "android-pixel-test" },
         });
         expect(recordStatus.isError).not.toBe(true);
         expect(JSON.parse(((recordStatus.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -108,8 +108,8 @@ describe("device-lab MCP backend definitions", () => {
         }));
 
         const recordStart = await client.callTool({
-            name: "record_video_start",
-            arguments: { deviceId: "android-pixel-test" },
+            name: "record_video",
+            arguments: { action: "start", deviceId: "android-pixel-test" },
         });
         expect(recordStart.isError).toBe(true);
         expect((recordStart.content as Array<{ text?: string }>)[0].text).toContain("Android backend missing prerequisites: adb");
@@ -201,8 +201,8 @@ describe("device-lab MCP backend definitions", () => {
         expect((screenshot.content as Array<{ text?: string }>)[0].text).toContain("iOS Simulator backend missing prerequisites");
 
         const recordStatus = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "ios-iphone-test" },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "ios-iphone-test" },
         });
         expect(recordStatus.isError).not.toBe(true);
         expect(JSON.parse(((recordStatus.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -211,18 +211,18 @@ describe("device-lab MCP backend definitions", () => {
         }));
 
         const recordStart = await client.callTool({
-            name: "record_video_start",
-            arguments: { deviceId: "ios-iphone-test" },
+            name: "record_video",
+            arguments: { action: "start", deviceId: "ios-iphone-test" },
         });
         expect(recordStart.isError).toBe(true);
         expect((recordStart.content as Array<{ text?: string }>)[0].text).toContain("iOS Simulator backend missing prerequisites");
 
         const session = await client.callTool({
-            name: "automation_status",
+            name: "status",
             arguments: { deviceId: "ios-iphone-test" },
         });
         expect(session.isError).not.toBe(true);
-        const sessionPayload = JSON.parse(((session.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
+        const sessionPayload = JSON.parse(((session.content as Array<{ text?: string }>)[0].text ?? "{}")).automation as {
             deviceId: string;
             appium: { available: boolean; missing: string[] };
             session: unknown;
@@ -237,7 +237,7 @@ describe("device-lab MCP backend definitions", () => {
         expect(sessionPayload.appium.missing).toEqual(expect.arrayContaining(["xcrun", "appium", "appium-xcuitest-driver", "xcodebuild"]));
 
         const dumpUi = await client.callTool({
-            name: "dump_ui",
+            name: "ui",
             arguments: { deviceId: "ios-iphone-test" },
         });
         expect(dumpUi.isError).toBe(true);
@@ -347,8 +347,8 @@ describe("device-lab MCP backend definitions", () => {
         expect((exec.content as Array<{ text?: string }>)[0].text).toContain("Windows Sandbox helper requires a running sandbox with a valid GUID sandboxId");
 
         const recordStatus = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "windows-win-test" },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "windows-win-test" },
         });
         expect(recordStatus.isError).not.toBe(true);
         expect(JSON.parse(((recordStatus.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toBeNull();
@@ -467,8 +467,8 @@ describe("device-lab MCP backend definitions", () => {
         expect((exec.content as Array<{ text?: string }>)[0].text).toContain("requires SSH bridge metadata");
 
         const recordStatus = await client.callTool({
-            name: "record_video_status",
-            arguments: { deviceId: "macos-mac-test" },
+            name: "record_video",
+            arguments: { action: "status", deviceId: "macos-mac-test" },
         });
         expect(recordStatus.isError).not.toBe(true);
         expect(JSON.parse(((recordStatus.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toBeNull();

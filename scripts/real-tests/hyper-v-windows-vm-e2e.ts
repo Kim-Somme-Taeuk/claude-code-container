@@ -552,20 +552,20 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
             }
 
             currentStep = "create production checkpoint";
-            const snapshot = resultValue(payload(await callTool("snapshot_create", { detail: true, ...direct, snapshotName: "durability" })));
+            const snapshot = resultValue(payload(await callTool("snapshot", { action: "create", detail: true, ...direct, snapshotName: "durability" })));
             const snapshotId = snapshot.snapshot?.id;
             assert.ok(snapshotId);
 
             currentStep = "list production checkpoints";
-            const snapshotList = resultValue(payload(await callTool("snapshot_list", { detail: true, ...direct })));
+            const snapshotList = resultValue(payload(await callTool("snapshot", { action: "list", detail: true, ...direct })));
             assert.ok(Array.isArray(snapshotList.snapshots));
             assert.ok(snapshotList.snapshots.some((candidate: any) => candidate?.id === snapshotId && candidate?.name === "durability"));
 
             currentStep = "restore production checkpoint";
-            resultValue(payload(await callTool("snapshot_restore", { detail: true, ...direct, snapshotId, force: true, confirmDestructive: true })));
+            resultValue(payload(await callTool("snapshot", { action: "restore", detail: true, ...direct, snapshotId, force: true, confirmDestructive: true })));
 
             currentStep = "delete production checkpoint";
-            resultValue(payload(await callTool("snapshot_delete", { detail: true, ...direct, snapshotId, confirmDestructive: true })));
+            resultValue(payload(await callTool("snapshot", { action: "delete", detail: true, ...direct, snapshotId, confirmDestructive: true })));
 
             currentStep = "stop VM";
             lifecycleDevice(payload(await callTool("stop", { detail: true, ...direct, force: true })), "stop");

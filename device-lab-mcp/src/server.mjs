@@ -17,7 +17,7 @@ import { flowJsonResult, jsonResult, textResult } from "./responses.mjs";
 import { compactToolValue } from "./public-output.mjs";
 import { OWNER_DEVICE_ID_PATTERN } from "./state/owner-device-state.mjs";
 import { readOwnerDevices } from "./state/device-store.mjs";
-import { DEVICE_FLOW_TOOL_NAMES, TOOLS, toolOperation } from "./tools.mjs";
+import { DEVICE_FLOW_TOOL_NAMES, TOOLS, toolOperation, flowOperationAllowed } from "./tools.mjs";
 import { TOOLS as OPERATION_TOOLS } from "./operation-tools.mjs";
 import { actionResult } from "./action-output.mjs";
 import { flowStepArguments, normalizeToolArgs, toolInputError } from "./tool-arguments.mjs";
@@ -112,7 +112,7 @@ const DIRECT_DEVICE_BACKEND_HINT_TOOLS = new Set([
 const CURRENT_DISPLAY_DEVICE_ID = "x11-current-display";
 const MOBILE_COMMON_OPERATIONS = new Map([
     ["device_click", "mobile_tap"], ["device_double_click", "mobile_double_tap"],
-    ["device_type", "mobile_type_text"], ["device_key", "mobile_key"],
+    ["device_accessibility_snapshot", "mobile_dump_ui"], ["device_type", "mobile_type_text"], ["device_key", "mobile_key"],
 ]);
 function commonOperation(name, backend, args) {
     if (!["android-emulator", "android-device", "ios-simulator", "ios-device"].includes(backend)) {
@@ -360,11 +360,11 @@ function lifecycleBackendDevices() {
     return [
         ["android-emulator", listAndroidDevices()],
         ["android-device", listAndroidRealDevices()],
-        ["ios-simulator", listIosDevices()],
+        ["ios-simulator", listIosDevices({ identityOnly: true })],
         ["ios-device", listIosRealDevices()],
         ["windows-sandbox", listWindowsDevices()],
         ["windows-vm", listWindowsVmDevices()],
-        ["macos-vm", listMacosDevices()],
+        ["macos-vm", listMacosDevices({ identityOnly: true })],
         ["linux-vm", listLinuxVmDevices()],
     ];
 }
@@ -491,7 +491,7 @@ function mobileBackendDevices() {
     return [
         ["android-emulator", listAndroidDevices()],
         ["android-device", listAndroidRealDevices()],
-        ["ios-simulator", listIosDevices()],
+        ["ios-simulator", listIosDevices({ identityOnly: true })],
         ["ios-device", listIosRealDevices()],
     ];
 }
@@ -1501,7 +1501,7 @@ async function dispatchTool(name, rawArgs) {
     const policy = evaluateDestructivePolicy(name, args);
     if (!policy.ok) return policyDeniedResult(policy);
 
-    const directTarget = optsOutOfImplicitBroker(args) && args.deviceId
+    const directTarget = optsOutOfImplicitBroker(args) && args.deviceId && args.deviceId !== CURRENT_DISPLAY_DEVICE_ID
         && name !== "device_create" && name !== "device_attach"
         ? inferLifecycleBackend(args.deviceId) : null;
     if (directTarget?.error === "ambiguous-device-backend") return jsonResult(directTarget);
@@ -1611,7 +1611,7 @@ async function handleRunFlow(args, { toolName, toolAllowed, detail }) {
             if (stopOnError) return finish({ ok: false, stoppedAt: index, results });
             continue;
         }
-        const inputError = toolInputError(tool, step.arguments);
+        const inputError = toolInputError(tool, step.arguments) || (!flowOperationAllowed(tool, step.arguments) ? `${toolName} does not allow step action: ${tool}` : null);
         if (inputError) {
             results.push({ index, label, tool, isError: true, error: inputError });
             if (stopOnError) return finish({ ok: false, stoppedAt: index, results });
@@ -1620,11 +1620,11 @@ async function handleRunFlow(args, { toolName, toolAllowed, detail }) {
         // A preceding step may have changed the broker or device state.
         let result;
         try {
-            result = await withBrokerOperation(() => dispatchTool(toolOperation(tool), flowStepArguments(tool, args, step.arguments)));
+            result = await withBrokerOperation(() => dispatchTool(toolOperation(tool, step.arguments), flowStepArguments(tool, args, step.arguments)));
         } catch (err) {
             result = textResult(false, `Unexpected error: ${err.message}`);
         }
-        const operation = toolOperation(tool);
+        const operation = toolOperation(tool, step.arguments);
         const classified = summarizeToolResult(operation, result, []);
         const presented = actionResult(tool, operation, result, { detail });
         const summary = { index, label, tool, ...summarizeToolResult(operation, presented, nativeContent),
@@ -1652,7 +1652,7 @@ export async function startServer() {
         const { name: publicName, arguments: rawArgs = {} } = request.params;
         const inputError = toolInputError(publicName, rawArgs);
         if (inputError) return jsonResult({ ok: false, error: inputError });
-        const name = toolOperation(publicName);
+        const name = toolOperation(publicName, rawArgs);
         const args = normalizeToolArgs(rawArgs, name);
         const result = await withBrokerOperation(async () => {
             try {

@@ -1,4 +1,4 @@
-import { TOOLS, SINGLE_BACKEND_TOOL_DEFAULTS } from "./tools.mjs";
+import { TOOLS, SINGLE_BACKEND_TOOL_DEFAULTS, GROUP_OPERATIONS, toolOperation } from "./tools.mjs";
 import { SINGLE_BACKEND_TOOL_DEFAULTS as OPERATION_DEFAULTS } from "./operation-tools.mjs";
 
 const DEVICE_TARGET_PROPERTIES = new Map(TOOLS
@@ -15,6 +15,13 @@ export function toolInputError(name, args = {}) {
     if ((DEVICE_TARGET_PROPERTIES.has(name) || name === "run_flow") && Object.hasOwn(args, "backend")) {
         return "deviceId determines the backend; omit backend";
     }
+    if (Object.hasOwn(GROUP_OPERATIONS, name) && !toolOperation(name, args)) return `${name} requires action: ${Object.keys(GROUP_OPERATIONS[name]).join(", ")}`;
+    if (name === "snapshot") {
+        if (args.action === "create" && !(typeof args.snapshotName === "string" && args.snapshotName.trim())) return "snapshot create requires snapshotName";
+        if (["restore", "delete"].includes(args.action) && ![args.snapshotName, args.snapshotId].some((value) => typeof value === "string" && value.trim())) return `snapshot ${args.action} requires snapshotName or snapshotId`;
+    }
+    if (name === "permission" && ![[args.packageName, args.permission], [args.bundleId, args.service]].some((pair) => pair.every((value) => typeof value === "string" && value.trim()))) return "permission requires packageName and permission, or bundleId and service";
+    if (name === "clipboard" && Object.hasOwn(args, "text") && typeof args.text !== "string") return "clipboard text must be a string";
     if (name === "key" && !(typeof args.key === "string" && args.key.length > 0)
         && !(Number.isInteger(args.keyCode) && args.keyCode >= 0)) return "key requires key or keyCode";
     if (name === "move" && (!Number.isInteger(args.x) || args.x < 0 || !Number.isInteger(args.y) || args.y < 0)) return "move requires nonnegative integer x and y";
@@ -28,6 +35,7 @@ export function toolInputError(name, args = {}) {
 export function normalizeToolArgs(args = {}, toolName) {
     if (!args || typeof args !== "object" || Array.isArray(args)) args = {};
     const { detail: _detail, ...normalized } = args;
+    if (Object.values(GROUP_OPERATIONS).some((group) => Object.values(group).includes(toolName))) delete normalized.action;
     if (normalized.backend === undefined && Object.hasOwn(OPERATION_DEFAULTS, toolName)) {
         normalized.backend = OPERATION_DEFAULTS[toolName];
     }
@@ -37,7 +45,7 @@ export function normalizeToolArgs(args = {}, toolName) {
 // The runtime and real-provider verifier must interpret shared targets identically.
 export function flowStepArguments(tool, rawFlowArgs, rawStepArgs) {
     const args = normalizeToolArgs(rawFlowArgs);
-    const stepArgs = normalizeToolArgs(rawStepArgs);
+    const stepArgs = { ...normalizeToolArgs(rawStepArgs), ...(Object.hasOwn(rawStepArgs || {}, "action") ? { action: rawStepArgs.action } : {}) };
     const sharedTarget = {};
     const changedTarget = ["deviceId"].some((key) =>
         Object.hasOwn(args, key) && Object.hasOwn(stepArgs, key) && args[key] !== stepArgs[key]);

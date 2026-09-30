@@ -43,24 +43,17 @@ describe("device-lab Linux VM foundation", () => {
             "image_list",
             "image_import",
             "create",
-            "disk_materialize",
             "start",
             "reboot",
             "stop",
             "delete",
-            "target_list",
-            "readiness_probe",
-            "session_open",
-            "snapshot_create",
-            "snapshot_restore",
-            "snapshot_delete",
+            "snapshot",
+            "status",
             "workspace_sync",
             "artifacts_export",
             "upload",
             "download",
             "exec",
-            "guest_agent_status",
-            "guest_agent_provision",
         ]));
         expect(names.some((name) => name.startsWith("lab_"))).toBe(false);
         const createTool = result.tools.find((tool) => tool.name === "create");
@@ -85,26 +78,11 @@ describe("device-lab Linux VM foundation", () => {
                 timeoutMs: expect.objectContaining({ minimum: 1, maximum: 600000 }),
             }),
         }));
-        const openSessionTool = result.tools.find((tool) => tool.name === "session_open");
-        expect(openSessionTool?.inputSchema).toEqual(expect.objectContaining({
-            properties: expect.objectContaining({
-                sessionType: expect.objectContaining({ enum: ["monitor", "metadata", "guest-ssh", "guest-agent"] }),
-            }),
-        }));
-        const guestAgentStatusTool = result.tools.find((tool) => tool.name === "guest_agent_status");
-        expect(guestAgentStatusTool?.inputSchema).toEqual(expect.objectContaining({
-            required: ["deviceId"],
-            properties: expect.objectContaining({
-                timeoutMs: expect.objectContaining({ minimum: 1, maximum: 600000 }),
-            }),
-        }));
-        const guestAgentProvisionTool = result.tools.find((tool) => tool.name === "guest_agent_provision");
-        expect(guestAgentProvisionTool?.inputSchema).toEqual(expect.objectContaining({
-            required: ["deviceId"],
-            properties: expect.objectContaining({
-                timeoutMs: expect.objectContaining({ minimum: 1, maximum: 600000 }),
-            }),
-        }));
+        for (const removed of ["disk_materialize", "target_list", "readiness_probe", "session_open", "guest_agent_status", "guest_agent_provision"]) {
+            expect(names).not.toContain(removed);
+        }
+        const statusTool = result.tools.find((tool) => tool.name === "status");
+        expect(statusTool?.inputSchema.required).toEqual(["deviceId"]);
     });
 
     it("reports unsupported by default and still stores named lab metadata", { timeout: TIMEOUT }, async () => {
@@ -131,14 +109,6 @@ describe("device-lab Linux VM foundation", () => {
             error: "lab-provider-unsupported",
         }));
 
-        const materialize = await client.callTool({ name: "disk_materialize", arguments: { detail: true, deviceId: "mcp-lab" } });
-        expect(materialize.isError).toBe(true);
-        const materializePayload = JSON.parse(((materialize.content as Array<{ text?: string }>)[0].text ?? "{}"));
-        expect(materializePayload).toEqual(expect.objectContaining({
-            ok: false,
-            error: "source-image-not-found",
-        }));
-
         const guestPush = await client.callTool({ name: "upload", arguments: { detail: true, deviceId: "mcp-lab", localPath: stateRoot, remotePath: "/workspace" } });
         expect(guestPush.isError).toBe(true);
         const guestPushPayload = JSON.parse(((guestPush.content as Array<{ text?: string }>)[0].text ?? "{}"));
@@ -147,30 +117,12 @@ describe("device-lab Linux VM foundation", () => {
             error: "lab-not-running",
         }));
 
-        const targets = await client.callTool({ name: "target_list", arguments: { detail: true, } });
-        const targetsPayload = JSON.parse(((targets.content as Array<{ text?: string }>)[0].text ?? "{}"));
-        expect(targetsPayload).toEqual(expect.objectContaining({
+        const observed = await client.callTool({ name: "status", arguments: { detail: true, deviceId: "mcp-lab" } });
+        expect(observed.isError).not.toBe(true);
+        const observedPayload = JSON.parse(((observed.content as Array<{ text?: string }>)[0].text ?? "{}"));
+        expect(observedPayload).toEqual(expect.objectContaining({
             ok: true,
-            targets: [expect.objectContaining({ labId: "mcp-lab", targetKind: "lab-vm", readiness: "stopped" })],
-        }));
-
-        const session = await client.callTool({ name: "session_open", arguments: { detail: true, deviceId: "mcp-lab", sessionId: "metadata-session", sessionType: "metadata" } });
-        const sessionPayload = JSON.parse(((session.content as Array<{ text?: string }>)[0].text ?? "{}"));
-        expect(sessionPayload).toEqual(expect.objectContaining({
-            ok: true,
-            session: expect.objectContaining({
-                id: "metadata-session",
-                state: "unavailable",
-                authority: "device-lab-metadata",
-            }),
-        }));
-
-        const readiness = await client.callTool({ name: "readiness_probe", arguments: { detail: true, deviceId: "mcp-lab" } });
-        expect(readiness.isError).toBe(true);
-        const readinessPayload = JSON.parse(((readiness.content as Array<{ text?: string }>)[0].text ?? "{}"));
-        expect(readinessPayload).toEqual(expect.objectContaining({
-            ok: false,
-            error: "lab-not-running",
+            device: expect.objectContaining({ deviceId: "mcp-lab", runtimeState: "stopped" }),
             readiness: expect.objectContaining({ state: "stopped" }),
         }));
     });

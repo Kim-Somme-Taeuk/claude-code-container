@@ -39,20 +39,18 @@ import { normalizeToolArgs, flowStepArguments } from "../../device-lab-mcp/src/t
 import { createLab, ownerId } from "../../device-lab-mcp/src/backends/linux-vm.mjs";
 
 const defaults = {
-    image_list: "linux-vm", image_import: "linux-vm", target_list: "linux-vm",
-    readiness_probe: "linux-vm", session_open: "linux-vm", workspace_sync: "linux-vm",
-    artifacts_export: "linux-vm", guest_agent_status: "linux-vm", guest_agent_provision: "linux-vm",
-    base_image_create: "macos-vm", base_image_clone: "macos-vm",
+    image_list: "linux-vm", image_import: "linux-vm", workspace_sync: "linux-vm",
+    artifacts_export: "linux-vm", base_image_create: "macos-vm", base_image_clone: "macos-vm",
 };
 const entries = Object.entries(defaults);
-const ownedActions = ["readiness_probe", "session_open", "workspace_sync", "artifacts_export", "guest_agent_status", "guest_agent_provision"];
+const ownedActions = ["workspace_sync", "artifacts_export"];
 const parse = (result: any) => JSON.parse(result.content[0].text);
 const call = (name: string, args: any) => fixture.handlers[1]({ params: { name, arguments: args } });
 
 describe("bounded single-backend argument contract", () => {
     beforeAll(async () => { await startServer(); });
     beforeEach(() => { fixture.calls.length = 0; });
-    it("uses exactly the eleven intentional defaults", () => { expect(SINGLE_BACKEND_TOOL_DEFAULTS).toEqual(defaults); });
+    it("uses exactly the six public intentional defaults", () => { expect(SINGLE_BACKEND_TOOL_DEFAULTS).toEqual(defaults); });
     it.each(entries)("%s exposes no redundant backend selector", (name) => {
         const schema = TOOLS.find((tool: any) => tool.name === name)!.inputSchema;
         expect(schema.properties).not.toHaveProperty("backend");
@@ -88,8 +86,8 @@ describe("bounded single-backend argument contract", () => {
     });
     it("inherits only declared target fields before deriving the selected backend", () => {
         const shared = { deviceId: "a", backend: "macos-vm", incarnationId: "a".repeat(32) };
-        expect(flowStepArguments("guest_agent_status", shared, {})).toEqual({ deviceId: "a" });
-        expect(normalizeToolArgs(flowStepArguments("guest_agent_status", shared, { deviceId: "b" }), "device_guest_agent_status")).toEqual({ deviceId: "b", backend: "linux-vm" });
+        expect(flowStepArguments("workspace_sync", shared, {})).toEqual({ deviceId: "a" });
+        expect(normalizeToolArgs(flowStepArguments("workspace_sync", shared, { deviceId: "b" }), "device_workspace_sync")).toEqual({ deviceId: "b", backend: "linux-vm" });
     });
 });
 
@@ -179,11 +177,10 @@ describe("single-backend QEMU owner isolation through MCP", () => {
                 expect(result.isError).toBe(true);
                 expect(parse(result)).toMatchObject({ error: "lab-not-found" });
             }
-            const duplicate = parse(await context.client.callTool({ name: "session_open", arguments: {
-                deviceId: "owned-target", sessionType: "metadata", broker: true, hostCandidates: ["127.0.0.1"], port,
-            } }));
-            expect(duplicate.ok).toBe(true);
-            expect(duplicate.session.authority).toBe("device-lab-metadata");
+            const duplicate = await context.client.callTool({ name: "artifacts_export", arguments: {
+                deviceId: "owned-target", broker: true, hostCandidates: ["127.0.0.1"], port,
+            } });
+            expect(JSON.stringify(duplicate)).not.toContain("host-only");
             expect(requests).toEqual([]);
         } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
     });
@@ -191,7 +188,7 @@ describe("single-backend QEMU owner isolation through MCP", () => {
         const path = join(root, "owners", JSON.parse(readFileSync(ownedMetadata, "utf8")).ownerId, "labs", "corrupt-target", "lab.json");
         mkdirSync(join(path, ".."), { recursive: true });
         writeFileSync(path, "{broken");
-        await expect(context.client.callTool({ name: "readiness_probe", arguments: { deviceId: "corrupt-target" } }))
+        await expect(context.client.callTool({ name: "workspace_sync", arguments: { deviceId: "corrupt-target" } }))
             .rejects.toThrow(/JSON|parse|corrupt|invalid/i);
         expect(readFileSync(path, "utf8")).toBe("{broken");
     });

@@ -176,6 +176,6 @@ describe("public iOS wait and flow errors", () => {
         expect(body.results[0].isError).toBe(true);
         expect(body.results[0].error).toBeUndefined();
         expect(JSON.stringify(body.results[0].content)).toContain("simulator unavailable");
-        expect(fixture.calls.filter((argv) => argv[1] === "list")).toHaveLength(1);
+        expect(fixture.calls.filter((argv) => argv[0] === "simctl" && argv[1] === "list")).toHaveLength(1);
     });
 });

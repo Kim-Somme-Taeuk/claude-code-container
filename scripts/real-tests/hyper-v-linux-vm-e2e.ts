@@ -16,7 +16,7 @@ const DEVICE_PREFIX = "linux-hyper-v-real-e2e-";
 const CAPABILITIES = [
     "inventory", "create", "delete", "start", "stop", "reboot", "status",
     "exec", "upload", "download",
-    "snapshot_list", "snapshot_create", "snapshot_restore", "snapshot_delete",
+    "snapshot", "snapshot", "snapshot", "snapshot",
 ];
 // Release this device's allocation but keep the shared managed switch, gateway and NAT, as the
 // Windows E2E does. Tearing that fabric down needs a UAC prompt, which an unattended Level 3 run
@@ -290,24 +290,24 @@ export async function runHyperVLinuxVmE2E(options: any = {}) {
             assert.strictEqual(readFileSync(downloadPath, "utf8"), "ccc-hyper-v-linux-transfer-ok");
 
             currentStep = "create production checkpoint";
-            const snapshot = resultValue(hyperVLinuxToolPayload(await callTool("snapshot_create", { detail: true, ...direct, snapshotName: "durability" })));
+            const snapshot = resultValue(hyperVLinuxToolPayload(await callTool("snapshot", { action: "create", detail: true, ...direct, snapshotName: "durability" })));
             const snapshotId = snapshot.snapshot?.id;
             assert.ok(snapshotId);
 
             currentStep = "list production checkpoints";
-            const snapshotList = resultValue(hyperVLinuxToolPayload(await callTool("snapshot_list", { detail: true, ...direct })));
+            const snapshotList = resultValue(hyperVLinuxToolPayload(await callTool("snapshot", { action: "list", detail: true, ...direct })));
             assert.ok(Array.isArray(snapshotList.snapshots));
             assert.ok(snapshotList.snapshots.some((candidate: any) => candidate?.id === snapshotId && candidate?.name === "durability"));
 
             currentStep = "restore production checkpoint";
-            resultValue(hyperVLinuxToolPayload(await callTool("snapshot_restore", { detail: true, ...direct, snapshotId, force: true, confirmDestructive: true })));
+            resultValue(hyperVLinuxToolPayload(await callTool("snapshot", { action: "restore", detail: true, ...direct, snapshotId, force: true, confirmDestructive: true })));
 
             currentStep = "verify SSH after checkpoint restore";
             const restored = resultValue(hyperVLinuxToolPayload(await callTool("exec", { detail: true, ...direct, command: "printf ccc-hyper-v-linux-restored" })));
             assert.match(restored.stdout || "", /ccc-hyper-v-linux-restored/);
 
             currentStep = "delete production checkpoint";
-            resultValue(hyperVLinuxToolPayload(await callTool("snapshot_delete", { detail: true, ...direct, snapshotId, confirmDestructive: true })));
+            resultValue(hyperVLinuxToolPayload(await callTool("snapshot", { action: "delete", detail: true, ...direct, snapshotId, confirmDestructive: true })));
 
             currentStep = "stop VM";
             lifecycleDevice(hyperVLinuxToolPayload(await callTool("stop", { detail: true, ...direct, force: true })), "stop");

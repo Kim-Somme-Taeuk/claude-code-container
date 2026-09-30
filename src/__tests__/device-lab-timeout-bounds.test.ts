@@ -51,9 +51,9 @@ describe("device-lab public timeout bounds", () => {
             "scroll",
             "cursor_position",
             "window_list",
-            "accessibility_snapshot",
-            "record_video_stop",
-            "record_video_status",
+            "ui",
+            "record_video",
+            "record_video",
             "upload",
             "download",
         ];

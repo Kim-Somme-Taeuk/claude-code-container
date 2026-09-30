@@ -863,8 +863,9 @@ function iosDevicesWithInventory(devices, discovery, inventory) {
     return devices.map((device) => withTargetStatus({ ...reconcileIosDevice(device, discovery, inventory), ownerId: ownerId() }));
 }
 
-export function listIosDevices() {
+export function listIosDevices({ identityOnly = false } = {}) {
     const devices = readIosDevices();
+    if (identityOnly) return devices;
     if (devices.length === 0) return [];
     const discovery = iosDiscovery();
     const inventory = discovery.available ? simctlJson(discovery.xcrun, ["list", "devices", "-j"]) : undefined;
@@ -1052,7 +1053,7 @@ async function handleIosToolUnlocked(name, args) {
             const device = findIosDevice(deviceId);
             if (!device) return undefined;
             const discovery = iosDiscovery();
-            return jsonResult({ device: withTargetStatus(reconcileIosDevice(device, discovery)), backend: iosBackend(discovery) });
+            return jsonResult({ device: withTargetStatus(reconcileIosDevice(device, discovery)), backend: iosBackend(discovery), automation: iosAppiumStatus(device) });
         }
 
         case "device_start": {

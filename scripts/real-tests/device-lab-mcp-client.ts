@@ -1,4 +1,4 @@
-import { toolOperation } from "../../device-lab-mcp/src/tools.mjs";
+import { toolOperation, isSimpleAction } from "../../device-lab-mcp/src/tools.mjs";
 import { createHash } from "crypto";
 import { readFileSync, statSync } from "fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -79,10 +79,10 @@ export function realMcpToolRequestTimeoutMs(name: string, args: Record<string, a
             : LONG_REAL_MCP_TOOL_TIMEOUT_MS;
     }
     if (name === "delete" && args?.deleteAvd === true) return LONG_REAL_MCP_TOOL_TIMEOUT_MS;
-    if (name === "device_broker_appium" || name === "set_clipboard" || name === "get_clipboard") {
+    if (name === "device_broker_appium" || name === "clipboard") {
         return LONG_REAL_MCP_TOOL_TIMEOUT_MS;
     }
-    if (typeof args?.backend === "string" && args.backend.startsWith("ios") && (toolOperation(name)?.startsWith("mobile_") || ["click", "double_click", "key", "type"].includes(name))) {
+    if (typeof args?.backend === "string" && args.backend.startsWith("ios") && (toolOperation(name, args)?.startsWith("mobile_") || ["click", "double_click", "key", "type"].includes(name))) {
         return LONG_REAL_MCP_TOOL_TIMEOUT_MS;
     }
     return DEFAULT_REAL_MCP_TOOL_TIMEOUT_MS;
@@ -353,7 +353,7 @@ export async function withDeviceLabMcp(callback, options: any = {}) {
                     try {
                         const payload = jsonContentPayload(resultContent(result)) || {};
                         if (Array.isArray(payload?.results)) {
-                            record.flowSteps = payload.results.map(summarizeFlowStepPayload).filter((step) => step.tool);
+                            record.flowSteps = payload.results.map((step, index) => ({ ...summarizeFlowStepPayload(step), simpleAction: isSimpleAction(step.tool, toolOperation(step.tool, args.steps?.[index]?.arguments)) })).filter((step) => step.tool);
                         }
                     } catch {
                         // Flow step tracing is proof metadata only; parsing failures should not affect the call.
@@ -382,7 +382,7 @@ export async function withDeviceLabMcp(callback, options: any = {}) {
             callTool,
             callContractTool: async (name, args = {}) => {
                 if (!hasDeviceLabOutputContract(name)) throw new Error(`No output contract registered for ${name}`);
-                return parseContractToolPayload(name, await callTool(name, args));
+                return parseContractToolPayload(name, await callTool(name, args), args);
             },
         });
     } finally {
@@ -825,14 +825,14 @@ export function formatBrokerToolFailure(value: any, fallback: string) {
     return message.slice(0, 511);
 }
 
-export function parseContractToolPayload<K extends keyof DeviceLabToolOutputMap>(name: K, result: any): DeviceLabToolOutputMap[K] {
+export function parseContractToolPayload<K extends keyof DeviceLabToolOutputMap>(name: K, result: any, args: Record<string, any> = {}): DeviceLabToolOutputMap[K] {
     if (!hasDeviceLabOutputContract(name)) throw new Error(`No output contract registered for ${name}`);
-    if (DEVICE_LAB_OUTPUT_CONTRACTS[name] === "image-content-v1") return validateDeviceLabToolOutput(name, result);
-    if (DEVICE_LAB_OUTPUT_CONTRACTS[name] === "action-v1" && result?.isError !== true
+    if (DEVICE_LAB_OUTPUT_CONTRACTS[name] === "image-content-v1") return validateDeviceLabToolOutput(name, result, args);
+    if ((DEVICE_LAB_OUTPUT_CONTRACTS[name] === "action-v1" || name === "clipboard") && result?.isError !== true
         && result?.content?.length === 1 && result.content[0]?.type === "text" && result.content[0].text === "ok") {
-        return validateDeviceLabToolOutput(name, "ok");
+        return validateDeviceLabToolOutput(name, "ok", args);
     }
-    return validateDeviceLabToolOutput(name, parseToolPayload(result));
+    return validateDeviceLabToolOutput(name, parseToolPayload(result), args);
 }
 
 export function lifecycleDevice(payload: any, operation: string): DeviceRecord {

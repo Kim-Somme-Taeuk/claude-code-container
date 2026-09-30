@@ -1,6 +1,6 @@
 # Canonical Device Lab inputs
 
-Device Lab MCP accepts the same 76 unprefixed tool names it advertises. Redundant mobile
+Device Lab MCP accepts the same 60 unprefixed tool names it advertises. Redundant mobile
 aliases and hidden administrative broker/image calls have been removed. Inputs
 are flat. Existing-device tools resolve routing from `deviceId`; they reject
 `backend`, as does `run_flow`. Only creation, attachment, candidate inventory and
@@ -26,3 +26,11 @@ smokes request `detail` explicitly when asserting provider capabilities.
 Internal transport controls remain available to existing route/test machinery;
 their host-routing contracts require a separate design before removal. Tests
 using isolated fixtures and real MCP stdio do not certify native host devices.
+
+The reduced catalog groups snapshots, recording, permissions and clipboard, and
+unifies UI hierarchy inspection under `ui`. `status` absorbs automation and QEMU
+readiness diagnostics; `backends` includes broker diagnostics. Eight internal or
+redundant tools are removed. QEMU disk preparation stays in `start`; configured
+guest-agent provisioning defaults on unless explicitly disabled, reports failures,
+and retries on repeated start without duplicating the VM. Status never provisions.
+Private provider helpers remain available internally; removed public names do not.

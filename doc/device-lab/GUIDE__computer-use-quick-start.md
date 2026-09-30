@@ -16,12 +16,19 @@ start a new call when you need to inspect the result before deciding what to do.
 
 ## Choose inputs for the target platform
 
-Container-QEMU image, target, readiness, session, workspace, artifact and guest-agent
-tools select their backend automatically. For example, `target_list({})`
-lists container-QEMU targets and `readiness_probe({deviceId:"my-vm"})`
-checks one. They do not inspect Hyper-V guests. macOS base-image create/clone
-also omit the redundant backend selector. Do not pass backend to these tools;
-explicit selectors are rejected before provider execution.
+Use `status({deviceId})` for device state and automation diagnostics. For a running
+container-QEMU VM it also refreshes configured SSH/guest-agent readiness; a stopped
+VM is reported without a guest probe. Use `backends` for host prerequisites and
+broker diagnosis. There are no separate broker, automation, target-list or
+readiness tools to call first.
+
+QEMU `start` prepares the writable disk and configured guest agent. A provisioning
+command enables automatic preparation unless `guestAgentAutoProvision:false` was
+explicitly configured. A failed preparation keeps the VM running and returns an
+error; retry `start` to retry preparation without booting a second VM. `status`
+never provisions anything. Commands and file transfers need no session-open call.
+Image/workspace/artifact tools select their backend automatically; macOS base-image
+create/clone also omit the redundant selector.
 
 Creation uses typed top-level fields. Android AVD provisioning uses `createAvd`
 and `systemImage`; iOS provisioning uses `createSimulator`, `deviceType` and
@@ -38,7 +45,7 @@ provide `bundleId`; `remotePath` is relative to that app container (for example,
 uses `path` for the app package in the project.
 
 Android apps use `packageName` or a launch `component`; iOS apps use `bundleId`.
-Permission tools pair Android `packageName` with `permission`, or iOS Simulator
+`permission` uses `action:"grant"` or `action:"revoke"` and pairs Android `packageName` with `permission`, or iOS Simulator
 `bundleId` with privacy `service`. Mobile keys are ADB key names/codes on Android
 and Appium key values on iOS; use `home` for the Home button.
 Battery `charging` controls simulated AC connection separately from `status`:
@@ -120,3 +127,19 @@ different from an observation error; flows stop on an unmet wait by default.
 Update client and host broker together for host-side cancellation support.
 
 Existing-device calls use `deviceId` only to choose the device. Do not supply `backend` to actions, status, lifecycle operations or `run_flow`; ownership records select the provider.
+
+## Focused management tools
+
+All these calls use an explicit `deviceId`:
+
+| Tool | Operation |
+| --- | --- |
+| `ui` | Read the mobile hierarchy or desktop accessibility tree automatically. |
+| `snapshot` | `action`: `list`, `create`, `restore`, `delete`. |
+| `record_video` | `action`: `start`, `stop`, `status`; stop retains saved artifacts. |
+| `clipboard` | Omit `text` to read; provide `text` to write, including an empty string. |
+| `permission` | `action`: `grant` or `revoke`, with the app and permission/service. |
+
+Each operation keeps its required fields and destructive confirmation. Flow
+support is checked for the chosen operation, not granted to an entire group.
+Old separate tool names are rejected.

@@ -127,15 +127,15 @@ describe("device-lab destructive action policy", () => {
             .sort();
         const policyTools = [...new Set(DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES.map(({ name }) => name))]
             .filter((name) => !HIDDEN_DESTRUCTIVE_POLICY_TOOLS.has(name))
-            .map(publicToolName).sort();
+            .map(publicToolName).filter((name, index, all) => all.indexOf(name) === index).sort();
 
         expect(schemaTools).toEqual(policyTools);
     });
 
     it("denies destructive direct tools before backend routing unless confirmed", { timeout: TIMEOUT }, async () => {
         const denied = await client.callTool({
-            name: "snapshot_delete",
-            arguments: { deviceId: "missing-macos", snapshotName: "before-test" },
+            name: "snapshot",
+            arguments: { action: "delete", deviceId: "missing-macos", snapshotName: "before-test" },
         });
         expect(denied.isError).toBe(true);
         expect(jsonPayload(denied)).toEqual(expect.objectContaining({
@@ -148,8 +148,8 @@ describe("device-lab destructive action policy", () => {
         }));
 
         const confirmed = await client.callTool({
-            name: "snapshot_delete",
-            arguments: { deviceId: "missing-macos", snapshotName: "before-test", confirmDestructive: true },
+            name: "snapshot",
+            arguments: { action: "delete", deviceId: "missing-macos", snapshotName: "before-test", confirmDestructive: true },
         });
         expect(confirmed.isError).toBe(true);
         expect(textPayload(confirmed)).not.toContain("destructive-action-confirmation-required");
