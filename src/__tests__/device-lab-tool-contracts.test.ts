@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { createHash } from "node:crypto";
 import {
     DEVICE_LAB_OUTPUT_CONTRACTS,
     hasDeviceLabOutputContract,
@@ -7,31 +6,29 @@ import {
 } from "../../device-lab-mcp/src/contracts/tool-contracts.mjs";
 import { TOOLS } from "../../device-lab-mcp/src/tools.mjs";
 
-function schemaShape(value: any): any {
-    if (Array.isArray(value)) return value.map(schemaShape);
-    if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).filter(key => key !== "description").sort().map(key => [key, schemaShape(value[key])]));
-    return value;
-}
-
 describe("canonical public input schemas", () => {
-    it("preserves advertised input shapes while removing compatibility-only acceptance", () => {
-        expect(createHash("sha256").update(JSON.stringify(schemaShape(TOOLS))).digest("hex"))
-            .toBe("2f58e206309a13ae21c4b09c03dc6b6db5f9a182c832e568ec001b152b6b3f84");
+    it("exposes only unique action names with explicit targets", () => {
+        const names = TOOLS.map(tool => tool.name);
+        expect(new Set(names).size).toBe(names.length);
+        expect(names.every(name => !/^(device|mobile|display)_/.test(name))).toBe(true);
+        for (const name of ["click", "double_click", "move", "type", "key", "screenshot", "status"]) {
+            expect(TOOLS.find(tool => tool.name === name)?.inputSchema.required).toContain("deviceId");
+        }
     });
 });
 
 describe("device-lab public output contracts", () => {
     it("maps lifecycle and mobile session tools to explicit contracts", () => {
         expect(DEVICE_LAB_OUTPUT_CONTRACTS).toEqual(expect.objectContaining({
-            device_create: "lifecycle-device-v1",
-            device_status: "lifecycle-device-v1",
-            device_start: "lifecycle-device-v1",
-            device_stop: "lifecycle-device-v1",
-            device_delete: "lifecycle-delete-v1",
-            mobile_session_status: "mobile-session-status-v1",
+            create: "lifecycle-device-v1",
+            status: "lifecycle-device-v1",
+            start: "lifecycle-device-v1",
+            stop: "lifecycle-device-v1",
+            delete: "lifecycle-delete-v1",
+            automation_status: "mobile-session-status-v1",
         }));
-        expect(hasDeviceLabOutputContract("device_start")).toBe(true);
-        expect(hasDeviceLabOutputContract("mobile_tap")).toBe(true);
+        expect(hasDeviceLabOutputContract("start")).toBe(true);
+        expect(hasDeviceLabOutputContract("click")).toBe(true);
         expect(hasDeviceLabOutputContract("not_a_public_tool")).toBe(false);
     });
 
@@ -39,16 +36,15 @@ describe("device-lab public output contracts", () => {
         const accepted = TOOLS.map((tool: { name: string }) => tool.name).sort();
         const contracted = Object.keys(DEVICE_LAB_OUTPUT_CONTRACTS).sort();
         expect(contracted).toEqual(accepted);
-        expect(contracted).toHaveLength(87);
-        expect(TOOLS).toHaveLength(87);
+        expect(contracted).toHaveLength(TOOLS.length);
         expect(TOOLS.every((tool: { name: string }) => contracted.includes(tool.name))).toBe(true);
     });
 
     it("returns typed lifecycle and session payloads", () => {
-        const lifecycle = validateDeviceLabToolOutput("device_start", {
+        const lifecycle = validateDeviceLabToolOutput("start", {
             device: { id: "ios-contract", status: "running" },
         });
-        const session = validateDeviceLabToolOutput("mobile_session_status", {
+        const session = validateDeviceLabToolOutput("automation_status", {
             deviceId: "ios-contract",
             session: null,
         });
@@ -58,11 +54,11 @@ describe("device-lab public output contracts", () => {
     });
 
     it("reports the tool and missing field instead of leaking undefined access errors", () => {
-        expect(() => validateDeviceLabToolOutput("device_status", { routedBy: "broker" }))
-            .toThrow("device_status response contract violation: required device field is missing");
-        expect(() => validateDeviceLabToolOutput("mobile_session_status", { session: null }))
-            .toThrow("mobile_session_status response contract violation: required deviceId field is missing");
-        expect(() => validateDeviceLabToolOutput("device_start", { ok: false, error: "provider-command-failed" }))
-            .toThrow("device_start response contract violation: operation failed (provider-command-failed)");
+        expect(() => validateDeviceLabToolOutput("status", { routedBy: "broker" }))
+            .toThrow("status response contract violation: required device field is missing");
+        expect(() => validateDeviceLabToolOutput("automation_status", { session: null }))
+            .toThrow("automation_status response contract violation: required deviceId field is missing");
+        expect(() => validateDeviceLabToolOutput("start", { ok: false, error: "provider-command-failed" }))
+            .toThrow("start response contract violation: operation failed (provider-command-failed)");
     });
 });

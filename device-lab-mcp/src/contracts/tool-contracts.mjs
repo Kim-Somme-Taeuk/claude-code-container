@@ -1,3 +1,5 @@
+import { TOOLS, toolOperation, SIMPLE_ACTIONS } from "../tools.mjs";
+
 function objectValue(value) {
     return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
@@ -64,8 +66,11 @@ const contractGroups = {
     "flow-result-v1": ["device_run_flow"],
 };
 
-export const DEVICE_LAB_OUTPUT_CONTRACTS = Object.freeze(Object.fromEntries(
+const OPERATION_CONTRACTS = Object.fromEntries(
     Object.entries(contractGroups).flatMap(([contract, tools]) => tools.map((tool) => [tool, contract])),
+);
+export const DEVICE_LAB_OUTPUT_CONTRACTS = Object.freeze(Object.fromEntries(
+    TOOLS.map(({ name }) => [name, SIMPLE_ACTIONS.has(name) ? "action-v1" : OPERATION_CONTRACTS[toolOperation(name)]]),
 ));
 
 const requiredFieldsByContract = {
@@ -102,15 +107,21 @@ const deviceObjectContracts = new Set(["lifecycle-device-v1", "physical-attach-v
 const arrayFields = new Set(["devices", "images", "results", "targets"]);
 
 export function validateDeviceLabToolOutput(tool, payload) {
-    const contract = DEVICE_LAB_OUTPUT_CONTRACTS[tool];
+    let contract = DEVICE_LAB_OUTPUT_CONTRACTS[tool];
     if (!contract) throw new Error(`No output contract registered for ${tool}`);
+    if (contract === "action-v1") {
+        if (payload === "ok") return payload;
+        contract = OPERATION_CONTRACTS[toolOperation(tool)];
+    }
+    if (tool === "list_devices" && Array.isArray(payload)) return payload;
+    if (tool === "status" && typeof payload?.id === "string" && payload.kind === "display") return payload;
     if (contract === "image-content-v1") {
         if (payload?.content && Array.isArray(payload.content) && payload.content.some((item) => item?.type === "image")) return payload;
         throw contractError(tool, "required MCP image content is missing", payload);
     }
     const value = objectValue(payload);
     if (!value) throw contractError(tool, "expected an object", payload);
-    if (value.ok === false) {
+    if (value.ok === false || (typeof value.error === "string" && value.error)) {
         const command = value.result?.execution?.command || value.selected?.body?.result?.execution?.command;
         const providerDetail = command?.error || command?.stderr || command?.stdout;
         const detail = providerDetail ? `: ${String(providerDetail).trim().slice(-512)}` : "";

@@ -3,7 +3,7 @@ import { spawn, spawnSync } from "child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
-import { TOOLS as DEVICE_LAB_MCP_TOOLS } from "../../device-lab-mcp/src/tools.mjs";
+import { TOOLS as DEVICE_LAB_MCP_TOOLS, SIMPLE_ACTIONS } from "../../device-lab-mcp/src/tools.mjs";
 import { consumeDeviceLabMcpToolCalls, consumeDeviceLabMcpToolSessions } from "./device-lab-mcp-client.ts";
 import { normalizeProviderConcurrency, partitionProviderFiles, runResourceAware } from "./provider-parallelism.ts";
 import { aggregateStepResult } from "./result-status.ts";
@@ -89,7 +89,7 @@ function toolArgumentFacets(tool, value) {
         }
     };
     collect(value);
-    if (tool === "device_run_flow" && Array.isArray(value.steps)) {
+    if (tool === "run_flow" && Array.isArray(value.steps)) {
         for (const step of value.steps) collect(step?.arguments);
     }
     return uniqueSorted(facets);
@@ -167,7 +167,7 @@ function validateToolArguments(tool, args) {
 
 function flowStepArgumentSchemaFailures(flowTool, rawArgs) {
     const args = rawArgs;
-    if (flowTool !== "device_run_flow" || !Array.isArray(args?.steps)) return [];
+    if (flowTool !== "run_flow" || !Array.isArray(args?.steps)) return [];
     return args.steps.flatMap((step, index) => {
         const tool = String(step?.tool || "");
         if (!tool) return [];
@@ -322,12 +322,12 @@ function groupSkipsByCategory(items) {
 const providerGapSkipCategories = new Set(["provider-prerequisite", "host-platform", "host-permission", "host-virtualization"]);
 const macosProviderValues = new Set(["auto", "tart", "vz", "utmctl"]);
 const directOkExemptDiagnosticTools = new Set([
-    "device_base_image_clone",
-    "device_base_image_create",
-    "device_snapshot_create",
-    "device_snapshot_delete",
-    "device_snapshot_restore",
-    "device_wireless",
+    "base_image_clone",
+    "base_image_create",
+    "snapshot_create",
+    "snapshot_delete",
+    "snapshot_restore",
+    "wireless",
 ]);
 
 function explainedProviderValuesFromSkips(skipCategories) {
@@ -558,13 +558,15 @@ function collectExecution(execution) {
                 ...(typeof call.errorPayloadJson === "boolean" ? { errorPayloadJson: call.errorPayloadJson } : {}),
                 ...(call.errorCode ? { errorCode: call.errorCode } : {}),
                 ...(Array.isArray(call.contentTypes) ? { contentTypes: call.contentTypes } : {}),
+                ...(typeof call.okPayloadAction === "boolean" ? { okPayloadAction: call.okPayloadAction } : {}),
                 ...(typeof call.okPayloadText === "boolean" ? { okPayloadText: call.okPayloadText } : {}),
                 ...(typeof call.okPayloadJson === "boolean" ? { okPayloadJson: call.okPayloadJson } : {}),
                 ...(typeof call.okPayloadImage === "boolean" ? { okPayloadImage: call.okPayloadImage } : {}),
                 ...(call.okPayloadShape ? { okPayloadShape: call.okPayloadShape } : {}),
                 ...(call.error ? { error: call.error } : {}),
                 ...(Array.isArray(call.flowSteps) ? { flowSteps: call.flowSteps } : {}),
-                facets: toolArgumentFacets(call.name, call.arguments),
+                ...(call.observedBackend ? { observedBackend: call.observedBackend } : {}),
+                facets: uniqueSorted([...toolArgumentFacets(call.name, call.arguments), ...(call.observedBackend ? [`${call.name}:backend=${call.observedBackend}`] : [])]),
             });
         }
         for (const session of moduleToolSessions) {
@@ -738,6 +740,7 @@ const okPublicPayloadFailures = toolCallRecords.filter((record) => (
     && advertisedTools.includes(record.tool)
     && record.okPayloadJson !== true
     && record.okPayloadImage !== true
+    && !(SIMPLE_ACTIONS.has(record.tool) && record.okPayloadAction === true)
 ));
 function emptyPayloadShape(shape) {
     if (shape?.kind === "object") return !Array.isArray(shape.keys) || shape.keys.length === 0;
@@ -749,6 +752,7 @@ const emptyOkPublicPayloadRecords = toolCallRecords.filter((record) => (
     && advertisedTools.includes(record.tool)
     && record.okPayloadJson === true
     && emptyPayloadShape(record.okPayloadShape)
+    && !(record.tool === "list_devices" && record.okPayloadShape?.kind === "array")
 ));
 const flowStepRecords = toolCallRecords.flatMap((record) => (Array.isArray(record.flowSteps) ? record.flowSteps : []).map((step, index) => ({
     file: record.file,
@@ -759,6 +763,7 @@ const flowStepRecords = toolCallRecords.flatMap((record) => (Array.isArray(recor
     isError: step.isError === true,
     expectedError: step.expectedError === true,
     ...(Array.isArray(step.contentTypes) ? { contentTypes: step.contentTypes } : {}),
+    ...(typeof step.okPayloadAction === "boolean" ? { okPayloadAction: step.okPayloadAction } : {}),
     ...(typeof step.okPayloadJson === "boolean" ? { okPayloadJson: step.okPayloadJson } : {}),
     ...(typeof step.okPayloadImage === "boolean" ? { okPayloadImage: step.okPayloadImage } : {}),
     ...(step.okPayloadShape ? { okPayloadShape: step.okPayloadShape } : {}),
@@ -781,12 +786,14 @@ const okPublicFlowStepPayloadFailures = flowStepRecords.filter((record) => (
     && advertisedTools.includes(record.tool)
     && record.okPayloadJson !== true
     && record.okPayloadImage !== true
+    && !(SIMPLE_ACTIONS.has(record.tool) && record.okPayloadAction === true)
 ));
 const emptyOkPublicFlowStepPayloadRecords = flowStepRecords.filter((record) => (
     record.isError !== true
     && advertisedTools.includes(record.tool)
     && record.okPayloadJson === true
     && emptyPayloadShape(record.okPayloadShape)
+    && !(record.tool === "list_devices" && record.okPayloadShape?.kind === "array")
 ));
 const flowStepToolOutcomeSummary: Record<string, any> = Object.fromEntries(uniqueSorted(flowStepRecords.map((record) => record.tool)).map((tool) => {
     const toolRecords = flowStepRecords.filter((record) => record.tool === tool);

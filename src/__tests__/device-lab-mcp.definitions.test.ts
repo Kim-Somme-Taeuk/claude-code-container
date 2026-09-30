@@ -21,14 +21,12 @@ describe("device-lab MCP backend definitions", () => {
 
     it("creates, lists, inspects, and deletes owner-scoped Android definitions", { timeout: TIMEOUT }, async () => {
         const create = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: {
                 backend: "android-emulator",
                 name: "Pixel Test",
-                options: {
-                    avdName: "Pixel_Test_API_35",
-                    port: 5580,
-                },
+                avdName: "Pixel_Test_API_35",
+                port: 5580,
             },
         });
         expect(create.isError).not.toBe(true);
@@ -43,7 +41,7 @@ describe("device-lab MCP backend definitions", () => {
             status: "stopped",
         }));
 
-        const list = await client.callTool({ name: "device_list", arguments: {} });
+        const list = await client.callTool({ name: "list_devices", arguments: {} });
         const listed = JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             devices: Array<{ id: string; backend?: string }>;
         };
@@ -52,7 +50,7 @@ describe("device-lab MCP backend definitions", () => {
         ]));
 
         const status = await client.callTool({
-            name: "device_status",
+            name: "status",
             arguments: { deviceId: "android-pixel-test" },
         });
         expect(status.isError).not.toBe(true);
@@ -78,7 +76,7 @@ describe("device-lab MCP backend definitions", () => {
         expect(inspected.backend.missing).toEqual(["adb", "emulator"]);
 
         const mobileStatus = await client.callTool({
-            name: "mobile_session_status",
+            name: "automation_status",
             arguments: { deviceId: "android-pixel-test" },
         });
         expect(mobileStatus.isError).not.toBe(true);
@@ -93,14 +91,14 @@ describe("device-lab MCP backend definitions", () => {
         expect(mobile.appium.missing).toContain("adb");
 
         const tap = await client.callTool({
-            name: "mobile_tap",
+            name: "click",
             arguments: { deviceId: "android-pixel-test", x: 10, y: 20 },
         });
         expect(tap.isError).toBe(true);
         expect((tap.content as Array<{ text?: string }>)[0].text).toContain("Android backend missing prerequisites: adb");
 
         const recordStatus = await client.callTool({
-            name: "device_record_video_status",
+            name: "record_video_status",
             arguments: { deviceId: "android-pixel-test" },
         });
         expect(recordStatus.isError).not.toBe(true);
@@ -110,26 +108,26 @@ describe("device-lab MCP backend definitions", () => {
         }));
 
         const recordStart = await client.callTool({
-            name: "device_record_video_start",
+            name: "record_video_start",
             arguments: { deviceId: "android-pixel-test" },
         });
         expect(recordStart.isError).toBe(true);
         expect((recordStart.content as Array<{ text?: string }>)[0].text).toContain("Android backend missing prerequisites: adb");
 
         const start = await client.callTool({
-            name: "device_start",
+            name: "start",
             arguments: { deviceId: "android-pixel-test" },
         });
         expect(start.isError).toBe(true);
         expect((start.content as Array<{ text?: string }>)[0].text).toContain("missing prerequisites");
 
         const deleted = await client.callTool({
-            name: "device_delete",
+            name: "delete",
             arguments: { deviceId: "android-pixel-test", confirmDestructive: true },
         });
         expect(deleted.isError).not.toBe(true);
 
-        const afterDelete = await client.callTool({ name: "device_list", arguments: {} });
+        const afterDelete = await client.callTool({ name: "list_devices", arguments: {} });
         const finalList = JSON.parse(((afterDelete.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             devices: Array<{ id: string }>;
         };
@@ -138,7 +136,7 @@ describe("device-lab MCP backend definitions", () => {
 
     it("creates, lists, inspects, starts with diagnostics, and deletes owner-scoped iOS definitions", { timeout: TIMEOUT }, async () => {
         const create = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: {
                 backend: "ios-simulator",
                 name: "iPhone Test",
@@ -159,7 +157,7 @@ describe("device-lab MCP backend definitions", () => {
             platform: "ios",
         }));
 
-        const list = await client.callTool({ name: "device_list", arguments: {} });
+        const list = await client.callTool({ name: "list_devices", arguments: {} });
         const listed = JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             devices: Array<{ id: string; backend?: string }>;
         };
@@ -168,7 +166,7 @@ describe("device-lab MCP backend definitions", () => {
         ]));
 
         const status = await client.callTool({
-            name: "device_status",
+            name: "status",
             arguments: { deviceId: "ios-iphone-test" },
         });
         expect(status.isError).not.toBe(true);
@@ -189,21 +187,21 @@ describe("device-lab MCP backend definitions", () => {
         expect(inspected.backend.missing).toEqual(["xcrun"]);
 
         const start = await client.callTool({
-            name: "device_start",
+            name: "start",
             arguments: { deviceId: "ios-iphone-test" },
         });
         expect(start.isError).toBe(true);
         expect((start.content as Array<{ text?: string }>)[0].text).toContain("iOS Simulator backend missing prerequisites");
 
         const screenshot = await client.callTool({
-            name: "device_screenshot",
+            name: "screenshot",
             arguments: { deviceId: "ios-iphone-test" },
         });
         expect(screenshot.isError).toBe(true);
         expect((screenshot.content as Array<{ text?: string }>)[0].text).toContain("iOS Simulator backend missing prerequisites");
 
         const recordStatus = await client.callTool({
-            name: "device_record_video_status",
+            name: "record_video_status",
             arguments: { deviceId: "ios-iphone-test" },
         });
         expect(recordStatus.isError).not.toBe(true);
@@ -213,14 +211,14 @@ describe("device-lab MCP backend definitions", () => {
         }));
 
         const recordStart = await client.callTool({
-            name: "device_record_video_start",
+            name: "record_video_start",
             arguments: { deviceId: "ios-iphone-test" },
         });
         expect(recordStart.isError).toBe(true);
         expect((recordStart.content as Array<{ text?: string }>)[0].text).toContain("iOS Simulator backend missing prerequisites");
 
         const session = await client.callTool({
-            name: "mobile_session_status",
+            name: "automation_status",
             arguments: { deviceId: "ios-iphone-test" },
         });
         expect(session.isError).not.toBe(true);
@@ -239,14 +237,14 @@ describe("device-lab MCP backend definitions", () => {
         expect(sessionPayload.appium.missing).toEqual(expect.arrayContaining(["xcrun", "appium", "appium-xcuitest-driver", "xcodebuild"]));
 
         const dumpUi = await client.callTool({
-            name: "mobile_dump_ui",
+            name: "dump_ui",
             arguments: { deviceId: "ios-iphone-test" },
         });
         expect(dumpUi.isError).toBe(true);
         expect((dumpUi.content as Array<{ text?: string }>)[0].text).toContain("iOS Appium/XCUITest layer missing prerequisites");
 
         const deleted = await client.callTool({
-            name: "device_delete",
+            name: "delete",
             arguments: { deviceId: "ios-iphone-test", confirmDestructive: true },
         });
         expect(deleted.isError).not.toBe(true);
@@ -254,7 +252,7 @@ describe("device-lab MCP backend definitions", () => {
 
     it("creates, lists, inspects, starts with diagnostics, and deletes owner-scoped Windows Sandbox definitions", { timeout: TIMEOUT }, async () => {
         const create = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: {
                 backend: "windows-sandbox",
                 name: "Win Test",
@@ -280,7 +278,7 @@ describe("device-lab MCP backend definitions", () => {
             guestScratchDir: "C:\\ccc\\scratch",
         }));
 
-        const list = await client.callTool({ name: "device_list", arguments: {} });
+        const list = await client.callTool({ name: "list_devices", arguments: {} });
         const listed = JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             devices: Array<{ id: string; backend?: string }>;
         };
@@ -289,7 +287,7 @@ describe("device-lab MCP backend definitions", () => {
         ]));
 
         const status = await client.callTool({
-            name: "device_status",
+            name: "status",
             arguments: { deviceId: "windows-win-test" },
         });
         expect(status.isError).not.toBe(true);
@@ -310,7 +308,7 @@ describe("device-lab MCP backend definitions", () => {
         expect(inspected.backend.missing).toEqual(["wsb"]);
 
         const inventory = await client.callTool({
-            name: "device_inventory",
+            name: "inventory",
             arguments: { backend: "windows-sandbox" },
         });
         expect(inventory.isError).not.toBe(true);
@@ -335,28 +333,28 @@ describe("device-lab MCP backend definitions", () => {
         ]));
 
         const start = await client.callTool({
-            name: "device_start",
+            name: "start",
             arguments: { deviceId: "windows-win-test" },
         });
         expect(start.isError).toBe(true);
         expect((start.content as Array<{ text?: string }>)[0].text).toContain("Windows Sandbox backend missing prerequisites");
 
         const exec = await client.callTool({
-            name: "device_exec",
+            name: "exec",
             arguments: { deviceId: "windows-win-test", command: "whoami", helperTimeoutMs: 50 },
         });
         expect(exec.isError).toBe(true);
         expect((exec.content as Array<{ text?: string }>)[0].text).toContain("Windows Sandbox helper requires a running sandbox with a valid GUID sandboxId");
 
         const recordStatus = await client.callTool({
-            name: "device_record_video_status",
+            name: "record_video_status",
             arguments: { deviceId: "windows-win-test" },
         });
         expect(recordStatus.isError).not.toBe(true);
         expect(JSON.parse(((recordStatus.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toBeNull();
 
         const deleted = await client.callTool({
-            name: "device_delete",
+            name: "delete",
             arguments: { deviceId: "windows-win-test", confirmDestructive: true },
         });
         expect(deleted.isError).not.toBe(true);
@@ -364,7 +362,7 @@ describe("device-lab MCP backend definitions", () => {
 
     it("creates, lists, inspects, starts with diagnostics, and deletes owner-scoped macOS VM definitions", { timeout: TIMEOUT }, async () => {
         const create = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: {
                 backend: "macos-vm",
                 name: "Mac Test",
@@ -398,7 +396,7 @@ describe("device-lab MCP backend definitions", () => {
         }));
         expect(created.device.providerPlan.helper.status).toBe("planned");
 
-        const list = await client.callTool({ name: "device_list", arguments: {} });
+        const list = await client.callTool({ name: "list_devices", arguments: {} });
         const listed = JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             devices: Array<{ id: string; backend?: string }>;
         };
@@ -407,7 +405,7 @@ describe("device-lab MCP backend definitions", () => {
         ]));
 
         const status = await client.callTool({
-            name: "device_status",
+            name: "status",
             arguments: { deviceId: "macos-mac-test" },
         });
         expect(status.isError).not.toBe(true);
@@ -428,7 +426,7 @@ describe("device-lab MCP backend definitions", () => {
         expect(inspected.backend.missing).toEqual(["macos-host"]);
 
         const inventory = await client.callTool({
-            name: "device_inventory",
+            name: "inventory",
             arguments: { backend: "macos-vm" },
         });
         expect(inventory.isError).not.toBe(true);
@@ -455,28 +453,28 @@ describe("device-lab MCP backend definitions", () => {
         ]));
 
         const start = await client.callTool({
-            name: "device_start",
+            name: "start",
             arguments: { deviceId: "macos-mac-test" },
         });
         expect(start.isError).toBe(true);
         expect((start.content as Array<{ text?: string }>)[0].text).toContain("macOS VM backend missing prerequisites");
 
         const exec = await client.callTool({
-            name: "device_exec",
+            name: "exec",
             arguments: { deviceId: "macos-mac-test", command: "whoami" },
         });
         expect(exec.isError).toBe(true);
         expect((exec.content as Array<{ text?: string }>)[0].text).toContain("requires SSH bridge metadata");
 
         const recordStatus = await client.callTool({
-            name: "device_record_video_status",
+            name: "record_video_status",
             arguments: { deviceId: "macos-mac-test" },
         });
         expect(recordStatus.isError).not.toBe(true);
         expect(JSON.parse(((recordStatus.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toBeNull();
 
         const deleted = await client.callTool({
-            name: "device_delete",
+            name: "delete",
             arguments: { deviceId: "macos-mac-test", confirmDestructive: true },
         });
         expect(deleted.isError).not.toBe(true);

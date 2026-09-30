@@ -430,7 +430,7 @@ describe("Hyper-V E2E zero-config image selection", () => {
     });
 
     it("forces every Hyper-V Linux E2E operation through the broker", () => {
-        expect(hyperVLinuxBrokerArgs("device_create", {
+        expect(hyperVLinuxBrokerArgs("create", {
             backend: "linux-vm",
             provider: "container-qemu",
             viaBroker: false,
@@ -439,11 +439,11 @@ describe("Hyper-V E2E zero-config image selection", () => {
             provider: "hyper-v",
             viaBroker: true,
         });
-        expect(hyperVLinuxBrokerArgs("device_status", {
-            backend: "linux-vm",
+        expect(hyperVLinuxBrokerArgs("status", {
+            deviceId: "owned-linux",
             viaBroker: false,
         })).toEqual({
-            backend: "linux-vm",
+            deviceId: "owned-linux",
             viaBroker: true,
         });
     });
@@ -1850,7 +1850,7 @@ describe("Hyper-V E2E zero-config image selection", () => {
         const catchIndex = functionSource.indexOf("} catch (error: any) {");
         const captureIndex = functionSource.indexOf("reason: await hyperVWindowsFailureReason", catchIndex);
         const finallyIndex = functionSource.indexOf("} finally {", captureIndex);
-        const stopIndex = functionSource.indexOf('callTool("device_stop"', finallyIndex);
+        const stopIndex = functionSource.indexOf('callTool("stop"', finallyIndex);
         expect(functionIndex).toBeGreaterThan(-1);
         expect(catchIndex).toBeGreaterThan(-1);
         expect(captureIndex).toBeGreaterThan(catchIndex);

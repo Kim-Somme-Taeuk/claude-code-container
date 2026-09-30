@@ -133,7 +133,7 @@ describe("broker-first backend discovery over the MCP wire", () => {
             const port = await freePort();
             const args = { implicitBroker: true, autolaunch: false, hostCandidates: ["127.0.0.1"], port, timeoutMs: 100 };
             writeFileSync(log, "");
-            const minimal = await context.client.callTool({ name: "device_backends", arguments: { ...args, detail: false } });
+            const minimal = await context.client.callTool({ name: "backends", arguments: { ...args, detail: false } });
             expect(json(minimal)).toMatchObject({ ok: false, error: "broker-unavailable" });
             expect(readFileSync(log, "utf8")).not.toMatch(/command -v (?:adb|emulator|avdmanager|xcrun|wsb|tart)/);
             expect(mobileCatalogLookups(log)).toEqual([]);
@@ -142,14 +142,14 @@ describe("broker-first backend discovery over the MCP wire", () => {
             expect(json(minimal).backends.some((backend: any) => backend.name === "linux-vm")).toBe(true);
 
             writeFileSync(log, "");
-            const detailed = await context.client.callTool({ name: "device_backends", arguments: { ...args, detail: true } });
+            const detailed = await context.client.callTool({ name: "backends", arguments: { ...args, detail: true } });
             expect(json(detailed).localBackends.length).toBeGreaterThan(1);
             expect(readFileSync(log, "utf8")).toContain("command -v adb");
             expect(readFileSync(log, "utf8")).toContain("command -v qemu-system-x86_64");
             expect(mobileCatalogLookups(log)).toEqual([...mobileCatalogTools].sort());
 
             writeFileSync(log, "");
-            const direct = await context.client.callTool({ name: "device_backends", arguments: { implicitBroker: false, detail: false } });
+            const direct = await context.client.callTool({ name: "backends", arguments: { implicitBroker: false, detail: false } });
             expect(json(direct).backends.some((backend: any) => backend.name === "android-emulator")).toBe(true);
             expect(readFileSync(log, "utf8")).toContain("command -v adb");
             expect(mobileCatalogLookups(log)).toEqual([...mobileCatalogTools].sort());
@@ -178,7 +178,7 @@ cp.spawnSync=function(command,args,...rest){
                 : { implicitBroker: true, detail: true, autolaunch: false, hostCandidates: ["127.0.0.1"], port, timeoutMs: 100 };
             async function catalog(executables: Record<string, string>) {
                 writeFileSync(statePath, JSON.stringify(executables));
-                const result = json(await context.client.callTool({ name: "device_backends", arguments: args }));
+                const result = json(await context.client.callTool({ name: "backends", arguments: args }));
                 return (route === "direct" ? result.backends : result.localBackends)
                     .filter((backend: any) => ["android-emulator", "android-device", "ios-simulator", "ios-device"].includes(backend.name));
             }
@@ -186,7 +186,7 @@ cp.spawnSync=function(command,args,...rest){
             expect(first).toHaveLength(4);
             for (const backend of first) {
                 expect(backend).toMatchObject({ available: true, status: "available", missing: [], lazy: true });
-                expect(backend.capabilities).toContain("device_inventory");
+                expect(backend.capabilities).toContain("inventory");
             }
             expect(first.find((backend: any) => backend.name === "ios-device")).toMatchObject({
                 host: "macos-host-usb-xcode", creatable: false, attachable: true,

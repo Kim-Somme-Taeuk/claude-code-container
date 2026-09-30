@@ -108,14 +108,14 @@ export async function run(options: any = {}) {
     return withDeviceLabMcp(async ({ callTool }) => {
         const direct = { backend: "android-device" };
         try {
-            const inventory = parsePayload(await callTool("device_inventory", direct));
+            const inventory = parsePayload(await callTool("inventory", { detail: true, ...direct }));
             const hostDevices = Array.isArray(inventory.hostDevices)
                 ? inventory.hostDevices
                 : inventory.hostDevices?.devices;
             assert.ok(Array.isArray(hostDevices));
             assert.ok(hostDevices.some((device) => device.serial === cap.serial));
 
-            const wireless = parsePayload(await callTool("device_wireless", direct));
+            const wireless = parsePayload(await callTool("wireless", { detail: true, ...direct }));
             assert.strictEqual(wireless.provider, "adb");
             assert.deepStrictEqual(
                 ["status", "usb-tcpip", "pair", "connect"].filter((action) => !wireless.actions?.includes(action)),
@@ -128,7 +128,7 @@ export async function run(options: any = {}) {
             assert.ok(Array.isArray(wirelessHostDevices));
             assert.ok(wirelessHostDevices.some((device) => device.serial === cap.serial && device.state === "device"));
 
-            const attach = parsePayload(await callTool("device_attach", {
+            const attach = parsePayload(await callTool("attach", { detail: true,
                 ...direct,
                 name: `Real Android Device E2E ${suffix}`,
                 deviceId,
@@ -138,34 +138,32 @@ export async function run(options: any = {}) {
             assert.strictEqual(attach.device.id, deviceId);
             assert.strictEqual(attach.device.serial, cap.serial);
 
-            const status = parsePayload(await callTool("device_status", { ...direct, deviceId }));
+            const status = parsePayload(await callTool("status", { detail: true, deviceId }));
             assert.strictEqual(status.device.id, deviceId);
             assert.strictEqual(status.device.serial, cap.serial);
             const statusCommand = androidDeviceStatusCommand(status);
             assert.strictEqual(statusCommand?.status, 0);
             assert.strictEqual(String(statusCommand?.stdout || "").trim(), "device");
 
-            const start = parsePayload(await callTool("device_start", { ...direct, deviceId }));
+            const start = parsePayload(await callTool("start", { detail: true, deviceId }));
             assert.strictEqual(androidDeviceStartSucceeded(start), true);
 
-            const exec = parsePayload(await callTool("device_exec", {
-                ...direct,
+            const exec = parsePayload(await callTool("exec", { detail: true,
                 deviceId,
                 command: "echo ccc-android-device-e2e-ok",
             }));
             assert.strictEqual(exec.status, 0);
             assert.match(exec.stdout, /ccc-android-device-e2e-ok/);
 
-            const session = parsePayload(await callTool("mobile_session_status", { ...direct, deviceId }));
+            const session = parsePayload(await callTool("automation_status", { detail: true, deviceId }));
             assert.strictEqual(session.deviceId, deviceId);
 
-            const ui = parsePayload(await callTool("mobile_dump_ui", { ...direct, deviceId }));
+            const ui = parsePayload(await callTool("dump_ui", { detail: true, deviceId }));
             assert.strictEqual(ui.provider, "adb-uiautomator");
             assert.ok(typeof ui.source === "string");
 
             const waitText = stableAndroidUiText(ui.source);
-            const waitForText = parsePayload(await callTool("mobile_wait_for_text", {
-                ...direct,
+            const waitForText = parsePayload(await callTool("wait_for_text", { detail: true,
                 deviceId,
                 text: waitText,
                 timeoutMs: 5000,
@@ -175,99 +173,98 @@ export async function run(options: any = {}) {
             assert.strictEqual(waitForText.text, waitText);
             assert.strictEqual(waitForText.found, true);
 
-            const tap = parsePayload(await callTool("mobile_tap", { ...direct, deviceId, x: 20, y: 20 }));
+            const tap = parsePayload(await callTool("click", { detail: true, deviceId, x: 20, y: 20 }));
             assert.strictEqual(tap.provider, "adb");
             assert.deepStrictEqual(tap.tapped, { x: 20, y: 20 });
 
-            const doubleTap = parsePayload(await callTool("mobile_double_tap", { ...direct, deviceId, x: 30, y: 30 }));
+            const doubleTap = parsePayload(await callTool("double_click", { detail: true, deviceId, x: 30, y: 30 }));
             assert.strictEqual(doubleTap.provider, "adb");
             assert.deepStrictEqual(doubleTap.doubleTapped, { x: 30, y: 30 });
 
-            const longPress = parsePayload(await callTool("mobile_long_press", { ...direct, deviceId, x: 40, y: 40, durationMs: 300 }));
+            const longPress = parsePayload(await callTool("long_press", { detail: true, deviceId, x: 40, y: 40, durationMs: 300 }));
             assert.strictEqual(longPress.provider, "adb");
             assert.deepStrictEqual(longPress.longPressed, { x: 40, y: 40, durationMs: 300 });
 
-            const swipe = parsePayload(await callTool("mobile_swipe", { ...direct, deviceId, x1: 80, y1: 120, x2: 80, y2: 80, durationMs: 200 }));
+            const swipe = parsePayload(await callTool("swipe", { detail: true, deviceId, x1: 80, y1: 120, x2: 80, y2: 80, durationMs: 200 }));
             assert.strictEqual(swipe.provider, "adb");
             assert.deepStrictEqual(swipe.swiped, { x1: 80, y1: 120, x2: 80, y2: 80, durationMs: 200 });
 
-            const drag = parsePayload(await callTool("mobile_drag", { ...direct, deviceId, x1: 90, y1: 90, x2: 100, y2: 100, durationMs: 300 }));
+            const drag = parsePayload(await callTool("drag", { detail: true, deviceId, x1: 90, y1: 90, x2: 100, y2: 100, durationMs: 300 }));
             assert.strictEqual(drag.provider, "adb");
             assert.deepStrictEqual(drag.dragged, { x1: 90, y1: 90, x2: 100, y2: 100, durationMs: 300 });
 
-            const typeText = parsePayload(await callTool("mobile_type_text", { ...direct, deviceId, text: "ccc" }));
+            const typeText = parsePayload(await callTool("type", { detail: true, deviceId, text: "ccc" }));
             assert.strictEqual(typeText.provider, "adb");
             assert.strictEqual(typeText.typed, true);
 
-            const key = parsePayload(await callTool("mobile_key", { ...direct, deviceId, keyCode: 4 }));
+            const key = parsePayload(await callTool("key", { detail: true, deviceId, keyCode: 4 }));
             assert.strictEqual(key.provider, "adb");
             assert.strictEqual(key.key, 4);
 
-            const home = parsePayload(await callTool("mobile_home", { ...direct, deviceId }));
+            const home = parsePayload(await callTool("home", { detail: true, deviceId }));
             assert.strictEqual(home.provider, "adb");
             assert.strictEqual(home.key, 3);
 
-            const back = parsePayload(await callTool("mobile_back", { ...direct, deviceId }));
+            const back = parsePayload(await callTool("back", { detail: true, deviceId }));
             assert.strictEqual(back.provider, "adb");
             assert.strictEqual(back.key, 4);
 
-            const forward = parsePayload(await callTool("mobile_forward", { ...direct, deviceId }));
+            const forward = parsePayload(await callTool("forward", { detail: true, deviceId }));
             assert.strictEqual(forward.provider, "adb");
             assert.strictEqual(forward.key, 125);
 
-            const recents = parsePayload(await callTool("mobile_recents", { ...direct, deviceId }));
+            const recents = parsePayload(await callTool("recents", { detail: true, deviceId }));
             assert.strictEqual(recents.provider, "adb");
             assert.strictEqual(recents.key, 187);
 
-            const power = parsePayload(await callTool("mobile_power", { ...direct, deviceId }));
+            const power = parsePayload(await callTool("power", { detail: true, deviceId }));
             assert.strictEqual(power.provider, "adb");
             assert.strictEqual(power.key, 26);
 
-            const lock = parsePayload(await callTool("mobile_lock", { ...direct, deviceId }));
+            const lock = parsePayload(await callTool("lock", { detail: true, deviceId }));
             assert.strictEqual(lock.provider, "adb");
             assert.strictEqual(lock.key, 223);
 
-            const unlock = parsePayload(await callTool("mobile_unlock", { ...direct, deviceId }));
+            const unlock = parsePayload(await callTool("unlock", { detail: true, deviceId }));
             assert.strictEqual(unlock.provider, "adb");
             assert.strictEqual(unlock.key, 224);
 
-            const portrait = parsePayload(await callTool("mobile_set_orientation", { ...direct, deviceId, orientation: "portrait" }));
+            const portrait = parsePayload(await callTool("set_orientation", { detail: true, deviceId, orientation: "portrait" }));
             assert.strictEqual(portrait.provider, "adb");
             assert.strictEqual(portrait.orientation, "portrait");
 
-            const rotateLeft = parsePayload(await callTool("mobile_set_orientation", { orientation: "landscape", ...direct, deviceId }));
+            const rotateLeft = parsePayload(await callTool("set_orientation", { detail: true, orientation: "landscape", deviceId }));
             assert.strictEqual(rotateLeft.provider, "adb");
             assert.strictEqual(rotateLeft.orientation, "landscape");
 
-            const rotateRight = parsePayload(await callTool("mobile_set_orientation", { orientation: "reverse-landscape", ...direct, deviceId }));
+            const rotateRight = parsePayload(await callTool("set_orientation", { detail: true, orientation: "reverse-landscape", deviceId }));
             assert.strictEqual(rotateRight.provider, "adb");
             assert.strictEqual(rotateRight.orientation, "reverse-landscape");
 
-            const openedUrl = parsePayload(await callTool("mobile_open_url", { ...direct, deviceId, url: "https://example.invalid/" }));
+            const openedUrl = parsePayload(await callTool("open_url", { detail: true, deviceId, url: "https://example.invalid/" }));
             assert.strictEqual(openedUrl.provider, "adb");
             assert.strictEqual(openedUrl.openedUrl, "https://example.invalid/");
 
-            const setClipboard = parsePayload(await callTool("mobile_set_clipboard", { ...direct, deviceId, text: "ccc-android-device-clipboard" }));
+            const setClipboard = parsePayload(await callTool("set_clipboard", { detail: true, deviceId, text: "ccc-android-device-clipboard" }));
             assert.strictEqual(setClipboard.provider, "broker-appium");
             assert.ok(setClipboard.requests >= 1);
 
-            const getClipboard = parsePayload(await callTool("mobile_get_clipboard", { ...direct, deviceId }));
+            const getClipboard = parsePayload(await callTool("get_clipboard", { detail: true, deviceId }));
             assert.strictEqual(getClipboard.provider, "broker-appium");
             assert.ok(getClipboard.requests >= 1);
             assert.strictEqual(getClipboard.text, "ccc-android-device-clipboard");
 
-            const mobileScreenshot = await callTool("device_screenshot", { ...direct, deviceId });
+            const mobileScreenshot = await callTool("screenshot", { detail: true, deviceId });
             assert.strictEqual(mobileScreenshot?.content?.[0]?.type, "image");
             assert.strictEqual(mobileScreenshot.content[0].mimeType, "image/png");
             assert.ok(String(mobileScreenshot.content[0].data || "").length > 64);
 
-            const deviceScreenshot = await callTool("device_screenshot", { ...direct, deviceId });
+            const deviceScreenshot = await callTool("screenshot", { detail: true, deviceId });
             assert.strictEqual(deviceScreenshot?.content?.[0]?.type, "image");
             assert.strictEqual(deviceScreenshot.content[0].mimeType, "image/png");
             assert.ok(String(deviceScreenshot.content[0].data || "").length > 64);
 
-            const recordStart = parsePayload(await callTool("device_record_video_start", {
-                ...direct,
+            const recordStart = parsePayload(await callTool("record_video_start", { detail: true,
                 deviceId,
                 localPath: recordingPath,
                 timeLimitSec: 10,
@@ -277,11 +274,11 @@ export async function run(options: any = {}) {
             assert.strictEqual(recordStart.recording.active, true);
             await new Promise((resolve) => setTimeout(resolve, 1000));
 
-            const recordingStatus = parsePayload(await callTool("device_record_video_status", { ...direct, deviceId }));
+            const recordingStatus = parsePayload(await callTool("record_video_status", { detail: true, deviceId }));
             assert.strictEqual(recordingStatus.provider, "adb-screenrecord");
             assert.strictEqual(recordingStatus.recording.active, true);
 
-            const recordStop = parsePayload(await callTool("device_record_video_stop", { ...direct, deviceId }));
+            const recordStop = parsePayload(await callTool("record_video_stop", { detail: true, deviceId }));
             recordingActive = false;
             assert.strictEqual(recordStop.provider, "adb-screenrecord");
             assert.strictEqual(recordStop.stopped, true);
@@ -294,21 +291,20 @@ export async function run(options: any = {}) {
             const remotePath = `/sdcard/Download/ccc-android-device-e2e-${suffix}.txt`;
             const downloadTarget = join(tempDir, "download.txt");
             writeFileSync(uploadSource, `ccc-android-device-file-${suffix}`);
-            const upload = parsePayload(await callTool("device_upload", { ...direct, deviceId, localPath: uploadSource, remotePath }));
+            const upload = parsePayload(await callTool("upload", { detail: true, deviceId, localPath: uploadSource, remotePath }));
             assert.strictEqual(upload.provider, "adb");
             assert.strictEqual(androidDeviceReportedPathMatches(upload.uploaded.localPath, uploadSource), true);
             assert.strictEqual(upload.uploaded.remotePath, remotePath);
 
-            const download = parsePayload(await callTool("device_download", { ...direct, deviceId, remotePath, localPath: downloadTarget }));
+            const download = parsePayload(await callTool("download", { detail: true, deviceId, remotePath, localPath: downloadTarget }));
             assert.strictEqual(download.provider, "adb");
             assert.strictEqual(download.downloaded.remotePath, remotePath);
             assert.strictEqual(androidDeviceReportedPathMatches(download.downloaded.localPath, downloadTarget), true);
             assert.strictEqual(readFileSync(downloadTarget, "utf-8"), `ccc-android-device-file-${suffix}`);
-            try { await callTool("device_exec", { ...direct, deviceId, command: `rm -f ${remotePath}` }); } catch { /* preserve primary failure */ }
+            try { await callTool("exec", { detail: true, deviceId, command: `rm -f ${remotePath}` }); } catch { /* preserve primary failure */ }
 
             {
-                const deviceInstall = parsePayload(await callTool("device_install_app", {
-                    ...direct,
+                const deviceInstall = parsePayload(await callTool("install_app", { detail: true,
                     deviceId,
                     path: appApk,
                     helperTimeoutMs: ANDROID_DEVICE_INSTALL_TIMEOUT_MS,
@@ -316,12 +312,11 @@ export async function run(options: any = {}) {
                 assert.strictEqual(deviceInstall.provider, "adb");
                 assert.strictEqual(androidDeviceReportedPathMatches(deviceInstall.installed, appApk), true);
 
-                const deviceLaunch = parsePayload(await callTool("device_launch_app", { ...direct, deviceId, packageName: appPackage }));
+                const deviceLaunch = parsePayload(await callTool("launch_app", { detail: true, deviceId, packageName: appPackage }));
                 assert.strictEqual(deviceLaunch.provider, "adb");
                 assert.strictEqual(deviceLaunch.launched, appPackage);
 
-                const install = parsePayload(await callTool("device_install_app", {
-                    ...direct,
+                const install = parsePayload(await callTool("install_app", { detail: true,
                     deviceId,
                     path: appApk,
                     helperTimeoutMs: ANDROID_DEVICE_INSTALL_TIMEOUT_MS,
@@ -329,12 +324,11 @@ export async function run(options: any = {}) {
                 assert.strictEqual(install.provider, "adb");
                 assert.strictEqual(androidDeviceReportedPathMatches(install.installed, appApk), true);
 
-                const launch = parsePayload(await callTool("device_launch_app", { ...direct, deviceId, packageName: appPackage }));
+                const launch = parsePayload(await callTool("launch_app", { detail: true, deviceId, packageName: appPackage }));
                 assert.strictEqual(launch.provider, "adb");
                 assert.strictEqual(launch.launched, appPackage);
 
-                const waitForApp = parsePayload(await callTool("mobile_wait_for_app", {
-                    ...direct,
+                const waitForApp = parsePayload(await callTool("wait_for_app", { detail: true,
                     deviceId,
                     packageName: appPackage,
                     timeoutMs: 10000,
@@ -345,32 +339,32 @@ export async function run(options: any = {}) {
                 assert.strictEqual(waitForApp.running, true);
                 assert.ok(String(waitForApp.pid || "").trim());
 
-                const grant = parsePayload(await callTool("mobile_grant_permission", { ...direct, deviceId, packageName: appPackage, permission: appPermission }));
+                const grant = parsePayload(await callTool("grant_permission", { detail: true, deviceId, packageName: appPackage, permission: appPermission }));
                 assert.deepStrictEqual(grant.permission, { packageName: appPackage, permission: appPermission, action: "grant" });
-                const revoke = parsePayload(await callTool("mobile_revoke_permission", { ...direct, deviceId, packageName: appPackage, permission: appPermission }));
+                const revoke = parsePayload(await callTool("revoke_permission", { detail: true, deviceId, packageName: appPackage, permission: appPermission }));
                 assert.deepStrictEqual(revoke.permission, { packageName: appPackage, permission: appPermission, action: "revoke" });
 
-                const stopApp = parsePayload(await callTool("mobile_stop_app", { ...direct, deviceId, packageName: appPackage }));
+                const stopApp = parsePayload(await callTool("stop_app", { detail: true, deviceId, packageName: appPackage }));
                 assert.strictEqual(stopApp.provider, "adb");
                 assert.strictEqual(stopApp.packageName, appPackage);
 
-                const reset = parsePayload(await callTool("device_reset", { ...direct, deviceId, packageName: appPackage, confirmDestructive: true }));
+                const reset = parsePayload(await callTool("reset", { detail: true, deviceId, packageName: appPackage, confirmDestructive: true }));
                 assert.strictEqual(reset.provider, "adb");
                 assert.deepStrictEqual(reset.reset, { packageName: appPackage });
 
-                const clearAppData = parsePayload(await callTool("mobile_clear_app_data", { ...direct, deviceId, packageName: appPackage, confirmDestructive: true }));
+                const clearAppData = parsePayload(await callTool("clear_app_data", { detail: true, deviceId, packageName: appPackage, confirmDestructive: true }));
                 assert.strictEqual(clearAppData.provider, "adb");
                 assert.strictEqual(clearAppData.packageName, appPackage);
 
-                const uninstall = parsePayload(await callTool("mobile_uninstall_app", { ...direct, deviceId, packageName: appPackage, confirmDestructive: true }));
+                const uninstall = parsePayload(await callTool("uninstall_app", { detail: true, deviceId, packageName: appPackage, confirmDestructive: true }));
                 assert.strictEqual(uninstall.provider, "adb");
                 assert.strictEqual(uninstall.uninstalled, appPackage);
             }
 
-            const stop = parsePayload(await callTool("device_stop", { ...direct, deviceId }));
+            const stop = parsePayload(await callTool("stop", { detail: true, deviceId }));
             assert.strictEqual(androidDeviceStopPreservedPhysicalDevice(stop), true);
 
-            const detach = parsePayload(await callTool("device_detach", { ...direct, deviceId }));
+            const detach = parsePayload(await callTool("detach", { detail: true, deviceId }));
             attached = false;
             assert.strictEqual(detach.detached, deviceId);
 
@@ -388,12 +382,12 @@ export async function run(options: any = {}) {
         } finally {
             const cleanupErrors = [];
             if (recordingActive) {
-                try { await callTool("device_record_video_stop", { ...direct, deviceId }); } catch (error) {
+                try { await callTool("record_video_stop", { detail: true, deviceId }); } catch (error) {
                     cleanupErrors.push(`recording stop: ${error.message}`);
                 }
             }
             if (attached) {
-                try { await callTool("device_detach", { ...direct, deviceId }); } catch (error) {
+                try { await callTool("detach", { detail: true, deviceId }); } catch (error) {
                     cleanupErrors.push(`device detach: ${error.message}`);
                 }
             }

@@ -1,4 +1,4 @@
-import { TOOLS, SINGLE_BACKEND_TOOL_DEFAULTS } from "../../device-lab-mcp/src/tools.mjs";
+import { TOOLS, SINGLE_BACKEND_TOOL_DEFAULTS, publicToolName, DEVICE_FLOW_TOOL_NAMES } from "../../device-lab-mcp/src/tools.mjs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdirSync } from "fs";
 import { join } from "path";
@@ -27,38 +27,38 @@ const HIDDEN_LEGACY_TRANSPORT_KEYS = new Set<string>([
 ]);
 
 const BROKER_CAPABLE_DEVICE_TOOLS = [
-    "device_create",
-    "device_status",
-    "device_start",
-    "device_stop",
-    "device_delete",
-    "device_inventory",
-    "device_record_video_status",
-    "device_screenshot",
-    "device_cursor_position",
-    "device_window_list",
-    "device_accessibility_snapshot",
-    "device_record_video_start",
-    "device_record_video_stop",
-    "device_exec",
-    "device_upload",
-    "device_download",
-    "device_reset",
-    "device_install_app",
-    "device_launch_app",
-    "device_click",
-    "device_double_click",
-    "device_key",
-    "device_type",
-    "device_scroll",
-    "device_snapshot_create",
-    "device_snapshot_restore",
-    "device_snapshot_delete",
-    "device_attach",
-    "device_detach",
+    "create",
+    "status",
+    "start",
+    "stop",
+    "delete",
+    "inventory",
+    "record_video_status",
+    "screenshot",
+    "cursor_position",
+    "window_list",
+    "accessibility_snapshot",
+    "record_video_start",
+    "record_video_stop",
+    "exec",
+    "upload",
+    "download",
+    "reset",
+    "install_app",
+    "launch_app",
+    "click",
+    "double_click",
+    "key",
+    "type",
+    "scroll",
+    "snapshot_create",
+    "snapshot_restore",
+    "snapshot_delete",
+    "attach",
+    "detach",
 ] as const;
 
-const DEVICE_ROUTE_PORT_COLLISION_TOOLS = new Set(["device_create", "device_attach"]);
+const DEVICE_ROUTE_PORT_COLLISION_TOOLS = new Set(["create", "attach"]);
 const DEVICE_BACKEND_ENUM = ["android-emulator", "android-device", "ios-simulator", "ios-device", "windows-sandbox", "windows-vm", "macos-vm", "linux-vm"] as const;
 const DEVICE_WITH_DISPLAY_BACKEND_ENUM = ["x11-current-display", "android-emulator", "android-device", "ios-simulator", "ios-device", "windows-sandbox", "windows-vm", "macos-vm", "linux-vm"] as const;
 const DEVICE_STATUS_BACKEND_ENUM = ["x11-current-display", "android-emulator", "android-device", "ios-simulator", "ios-device", "windows-sandbox", "windows-vm", "macos-vm", "linux-vm"] as const;
@@ -79,32 +79,32 @@ const MOBILE_WITHOUT_IOS_DEVICE_BACKEND_ENUM = ["android-emulator", "android-dev
 const APP_BACKEND_ENUM = ["android-emulator", "android-device", "ios-simulator", "ios-device"] as const;
 
 const DEVICE_TOOL_BACKEND_ENUMS: Record<string, readonly string[]> = {
-    device_create: DEVICE_CREATE_BACKEND_ENUM,
-    device_delete: DEVICE_CREATE_BACKEND_ENUM,
-    device_attach: PHYSICAL_BACKEND_ENUM,
-    device_detach: PHYSICAL_BACKEND_ENUM,
-    device_status: DEVICE_STATUS_BACKEND_ENUM,
-    device_screenshot: DEVICE_WITH_DISPLAY_BACKEND_ENUM,
-    device_exec: DEVICE_EXEC_BACKEND_ENUM,
-    device_click: DISPLAY_DESKTOP_BACKEND_ENUM,
-    device_double_click: DISPLAY_DESKTOP_BACKEND_ENUM,
-    device_key: DISPLAY_DESKTOP_BACKEND_ENUM,
-    device_type: DISPLAY_DESKTOP_BACKEND_ENUM,
-    device_scroll: DISPLAY_DESKTOP_BACKEND_ENUM,
-    device_cursor_position: DISPLAY_DESKTOP_BACKEND_ENUM,
-    device_window_list: DESKTOP_BACKEND_ENUM,
-    device_accessibility_snapshot: DESKTOP_BACKEND_ENUM,
-    device_snapshot_create: SNAPSHOT_BACKEND_ENUM,
-    device_snapshot_restore: SNAPSHOT_BACKEND_ENUM,
-    device_snapshot_delete: SNAPSHOT_BACKEND_ENUM,
-    device_record_video_start: RECORDING_BACKEND_ENUM,
-    device_record_video_stop: RECORDING_BACKEND_ENUM,
-    device_record_video_status: RECORDING_BACKEND_ENUM,
-    device_upload: FILE_TRANSFER_BACKEND_ENUM,
-    device_download: FILE_TRANSFER_BACKEND_ENUM,
-    device_reset: RESET_BACKEND_ENUM,
-    device_install_app: APP_BACKEND_ENUM,
-    device_launch_app: APP_BACKEND_ENUM,
+    create: DEVICE_CREATE_BACKEND_ENUM,
+    delete: DEVICE_CREATE_BACKEND_ENUM,
+    attach: PHYSICAL_BACKEND_ENUM,
+    detach: PHYSICAL_BACKEND_ENUM,
+    status: DEVICE_STATUS_BACKEND_ENUM,
+    screenshot: DEVICE_WITH_DISPLAY_BACKEND_ENUM,
+    exec: DEVICE_EXEC_BACKEND_ENUM,
+    click: DEVICE_WITH_DISPLAY_BACKEND_ENUM,
+    double_click: DEVICE_WITH_DISPLAY_BACKEND_ENUM,
+    key: DEVICE_WITH_DISPLAY_BACKEND_ENUM,
+    type: DEVICE_WITH_DISPLAY_BACKEND_ENUM,
+    scroll: DISPLAY_DESKTOP_BACKEND_ENUM,
+    cursor_position: DISPLAY_DESKTOP_BACKEND_ENUM,
+    window_list: DESKTOP_BACKEND_ENUM,
+    accessibility_snapshot: DESKTOP_BACKEND_ENUM,
+    snapshot_create: SNAPSHOT_BACKEND_ENUM,
+    snapshot_restore: SNAPSHOT_BACKEND_ENUM,
+    snapshot_delete: SNAPSHOT_BACKEND_ENUM,
+    record_video_start: RECORDING_BACKEND_ENUM,
+    record_video_stop: RECORDING_BACKEND_ENUM,
+    record_video_status: RECORDING_BACKEND_ENUM,
+    upload: FILE_TRANSFER_BACKEND_ENUM,
+    download: FILE_TRANSFER_BACKEND_ENUM,
+    reset: RESET_BACKEND_ENUM,
+    install_app: APP_BACKEND_ENUM,
+    launch_app: APP_BACKEND_ENUM,
 };
 
 function expectedDeviceToolBackends(name: string) {
@@ -112,65 +112,65 @@ function expectedDeviceToolBackends(name: string) {
 }
 
 const MOBILE_TOOL_BACKEND_ENUMS: Record<string, readonly string[]> = {
-    mobile_back: ANDROID_BACKEND_ENUM,
-    mobile_forward: ANDROID_BACKEND_ENUM,
-    mobile_recents: ANDROID_BACKEND_ENUM,
-    mobile_power: ANDROID_BACKEND_ENUM,
-    mobile_open_url: MOBILE_WITHOUT_IOS_DEVICE_BACKEND_ENUM,
-    mobile_uninstall_app: MOBILE_WITHOUT_IOS_DEVICE_BACKEND_ENUM,
-    mobile_clear_app_data: RESET_BACKEND_ENUM,
-    mobile_grant_permission: MOBILE_WITHOUT_IOS_DEVICE_BACKEND_ENUM,
-    mobile_revoke_permission: MOBILE_WITHOUT_IOS_DEVICE_BACKEND_ENUM,
-    mobile_set_location: EMULATOR_SIMULATOR_BACKEND_ENUM,
-    mobile_set_battery: ANDROID_EMULATOR_BACKEND_ENUM,
-    mobile_set_network: ANDROID_EMULATOR_BACKEND_ENUM,
-    mobile_toggle_airplane_mode: ANDROID_EMULATOR_BACKEND_ENUM,
-    mobile_set_clipboard: MOBILE_WITHOUT_IOS_DEVICE_BACKEND_ENUM,
-    mobile_get_clipboard: MOBILE_WITHOUT_IOS_DEVICE_BACKEND_ENUM,
+    back: ANDROID_BACKEND_ENUM,
+    forward: ANDROID_BACKEND_ENUM,
+    recents: ANDROID_BACKEND_ENUM,
+    power: ANDROID_BACKEND_ENUM,
+    open_url: MOBILE_WITHOUT_IOS_DEVICE_BACKEND_ENUM,
+    uninstall_app: MOBILE_WITHOUT_IOS_DEVICE_BACKEND_ENUM,
+    clear_app_data: RESET_BACKEND_ENUM,
+    grant_permission: MOBILE_WITHOUT_IOS_DEVICE_BACKEND_ENUM,
+    revoke_permission: MOBILE_WITHOUT_IOS_DEVICE_BACKEND_ENUM,
+    set_location: EMULATOR_SIMULATOR_BACKEND_ENUM,
+    set_battery: ANDROID_EMULATOR_BACKEND_ENUM,
+    set_network: ANDROID_EMULATOR_BACKEND_ENUM,
+    toggle_airplane_mode: ANDROID_EMULATOR_BACKEND_ENUM,
+    set_clipboard: MOBILE_WITHOUT_IOS_DEVICE_BACKEND_ENUM,
+    get_clipboard: MOBILE_WITHOUT_IOS_DEVICE_BACKEND_ENUM,
 };
 
 function expectedMobileToolBackends(name: string) {
-    if (name.startsWith("device_")) return expectedDeviceToolBackends(name);
+    if (["click", "double_click", "type", "key", "screenshot", "install_app", "launch_app"].includes(name)) return expectedDeviceToolBackends(name);
     return MOBILE_TOOL_BACKEND_ENUMS[name] || MOBILE_BACKEND_ENUM;
 }
 
 const BROKER_CAPABLE_MOBILE_TOOLS = [
-    "mobile_session_status",
-    "mobile_dump_ui",
-    "mobile_tap",
-    "mobile_double_tap",
-    "mobile_long_press",
-    "mobile_swipe",
-    "mobile_drag",
-    "mobile_type_text",
-    "mobile_key",
-    "mobile_home",
-    "mobile_back",
-    "mobile_forward",
-    "mobile_recents",
-    "mobile_power",
-    "mobile_lock",
-    "mobile_unlock",
+    "automation_status",
+    "dump_ui",
+    "click",
+    "double_click",
+    "long_press",
+    "swipe",
+    "drag",
+    "type",
+    "key",
+    "home",
+    "back",
+    "forward",
+    "recents",
+    "power",
+    "lock",
+    "unlock",
 
 
-    "mobile_set_orientation",
-    "mobile_open_url",
-    "device_install_app",
-    "device_launch_app",
-    "mobile_uninstall_app",
-    "mobile_stop_app",
-    "mobile_clear_app_data",
-    "mobile_grant_permission",
-    "mobile_revoke_permission",
-    "mobile_set_location",
-    "mobile_set_battery",
-    "mobile_set_network",
-    "mobile_toggle_airplane_mode",
-    "mobile_set_clipboard",
-    "mobile_get_clipboard",
-    "mobile_wait_for_text",
-    "mobile_wait_for_app",
-    "device_screenshot",
+    "set_orientation",
+    "open_url",
+    "install_app",
+    "launch_app",
+    "uninstall_app",
+    "stop_app",
+    "clear_app_data",
+    "grant_permission",
+    "revoke_permission",
+    "set_location",
+    "set_battery",
+    "set_network",
+    "toggle_airplane_mode",
+    "set_clipboard",
+    "get_clipboard",
+    "wait_for_text",
+    "wait_for_app",
+    "screenshot",
 ] as const;
 
 function toolProperties(tool: { inputSchema?: unknown } | undefined) {
@@ -217,7 +217,7 @@ describe("device-lab MCP foundation and definitions", () => {
         const result = await client.listTools();
         const names = result.tools.map((tool) => tool.name);
         expect(names).toEqual(TOOLS.map((tool: { name: string }) => tool.name));
-        expect(names).toHaveLength(87);
+        expect(new Set(names).size).toBe(TOOLS.length);
         const requiredWithoutProperties = result.tools.flatMap((tool) => {
             const schema = tool.inputSchema as { required?: unknown; properties?: Record<string, unknown> } | undefined;
             const required = Array.isArray(schema?.required) ? schema.required.map(String) : [];
@@ -232,8 +232,8 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(requiredWithoutProperties).toEqual([]);
         expect(advertisedTransportKeys).toEqual([]);
 
-        expect(names).toContain("device_backends");
-        expect(names).toContain("device_broker_status");
+        expect(names).toContain("backends");
+        expect(names).toContain("broker_status");
         expect(names).not.toContain("device_broker_shutdown");
         expect(names).not.toContain("device_broker_service");
         expect(names).not.toContain("device_broker_rpc");
@@ -242,90 +242,90 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(names).not.toContain("device_broker_apple");
         expect(names).not.toContain("device_broker_command");
         expect(names).not.toContain("device_broker_appium");
-        expect(names).toContain("device_list");
-        expect(names).toContain("device_inventory");
-        expect(names).toContain("device_wireless");
-        expect(names).toContain("display_current");
-        expect(names).toContain("display_screenshot");
-        expect(names).toContain("display_click");
-        expect(names).toContain("display_double_click");
-        expect(names).toContain("display_key");
-        expect(names).toContain("display_type");
-        expect(names).toContain("display_scroll");
-        expect(names).toContain("display_cursor_position");
-        expect(names).toContain("device_create");
-        expect(names).toContain("device_attach");
-        expect(names).toContain("device_detach");
-        expect(names).toContain("device_delete");
-        expect(names).toContain("device_start");
-        expect(names).toContain("device_stop");
-        expect(names).toContain("device_status");
-        expect(names).toContain("device_exec");
-        expect(names).toContain("device_screenshot");
-        expect(names).toContain("device_click");
-        expect(names).toContain("device_double_click");
-        expect(names).toContain("device_key");
-        expect(names).toContain("device_type");
-        expect(names).toContain("device_scroll");
-        expect(names).toContain("device_cursor_position");
-        expect(names).toContain("device_window_list");
-        expect(names).toContain("device_accessibility_snapshot");
-        expect(names).toContain("device_base_image_create");
-        expect(names).toContain("device_base_image_clone");
+        expect(names).toContain("list_devices");
+        expect(names).toContain("inventory");
+        expect(names).toContain("wireless");
+        expect(names).toContain("status");
+        expect(names).toContain("screenshot");
+        expect(names).toContain("click");
+        expect(names).toContain("double_click");
+        expect(names).toContain("key");
+        expect(names).toContain("type");
+        expect(names).toContain("scroll");
+        expect(names).toContain("cursor_position");
+        expect(names).toContain("create");
+        expect(names).toContain("attach");
+        expect(names).toContain("detach");
+        expect(names).toContain("delete");
+        expect(names).toContain("start");
+        expect(names).toContain("stop");
+        expect(names).toContain("status");
+        expect(names).toContain("exec");
+        expect(names).toContain("screenshot");
+        expect(names).toContain("click");
+        expect(names).toContain("double_click");
+        expect(names).toContain("key");
+        expect(names).toContain("type");
+        expect(names).toContain("scroll");
+        expect(names).toContain("cursor_position");
+        expect(names).toContain("window_list");
+        expect(names).toContain("accessibility_snapshot");
+        expect(names).toContain("base_image_create");
+        expect(names).toContain("base_image_clone");
         expect(names).not.toContain("device_image_create");
         expect(names).not.toContain("device_image_clone");
-        expect(names).toContain("device_snapshot_create");
-        expect(names).toContain("device_snapshot_restore");
-        expect(names).toContain("device_snapshot_delete");
-        expect(names).toContain("device_record_video_start");
-        expect(names).toContain("device_record_video_stop");
-        expect(names).toContain("device_record_video_status");
-        expect(names).toContain("device_upload");
-        expect(names).toContain("device_download");
-        expect(names).toContain("device_reset");
-        expect(names).toContain("device_install_app");
-        expect(names).toContain("device_launch_app");
-        expect(names).toContain("mobile_session_status");
-        expect(names).toContain("mobile_dump_ui");
-        expect(names).toContain("mobile_tap");
-        expect(names).toContain("mobile_double_tap");
-        expect(names).toContain("mobile_long_press");
-        expect(names).toContain("mobile_swipe");
-        expect(names).toContain("mobile_drag");
-        expect(names).toContain("mobile_type_text");
-        expect(names).toContain("mobile_key");
-        expect(names).toContain("mobile_home");
-        expect(names).toContain("mobile_back");
-        expect(names).toContain("mobile_forward");
-        expect(names).toContain("mobile_recents");
-        expect(names).toContain("mobile_power");
-        expect(names).toContain("mobile_lock");
-        expect(names).toContain("mobile_unlock");
+        expect(names).toContain("snapshot_create");
+        expect(names).toContain("snapshot_restore");
+        expect(names).toContain("snapshot_delete");
+        expect(names).toContain("record_video_start");
+        expect(names).toContain("record_video_stop");
+        expect(names).toContain("record_video_status");
+        expect(names).toContain("upload");
+        expect(names).toContain("download");
+        expect(names).toContain("reset");
+        expect(names).toContain("install_app");
+        expect(names).toContain("launch_app");
+        expect(names).toContain("automation_status");
+        expect(names).toContain("dump_ui");
+        expect(names).toContain("click");
+        expect(names).toContain("double_click");
+        expect(names).toContain("long_press");
+        expect(names).toContain("swipe");
+        expect(names).toContain("drag");
+        expect(names).toContain("type");
+        expect(names).toContain("key");
+        expect(names).toContain("home");
+        expect(names).toContain("back");
+        expect(names).toContain("forward");
+        expect(names).toContain("recents");
+        expect(names).toContain("power");
+        expect(names).toContain("lock");
+        expect(names).toContain("unlock");
         expect(names).not.toContain("mobile_rotate_left");
         expect(names).not.toContain("mobile_rotate_right");
-        expect(names).toContain("mobile_set_orientation");
-        expect(names).toContain("mobile_open_url");
-        expect(names).toContain("device_install_app");
-        expect(names).toContain("device_launch_app");
-        expect(names).toContain("mobile_uninstall_app");
-        expect(names).toContain("mobile_stop_app");
-        expect(names).toContain("mobile_clear_app_data");
-        expect(names).toContain("mobile_grant_permission");
-        expect(names).toContain("mobile_revoke_permission");
-        expect(names).toContain("mobile_set_location");
-        expect(names).toContain("mobile_set_battery");
-        expect(names).toContain("mobile_set_network");
-        expect(names).toContain("mobile_toggle_airplane_mode");
-        expect(names).toContain("mobile_set_clipboard");
-        expect(names).toContain("mobile_get_clipboard");
-        expect(names).toContain("mobile_wait_for_text");
-        expect(names).toContain("mobile_wait_for_app");
-        expect(names).toContain("device_screenshot");
-        expect(names).toContain("device_run_flow");
-        expect(names).toContain("device_run_flow");
-        const backendsTool = result.tools.find((tool) => tool.name === "device_backends");
+        expect(names).toContain("set_orientation");
+        expect(names).toContain("open_url");
+        expect(names).toContain("install_app");
+        expect(names).toContain("launch_app");
+        expect(names).toContain("uninstall_app");
+        expect(names).toContain("stop_app");
+        expect(names).toContain("clear_app_data");
+        expect(names).toContain("grant_permission");
+        expect(names).toContain("revoke_permission");
+        expect(names).toContain("set_location");
+        expect(names).toContain("set_battery");
+        expect(names).toContain("set_network");
+        expect(names).toContain("toggle_airplane_mode");
+        expect(names).toContain("set_clipboard");
+        expect(names).toContain("get_clipboard");
+        expect(names).toContain("wait_for_text");
+        expect(names).toContain("wait_for_app");
+        expect(names).toContain("screenshot");
+        expect(names).toContain("run_flow");
+        expect(names).toContain("run_flow");
+        const backendsTool = result.tools.find((tool) => tool.name === "backends");
         expectRoutingProperties(toolProperties(backendsTool));
-        const deviceRunFlowTool = result.tools.find((tool) => tool.name === "device_run_flow");
+        const deviceRunFlowTool = result.tools.find((tool) => tool.name === "run_flow");
         expect(deviceRunFlowTool?.inputSchema).toEqual(expect.objectContaining({
             required: ["steps"],
             properties: expect.objectContaining({
@@ -342,7 +342,7 @@ describe("device-lab MCP foundation and definitions", () => {
                 tool: expect.objectContaining({ type: "string" }),
             }),
         }));
-        const wirelessTool = result.tools.find((tool) => tool.name === "device_wireless");
+        const wirelessTool = result.tools.find((tool) => tool.name === "wireless");
         expect(wirelessTool?.inputSchema).toEqual(expect.objectContaining({
             required: ["backend"],
             properties: expect.objectContaining({
@@ -352,7 +352,7 @@ describe("device-lab MCP foundation and definitions", () => {
                 timeoutMs: expect.objectContaining({ maximum: 30000 }),
             }),
         }));
-        const brokerTool = result.tools.find((tool) => tool.name === "device_broker_status");
+        const brokerTool = result.tools.find((tool) => tool.name === "broker_status");
         const brokerProperties = toolProperties(brokerTool);
         expect(brokerProperties).toEqual(expect.objectContaining({
             probe: expect.objectContaining({ type: "boolean" }),
@@ -363,22 +363,23 @@ describe("device-lab MCP foundation and definitions", () => {
             const tool = TOOLS.find((candidate: { name: string }) => candidate.name === name);
             expect(tool, `${name} should remain accepted`).toBeTruthy();
             expectRoutingProperties(toolProperties(tool), { port: !DEVICE_ROUTE_PORT_COLLISION_TOOLS.has(name) });
-            expectBackendProperty(toolProperties(tool), expectedDeviceToolBackends(name));
+            if (["inventory", "create", "attach"].includes(name)) expectBackendProperty(toolProperties(tool), expectedDeviceToolBackends(name));
+            else expect(toolProperties(tool)).not.toHaveProperty("backend");
         }
         for (const name of BROKER_CAPABLE_MOBILE_TOOLS) {
             const tool = TOOLS.find((candidate: { name: string }) => candidate.name === name);
             expect(tool, `${name} should remain accepted`).toBeTruthy();
             expectRoutingProperties(toolProperties(tool), { mobile: true });
-            expectBackendProperty(toolProperties(tool), expectedMobileToolBackends(name));
+            expect(toolProperties(tool)).not.toHaveProperty("backend");
         }
-        const mobileDumpTool = result.tools.find((tool) => tool.name === "mobile_dump_ui");
+        const mobileDumpTool = result.tools.find((tool) => tool.name === "dump_ui");
         const mobileDumpProperties = toolProperties(mobileDumpTool);
         expect(mobileDumpTool?.inputSchema).toEqual(expect.objectContaining({ required: ["deviceId"] }));
         expect(mobileDumpProperties).toEqual(expect.objectContaining({
             deviceId: expect.objectContaining({ type: "string" }),
         }));
         expectRoutingProperties(mobileDumpProperties, { mobile: true });
-        const mobileTapTool = result.tools.find((tool) => tool.name === "mobile_tap");
+        const mobileTapTool = result.tools.find((tool) => tool.name === "click");
         const mobileTapProperties = toolProperties(mobileTapTool);
         expect(mobileTapTool?.inputSchema).toEqual(expect.objectContaining({ required: ["deviceId", "x", "y"] }));
         expect(mobileTapProperties).toEqual(expect.objectContaining({
@@ -387,7 +388,7 @@ describe("device-lab MCP foundation and definitions", () => {
             y: expect.objectContaining({ type: "number" }),
         }));
         expectRoutingProperties(mobileTapProperties, { mobile: true });
-        for (const name of ["mobile_forward", "mobile_recents", "mobile_power"]) {
+        for (const name of ["forward", "recents", "power"]) {
             const mobileControlTool = TOOLS.find((tool: { name: string }) => tool.name === name);
             const mobileControlProperties = toolProperties(mobileControlTool);
             expect(mobileControlTool?.inputSchema).toEqual(expect.objectContaining({ required: ["deviceId"] }));
@@ -396,7 +397,7 @@ describe("device-lab MCP foundation and definitions", () => {
             }));
             expectRoutingProperties(mobileControlProperties, { mobile: true });
         }
-        for (const name of ["device_screenshot", "mobile_open_url", "device_install_app", "device_launch_app", "mobile_uninstall_app", "mobile_stop_app", "mobile_clear_app_data", "mobile_set_location", "mobile_set_clipboard", "mobile_get_clipboard", "mobile_wait_for_app"]) {
+        for (const name of ["screenshot", "open_url", "install_app", "launch_app", "uninstall_app", "stop_app", "clear_app_data", "set_location", "set_clipboard", "get_clipboard", "wait_for_app"]) {
             const mobileAppTool = TOOLS.find((tool: { name: string }) => tool.name === name);
             const mobileAppProperties = toolProperties(mobileAppTool);
             expect(mobileAppTool?.inputSchema).toEqual(expect.objectContaining({ required: expect.arrayContaining(["deviceId"]) }));
@@ -405,7 +406,7 @@ describe("device-lab MCP foundation and definitions", () => {
             }));
             expectRoutingProperties(mobileAppProperties, { mobile: true });
         }
-        for (const name of ["mobile_set_network", "mobile_toggle_airplane_mode"]) {
+        for (const name of ["set_network", "toggle_airplane_mode"]) {
             const mobileNetworkTool = result.tools.find((tool) => tool.name === name);
             const mobileNetworkProperties = toolProperties(mobileNetworkTool);
             expect(mobileNetworkTool?.inputSchema).toEqual(expect.objectContaining({ required: expect.arrayContaining(["deviceId"]) }));
@@ -415,13 +416,13 @@ describe("device-lab MCP foundation and definitions", () => {
             }));
             expectRoutingProperties(mobileNetworkProperties, { mobile: true });
         }
-        for (const name of ["mobile_grant_permission", "mobile_revoke_permission", "mobile_set_battery"]) {
+        for (const name of ["grant_permission", "revoke_permission", "set_battery"]) {
             const brokerBackedMobileTool = result.tools.find((tool) => tool.name === name);
             const brokerBackedMobileProperties = toolProperties(brokerBackedMobileTool);
             expect(brokerBackedMobileTool?.inputSchema).toEqual(expect.objectContaining({ required: expect.arrayContaining(["deviceId"]) }));
             expectRoutingProperties(brokerBackedMobileProperties, { mobile: true });
         }
-        const waitForTextTool = result.tools.find((tool) => tool.name === "mobile_wait_for_text");
+        const waitForTextTool = result.tools.find((tool) => tool.name === "wait_for_text");
         const waitForTextProperties = toolProperties(waitForTextTool);
         expect(waitForTextTool?.inputSchema).toEqual(expect.objectContaining({ required: ["deviceId", "text"] }));
         expect(waitForTextProperties).toEqual(expect.objectContaining({
@@ -431,16 +432,16 @@ describe("device-lab MCP foundation and definitions", () => {
             intervalMs: expect.objectContaining({ type: "number" }),
         }));
         expectRoutingProperties(waitForTextProperties, { mobile: true });
-        const lifecycleTool = result.tools.find((tool) => tool.name === "device_start");
+        const lifecycleTool = result.tools.find((tool) => tool.name === "start");
         const lifecycleProperties = toolProperties(lifecycleTool);
         expect(lifecycleTool?.inputSchema).toEqual(expect.objectContaining({ required: ["deviceId"] }));
         expect(lifecycleProperties).toEqual(expect.objectContaining({
             deviceId: expect.objectContaining({ type: "string" }),
             minimized: expect.objectContaining({ type: "boolean" }),
         }));
-        expectBackendProperty(lifecycleProperties, DEVICE_BACKEND_ENUM);
+        expect(lifecycleProperties).not.toHaveProperty("backend");
         expectRoutingProperties(lifecycleProperties);
-        const createTool = result.tools.find((tool) => tool.name === "device_create");
+        const createTool = result.tools.find((tool) => tool.name === "create");
         const createProperties = toolProperties(createTool);
         expect(createTool?.inputSchema).toEqual(expect.objectContaining({ required: ["backend", "name"] }));
         expect(createProperties).toEqual(expect.objectContaining({
@@ -457,9 +458,9 @@ describe("device-lab MCP foundation and definitions", () => {
         }));
         expectBackendProperty(createProperties, DEVICE_CREATE_BACKEND_ENUM);
         expect(createProperties).not.toHaveProperty("options");
-        expect(toolProperties(TOOLS.find((tool: { name: string }) => tool.name === "device_create"))).not.toHaveProperty("options");
+        expect(toolProperties(TOOLS.find((tool: { name: string }) => tool.name === "create"))).not.toHaveProperty("options");
         expectRoutingProperties(createProperties, { port: false });
-        const attachTool = result.tools.find((tool) => tool.name === "device_attach");
+        const attachTool = result.tools.find((tool) => tool.name === "attach");
         const attachProperties = toolProperties(attachTool);
         expect(attachTool?.inputSchema).toEqual(expect.objectContaining({ required: ["backend"] }));
         expect(attachProperties).toEqual(expect.objectContaining({
@@ -467,48 +468,48 @@ describe("device-lab MCP foundation and definitions", () => {
         }));
         expectBackendProperty(attachProperties, PHYSICAL_BACKEND_ENUM);
         expectRoutingProperties(attachProperties, { port: false });
-        for (const name of ["device_detach", "device_delete", "device_stop", "device_status"]) {
+        for (const name of ["detach", "delete", "stop", "status"]) {
             const routedLifecycleTool = result.tools.find((tool) => tool.name === name);
             const routedLifecycleProperties = toolProperties(routedLifecycleTool);
             expect(routedLifecycleTool?.inputSchema).toEqual(expect.objectContaining({ required: expect.arrayContaining(["deviceId"]) }));
-            expectBackendProperty(routedLifecycleProperties, expectedDeviceToolBackends(name));
+            expect(routedLifecycleProperties).not.toHaveProperty("backend");
             expectRoutingProperties(routedLifecycleProperties);
         }
-        expect(toolProperties(result.tools.find((tool) => tool.name === "device_delete"))).toEqual(
+        expect(toolProperties(result.tools.find((tool) => tool.name === "delete"))).toEqual(
             expect.objectContaining({
                 preserveNetwork: expect.objectContaining({ type: "boolean" }),
             }),
         );
-        for (const name of ["device_status", "device_snapshot_list"]) {
+        for (const name of ["status", "snapshot_list"]) {
             expect(toolProperties(result.tools.find((tool) => tool.name === name))).toEqual(expect.objectContaining({
                 incarnationId: expect.objectContaining({ type: "string", pattern: "^[a-f0-9]{32}$" }),
             }));
         }
-        const inventoryTool = result.tools.find((tool) => tool.name === "device_inventory");
+        const inventoryTool = result.tools.find((tool) => tool.name === "inventory");
         const inventoryProperties = toolProperties(inventoryTool);
         expectBackendProperty(inventoryProperties, DEVICE_BACKEND_ENUM);
         expectRoutingProperties(inventoryProperties);
-        const recordingStatusTool = result.tools.find((tool) => tool.name === "device_record_video_status");
+        const recordingStatusTool = result.tools.find((tool) => tool.name === "record_video_status");
         const recordingStatusProperties = toolProperties(recordingStatusTool);
         expect(recordingStatusTool?.inputSchema).toEqual(expect.objectContaining({ required: ["deviceId"] }));
         expect(recordingStatusProperties).toEqual(expect.objectContaining({
             deviceId: expect.objectContaining({ type: "string" }),
         }));
         expectRoutingProperties(recordingStatusProperties);
-        expectAnyOfRequired(result.tools.find((tool) => tool.name === "device_snapshot_restore"), [["snapshotName"], ["snapshotId"]]);
-        expectAnyOfRequired(result.tools.find((tool) => tool.name === "device_snapshot_delete"), [["snapshotName"], ["snapshotId"]]);
-        expectAnyOfRequired(result.tools.find((tool) => tool.name === "device_reset"), [["packageName"], ["bundleId"], ["eraseSimulator"]]);
-        expectAnyOfRequired(result.tools.find((tool) => tool.name === "device_launch_app"), [["packageName"], ["bundleId"], ["component"]]);
-        expectAnyOfRequired(TOOLS.find((tool: { name: string }) => tool.name === "device_launch_app"), [["packageName"], ["bundleId"], ["component"]]);
-        expectAnyOfRequired(result.tools.find((tool) => tool.name === "mobile_uninstall_app"), [["packageName"], ["bundleId"]]);
-        expectAnyOfRequired(result.tools.find((tool) => tool.name === "mobile_stop_app"), [["packageName"], ["bundleId"]]);
-        expectAnyOfRequired(result.tools.find((tool) => tool.name === "mobile_clear_app_data"), [["packageName"], ["bundleId"]]);
-        expectAnyOfRequired(result.tools.find((tool) => tool.name === "mobile_grant_permission"), [["packageName", "permission"], ["bundleId", "service"]]);
-        expectAnyOfRequired(result.tools.find((tool) => tool.name === "mobile_revoke_permission"), [["packageName", "permission"], ["bundleId", "service"]]);
-        expectAnyOfRequired(result.tools.find((tool) => tool.name === "mobile_set_battery"), [["level"], ["status"], ["charging"]]);
-        expectAnyOfRequired(result.tools.find((tool) => tool.name === "mobile_set_network"), [["wifi"], ["data"]]);
-        expectAnyOfRequired(result.tools.find((tool) => tool.name === "mobile_wait_for_app"), [["packageName"], ["bundleId"]]);
-        const accessibilityTool = result.tools.find((tool) => tool.name === "device_accessibility_snapshot");
+        expectAnyOfRequired(result.tools.find((tool) => tool.name === "snapshot_restore"), [["snapshotName"], ["snapshotId"]]);
+        expectAnyOfRequired(result.tools.find((tool) => tool.name === "snapshot_delete"), [["snapshotName"], ["snapshotId"]]);
+        expectAnyOfRequired(result.tools.find((tool) => tool.name === "reset"), [["packageName"], ["bundleId"], ["eraseSimulator"]]);
+        expectAnyOfRequired(result.tools.find((tool) => tool.name === "launch_app"), [["packageName"], ["bundleId"], ["component"]]);
+        expectAnyOfRequired(TOOLS.find((tool: { name: string }) => tool.name === "launch_app"), [["packageName"], ["bundleId"], ["component"]]);
+        expectAnyOfRequired(result.tools.find((tool) => tool.name === "uninstall_app"), [["packageName"], ["bundleId"]]);
+        expectAnyOfRequired(result.tools.find((tool) => tool.name === "stop_app"), [["packageName"], ["bundleId"]]);
+        expectAnyOfRequired(result.tools.find((tool) => tool.name === "clear_app_data"), [["packageName"], ["bundleId"]]);
+        expectAnyOfRequired(result.tools.find((tool) => tool.name === "grant_permission"), [["packageName", "permission"], ["bundleId", "service"]]);
+        expectAnyOfRequired(result.tools.find((tool) => tool.name === "revoke_permission"), [["packageName", "permission"], ["bundleId", "service"]]);
+        expectAnyOfRequired(result.tools.find((tool) => tool.name === "set_battery"), [["level"], ["status"], ["charging"]]);
+        expectAnyOfRequired(result.tools.find((tool) => tool.name === "set_network"), [["wifi"], ["data"]]);
+        expectAnyOfRequired(result.tools.find((tool) => tool.name === "wait_for_app"), [["packageName"], ["bundleId"]]);
+        const accessibilityTool = result.tools.find((tool) => tool.name === "accessibility_snapshot");
         const accessibilityProperties = toolProperties(accessibilityTool);
         expect(accessibilityTool?.inputSchema).toEqual(expect.objectContaining({ required: ["deviceId"] }));
         expect(accessibilityProperties).toEqual(expect.objectContaining({
@@ -517,7 +518,7 @@ describe("device-lab MCP foundation and definitions", () => {
             maxNodes: expect.objectContaining({ maximum: 1000 }),
         }));
         expectRoutingProperties(accessibilityProperties);
-        const desktopExecTool = result.tools.find((tool) => tool.name === "device_exec");
+        const desktopExecTool = result.tools.find((tool) => tool.name === "exec");
         const desktopExecProperties = toolProperties(desktopExecTool);
         expect(desktopExecTool?.inputSchema).toEqual(expect.objectContaining({ required: ["deviceId", "command"] }));
         expect(desktopExecProperties).toEqual(expect.objectContaining({
@@ -525,25 +526,25 @@ describe("device-lab MCP foundation and definitions", () => {
             helperTimeoutMs: expect.objectContaining({ type: "number" }),
         }));
         expectRoutingProperties(desktopExecProperties);
-        const uploadTool = result.tools.find((tool) => tool.name === "device_upload");
+        const uploadTool = result.tools.find((tool) => tool.name === "upload");
         const uploadProperties = toolProperties(uploadTool);
         expect(uploadProperties).toEqual(expect.objectContaining({
             helperTimeoutMs: expect.objectContaining({ type: "number" }),
         }));
         expectRoutingProperties(uploadProperties);
-        const downloadTool = result.tools.find((tool) => tool.name === "device_download");
+        const downloadTool = result.tools.find((tool) => tool.name === "download");
         const downloadProperties = toolProperties(downloadTool);
         expect(downloadProperties).toEqual(expect.objectContaining({
             helperTimeoutMs: expect.objectContaining({ type: "number" }),
         }));
         expectRoutingProperties(downloadProperties);
-        const recordStopTool = result.tools.find((tool) => tool.name === "device_record_video_stop");
+        const recordStopTool = result.tools.find((tool) => tool.name === "record_video_stop");
         const recordStopProperties = toolProperties(recordStopTool);
         expect(recordStopProperties).toEqual(expect.objectContaining({
             helperTimeoutMs: expect.objectContaining({ type: "number" }),
         }));
         expectRoutingProperties(recordStopProperties);
-        const scrollTool = result.tools.find((tool) => tool.name === "device_scroll");
+        const scrollTool = result.tools.find((tool) => tool.name === "scroll");
         expect(scrollTool?.inputSchema).toEqual(expect.objectContaining({
             required: ["deviceId", "direction"],
             properties: expect.objectContaining({
@@ -556,8 +557,8 @@ describe("device-lab MCP foundation and definitions", () => {
 
     it("rejects unsafe device ids before direct, broker, or flow routing", { timeout: TIMEOUT }, async () => {
         for (const request of [
-            { name: "device_status", arguments: { deviceId: "../../outside" } },
-            { name: "device_create", arguments: { backend: "ios-simulator", deviceId: "..\\outside", name: "Unsafe" } },
+            { name: "status", arguments: { deviceId: "../../outside" } },
+            { name: "create", arguments: { backend: "ios-simulator", deviceId: "..\\outside", name: "Unsafe" } },
         ]) {
             const result = await client.callTool(request);
             expect(result.isError).toBe(true);
@@ -566,8 +567,8 @@ describe("device-lab MCP foundation and definitions", () => {
         }
 
         const flow = await client.callTool({
-            name: "device_run_flow",
-            arguments: { steps: [{ tool: "device_status", arguments: { deviceId: "/tmp/outside" } }] },
+            name: "run_flow",
+            arguments: { steps: [{ tool: "status", arguments: { deviceId: "/tmp/outside" } }] },
         });
         expect(flow.isError).toBe(true);
         expect(JSON.parse((flow.content as Array<{ text?: string }>)[0].text ?? "{}")).toEqual(expect.objectContaining({
@@ -584,7 +585,7 @@ describe("device-lab MCP foundation and definitions", () => {
 
     it("runs target-neutral display flow steps and rejects lifecycle steps", { timeout: TIMEOUT }, async () => {
         const displayStatus = await client.callTool({
-            name: "device_status",
+            name: "status",
             arguments: { deviceId: "x11-current-display" },
         });
         expect(displayStatus.isError).not.toBe(true);
@@ -599,19 +600,19 @@ describe("device-lab MCP foundation and definitions", () => {
             kind: "display",
             backend: "x11",
         }));
-        expect(displayStatusPayload.capabilities).toEqual(expect.arrayContaining([
-            "device_status",
-            "device_screenshot",
-            "device_click",
-            "device_cursor_position",
+        expect(displayStatusPayload.capabilities?.map(publicToolName)).toEqual(expect.arrayContaining([
+            "status",
+            "screenshot",
+            "click",
+            "cursor_position",
         ]));
 
         const flow = await client.callTool({
-            name: "device_run_flow",
+            name: "run_flow",
             arguments: {
                 steps: [
-                    { label: "current display", tool: "display_current", arguments: {} },
-                    { label: "inventory", tool: "device_inventory", arguments: { backend: "windows-sandbox", implicitBroker: false } },
+                    { label: "current display", tool: "status", arguments: { deviceId: "x11-current-display" } },
+                    { label: "inventory", tool: "inventory", arguments: { backend: "windows-sandbox", implicitBroker: false } },
                 ],
             },
         });
@@ -629,11 +630,11 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(payload.results[1].content[0].value).toEqual(expect.objectContaining({ backend: "windows-sandbox" }));
 
         const stopped = await client.callTool({
-            name: "device_run_flow",
+            name: "run_flow",
             arguments: {
                 steps: [
-                    { label: "start", tool: "device_start", arguments: { deviceId: "win-flow" } },
-                    { label: "display", tool: "display_current", arguments: {} },
+                    { label: "start", tool: "start", arguments: { deviceId: "win-flow" } },
+                    { label: "display", tool: "status", arguments: { deviceId: "x11-current-display" } },
                 ],
             },
         });
@@ -647,18 +648,18 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(stoppedPayload.results).toHaveLength(1);
         expect(stoppedPayload.results[0]).toEqual(expect.objectContaining({
             label: "start",
-            tool: "device_start",
+            tool: "start",
             isError: true,
-            error: "device_run_flow does not allow step tool: device_start",
+            error: "device_run_flow does not allow step tool: start",
         }));
 
         const continued = await client.callTool({
-            name: "device_run_flow",
+            name: "run_flow",
             arguments: {
                 stopOnError: false,
                 steps: [
-                    { label: "upload", tool: "device_upload", arguments: { deviceId: "win-flow", localPath: "/tmp/a", remotePath: "C:\\a" } },
-                    { label: "display", tool: "display_current", arguments: {} },
+                    { label: "upload", tool: "upload", arguments: { deviceId: "win-flow", localPath: "/tmp/a", remotePath: "C:\\a" } },
+                    { label: "display", tool: "status", arguments: { deviceId: "x11-current-display" } },
                 ],
             },
         });
@@ -672,16 +673,16 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(continuedPayload.results[0]).toEqual(expect.objectContaining({
             label: "upload",
             isError: true,
-            error: "device_run_flow does not allow step tool: device_upload",
+            error: "device_run_flow does not allow step tool: upload",
         }));
         expect(continuedPayload.results[1].content?.[0].value).toEqual(expect.objectContaining({ id: "x11-current-display" }));
 
         const recordingStatus = await client.callTool({
-            name: "device_run_flow",
+            name: "run_flow",
             arguments: {
                 steps: [
-                    { label: "recording", tool: "device_record_video_status", arguments: { backend: "windows-sandbox", deviceId: "win-flow", implicitBroker: false } },
-                    { label: "display", tool: "display_current", arguments: {} },
+                    { label: "recording", tool: "record_video_status", arguments: { deviceId: "win-flow", implicitBroker: false } },
+                    { label: "display", tool: "status", arguments: { deviceId: "x11-current-display" } },
                 ],
             },
         });
@@ -701,12 +702,12 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(recordingStatusPayload.results[0].content?.[0]).toEqual(expect.objectContaining({ type: expect.any(String) }));
 
         const clipboardFlow = await client.callTool({
-            name: "device_run_flow",
+            name: "run_flow",
             arguments: {
                 stopOnError: false,
                 steps: [
-                    { label: "set clipboard", tool: "mobile_set_clipboard", arguments: { backend: "android-emulator", deviceId: "android-flow", text: "flow-clipboard", implicitBroker: false } },
-                    { label: "get clipboard", tool: "mobile_get_clipboard", arguments: { backend: "android-emulator", deviceId: "android-flow", implicitBroker: false } },
+                    { label: "set clipboard", tool: "set_clipboard", arguments: { deviceId: "android-flow", text: "flow-clipboard", implicitBroker: false } },
+                    { label: "get clipboard", tool: "get_clipboard", arguments: { deviceId: "android-flow", implicitBroker: false } },
                 ],
             },
         });
@@ -718,11 +719,11 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(clipboardFlowPayload.results.filter((result) => result.error?.includes("device_run_flow does not allow step tool"))).toEqual([]);
 
         const semanticFailure = await client.callTool({
-            name: "device_run_flow",
+            name: "run_flow",
             arguments: {
                 steps: [
-                    { label: "broker status", tool: "device_status", arguments: { deviceId: "unknown-flow-device", broker: true } },
-                    { label: "display", tool: "display_current", arguments: {} },
+                    { label: "broker status", tool: "status", arguments: { deviceId: "unknown-flow-device", broker: true } },
+                    { label: "display", tool: "status", arguments: { deviceId: "x11-current-display" } },
                 ],
             },
         });
@@ -741,9 +742,9 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(semanticFailurePayload.results[0].content[0].value).toEqual(expect.objectContaining({ ok: false }));
 
         const tooMany = await client.callTool({
-            name: "device_run_flow",
+            name: "run_flow",
             arguments: {
-                steps: Array.from({ length: 51 }, () => ({ tool: "display_current", arguments: {} })),
+                steps: Array.from({ length: 51 }, () => ({ tool: "status", arguments: { deviceId: "x11-current-display" } })),
             },
         });
         expect(tooMany.isError).toBe(true);
@@ -751,7 +752,7 @@ describe("device-lab MCP foundation and definitions", () => {
     });
 
     it("reports backends without starting heavyweight devices", { timeout: TIMEOUT }, async () => {
-        const result = await client.callTool({ name: "device_backends", arguments: { implicitBroker: false } });
+        const result = await client.callTool({ name: "backends", arguments: { implicitBroker: false } });
         expect(result.isError).not.toBe(true);
 
         const content = result.content as Array<{ type: string; text?: string }>;
@@ -795,8 +796,9 @@ describe("device-lab MCP foundation and definitions", () => {
             "macos-vm",
             "linux-vm",
         ]);
+        for (const backend of payload.backends || []) backend.capabilities = (backend.capabilities || []).map(publicToolName);
         const acceptedTools = new Set([...TOOLS.map((tool: { name: string }) => tool.name),
-            "mobile_rotate_left", "mobile_rotate_right", "mobile_install_app", "mobile_launch_app", "mobile_screenshot"]);
+            "rotate_left", "rotate_right", "install_app", "launch_app", "screenshot"]);
         const unknownCapabilities = (payload.backends || []).flatMap((backend) => (backend.capabilities || [])
             .filter((capability) => !acceptedTools.has(capability))
             .map((capability) => ({ backend: backend.name, capability })));
@@ -819,66 +821,66 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(payload.backends?.find((backend) => backend.name === "android-emulator")?.status).toBe("missing-prerequisites");
         expect(payload.backends?.find((backend) => backend.name === "android-device")?.status).toBe("missing-prerequisites");
         const androidDeviceBackend = payload.backends?.find((backend) => backend.name === "android-device");
-        expect(androidDeviceBackend?.capabilities).toContain("device_wireless");
+        expect(androidDeviceBackend?.capabilities).toContain("wireless");
         expect(androidDeviceBackend?.capabilities).not.toEqual(expect.arrayContaining([
-            "mobile_set_location",
-            "mobile_set_battery",
-            "mobile_set_network",
-            "mobile_toggle_airplane_mode",
+            "set_location",
+            "set_battery",
+            "set_network",
+            "toggle_airplane_mode",
         ]));
         const iosSimulatorBackend = payload.backends?.find((backend) => backend.name === "ios-simulator");
         expect(iosSimulatorBackend?.status).toBe("missing-prerequisites");
         expect(iosSimulatorBackend?.capabilities).toEqual(expect.arrayContaining([
-            "mobile_tap",
-            "mobile_double_tap",
-            "mobile_long_press",
-            "mobile_swipe",
-            "mobile_drag",
-            "mobile_type_text",
-            "mobile_key",
-            "mobile_home",
-            "mobile_lock",
-            "mobile_unlock",
-            "mobile_set_orientation",
-            "mobile_set_location",
-            "mobile_set_clipboard",
-            "mobile_get_clipboard",
-            "mobile_wait_for_text",
+            "click",
+            "double_click",
+            "long_press",
+            "swipe",
+            "drag",
+            "type",
+            "key",
+            "home",
+            "lock",
+            "unlock",
+            "set_orientation",
+            "set_location",
+            "set_clipboard",
+            "get_clipboard",
+            "wait_for_text",
         ]));
         expect(iosSimulatorBackend?.capabilities).not.toEqual(expect.arrayContaining([
-            "mobile_set_battery",
-            "mobile_set_network",
-            "mobile_toggle_airplane_mode",
+            "set_battery",
+            "set_network",
+            "toggle_airplane_mode",
         ]));
         const iosDeviceBackend = payload.backends?.find((backend) => backend.name === "ios-device");
         expect(iosDeviceBackend?.status).toBe("missing-prerequisites");
-        expect(iosDeviceBackend?.capabilities).toContain("device_wireless");
+        expect(iosDeviceBackend?.capabilities).toContain("wireless");
         expect(iosDeviceBackend?.capabilities).not.toEqual(expect.arrayContaining([
-            "device_exec",
-            "mobile_open_url",
-            "mobile_set_location",
-            "mobile_set_clipboard",
-            "mobile_get_clipboard",
-            "mobile_set_battery",
+            "exec",
+            "open_url",
+            "set_location",
+            "set_clipboard",
+            "get_clipboard",
+            "set_battery",
         ]));
         const windowsBackend = payload.backends?.find((backend) => backend.name === "windows-sandbox");
         expect(windowsBackend?.status).toBe("missing-prerequisites");
-        expect(windowsBackend?.capabilities).toContain("device_inventory");
-        expect(windowsBackend?.capabilities).toEqual(expect.arrayContaining(["device_window_list", "device_accessibility_snapshot"]));
+        expect(windowsBackend?.capabilities).toContain("inventory");
+        expect(windowsBackend?.capabilities).toEqual(expect.arrayContaining(["window_list", "accessibility_snapshot"]));
         const macosBackend = payload.backends?.find((backend) => backend.name === "macos-vm");
         expect(macosBackend?.status).toBe("missing-prerequisites");
-        expect(macosBackend?.capabilities).toContain("device_inventory");
+        expect(macosBackend?.capabilities).toContain("inventory");
         expect(macosBackend?.capabilities).toEqual(expect.arrayContaining([
-            "device_window_list",
-            "device_accessibility_snapshot",
-            "device_base_image_create",
-            "device_base_image_clone",
+            "window_list",
+            "accessibility_snapshot",
+            "base_image_create",
+            "base_image_clone",
         ]));
     });
 
     it("reports real-device wireless missing prerequisites without environment configuration", { timeout: TIMEOUT }, async () => {
         const android = await client.callTool({
-            name: "device_wireless",
+            name: "wireless",
             arguments: { backend: "android-device", action: "status" },
         });
         expect(android.isError).toBe(true);
@@ -889,7 +891,7 @@ describe("device-lab MCP foundation and definitions", () => {
         }));
 
         const ios = await client.callTool({
-            name: "device_wireless",
+            name: "wireless",
             arguments: { backend: "ios-device", action: "status" },
         });
         expect(ios.isError).toBe(true);
@@ -902,7 +904,7 @@ describe("device-lab MCP foundation and definitions", () => {
 
     it("reports zero-config broker contract without starting host providers", { timeout: TIMEOUT }, async () => {
         const result = await client.callTool({
-            name: "device_broker_status",
+            name: "broker_status",
             arguments: { probe: false, autolaunch: false },
         });
         expect(result.isError).not.toBe(true);
@@ -969,7 +971,7 @@ describe("device-lab MCP foundation and definitions", () => {
                 setupHome: (homeDir) => mkdirSync(join(homeDir, ".ccc/devices"), { recursive: true }),
             });
             const result = await wiredContext.client.callTool({
-                name: "device_broker_status",
+                name: "broker_status",
                 arguments: { probe: false, autolaunch: false },
             });
             expect(result.isError).not.toBe(true);
@@ -1002,7 +1004,7 @@ describe("device-lab MCP foundation and definitions", () => {
                 setupHome: (homeDir) => mkdirSync(join(homeDir, ".ccc/devices"), { recursive: true }),
             });
             const result = await wiredContext.client.callTool({
-                name: "device_backends",
+                name: "backends",
                 arguments: {},
             });
             expect(result.isError).not.toBe(true);
@@ -1029,7 +1031,7 @@ describe("device-lab MCP foundation and definitions", () => {
     });
 
     it("lists only the current non-creatable X11 display in the foundation slice", { timeout: TIMEOUT }, async () => {
-        const result = await client.callTool({ name: "device_list", arguments: {} });
+        const result = await client.callTool({ name: "list_devices", arguments: {} });
         expect(result.isError).not.toBe(true);
 
         const content = result.content as Array<{ type: string; text?: string }>;
@@ -1076,99 +1078,88 @@ describe("device-lab MCP foundation and definitions", () => {
             { backend: "macos-vm", name: "macOS exhaustive smoke", deviceId: macosId, image: "missing-image" },
             { backend: "linux-vm", name: "Linux exhaustive smoke", deviceId: linuxId },
         ]) {
-            await client.callTool({ name: "device_create", arguments: { ...direct, ...args } });
+            await client.callTool({ name: "create", arguments: { ...direct, ...args } });
         }
 
         const samples: Record<string, Record<string, unknown>> = {
-            device_backends: { ...direct },
-            device_broker_status: { ...brokerProbe },
-            device_list: {},
-            device_inventory: { ...direct, backend: "android-emulator" },
-            device_image_list: { },
-            device_image_import: { name: "Missing Linux image", sourcePath: "images/missing-linux-smoke.qcow2" },
-            device_wireless: { backend: "android-device", action: "status", timeoutMs: 1 },
-            display_current: {},
-            display_screenshot: {},
-            display_click: { x: 1, y: 1, button: "left" },
-            display_double_click: { x: 1, y: 1, button: "left" },
-            display_key: { key: "Escape" },
-            display_type: { text: "" },
-            display_scroll: { x: 1, y: 1, direction: "down", amount: 1 },
-            display_cursor_position: {},
-            device_create: { ...direct, backend: "android-emulator", name: "Android exhaustive smoke", deviceId: androidId },
-            device_attach: { ...direct, backend: "android-device", name: "Android attach smoke", serial: "SERIAL-SMOKE" },
-            device_detach: { ...brokerProbe, broker: true, deviceId: "missing-detach-smoke" },
-            device_delete: { ...brokerProbe, broker: true, backend: "android-emulator", deviceId: "missing-delete-smoke", confirmDestructive: true },
-            device_start: { ...direct, backend: "android-emulator", deviceId: androidId, waitForBoot: false, bootTimeoutMs: 1 },
-            device_stop: { ...direct, backend: "android-emulator", deviceId: androidId },
-            device_status: { ...direct, backend: "android-emulator", deviceId: androidId },
-            device_disk_materialize: { backend: "linux-vm", deviceId: linuxId, dryRun: true },
-            device_reboot: { backend: "linux-vm", deviceId: linuxId },
-            device_target_list: { deviceId: linuxId },
-            device_readiness_probe: { deviceId: linuxId },
-            device_session_open: { deviceId: linuxId, sessionType: "metadata" },
-            device_workspace_sync: { deviceId: linuxId, sourcePath: "missing-workspace-smoke" },
-            device_artifacts_export: { deviceId: linuxId },
-            device_guest_agent_status: { deviceId: linuxId },
-            device_guest_agent_provision: { deviceId: linuxId },
-            device_exec: { ...direct, backend: "android-emulator", deviceId: androidId, command: "true", helperTimeoutMs: 1 },
-            device_screenshot: { ...direct, backend: "android-emulator", deviceId: androidId, helperTimeoutMs: 1 },
-            device_click: { ...direct, backend: "windows-sandbox", deviceId: windowsId, x: 1, y: 1, helperTimeoutMs: 1 },
-            device_double_click: { ...direct, backend: "windows-sandbox", deviceId: windowsId, x: 1, y: 1, helperTimeoutMs: 1 },
-            device_key: { ...direct, backend: "windows-sandbox", deviceId: windowsId, key: "Escape", helperTimeoutMs: 1 },
-            device_type: { ...direct, backend: "windows-sandbox", deviceId: windowsId, text: "", helperTimeoutMs: 1 },
-            device_scroll: { ...direct, backend: "windows-sandbox", deviceId: windowsId, x: 1, y: 1, direction: "down", amount: 1, helperTimeoutMs: 1 },
-            device_cursor_position: { ...direct, backend: "windows-sandbox", deviceId: windowsId, helperTimeoutMs: 1 },
-            device_window_list: { ...direct, backend: "windows-sandbox", deviceId: windowsId, helperTimeoutMs: 1 },
-            device_accessibility_snapshot: { ...direct, backend: "windows-sandbox", deviceId: windowsId, maxDepth: 1, maxNodes: 1, helperTimeoutMs: 1 },
-            device_base_image_create: { name: "Base image smoke", sourceImage: "missing-source" },
-            device_base_image_clone: { name: "Base clone smoke", sourceDeviceId: macosId },
-            device_snapshot_create: { ...direct, backend: "macos-vm", deviceId: macosId, snapshotName: "smoke" },
-            device_snapshot_list: { ...brokerProbe, broker: true, backend: "windows-vm", deviceId: "missing-windows-vm-snapshot-list-smoke" },
-            device_snapshot_restore: { ...direct, backend: "macos-vm", deviceId: macosId, snapshotName: "smoke", confirmDestructive: true },
-            device_snapshot_delete: { ...direct, backend: "macos-vm", deviceId: macosId, snapshotName: "smoke", confirmDestructive: true },
-            device_record_video_start: { ...direct, backend: "android-emulator", deviceId: androidId, remotePath: "/sdcard/smoke.mp4", timeLimitSec: 1 },
-            device_record_video_stop: { ...direct, backend: "android-emulator", deviceId: androidId, helperTimeoutMs: 1 },
-            device_record_video_status: { ...direct, backend: "android-emulator", deviceId: androidId, helperTimeoutMs: 1 },
-            device_upload: { ...direct, backend: "android-emulator", deviceId: androidId, localPath: "/tmp/missing-smoke.txt", remotePath: "/sdcard/missing-smoke.txt", helperTimeoutMs: 1 },
-            device_download: { ...direct, backend: "android-emulator", deviceId: androidId, remotePath: "/sdcard/missing-smoke.txt", localPath: "/tmp/device-lab-smoke-download.txt", helperTimeoutMs: 1 },
-            device_reset: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
-            device_install_app: { ...direct, backend: "android-emulator", deviceId: androidId, path: "/tmp/missing-smoke.apk" },
-            device_launch_app: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke" },
-            mobile_session_status: { ...direct, backend: "android-emulator", deviceId: androidId },
-            mobile_dump_ui: { ...direct, backend: "android-emulator", deviceId: androidId },
-            mobile_tap: { ...direct, backend: "android-emulator", deviceId: androidId, x: 1, y: 1 },
-            mobile_double_tap: { ...direct, backend: "android-emulator", deviceId: androidId, x: 1, y: 1 },
-            mobile_long_press: { ...direct, backend: "android-emulator", deviceId: androidId, x: 1, y: 1, durationMs: 1 },
-            mobile_swipe: { ...direct, backend: "android-emulator", deviceId: androidId, x1: 1, y1: 1, x2: 2, y2: 2, durationMs: 1 },
-            mobile_drag: { ...direct, backend: "android-emulator", deviceId: androidId, x1: 1, y1: 1, x2: 2, y2: 2, durationMs: 1 },
-            mobile_type_text: { ...direct, backend: "android-emulator", deviceId: androidId, text: "smoke" },
-            mobile_key: { ...direct, backend: "android-emulator", deviceId: androidId, keyCode: 4 },
-            mobile_home: { ...direct, backend: "android-emulator", deviceId: androidId },
-            mobile_back: { ...direct, backend: "android-emulator", deviceId: androidId },
-            mobile_forward: { ...direct, backend: "android-emulator", deviceId: androidId },
-            mobile_recents: { ...direct, backend: "android-emulator", deviceId: androidId },
-            mobile_power: { ...direct, backend: "android-emulator", deviceId: androidId },
-            mobile_lock: { ...direct, backend: "android-emulator", deviceId: androidId },
-            mobile_unlock: { ...direct, backend: "android-emulator", deviceId: androidId },
-            mobile_set_orientation: { ...direct, backend: "android-emulator", deviceId: androidId, orientation: "portrait" },
-            mobile_open_url: { ...direct, backend: "android-emulator", deviceId: androidId, url: "https://example.invalid" },
-            mobile_uninstall_app: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
-            mobile_stop_app: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke" },
-            mobile_clear_app_data: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
-            mobile_grant_permission: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke", permission: "android.permission.CAMERA" },
-            mobile_revoke_permission: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke", permission: "android.permission.CAMERA" },
-            mobile_set_location: { ...direct, backend: "android-emulator", deviceId: androidId, latitude: 1, longitude: 2 },
-            mobile_set_battery: { ...direct, backend: "android-emulator", deviceId: androidId, level: 50, confirmDestructive: true },
-            mobile_set_network: { ...direct, backend: "android-emulator", deviceId: androidId, wifi: true, confirmDestructive: true },
-            mobile_toggle_airplane_mode: { ...direct, backend: "android-emulator", deviceId: androidId, enabled: false, confirmDestructive: true },
-            mobile_set_clipboard: { ...direct, backend: "android-emulator", deviceId: androidId, text: "smoke" },
-            mobile_get_clipboard: { ...direct, backend: "android-emulator", deviceId: androidId },
-            mobile_wait_for_text: { ...direct, backend: "android-emulator", deviceId: androidId, text: "smoke", timeoutMs: 1, intervalMs: 50 },
-            mobile_wait_for_app: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke", timeoutMs: 1, intervalMs: 50 },
-            device_run_flow: { steps: [{ tool: "mobile_session_status", arguments: { ...direct, backend: "android-emulator", deviceId: androidId } }] },
+            backends: { ...direct },
+            broker_status: { ...brokerProbe },
+            list_devices: {},
+            inventory: { ...direct, backend: "android-emulator" },
+            image_list: { },
+            image_import: { name: "Missing Linux image", sourcePath: "images/missing-linux-smoke.qcow2" },
+            wireless: { backend: "android-device", action: "status", timeoutMs: 1 },
+            create: { ...direct, backend: "android-emulator", name: "Android exhaustive smoke", deviceId: androidId },
+            attach: { ...direct, backend: "android-device", name: "Android attach smoke", serial: "SERIAL-SMOKE" },
+            detach: { ...brokerProbe, broker: true, deviceId: "missing-detach-smoke" },
+            delete: { ...brokerProbe, broker: true, deviceId: "missing-delete-smoke", confirmDestructive: true },
+            start: { ...direct, deviceId: androidId, waitForBoot: false, bootTimeoutMs: 1 },
+            stop: { ...direct, deviceId: androidId },
+            status: { ...direct, deviceId: androidId },
+            disk_materialize: { deviceId: linuxId, dryRun: true },
+            reboot: { deviceId: linuxId },
+            target_list: { deviceId: linuxId },
+            readiness_probe: { deviceId: linuxId },
+            session_open: { deviceId: linuxId, sessionType: "metadata" },
+            workspace_sync: { deviceId: linuxId, sourcePath: "missing-workspace-smoke" },
+            artifacts_export: { deviceId: linuxId },
+            guest_agent_status: { deviceId: linuxId },
+            guest_agent_provision: { deviceId: linuxId },
+            exec: { ...direct, deviceId: androidId, command: "true", helperTimeoutMs: 1 },
+            screenshot: { ...direct, deviceId: androidId, helperTimeoutMs: 1 },
+            scroll: { ...direct, deviceId: windowsId, x: 1, y: 1, direction: "down", amount: 1, helperTimeoutMs: 1 },
+            cursor_position: { ...direct, deviceId: windowsId, helperTimeoutMs: 1 },
+            window_list: { ...direct, deviceId: windowsId, helperTimeoutMs: 1 },
+            accessibility_snapshot: { ...direct, deviceId: windowsId, maxDepth: 1, maxNodes: 1, helperTimeoutMs: 1 },
+            base_image_create: { name: "Base image smoke", sourceImage: "missing-source" },
+            base_image_clone: { name: "Base clone smoke", sourceDeviceId: macosId },
+            snapshot_create: { ...direct, deviceId: macosId, snapshotName: "smoke" },
+            snapshot_list: { ...brokerProbe, broker: true, deviceId: "missing-windows-vm-snapshot-list-smoke" },
+            snapshot_restore: { ...direct, deviceId: macosId, snapshotName: "smoke", confirmDestructive: true },
+            snapshot_delete: { ...direct, deviceId: macosId, snapshotName: "smoke", confirmDestructive: true },
+            record_video_start: { ...direct, deviceId: androidId, remotePath: "/sdcard/smoke.mp4", timeLimitSec: 1 },
+            record_video_stop: { ...direct, deviceId: androidId, helperTimeoutMs: 1 },
+            record_video_status: { ...direct, deviceId: androidId, helperTimeoutMs: 1 },
+            upload: { ...direct, deviceId: androidId, localPath: "/tmp/missing-smoke.txt", remotePath: "/sdcard/missing-smoke.txt", helperTimeoutMs: 1 },
+            download: { ...direct, deviceId: androidId, remotePath: "/sdcard/missing-smoke.txt", localPath: "/tmp/device-lab-smoke-download.txt", helperTimeoutMs: 1 },
+            reset: { ...direct, deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
+            install_app: { ...direct, deviceId: androidId, path: "/tmp/missing-smoke.apk" },
+            launch_app: { ...direct, deviceId: androidId, packageName: "com.example.smoke" },
+            automation_status: { ...direct, deviceId: androidId },
+            dump_ui: { ...direct, deviceId: androidId },
+            click: { ...direct, deviceId: androidId, x: 1, y: 1 },
+            double_click: { ...direct, deviceId: androidId, x: 1, y: 1 },
+            long_press: { ...direct, deviceId: androidId, x: 1, y: 1, durationMs: 1 },
+            swipe: { ...direct, deviceId: androidId, x1: 1, y1: 1, x2: 2, y2: 2, durationMs: 1 },
+            drag: { ...direct, deviceId: androidId, x1: 1, y1: 1, x2: 2, y2: 2, durationMs: 1 },
+            type: { ...direct, deviceId: androidId, text: "smoke" },
+            key: { ...direct, deviceId: androidId, keyCode: 4 },
+            home: { ...direct, deviceId: androidId },
+            back: { ...direct, deviceId: androidId },
+            forward: { ...direct, deviceId: androidId },
+            recents: { ...direct, deviceId: androidId },
+            power: { ...direct, deviceId: androidId },
+            lock: { ...direct, deviceId: androidId },
+            unlock: { ...direct, deviceId: androidId },
+            set_orientation: { ...direct, deviceId: androidId, orientation: "portrait" },
+            open_url: { ...direct, deviceId: androidId, url: "https://example.invalid" },
+            uninstall_app: { ...direct, deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
+            stop_app: { ...direct, deviceId: androidId, packageName: "com.example.smoke" },
+            clear_app_data: { ...direct, deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
+            grant_permission: { ...direct, deviceId: androidId, packageName: "com.example.smoke", permission: "android.permission.CAMERA" },
+            revoke_permission: { ...direct, deviceId: androidId, packageName: "com.example.smoke", permission: "android.permission.CAMERA" },
+            set_location: { ...direct, deviceId: androidId, latitude: 1, longitude: 2 },
+            set_battery: { ...direct, deviceId: androidId, level: 50, confirmDestructive: true },
+            set_network: { ...direct, deviceId: androidId, wifi: true, confirmDestructive: true },
+            toggle_airplane_mode: { ...direct, deviceId: androidId, enabled: false, confirmDestructive: true },
+            set_clipboard: { ...direct, deviceId: androidId, text: "smoke" },
+            get_clipboard: { ...direct, deviceId: androidId },
+            wait_for_text: { ...direct, deviceId: androidId, text: "smoke", timeoutMs: 1, intervalMs: 50 },
+            wait_for_app: { ...direct, deviceId: androidId, packageName: "com.example.smoke", timeoutMs: 1, intervalMs: 50 },
+            run_flow: { steps: [{ tool: "automation_status", arguments: { ...direct, deviceId: androidId } }] },
         };
 
+        samples.move = { deviceId: "x11-current-display", x: 0, y: 0 };
         expect(Object.keys(samples).sort()).toEqual(toolNames);
         const missingRequiredSamples = listed.tools.flatMap((tool) => {
             const required = Array.isArray((tool.inputSchema as { required?: unknown } | undefined)?.required)
@@ -1211,11 +1202,11 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(failures).toEqual([]);
 
         const mobileFlow = await client.callTool({
-            name: "device_run_flow",
+            name: "run_flow",
             arguments: {
                 stopOnError: false,
                 steps: toolNames
-                    .filter((name) => name.startsWith("mobile_") && name !== "device_run_flow")
+                    .filter((name) => DEVICE_FLOW_TOOL_NAMES.includes(name))
                     .map((name) => ({ tool: name, arguments: samples[name] })),
             },
         });
@@ -1223,41 +1214,42 @@ describe("device-lab MCP foundation and definitions", () => {
         const mobileFlowPayload = JSON.parse(((mobileFlow.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             results: Array<{ tool?: string; error?: string }>;
         };
-        expect(mobileFlowPayload.results).toHaveLength(toolNames.filter((name) => name.startsWith("mobile_") && name !== "device_run_flow").length);
+        expect(mobileFlowPayload.results).toHaveLength(toolNames.filter((name) => DEVICE_FLOW_TOOL_NAMES.includes(name)).length);
         expect(mobileFlowPayload.results.filter((result) => result.error?.includes("device_run_flow does not allow step tool"))).toEqual([]);
 
         const deviceFlowAllowedMobileTools = [
-            "mobile_session_status",
-            "mobile_dump_ui",
-            "mobile_tap",
-            "mobile_double_tap",
-            "mobile_long_press",
-            "mobile_swipe",
-            "mobile_drag",
-            "mobile_type_text",
-            "mobile_key",
-            "mobile_home",
-            "mobile_back",
-            "mobile_forward",
-            "mobile_recents",
-            "mobile_power",
-            "mobile_lock",
-            "mobile_unlock",
+            "install_app", "launch_app",
+            "automation_status",
+            "dump_ui",
+            "click",
+            "double_click",
+            "long_press",
+            "swipe",
+            "drag",
+            "type",
+            "key",
+            "home",
+            "back",
+            "forward",
+            "recents",
+            "power",
+            "lock",
+            "unlock",
 
 
-            "mobile_set_orientation",
-            "mobile_open_url",
-            "mobile_set_clipboard",
-            "mobile_get_clipboard",
-            "mobile_wait_for_text",
-            "mobile_wait_for_app",
-            "device_screenshot",
-            "mobile_uninstall_app", "mobile_stop_app", "mobile_clear_app_data",
-            "mobile_grant_permission", "mobile_revoke_permission", "mobile_set_location",
-            "mobile_set_battery", "mobile_set_network", "mobile_toggle_airplane_mode",
+            "set_orientation",
+            "open_url",
+            "set_clipboard",
+            "get_clipboard",
+            "wait_for_text",
+            "wait_for_app",
+            "screenshot",
+            "uninstall_app", "stop_app", "clear_app_data",
+            "grant_permission", "revoke_permission", "set_location",
+            "set_battery", "set_network", "toggle_airplane_mode",
         ];
         const deviceMobileFlow = await client.callTool({
-            name: "device_run_flow",
+            name: "run_flow",
             arguments: {
                 stopOnError: false,
                 steps: deviceFlowAllowedMobileTools.map((name) => ({ tool: name, arguments: samples[name] })),
@@ -1271,11 +1263,11 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(deviceMobileFlowPayload.results.filter((result) => result.error?.includes("device_run_flow does not allow step tool"))).toEqual([]);
 
         const deviceFlowBlockedMobileTools = toolNames
-            .filter((name) => name.startsWith("mobile_"))
-            .filter((name) => name !== "device_run_flow")
+            .filter((name) => BROKER_CAPABLE_MOBILE_TOOLS.includes(name as typeof BROKER_CAPABLE_MOBILE_TOOLS[number]))
+            .filter((name) => name !== "run_flow")
             .filter((name) => !deviceFlowAllowedMobileTools.includes(name));
         const blockedDeviceMobileFlow = await client.callTool({
-            name: "device_run_flow",
+            name: "run_flow",
             arguments: {
                 stopOnError: false,
                 steps: deviceFlowBlockedMobileTools.map((name) => ({ tool: name, arguments: samples[name] })),
@@ -1287,7 +1279,7 @@ describe("device-lab MCP foundation and definitions", () => {
             .toContain("requires at least one step");
 
         for (const deviceId of [androidId, iosId, windowsId, macosId, linuxId]) {
-            await client.callTool({ name: "device_delete", arguments: { ...direct, deviceId, force: true, confirmDestructive: true } });
+            await client.callTool({ name: "delete", arguments: { ...direct, deviceId, force: true, confirmDestructive: true } });
         }
     });
 

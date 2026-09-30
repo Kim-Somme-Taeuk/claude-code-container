@@ -40,7 +40,7 @@ function replaceDevice(statePath: string, replacement: DeviceRecord) {
 
 async function attach(context: FakeIosMcpContext, deviceId: string, udid = "00008110-001C195E0E91801E") {
     const result = await context.client.callTool({
-        name: "device_attach",
+        name: "attach",
         arguments: { backend: "ios-device", deviceId, name: deviceId, udid },
     });
     expect(result.isError, (result.content as Array<{ text?: string }>)[0]?.text).not.toBe(true);
@@ -92,8 +92,8 @@ describe("iOS physical runtime cleanup fencing", () => {
         replaceDevice(statePath, { ...original, recording });
 
         const detached = await context.client.callTool({
-            name: "device_detach",
-            arguments: { backend: "ios-device", deviceId: attached.id },
+            name: "detach",
+            arguments: { deviceId: attached.id },
         });
         expect(detached.isError).toBe(true);
         expect((detached.content as Array<{ text?: string }>)[0]?.text).toContain("did not exit within 3000ms");
@@ -127,8 +127,8 @@ describe("iOS physical runtime cleanup fencing", () => {
         replaceDevice(statePath, { ...original, appium });
 
         const stopped = await context.client.callTool({
-            name: "device_stop",
-            arguments: { backend: "ios-device", deviceId: attached.id },
+            name: "stop",
+            arguments: { deviceId: attached.id },
         });
         expect(stopped.isError).toBe(true);
         expect((stopped.content as Array<{ text?: string }>)[0]?.text).toContain("Appium metadata and physical lease were preserved for retry");
@@ -145,7 +145,7 @@ describe("iOS physical runtime cleanup fencing", () => {
         const attached = await attach(context, "ios-partial-cleanup");
         const statePath = statePathFor(context.homeDir, attached);
         const leasePath = leasePathFor(context.homeDir, attached);
-        const session = await context.client.callTool({ name: "mobile_dump_ui", arguments: { deviceId: attached.id } });
+        const session = await context.client.callTool({ name: "dump_ui", arguments: { deviceId: attached.id } });
         expect(session.isError, (session.content as Array<{ text?: string }>)[0]?.text).not.toBe(true);
 
         child = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore", windowsHide: true });
@@ -168,8 +168,8 @@ describe("iOS physical runtime cleanup fencing", () => {
         replaceDevice(statePath, { ...original, appium: forgedAppium, recording });
 
         const stopped = await context.client.callTool({
-            name: "device_stop",
-            arguments: { backend: "ios-device", deviceId: attached.id },
+            name: "stop",
+            arguments: { deviceId: attached.id },
         });
         expect(stopped.isError).toBe(true);
         expect((stopped.content as Array<{ text?: string }>)[0]?.text).toContain("Appium metadata and physical lease were preserved for retry");
@@ -192,7 +192,7 @@ describe("iOS physical runtime cleanup fencing", () => {
         const attached = await attach(context, "ios-cleanup-successor", "00008111-001C195E0E91801F");
         const statePath = statePathFor(context.homeDir, attached);
         const leasePath = leasePathFor(context.homeDir, attached);
-        const session = await context.client.callTool({ name: "mobile_dump_ui", arguments: { deviceId: attached.id } });
+        const session = await context.client.callTool({ name: "dump_ui", arguments: { deviceId: attached.id } });
         expect(session.isError, (session.content as Array<{ text?: string }>)[0]?.text).not.toBe(true);
 
         const currentState = readDevice(statePath, attached.id);
@@ -209,8 +209,8 @@ describe("iOS physical runtime cleanup fencing", () => {
         writeFileSync(join(context.homeDir, "fake-ios-real-state-conflict-path"), statePath);
 
         const stopped = await context.client.callTool({
-            name: "device_stop",
-            arguments: { backend: "ios-device", deviceId: attached.id },
+            name: "stop",
+            arguments: { deviceId: attached.id },
         });
         expect(stopped.isError).toBe(true);
         expect((stopped.content as Array<{ text?: string }>)[0]?.text).toContain("owner-device-state-conflict");

@@ -1,3 +1,4 @@
+import { toolOperation } from "../../device-lab-mcp/src/tools.mjs";
 import { createBrokerApiClient } from "./broker-api-client.ts";
 import assert from "assert";
 import { spawnSync } from "child_process";
@@ -23,54 +24,54 @@ const expectedBackends = [
     "macos-vm",
 ];
 const scriptedArgumentFacets = [
-    "device_delete:confirmDestructive=true",
-    "device_launch_app:bundleId=com.example.missing",
-    "device_launch_app:component=com.example.missing/.MainActivity",
-    "device_launch_app:packageName=com.example.missing",
-    "device_reset:confirmDestructive=true",
-    "device_reset:bundleId=com.example.missing",
-    "device_reset:eraseSimulator=true",
-    "device_reset:packageName=com.example.missing",
-    "device_snapshot_delete:confirmDestructive=true",
-    "device_snapshot_delete:snapshotId=missing-snapshot-id",
-    "device_snapshot_delete:snapshotName=missing",
-    "device_snapshot_restore:confirmDestructive=true",
-    "device_snapshot_restore:snapshotId=missing-snapshot-id",
-    "device_snapshot_restore:snapshotName=missing",
-    "mobile_clear_app_data:confirmDestructive=true",
-    "mobile_clear_app_data:bundleId=com.example.missing",
-    "mobile_clear_app_data:packageName=com.example.missing",
-    "mobile_grant_permission:bundleId=com.example.missing",
-    "mobile_grant_permission:packageName=com.example.missing",
-    "mobile_grant_permission:permission=android.permission.CAMERA",
-    "mobile_grant_permission:service=camera",
-    "device_launch_app:bundleId=com.example.missing",
-    "device_launch_app:component=com.example.missing/.MainActivity",
-    "device_launch_app:packageName=com.example.missing",
-    "mobile_set_orientation:orientation=landscape",
-    "mobile_set_orientation:orientation=portrait",
-    "mobile_set_orientation:orientation=reverse-landscape",
-    "mobile_set_orientation:orientation=reverse-portrait",
-    "mobile_set_battery:confirmDestructive=true",
-    "mobile_set_battery:charging=true",
-    "mobile_set_battery:level=50",
-    "mobile_set_battery:status=2",
-    "mobile_set_network:data=true",
-    "mobile_set_network:confirmDestructive=true",
-    "mobile_set_network:wifi=true",
-    "mobile_toggle_airplane_mode:confirmDestructive=true",
-    "mobile_toggle_airplane_mode:enabled=false",
-    "mobile_uninstall_app:confirmDestructive=true",
-    "mobile_uninstall_app:bundleId=com.example.missing",
-    "mobile_uninstall_app:packageName=com.example.missing",
-    "mobile_revoke_permission:bundleId=com.example.missing",
-    "mobile_revoke_permission:packageName=com.example.missing",
-    "mobile_revoke_permission:permission=android.permission.CAMERA",
-    "mobile_revoke_permission:service=camera",
-    "mobile_stop_app:bundleId=com.example.missing",
-    "mobile_stop_app:packageName=com.example.missing",
-    "mobile_wait_for_app:bundleId=com.example.missing",
-    "mobile_wait_for_app:packageName=com.example.missing",
+    "delete:confirmDestructive=true",
+    "launch_app:bundleId=com.example.missing",
+    "launch_app:component=com.example.missing/.MainActivity",
+    "launch_app:packageName=com.example.missing",
+    "reset:confirmDestructive=true",
+    "reset:bundleId=com.example.missing",
+    "reset:eraseSimulator=true",
+    "reset:packageName=com.example.missing",
+    "snapshot_delete:confirmDestructive=true",
+    "snapshot_delete:snapshotId=missing-snapshot-id",
+    "snapshot_delete:snapshotName=missing",
+    "snapshot_restore:confirmDestructive=true",
+    "snapshot_restore:snapshotId=missing-snapshot-id",
+    "snapshot_restore:snapshotName=missing",
+    "clear_app_data:confirmDestructive=true",
+    "clear_app_data:bundleId=com.example.missing",
+    "clear_app_data:packageName=com.example.missing",
+    "grant_permission:bundleId=com.example.missing",
+    "grant_permission:packageName=com.example.missing",
+    "grant_permission:permission=android.permission.CAMERA",
+    "grant_permission:service=camera",
+    "launch_app:bundleId=com.example.missing",
+    "launch_app:component=com.example.missing/.MainActivity",
+    "launch_app:packageName=com.example.missing",
+    "set_orientation:orientation=landscape",
+    "set_orientation:orientation=portrait",
+    "set_orientation:orientation=reverse-landscape",
+    "set_orientation:orientation=reverse-portrait",
+    "set_battery:confirmDestructive=true",
+    "set_battery:charging=true",
+    "set_battery:level=50",
+    "set_battery:status=2",
+    "set_network:data=true",
+    "set_network:confirmDestructive=true",
+    "set_network:wifi=true",
+    "toggle_airplane_mode:confirmDestructive=true",
+    "toggle_airplane_mode:enabled=false",
+    "uninstall_app:confirmDestructive=true",
+    "uninstall_app:bundleId=com.example.missing",
+    "uninstall_app:packageName=com.example.missing",
+    "revoke_permission:bundleId=com.example.missing",
+    "revoke_permission:packageName=com.example.missing",
+    "revoke_permission:permission=android.permission.CAMERA",
+    "revoke_permission:service=camera",
+    "stop_app:bundleId=com.example.missing",
+    "stop_app:packageName=com.example.missing",
+    "wait_for_app:bundleId=com.example.missing",
+    "wait_for_app:packageName=com.example.missing",
 ];
 const scriptedTools = new Set();
 
@@ -93,18 +94,18 @@ function failStep(name, error) {
     }
 }
 
-const PUBLIC_DEVICE_LIFECYCLE_TOOLS = new Set(["device_create", "device_start", "device_stop", "device_delete"]);
-const PUBLIC_DEVICE_PHYSICAL_TOOLS = new Set(["device_attach", "device_detach"]);
+const PUBLIC_DEVICE_LIFECYCLE_TOOLS = new Set(["create", "start", "stop", "delete"]);
+const PUBLIC_DEVICE_PHYSICAL_TOOLS = new Set(["attach", "detach"]);
 const PUBLIC_DEVICE_READONLY_TOOLS = new Set([
-    "device_record_video_status",
-    "device_window_list",
-    "device_accessibility_snapshot",
+    "record_video_status",
+    "window_list",
+    "accessibility_snapshot",
 ]);
 const PUBLIC_MOBILE_DEVICE_BACKEND_TOOLS = new Set([
-    "mobile_clear_app_data",
-    "mobile_grant_permission",
-    "mobile_revoke_permission",
-    "mobile_set_battery",
+    "clear_app_data",
+    "grant_permission",
+    "revoke_permission",
+    "set_battery",
 ]);
 
 function expectedPublicDeviceRoutedBy(tool) {
@@ -115,7 +116,7 @@ function expectedPublicDeviceRoutedBy(tool) {
 }
 
 function expectedPublicMobileRoutedBy(tool) {
-    if (tool === "mobile_session_status") return "";
+    if (tool === "automation_status") return "";
     if (PUBLIC_MOBILE_DEVICE_BACKEND_TOOLS.has(tool)) return "mobile-device-broker";
     return "mobile-broker-appium";
 }
@@ -136,7 +137,7 @@ function brokerEnumSample(toolName, route, facetKey, facetValue, index) {
     };
     delete args.implicitBroker;
 
-    if (toolName === "device_create") {
+    if (toolName === "create") {
         args.name = `Level 2 enum ${facetKey} ${facetValue}`;
         args.deviceId = `level2-enum-${facetKey}-${facetValue}-${index}`;
         args.dryRun = true;
@@ -146,16 +147,16 @@ function brokerEnumSample(toolName, route, facetKey, facetValue, index) {
             args.image = "missing-image";
         }
     }
-    if (toolName === "device_delete") args.confirmDestructive = true;
-    if (toolName === "device_snapshot_restore" || toolName === "device_snapshot_delete") {
+    if (toolName === "delete") args.confirmDestructive = true;
+    if (toolName === "snapshot_restore" || toolName === "snapshot_delete") {
         args.confirmDestructive = true;
         args.snapshotName ||= "missing";
     }
-    if (toolName === "device_reset") {
+    if (toolName === "reset") {
         args.confirmDestructive = true;
         args.packageName ||= "com.example.missing";
     }
-    if (toolName.startsWith("mobile_") && /ios/.test(String(facetValue))) {
+    if ((toolOperation(toolName)?.startsWith("mobile_") || ["click", "double_click", "key", "type"].includes(toolName)) && /ios/.test(String(facetValue))) {
         if ("packageName" in args && !("bundleId" in args)) {
             delete args.packageName;
             args.bundleId = "com.example.missing";
@@ -301,7 +302,7 @@ export async function runBrokerE2E(options: any = {}) {
             const callInternal = (operation: string, args: Record<string, unknown>) => internalBroker.call(operation, args);
             let brokerReady = false;
             try {
-                const status = parseToolPayload(await callTool("device_broker_status", { ...route, probe: true }));
+                const status = parseToolPayload(await callTool("broker_status", { detail: true, ...route, probe: true }));
                 assert.strictEqual(status.available, true, JSON.stringify(status));
                 assert.strictEqual(status.launch?.ok ?? true, true, JSON.stringify(status.launch));
                 brokerReady = true;
@@ -652,7 +653,7 @@ export async function runBrokerE2E(options: any = {}) {
                     name: `level2-broker-e2e-command-${command}`,
                 }));
                 assert.strictEqual(planned.method, "broker.command.plan", JSON.stringify(planned));
-                if (command === "device_create") {
+                if (command === "create") {
                     assert.strictEqual(planned.ok, true, JSON.stringify(planned));
                     assert.strictEqual(planned.result.command, command, JSON.stringify(planned));
                     assert.strictEqual(planned.result.execution.mutatesHost, false, JSON.stringify(planned));
@@ -726,7 +727,7 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const backends = parseToolPayload(await callTool("device_backends", publicReadRoute));
+            const backends = parseToolPayload(await callTool("backends", { detail: true, ...publicReadRoute }));
             assert.strictEqual(backends.routedBy, "device-backends-broker", JSON.stringify(backends));
             assert.strictEqual(backends.source, "host-broker-provider-discovery", JSON.stringify(backends));
             assert.strictEqual(backends.broker?.available, true, JSON.stringify(backends.broker));
@@ -736,7 +737,7 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const inventory = parseToolPayload(await callTool("device_inventory", { ...publicReadRoute, backend: "android-emulator" }));
+            const inventory = parseToolPayload(await callTool("inventory", { detail: true, ...publicReadRoute, backend: "android-emulator" }));
             assert.ok(["device-readonly-broker-implicit", "device-readonly-broker"].includes(inventory.routedBy), JSON.stringify(inventory));
             assert.strictEqual(inventory.ok, true, JSON.stringify(inventory));
             assert.strictEqual(inventory.result?.source, "host-broker-owner-state", JSON.stringify(inventory.result));
@@ -748,7 +749,7 @@ export async function runBrokerE2E(options: any = {}) {
             try {
             const fakeAndroid = "level2-broker-e2e-public-android";
             const fakeWindows = "level2-broker-e2e-public-windows";
-            const createPlan = parseToolPayload(await callTool("device_create", {
+            const createPlan = parseToolPayload(await callTool("create", { detail: true,
                 ...publicRoute,
                 backend: "android-emulator",
                 name: "Level 2 public dry-run create",
@@ -758,31 +759,31 @@ export async function runBrokerE2E(options: any = {}) {
             assert.strictEqual(createPlan.ok, true, JSON.stringify(createPlan));
             assert.strictEqual(createPlan.routedBy, "device-lifecycle-broker", JSON.stringify(createPlan));
             const publicDeviceDiagnostics = scriptedToolCases([
-                ["device_start", { ...publicRoute, backend: "android-emulator", deviceId: fakeAndroid }],
-                ["device_stop", { ...publicRoute, backend: "android-emulator", deviceId: fakeAndroid }],
-                ["device_stop", { ...publicRoute, backend: "windows-sandbox", deviceId: fakeWindows }],
-                ["device_delete", { ...publicRoute, backend: "android-emulator", deviceId: fakeAndroid, confirmDestructive: true }],
-                ["device_delete", { ...publicRoute, backend: "windows-sandbox", deviceId: fakeWindows, confirmDestructive: true }],
-                ["device_attach", { ...publicRoute, backend: "android-device", name: "Level 2 public attach diagnostic", deviceId: `${fakeAndroid}-attach`, serial: "ccc-level2-definitely-missing-android-serial" }],
-                ["device_detach", { ...publicRoute, backend: "android-device", deviceId: `${fakeAndroid}-detach` }],
-                ["device_exec", { ...publicRoute, backend: "android-emulator", deviceId: fakeAndroid, command: "true", helperTimeoutMs: 1 }],
-                ["device_record_video_start", { ...publicRoute, backend: "android-emulator", deviceId: fakeAndroid, remotePath: "/sdcard/level2-public.mp4", timeLimitSec: 1 }],
-                ["device_record_video_status", { ...publicRoute, backend: "android-emulator", deviceId: fakeAndroid, helperTimeoutMs: 1 }],
-                ["device_record_video_stop", { ...publicRoute, backend: "android-emulator", deviceId: fakeAndroid, helperTimeoutMs: 1 }],
-                ["device_upload", { ...publicRoute, backend: "android-emulator", deviceId: fakeAndroid, localPath: "/tmp/ccc-missing-public-upload.txt", remotePath: "/sdcard/ccc-missing-public-upload.txt", helperTimeoutMs: 1 }],
-                ["device_download", { ...publicRoute, backend: "android-emulator", deviceId: fakeAndroid, remotePath: "/sdcard/ccc-missing-public-download.txt", localPath: "/tmp/ccc-missing-public-download.txt", helperTimeoutMs: 1 }],
-                ["device_reset", { ...publicRoute, backend: "android-emulator", deviceId: fakeAndroid, packageName: "com.example.missing", confirmDestructive: true }],
-                ["device_reset", { ...publicRoute, backend: "ios-simulator", deviceId: fakeAndroid, bundleId: "com.example.missing", confirmDestructive: true }],
-                ["device_reset", { ...publicRoute, backend: "ios-simulator", deviceId: fakeAndroid, eraseSimulator: true, confirmDestructive: true }],
-                ["device_install_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeAndroid, path: "/tmp/ccc-missing-public.apk" }],
-                ["device_launch_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeAndroid, packageName: "com.example.missing" }],
-                ["device_launch_app", { ...publicRoute, backend: "ios-simulator", deviceId: fakeAndroid, bundleId: "com.example.missing" }],
-                ["device_launch_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeAndroid, component: "com.example.missing/.MainActivity" }],
-                ["device_window_list", { ...publicRoute, backend: "windows-sandbox", deviceId: fakeWindows, helperTimeoutMs: 1 }],
-                ["device_accessibility_snapshot", { ...publicRoute, backend: "windows-sandbox", deviceId: fakeWindows, maxDepth: 1, maxNodes: 1, helperTimeoutMs: 1 }],
+                ["start", { ...publicRoute, deviceId: fakeAndroid }],
+                ["stop", { ...publicRoute, deviceId: fakeAndroid }],
+                ["stop", { ...publicRoute, deviceId: fakeWindows }],
+                ["delete", { ...publicRoute, deviceId: fakeAndroid, confirmDestructive: true }],
+                ["delete", { ...publicRoute, deviceId: fakeWindows, confirmDestructive: true }],
+                ["attach", { ...publicRoute, backend: "android-device", name: "Level 2 public attach diagnostic", deviceId: `${fakeAndroid}-attach`, serial: "ccc-level2-definitely-missing-android-serial" }],
+                ["detach", { ...publicRoute, deviceId: `${fakeAndroid}-detach` }],
+                ["exec", { ...publicRoute, deviceId: fakeAndroid, command: "true", helperTimeoutMs: 1 }],
+                ["record_video_start", { ...publicRoute, deviceId: fakeAndroid, remotePath: "/sdcard/level2-public.mp4", timeLimitSec: 1 }],
+                ["record_video_status", { ...publicRoute, deviceId: fakeAndroid, helperTimeoutMs: 1 }],
+                ["record_video_stop", { ...publicRoute, deviceId: fakeAndroid, helperTimeoutMs: 1 }],
+                ["upload", { ...publicRoute, deviceId: fakeAndroid, localPath: "/tmp/ccc-missing-public-upload.txt", remotePath: "/sdcard/ccc-missing-public-upload.txt", helperTimeoutMs: 1 }],
+                ["download", { ...publicRoute, deviceId: fakeAndroid, remotePath: "/sdcard/ccc-missing-public-download.txt", localPath: "/tmp/ccc-missing-public-download.txt", helperTimeoutMs: 1 }],
+                ["reset", { ...publicRoute, deviceId: fakeAndroid, packageName: "com.example.missing", confirmDestructive: true }],
+                ["reset", { ...publicRoute, deviceId: fakeAndroid, bundleId: "com.example.missing", confirmDestructive: true }],
+                ["reset", { ...publicRoute, deviceId: fakeAndroid, eraseSimulator: true, confirmDestructive: true }],
+                ["install_app", { ...publicRoute, deviceId: fakeAndroid, path: "/tmp/ccc-missing-public.apk" }],
+                ["launch_app", { ...publicRoute, deviceId: fakeAndroid, packageName: "com.example.missing" }],
+                ["launch_app", { ...publicRoute, deviceId: fakeAndroid, bundleId: "com.example.missing" }],
+                ["launch_app", { ...publicRoute, deviceId: fakeAndroid, component: "com.example.missing/.MainActivity" }],
+                ["window_list", { ...publicRoute, deviceId: fakeWindows, helperTimeoutMs: 1 }],
+                ["accessibility_snapshot", { ...publicRoute, deviceId: fakeWindows, maxDepth: 1, maxNodes: 1, helperTimeoutMs: 1 }],
             ]);
             for (const [tool, args] of publicDeviceDiagnostics) {
-                const diagnostic = parseToolPayload(await callTool(tool, args));
+                const diagnostic = parseToolPayload(await callTool(tool, { detail: true, ...args }));
                 assertFailureDiagnostic(tool, diagnostic, expectedPublicDeviceRoutedBy(tool));
             }
             steps.push({ name: "public device wrapper dry-run create and missing-device diagnostics", status: "PASS", detail: `diagnostics=${publicDeviceDiagnostics.length}` });
@@ -793,78 +794,78 @@ export async function runBrokerE2E(options: any = {}) {
             try {
             const fakeMobile = "level2-broker-e2e-public-mobile";
             const publicMobileDiagnostics = scriptedToolCases([
-                ["mobile_session_status", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
-                ["mobile_dump_ui", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
-                ["mobile_tap", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, x: 1, y: 1 }],
-                ["mobile_double_tap", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, x: 1, y: 1 }],
-                ["mobile_long_press", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, x: 1, y: 1, durationMs: 1 }],
-                ["mobile_swipe", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, x1: 1, y1: 1, x2: 2, y2: 2, durationMs: 1 }],
-                ["mobile_drag", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, x1: 1, y1: 1, x2: 2, y2: 2, durationMs: 1 }],
-                ["mobile_type_text", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, text: "ccc-public-mobile" }],
-                ["mobile_key", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, keyCode: 4 }],
-                ["mobile_home", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
-                ["mobile_back", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
-                ["mobile_forward", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
-                ["mobile_recents", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
-                ["mobile_power", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
-                ["mobile_lock", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
-                ["mobile_unlock", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
-                ["mobile_set_orientation", { orientation: "landscape", ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
-                ["mobile_set_orientation", { orientation: "reverse-landscape", ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
-                ["mobile_set_orientation", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, orientation: "landscape" }],
-                ["mobile_set_orientation", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, orientation: "portrait" }],
-                ["mobile_set_orientation", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, orientation: "reverse-landscape" }],
-                ["mobile_set_orientation", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, orientation: "reverse-portrait" }],
-                ["mobile_open_url", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, url: "https://example.invalid/" }],
-                ["device_install_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, path: "/tmp/ccc-missing-public.apk" }],
-                ["device_launch_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, packageName: "com.example.missing" }],
-                ["device_launch_app", { ...publicRoute, backend: "ios-simulator", deviceId: fakeMobile, bundleId: "com.example.missing" }],
-                ["device_launch_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, component: "com.example.missing/.MainActivity" }],
-                ["mobile_uninstall_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, packageName: "com.example.missing", confirmDestructive: true }],
-                ["mobile_uninstall_app", { ...publicRoute, backend: "ios-simulator", deviceId: fakeMobile, bundleId: "com.example.missing", confirmDestructive: true }],
-                ["mobile_stop_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, packageName: "com.example.missing" }],
-                ["mobile_stop_app", { ...publicRoute, backend: "ios-simulator", deviceId: fakeMobile, bundleId: "com.example.missing" }],
-                ["mobile_clear_app_data", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, packageName: "com.example.missing", confirmDestructive: true }],
-                ["mobile_clear_app_data", { ...publicRoute, backend: "ios-simulator", deviceId: fakeMobile, bundleId: "com.example.missing", confirmDestructive: true }],
-                ["mobile_grant_permission", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, packageName: "com.example.missing", permission: "android.permission.CAMERA" }],
-                ["mobile_grant_permission", { ...publicRoute, backend: "ios-simulator", deviceId: fakeMobile, bundleId: "com.example.missing", service: "camera" }],
-                ["mobile_revoke_permission", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, packageName: "com.example.missing", permission: "android.permission.CAMERA" }],
-                ["mobile_revoke_permission", { ...publicRoute, backend: "ios-simulator", deviceId: fakeMobile, bundleId: "com.example.missing", service: "camera" }],
-                ["mobile_set_location", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, latitude: 37.7749, longitude: -122.4194 }],
-                ["mobile_set_battery", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, level: 50, confirmDestructive: true }],
-                ["mobile_set_battery", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, status: 2, confirmDestructive: true }],
-                ["mobile_set_battery", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, charging: true, confirmDestructive: true }],
-                ["mobile_set_network", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, wifi: true, confirmDestructive: true }],
-                ["mobile_set_network", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, data: true, confirmDestructive: true }],
-                ["mobile_toggle_airplane_mode", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, enabled: false, confirmDestructive: true }],
-                ["mobile_set_clipboard", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, text: "ccc-public-clipboard" }],
-                ["mobile_get_clipboard", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
-                ["mobile_wait_for_text", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, text: "missing", timeoutMs: 1, intervalMs: 50 }],
-                ["mobile_wait_for_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, packageName: "com.example.missing", timeoutMs: 1, intervalMs: 50 }],
-                ["mobile_wait_for_app", { ...publicRoute, backend: "ios-simulator", deviceId: fakeMobile, bundleId: "com.example.missing", timeoutMs: 1, intervalMs: 50 }],
-                ["device_screenshot", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
+                ["automation_status", { ...publicRoute, deviceId: fakeMobile }],
+                ["dump_ui", { ...publicRoute, deviceId: fakeMobile }],
+                ["click", { ...publicRoute, deviceId: fakeMobile, x: 1, y: 1 }],
+                ["double_click", { ...publicRoute, deviceId: fakeMobile, x: 1, y: 1 }],
+                ["long_press", { ...publicRoute, deviceId: fakeMobile, x: 1, y: 1, durationMs: 1 }],
+                ["swipe", { ...publicRoute, deviceId: fakeMobile, x1: 1, y1: 1, x2: 2, y2: 2, durationMs: 1 }],
+                ["drag", { ...publicRoute, deviceId: fakeMobile, x1: 1, y1: 1, x2: 2, y2: 2, durationMs: 1 }],
+                ["type", { ...publicRoute, deviceId: fakeMobile, text: "ccc-public-mobile" }],
+                ["key", { ...publicRoute, deviceId: fakeMobile, keyCode: 4 }],
+                ["home", { ...publicRoute, deviceId: fakeMobile }],
+                ["back", { ...publicRoute, deviceId: fakeMobile }],
+                ["forward", { ...publicRoute, deviceId: fakeMobile }],
+                ["recents", { ...publicRoute, deviceId: fakeMobile }],
+                ["power", { ...publicRoute, deviceId: fakeMobile }],
+                ["lock", { ...publicRoute, deviceId: fakeMobile }],
+                ["unlock", { ...publicRoute, deviceId: fakeMobile }],
+                ["set_orientation", { orientation: "landscape", ...publicRoute, deviceId: fakeMobile }],
+                ["set_orientation", { orientation: "reverse-landscape", ...publicRoute, deviceId: fakeMobile }],
+                ["set_orientation", { ...publicRoute, deviceId: fakeMobile, orientation: "landscape" }],
+                ["set_orientation", { ...publicRoute, deviceId: fakeMobile, orientation: "portrait" }],
+                ["set_orientation", { ...publicRoute, deviceId: fakeMobile, orientation: "reverse-landscape" }],
+                ["set_orientation", { ...publicRoute, deviceId: fakeMobile, orientation: "reverse-portrait" }],
+                ["open_url", { ...publicRoute, deviceId: fakeMobile, url: "https://example.invalid/" }],
+                ["install_app", { ...publicRoute, deviceId: fakeMobile, path: "/tmp/ccc-missing-public.apk" }],
+                ["launch_app", { ...publicRoute, deviceId: fakeMobile, packageName: "com.example.missing" }],
+                ["launch_app", { ...publicRoute, deviceId: fakeMobile, bundleId: "com.example.missing" }],
+                ["launch_app", { ...publicRoute, deviceId: fakeMobile, component: "com.example.missing/.MainActivity" }],
+                ["uninstall_app", { ...publicRoute, deviceId: fakeMobile, packageName: "com.example.missing", confirmDestructive: true }],
+                ["uninstall_app", { ...publicRoute, deviceId: fakeMobile, bundleId: "com.example.missing", confirmDestructive: true }],
+                ["stop_app", { ...publicRoute, deviceId: fakeMobile, packageName: "com.example.missing" }],
+                ["stop_app", { ...publicRoute, deviceId: fakeMobile, bundleId: "com.example.missing" }],
+                ["clear_app_data", { ...publicRoute, deviceId: fakeMobile, packageName: "com.example.missing", confirmDestructive: true }],
+                ["clear_app_data", { ...publicRoute, deviceId: fakeMobile, bundleId: "com.example.missing", confirmDestructive: true }],
+                ["grant_permission", { ...publicRoute, deviceId: fakeMobile, packageName: "com.example.missing", permission: "android.permission.CAMERA" }],
+                ["grant_permission", { ...publicRoute, deviceId: fakeMobile, bundleId: "com.example.missing", service: "camera" }],
+                ["revoke_permission", { ...publicRoute, deviceId: fakeMobile, packageName: "com.example.missing", permission: "android.permission.CAMERA" }],
+                ["revoke_permission", { ...publicRoute, deviceId: fakeMobile, bundleId: "com.example.missing", service: "camera" }],
+                ["set_location", { ...publicRoute, deviceId: fakeMobile, latitude: 37.7749, longitude: -122.4194 }],
+                ["set_battery", { ...publicRoute, deviceId: fakeMobile, level: 50, confirmDestructive: true }],
+                ["set_battery", { ...publicRoute, deviceId: fakeMobile, status: 2, confirmDestructive: true }],
+                ["set_battery", { ...publicRoute, deviceId: fakeMobile, charging: true, confirmDestructive: true }],
+                ["set_network", { ...publicRoute, deviceId: fakeMobile, wifi: true, confirmDestructive: true }],
+                ["set_network", { ...publicRoute, deviceId: fakeMobile, data: true, confirmDestructive: true }],
+                ["toggle_airplane_mode", { ...publicRoute, deviceId: fakeMobile, enabled: false, confirmDestructive: true }],
+                ["set_clipboard", { ...publicRoute, deviceId: fakeMobile, text: "ccc-public-clipboard" }],
+                ["get_clipboard", { ...publicRoute, deviceId: fakeMobile }],
+                ["wait_for_text", { ...publicRoute, deviceId: fakeMobile, text: "missing", timeoutMs: 1, intervalMs: 50 }],
+                ["wait_for_app", { ...publicRoute, deviceId: fakeMobile, packageName: "com.example.missing", timeoutMs: 1, intervalMs: 50 }],
+                ["wait_for_app", { ...publicRoute, deviceId: fakeMobile, bundleId: "com.example.missing", timeoutMs: 1, intervalMs: 50 }],
+                ["screenshot", { ...publicRoute, deviceId: fakeMobile }],
             ]);
             for (const [tool, args] of publicMobileDiagnostics) {
-                const diagnostic = parseToolPayload(await callTool(tool, args));
+                const diagnostic = parseToolPayload(await callTool(tool, { detail: true, ...args }));
                 assertFailureDiagnostic(tool, diagnostic, expectedPublicMobileRoutedBy(tool));
             }
-            const flow = parseToolPayload(markExpectedFlowStepErrors(await callTool("device_run_flow", {
+            const flow = parseToolPayload(markExpectedFlowStepErrors(await callTool("run_flow", { detail: true,
                 stopOnError: false,
                 steps: [
-                    { tool: "mobile_session_status", arguments: { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile } },
-                    { tool: "mobile_tap", arguments: { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, x: 1, y: 1 } },
+                    { tool: "automation_status", arguments: { ...publicRoute, deviceId: fakeMobile } },
+                    { tool: "click", arguments: { ...publicRoute, deviceId: fakeMobile, x: 1, y: 1 } },
                 ],
-            }), ["mobile_session_status", "mobile_tap"]));
+            }), ["automation_status", "click"]));
             assert.strictEqual(flow.ok, false, JSON.stringify(flow));
-            assert.strictEqual(flow.results?.[0]?.tool, "mobile_session_status", JSON.stringify(flow));
-            assert.strictEqual(flow.results?.[1]?.tool, "mobile_tap", JSON.stringify(flow));
+            assert.strictEqual(flow.results?.[0]?.tool, "automation_status", JSON.stringify(flow));
+            assert.strictEqual(flow.results?.[1]?.tool, "click", JSON.stringify(flow));
             steps.push({ name: "public mobile wrapper missing-device diagnostics", status: "PASS", detail: `tools=${publicMobileDiagnostics.length + 1}` });
         } catch (error) {
             steps.push(failStep("public mobile wrapper missing-device diagnostics", error));
         }
 
             try {
-            const wirelessStatus = markExpectedToolError(await callTool("device_wireless", {
+            const wirelessStatus = markExpectedToolError(await callTool("wireless", { detail: true,
                 ...publicRoute,
                 backend: "android-device",
                 action: "status",
@@ -878,22 +879,22 @@ export async function runBrokerE2E(options: any = {}) {
 
             try {
             const publicMacosDiagnostics = scriptedToolCases([
-                ["device_snapshot_create", { ...publicRoute, backend: "macos-vm", deviceId: "level2-public-missing-macos", snapshotName: "missing" }],
-                ["device_snapshot_restore", { ...publicRoute, backend: "macos-vm", deviceId: "level2-public-missing-macos", snapshotName: "missing", confirmDestructive: true }],
-                ["device_snapshot_restore", { ...publicRoute, backend: "macos-vm", deviceId: "level2-public-missing-macos", snapshotId: "missing-snapshot-id", confirmDestructive: true }],
-                ["device_snapshot_delete", { ...publicRoute, backend: "macos-vm", deviceId: "level2-public-missing-macos", snapshotName: "missing", confirmDestructive: true }],
-                ["device_snapshot_delete", { ...publicRoute, backend: "macos-vm", deviceId: "level2-public-missing-macos", snapshotId: "missing-snapshot-id", confirmDestructive: true }],
+                ["snapshot_create", { ...publicRoute, deviceId: "level2-public-missing-macos", snapshotName: "missing" }],
+                ["snapshot_restore", { ...publicRoute, deviceId: "level2-public-missing-macos", snapshotName: "missing", confirmDestructive: true }],
+                ["snapshot_restore", { ...publicRoute, deviceId: "level2-public-missing-macos", snapshotId: "missing-snapshot-id", confirmDestructive: true }],
+                ["snapshot_delete", { ...publicRoute, deviceId: "level2-public-missing-macos", snapshotName: "missing", confirmDestructive: true }],
+                ["snapshot_delete", { ...publicRoute, deviceId: "level2-public-missing-macos", snapshotId: "missing-snapshot-id", confirmDestructive: true }],
             ]);
             for (const [tool, args] of publicMacosDiagnostics) {
-                const diagnostic = parseToolPayload(await callTool(tool, args));
+                const diagnostic = parseToolPayload(await callTool(tool, { detail: true, ...args }));
                 assertFailureDiagnostic(tool, diagnostic, expectedPublicDeviceRoutedBy(tool));
             }
             const directMacosImageDiagnostics = scriptedToolCases([
-                ["device_base_image_create", { name: "Level 2 public missing base image", sourceImage: "missing-source" }],
-                ["device_base_image_clone", { name: "Level 2 public missing clone", sourceDeviceId: "level2-public-missing-source" }],
+                ["base_image_create", { name: "Level 2 public missing base image", sourceImage: "missing-source" }],
+                ["base_image_clone", { name: "Level 2 public missing clone", sourceDeviceId: "level2-public-missing-source" }],
             ]);
             for (const [tool, args] of directMacosImageDiagnostics) {
-                const diagnostic = markExpectedToolError(await callTool(tool, args));
+                const diagnostic = markExpectedToolError(await callTool(tool, { detail: true, ...args }));
                 assert.strictEqual(diagnostic?.isError, true, `${tool} unexpectedly succeeded: ${diagnostic?.content?.[0]?.text || ""}`);
                 assert.ok(String(diagnostic.content?.[0]?.text || "").length > 0, `${tool}: missing diagnostic text`);
                 assert.ok(!String(diagnostic.content?.[0]?.text || "").includes("omit backend"), `${tool}: selector rejection did not reach provider diagnostics`);
@@ -906,7 +907,7 @@ export async function runBrokerE2E(options: any = {}) {
             try {
             const diagnostics = scriptedToolCases(backendProviderEnumDiagnostics(publicRoute));
             for (const [tool, args, facet] of diagnostics) {
-                const result = markExpectedToolError(await callTool(tool, args));
+                const result = markExpectedToolError(await callTool(tool, { detail: true, ...args }));
                 const text = result?.content?.map((item) => item?.text || "").join("\n") || "";
                 assert.ok(Array.isArray(result?.content) && result.content.length > 0, `${facet}: missing MCP response content`);
                 if (!result?.isError && /^[\[{]/.test(text.trim())) {

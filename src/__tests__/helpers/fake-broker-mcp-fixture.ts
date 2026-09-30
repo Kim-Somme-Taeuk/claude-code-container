@@ -140,6 +140,14 @@ const server = http.createServer((req, res) => {
     if (body.method === "broker.physical.attach") return send(res, 200, { ok: true, result: { ownerId: match[1], device: { id: body.params.deviceId, backend: body.params.backend, serial: body.params.serial || null, udid: body.params.udid || null, connection: body.params.connection || "usb" } } });
     if (body.method === "broker.physical.detach") return send(res, 200, { ok: true, result: { ownerId: match[1], detached: body.params.deviceId, physicalDevicePoweredOff: false } });
     if (body.method === "broker.physical.list") return send(res, 200, { ok: true, result: { ownerId: match[1], backend: body.params.backend, devices: [], leases: [] } });
+    if (body.method === "broker.inventory") {
+      const root = path.join(os.homedir(), ".ccc/devices/owners", match[1]);
+      const backends = ["android", "android-device", "ios", "ios-device", "windows", "windows-vm", "linux-vm", "macos"].map(stateKey => {
+        const file = path.join(root, stateKey, "devices.json");
+        return { stateKey, devices: fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")).devices : [] };
+      });
+      return send(res, 200, { ok: true, result: { backends } });
+    }
     if (body.method === "broker.command.plan") return send(res, 200, { ok: true, result: { ownerId: match[1], backend: body.params.backend, command: body.params.command, deviceId: body.params.deviceId, device: { id: body.params.deviceId, status: "stopped" }, execution: { mode: "planned", providerExecution: "fake", mutatesHost: false } } });
     if (body.method === "broker.command.invoke") return send(res, 200, { ok: true, result: { ownerId: match[1], backend: body.params.backend, command: body.params.command, deviceId: body.params.deviceId, dryRun: body.params.dryRun === true, invoked: body.params.dryRun !== true, device: { id: body.params.deviceId, status: body.params.command === "device_start" ? "running" : "stopped" }, execution: { mode: body.params.dryRun === true ? "dry-run" : "exec", providerExecution: "fake", mutatesHost: body.params.dryRun !== true && body.params.command !== "device_status" } } });
     return send(res, 418, { ok: false, error: "fake-broker-error", method: body.method });

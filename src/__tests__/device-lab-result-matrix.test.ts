@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { assertResultMatrix, PROVIDER_RESULT_SPECS } from "../../scripts/real-tests/assert-matrix.js";
 import { TOOLS } from "../../device-lab-mcp/src/tools.mjs";
 
-const imageTools = ["device_base_image_create", "device_base_image_clone"];
+const imageTools = ["base_image_create", "base_image_clone"];
 
 function matrix(tools = imageTools, change: (call: any) => any = (call) => call) {
     const calls = ["source", "dist"].flatMap((source) => tools.map((tool) => change({
@@ -41,8 +41,8 @@ describe("canonical provider result evidence", () => {
     });
 
     it("requires explicit backend evidence for multi-backend tools", () => {
-        expect(matrix(["device_create"]).ok).toBe(false);
-        expect(matrix(["device_create"], (call) => ({
+        expect(matrix(["create"]).ok).toBe(false);
+        expect(matrix(["create"], (call) => ({
             ...call, facets: [`${call.tool}:backend=macos-vm`],
         })).ok).toBe(true);
     });

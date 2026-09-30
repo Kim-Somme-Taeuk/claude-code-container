@@ -278,7 +278,7 @@ exit 0
 
     it("writes owner-scoped Windows Sandbox config with helper bootstrap only on explicit start", { timeout: TIMEOUT }, async () => {
         const create = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: {
                 backend: "windows-sandbox",
                 name: "Win Helper",
@@ -298,7 +298,7 @@ exit 0
 
         expect(readFileSync(logPath, { encoding: "utf-8", flag: "a+" })).not.toContain("wsb start");
         const inventory = await client.callTool({
-            name: "device_inventory",
+            name: "inventory",
             arguments: { backend: "windows-sandbox" },
         });
         expect(inventory.isError).not.toBe(true);
@@ -319,7 +319,7 @@ exit 0
         expect(readFileSync(logPath, { encoding: "utf-8", flag: "a+" })).not.toContain("wsb start");
 
         const start = await client.callTool({
-            name: "device_start",
+            name: "start",
             arguments: { deviceId: "windows-win-helper" },
         });
         expect(start.isError).not.toBe(true);
@@ -557,7 +557,7 @@ exit 0
         }, 25);
 
         const exec = await client.callTool({
-            name: "device_exec",
+            name: "exec",
             arguments: { deviceId: "windows-win-helper", command: "whoami", helperTimeoutMs: 1000 },
         });
         expect(exec.isError).not.toBe(true);
@@ -573,7 +573,7 @@ exit 0
         expect(helperLaunchLog).toMatch(/wsb exec --id [0-9a-f-]{36} --command powershell\.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\ccc\\tools\\ccc-guest-helper-bootstrap\.ps1 --run-as ExistingLogin/);
 
         const screenshot = await client.callTool({
-            name: "device_screenshot",
+            name: "screenshot",
             arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(screenshot.isError).not.toBe(true);
@@ -582,21 +582,21 @@ exit 0
         expect(Buffer.from(screenshotContent.data || "", "base64").toString("utf8")).toBe("fakepng");
 
         const mismatchedResponse = await client.callTool({
-            name: "device_exec",
+            name: "exec",
             arguments: { deviceId: "windows-win-helper", command: "mismatched-response", helperTimeoutMs: 300 },
         });
         expect(mismatchedResponse.isError).toBe(true);
         expect((mismatchedResponse.content as Array<{ text?: string }>)[0].text).toContain("response id or type mismatch");
 
         const oversizedResponse = await client.callTool({
-            name: "device_exec",
+            name: "exec",
             arguments: { deviceId: "windows-win-helper", command: "oversized-response", helperTimeoutMs: 300 },
         });
         expect(oversizedResponse.isError).toBe(true);
         expect((oversizedResponse.content as Array<{ text?: string }>)[0].text).toContain("windows-helper-response-file-too-large");
 
         const click = await client.callTool({
-            name: "device_click",
+            name: "click",
             arguments: { deviceId: "windows-win-helper", x: 25, y: 40, button: "right", helperTimeoutMs: 1000 },
         });
         expect(click.isError).not.toBe(true);
@@ -607,7 +607,7 @@ exit 0
         });
 
         const doubleClick = await client.callTool({
-            name: "device_double_click",
+            name: "double_click",
             arguments: { deviceId: "windows-win-helper", x: 30, y: 50, helperTimeoutMs: 1000 },
         });
         expect(doubleClick.isError).not.toBe(true);
@@ -618,7 +618,7 @@ exit 0
         });
 
         const key = await client.callTool({
-            name: "device_key",
+            name: "key",
             arguments: { deviceId: "windows-win-helper", key: "Control+A", helperTimeoutMs: 1000 },
         });
         expect(key.isError).not.toBe(true);
@@ -628,7 +628,7 @@ exit 0
         });
 
         const type = await client.callTool({
-            name: "device_type",
+            name: "type",
             arguments: { deviceId: "windows-win-helper", text: "hello from ccc", helperTimeoutMs: 1000 },
         });
         expect(type.isError).not.toBe(true);
@@ -638,7 +638,7 @@ exit 0
         });
 
         const literalType = await client.callTool({
-            name: "device_type",
+            name: "type",
             arguments: { deviceId: "windows-win-helper", text: "a+b {ok} 50% [x] (y) ~ ^", helperTimeoutMs: 1000 },
         });
         expect(literalType.isError).not.toBe(true);
@@ -648,7 +648,7 @@ exit 0
         });
 
         const scroll = await client.callTool({
-            name: "device_scroll",
+            name: "scroll",
             arguments: { deviceId: "windows-win-helper", x: 10, y: 20, direction: "down", amount: 3, helperTimeoutMs: 1000 },
         });
         expect(scroll.isError).not.toBe(true);
@@ -660,14 +660,14 @@ exit 0
         });
 
         const cursor = await client.callTool({
-            name: "device_cursor_position",
+            name: "cursor_position",
             arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(cursor.isError).not.toBe(true);
         expect(JSON.parse(((cursor.content as Array<{ text?: string }>)[0].text ?? "{}")).cursor).toEqual({ x: 11, y: 22 });
 
         const windows = await client.callTool({
-            name: "device_window_list",
+            name: "window_list",
             arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(windows.isError).not.toBe(true);
@@ -677,7 +677,7 @@ exit 0
         }));
 
         const accessibility = await client.callTool({
-            name: "device_accessibility_snapshot",
+            name: "accessibility_snapshot",
             arguments: { deviceId: "windows-win-helper", maxDepth: 99, maxNodes: 5000, helperTimeoutMs: 1000 },
         });
         expect(accessibility.isError).not.toBe(true);
@@ -696,7 +696,7 @@ exit 0
         const uploadSource = join(homeDir, "upload.txt");
         writeFileSync(uploadSource, "upload");
         const upload = await client.callTool({
-            name: "device_upload",
+            name: "upload",
             arguments: { deviceId: "windows-win-helper", localPath: uploadSource, remotePath: "C:\\Users\\WDAGUtilityAccount\\upload.txt", helperTimeoutMs: 1000 },
         });
         expect(upload.isError).not.toBe(true);
@@ -711,7 +711,7 @@ exit 0
 
         const downloadTarget = join(homeDir, "download.txt");
         const download = await client.callTool({
-            name: "device_download",
+            name: "download",
             arguments: { deviceId: "windows-win-helper", remotePath: "C:\\Users\\WDAGUtilityAccount\\remote.txt", localPath: downloadTarget, helperTimeoutMs: 1000 },
         });
         expect(download.isError).not.toBe(true);
@@ -727,7 +727,7 @@ exit 0
         const oversizedDownloadTarget = join(homeDir, "oversized-download.bin");
         writeFileSync(oversizedDownloadTarget, "preserved");
         const oversizedDownload = await client.callTool({
-            name: "device_download",
+            name: "download",
             arguments: { deviceId: "windows-win-helper", remotePath: "C:\\Users\\WDAGUtilityAccount\\oversized.bin", localPath: oversizedDownloadTarget, helperTimeoutMs: 1000 },
         });
         expect(oversizedDownload.isError).toBe(true);
@@ -736,19 +736,19 @@ exit 0
 
         const helperRequestCount = helperRequests.length;
         const rejectedHelperUpload = await client.callTool({
-            name: "device_upload",
+            name: "upload",
             arguments: { deviceId: "windows-win-helper", localPath: uploadSource, remotePath: "C:\\ccc\\scratch\\inbox\\evil.txt", helperTimeoutMs: 1000 },
         });
         expect(rejectedHelperUpload.isError).toBe(true);
         expect((rejectedHelperUpload.content as Array<{ text?: string }>)[0].text).toContain("upload-remote-path-helper-path-rejected");
         const rejectedNamespaceUpload = await client.callTool({
-            name: "device_upload",
+            name: "upload",
             arguments: { deviceId: "windows-win-helper", localPath: uploadSource, remotePath: "\\\\?\\C:\\ccc\\scratch\\inbox\\evil.txt", helperTimeoutMs: 1000 },
         });
         expect(rejectedNamespaceUpload.isError).toBe(true);
         expect((rejectedNamespaceUpload.content as Array<{ text?: string }>)[0].text).toContain("upload-remote-path-device-namespace-rejected");
         const rejectedTraversalDownload = await client.callTool({
-            name: "device_download",
+            name: "download",
             arguments: { deviceId: "windows-win-helper", remotePath: "C:\\Users\\WDAGUtilityAccount\\..\\escape.txt", localPath: join(homeDir, "bad-download.txt"), helperTimeoutMs: 1000 },
         });
         expect(rejectedTraversalDownload.isError).toBe(true);
@@ -756,7 +756,7 @@ exit 0
         expect(helperRequests).toHaveLength(helperRequestCount);
 
         const recordStart = await client.callTool({
-            name: "device_record_video_start",
+            name: "record_video_start",
             arguments: { deviceId: "windows-win-helper", localPath: join(homeDir, "windows-recording.zip"), timeLimitSec: 2, helperTimeoutMs: 1000 },
         });
         expect(recordStart.isError).not.toBe(true);
@@ -772,21 +772,21 @@ exit 0
         }));
 
         const duplicateRecordStart = await client.callTool({
-            name: "device_record_video_start",
+            name: "record_video_start",
             arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(duplicateRecordStart.isError).toBe(true);
         expect((duplicateRecordStart.content as Array<{ text?: string }>)[0].text).toContain("Windows Sandbox recording already active");
 
         const invalidRecordStop = await client.callTool({
-            name: "device_record_video_stop",
+            name: "record_video_stop",
             arguments: { deviceId: "windows-win-helper", localPath: join(homeDir, ".env"), helperTimeoutMs: 1000 },
         });
         expect(invalidRecordStop.isError).toBe(true);
         expect((invalidRecordStop.content as Array<{ text?: string }>)[0].text).toContain("recording-local-path-secret-looking-file");
 
         const activeRecordStatus = await client.callTool({
-            name: "device_record_video_status",
+            name: "record_video_status",
             arguments: { deviceId: "windows-win-helper" },
         });
         expect(activeRecordStatus.isError).not.toBe(true);
@@ -796,7 +796,7 @@ exit 0
         }));
 
         const recordStop = await client.callTool({
-            name: "device_record_video_stop",
+            name: "record_video_stop",
             arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(recordStop.isError).not.toBe(true);
@@ -812,7 +812,7 @@ exit 0
         expect(readFileSync(join(homeDir, "windows-recording.zip"), "utf-8")).toBe("fakezip");
 
         const stopWithoutRecording = await client.callTool({
-            name: "device_record_video_stop",
+            name: "record_video_stop",
             arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(stopWithoutRecording.isError).toBe(true);
@@ -820,25 +820,25 @@ exit 0
 
         const failedStopRecordingPath = join(homeDir, "failed-stop-windows-recording.zip");
         const failedStopRecordStart = await client.callTool({
-            name: "device_record_video_start",
+            name: "record_video_start",
             arguments: { deviceId: "windows-win-helper", localPath: failedStopRecordingPath, helperTimeoutMs: 1000 },
         });
         expect(failedStopRecordStart.isError).not.toBe(true);
         failRecordStop = true;
         const failedRecordStop = await client.callTool({
-            name: "device_record_video_stop",
+            name: "record_video_stop",
             arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(failedRecordStop.isError).toBe(true);
         expect((failedRecordStop.content as Array<{ text?: string }>)[0].text).toContain("recording state preserved for retry");
         const statusAfterFailedRecordStop = await client.callTool({
-            name: "device_record_video_status",
+            name: "record_video_status",
             arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(JSON.parse(((statusAfterFailedRecordStop.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toEqual(expect.objectContaining({ active: true }));
         failRecordStop = false;
         const retriedFailedRecordStop = await client.callTool({
-            name: "device_record_video_stop",
+            name: "record_video_stop",
             arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(retriedFailedRecordStop.isError).not.toBe(true);
@@ -846,14 +846,14 @@ exit 0
 
         const retryRecordingPath = join(homeDir, "retry-windows-recording.zip");
         const retryRecordStart = await client.callTool({
-            name: "device_record_video_start",
+            name: "record_video_start",
             arguments: { deviceId: "windows-win-helper", localPath: retryRecordingPath, helperTimeoutMs: 1000 },
         });
         expect(retryRecordStart.isError).not.toBe(true);
         writeFileSync(retryRecordingPath, "preserved");
         omitRecordStopArchive = true;
         const missingArchiveStop = await client.callTool({
-            name: "device_record_video_stop",
+            name: "record_video_stop",
             arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(missingArchiveStop.isError).toBe(true);
@@ -861,7 +861,7 @@ exit 0
         expect(readFileSync(retryRecordingPath, "utf8")).toBe("preserved");
         omitRecordStopArchive = false;
         const retriedArchiveStop = await client.callTool({
-            name: "device_record_video_stop",
+            name: "record_video_stop",
             arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(retriedArchiveStop.isError).not.toBe(true);
@@ -870,7 +870,7 @@ exit 0
         const unsafeStatusPath = join(homeDir, "unsafe-status-recording.zip");
         const unsafeStatusTarget = join(homeDir, "unsafe-status-target.zip");
         const unsafeStatusRecordStart = await client.callTool({
-            name: "device_record_video_start",
+            name: "record_video_start",
             arguments: { deviceId: "windows-win-helper", localPath: unsafeStatusPath, timeLimitSec: 1, helperTimeoutMs: 1000 },
         });
         expect(unsafeStatusRecordStart.isError).not.toBe(true);
@@ -878,7 +878,7 @@ exit 0
         symlinkSync(unsafeStatusTarget, unsafeStatusPath);
         forceInactiveRecordStatus = true;
         const unsafeInactiveRecordStatus = await client.callTool({
-            name: "device_record_video_status",
+            name: "record_video_status",
             arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(unsafeInactiveRecordStatus.isError).not.toBe(true);
@@ -892,40 +892,40 @@ exit 0
         forceInactiveRecordStatus = false;
         rmSync(unsafeStatusPath, { force: true });
         const unsafeStatusRecordStop = await client.callTool({
-            name: "device_record_video_stop",
+            name: "record_video_stop",
             arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(unsafeStatusRecordStop.isError).not.toBe(true);
         expect(readFileSync(unsafeStatusPath, "utf-8")).toBe("fakezip");
 
         const boundedRecordStart = await client.callTool({
-            name: "device_record_video_start",
+            name: "record_video_start",
             arguments: { deviceId: "windows-win-helper", localPath: join(homeDir, "bounded-windows-recording.zip"), timeLimitSec: 1, helperTimeoutMs: 1000 },
         });
         expect(boundedRecordStart.isError).not.toBe(true);
         forceInactiveRecordStatus = true;
         const inactiveRecordStatus = await client.callTool({
-            name: "device_record_video_status",
+            name: "record_video_status",
             arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(inactiveRecordStatus.isError).not.toBe(true);
         expect(JSON.parse(((inactiveRecordStatus.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toBeNull();
         expect(readFileSync(join(homeDir, "bounded-windows-recording.zip"), "utf-8")).toBe("boundedzip");
         const restartAfterInactiveStatus = await client.callTool({
-            name: "device_record_video_start",
+            name: "record_video_start",
             arguments: { deviceId: "windows-win-helper", localPath: join(homeDir, "restart-windows-recording.zip"), helperTimeoutMs: 1000 },
         });
         expect(restartAfterInactiveStatus.isError).not.toBe(true);
         forceInactiveRecordStatus = false;
         const restartStop = await client.callTool({
-            name: "device_record_video_stop",
+            name: "record_video_stop",
             arguments: { deviceId: "windows-win-helper", helperTimeoutMs: 1000 },
         });
         expect(restartStop.isError).not.toBe(true);
         clearInterval(responder);
 
         const stop = await client.callTool({
-            name: "device_stop",
+            name: "stop",
             arguments: { deviceId: "windows-win-helper" },
         });
         expect(stop.isError).not.toBe(true);
@@ -970,7 +970,7 @@ exit 0
 
     it("cleans Windows Sandbox scratch on delete and preserves state when forced stop fails", { timeout: TIMEOUT }, async () => {
         const stoppedCreate = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: {
                 backend: "windows-sandbox",
                 name: "Win Delete Stopped",
@@ -984,14 +984,14 @@ exit 0
         expect(existsSync(stoppedCreated.device.helper.scratchDir)).toBe(true);
 
         const stoppedDelete = await client.callTool({
-            name: "device_delete",
+            name: "delete",
             arguments: { deviceId: "windows-delete-stopped", confirmDestructive: true },
         });
         expect(stoppedDelete.isError).not.toBe(true);
         expect(existsSync(stoppedCreated.device.helper.scratchDir)).toBe(false);
 
         const runningCreate = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: {
                 backend: "windows-sandbox",
                 name: "Win Delete Running",
@@ -1003,14 +1003,14 @@ exit 0
             device: { helper: { scratchDir: string } };
         };
         const runningStart = await client.callTool({
-            name: "device_start",
+            name: "start",
             arguments: { deviceId: "windows-delete-running" },
         });
         expect(runningStart.isError).not.toBe(true);
 
         const logBeforeRefusal = await waitForStableLog(logPath);
         const runningDeleteRefused = await client.callTool({
-            name: "device_delete",
+            name: "delete",
             arguments: { deviceId: "windows-delete-running", confirmDestructive: true },
         });
         expect(runningDeleteRefused.isError).toBe(true);
@@ -1018,7 +1018,7 @@ exit 0
         expect(readFileSync(logPath, "utf-8")).toBe(logBeforeRefusal);
         expect(existsSync(runningCreated.device.helper.scratchDir)).toBe(true);
         const statusAfterRefusedDelete = await client.callTool({
-            name: "device_status",
+            name: "status",
             arguments: { deviceId: "windows-delete-running" },
         });
         expect(statusAfterRefusedDelete.isError).not.toBe(true);
@@ -1026,7 +1026,7 @@ exit 0
 
         const logBeforeForceDelete = readFileSync(logPath, "utf-8");
         const runningForceDelete = await client.callTool({
-            name: "device_delete",
+            name: "delete",
             arguments: { deviceId: "windows-delete-running", force: true, confirmDestructive: true },
         });
         expect(runningForceDelete.isError).not.toBe(true);
@@ -1034,7 +1034,7 @@ exit 0
         expect(logAfterForceDelete.slice(logBeforeForceDelete.length)).toMatch(/wsb stop --id [0-9a-f-]{36}/);
         expect(existsSync(runningCreated.device.helper.scratchDir)).toBe(false);
         const inventoryAfterDelete = await client.callTool({
-            name: "device_inventory",
+            name: "inventory",
             arguments: { backend: "windows-sandbox" },
         });
         expect(inventoryAfterDelete.isError).not.toBe(true);
@@ -1044,7 +1044,7 @@ exit 0
         expect(inventoryAfterDeletePayload.devices.some((device) => device.id === "windows-delete-running")).toBe(false);
 
         const failCreate = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: {
                 backend: "windows-sandbox",
                 name: "Win Delete Stop Failure",
@@ -1056,21 +1056,21 @@ exit 0
             device: { helper: { scratchDir: string } };
         };
         const failStart = await client.callTool({
-            name: "device_start",
+            name: "start",
             arguments: { deviceId: "windows-delete-stop-failure" },
         });
         expect(failStart.isError).not.toBe(true);
 
         writeFileSync(failStopPath, "fail");
         const failedForceDelete = await client.callTool({
-            name: "device_delete",
+            name: "delete",
             arguments: { deviceId: "windows-delete-stop-failure", force: true, confirmDestructive: true },
         });
         expect(failedForceDelete.isError).toBe(true);
         expect((failedForceDelete.content as Array<{ text?: string }>)[0].text).toContain("forced stop failure");
         expect(existsSync(failCreated.device.helper.scratchDir)).toBe(true);
         const statusAfterFailedDelete = await client.callTool({
-            name: "device_status",
+            name: "status",
             arguments: { deviceId: "windows-delete-stop-failure" },
         });
         expect(statusAfterFailedDelete.isError).not.toBe(true);
@@ -1078,7 +1078,7 @@ exit 0
 
         rmSync(failStopPath, { force: true });
         const retryForceDelete = await client.callTool({
-            name: "device_delete",
+            name: "delete",
             arguments: { deviceId: "windows-delete-stop-failure", force: true, confirmDestructive: true },
         });
         expect(retryForceDelete.isError).not.toBe(true);
@@ -1087,7 +1087,7 @@ exit 0
 
     it("falls back to a one-shot helper request when the long-running helper does not answer", { timeout: TIMEOUT }, async () => {
         const create = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: {
                 backend: "windows-sandbox",
                 name: "Win One Shot",
@@ -1099,7 +1099,7 @@ exit 0
         let started = false;
         try {
             const start = await client.callTool({
-                name: "device_start",
+                name: "start",
                 arguments: { deviceId: "windows-one-shot" },
             });
             expect(start.isError).not.toBe(true);
@@ -1109,7 +1109,7 @@ exit 0
             started = true;
 
             const exec = await client.callTool({
-                name: "device_exec",
+                name: "exec",
                 arguments: { deviceId: "windows-one-shot", command: "whoami", helperTimeoutMs: 350 },
             });
             expect(exec.isError).toBe(true);
@@ -1129,7 +1129,7 @@ exit 0
             const uploadSource = join(homeDir, "one-shot-timeout-upload.txt");
             writeFileSync(uploadSource, "upload");
             const upload = await client.callTool({
-                name: "device_upload",
+                name: "upload",
                 arguments: {
                     deviceId: "windows-one-shot",
                     localPath: uploadSource,
@@ -1151,12 +1151,12 @@ exit 0
         } finally {
             if (started) {
                 await client.callTool({
-                    name: "device_stop",
+                    name: "stop",
                     arguments: { deviceId: "windows-one-shot" },
                 });
             }
             await client.callTool({
-                name: "device_delete",
+                name: "delete",
                 arguments: { deviceId: "windows-one-shot", force: true, confirmDestructive: true },
             });
         }
@@ -1166,7 +1166,7 @@ exit 0
         writeFileSync(failExistingLoginPath, "fail");
         const logBefore = readFileSync(logPath, { encoding: "utf-8", flag: "a+" });
         const create = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: {
                 backend: "windows-sandbox",
                 name: "Win Existing Login Retry",
@@ -1178,14 +1178,14 @@ exit 0
         let started = false;
         try {
             const start = await client.callTool({
-                name: "device_start",
+                name: "start",
                 arguments: { deviceId: "windows-existing-login-retry" },
             });
             expect(start.isError).not.toBe(true);
             started = true;
 
             const exec = await client.callTool({
-                name: "device_exec",
+                name: "exec",
                 arguments: { deviceId: "windows-existing-login-retry", command: "whoami", helperTimeoutMs: 350 },
             });
             expect(exec.isError).toBe(true);
@@ -1207,12 +1207,12 @@ exit 0
             rmSync(failExistingLoginPath, { force: true });
             if (started) {
                 await client.callTool({
-                    name: "device_stop",
+                    name: "stop",
                     arguments: { deviceId: "windows-existing-login-retry" },
                 });
             }
             await client.callTool({
-                name: "device_delete",
+                name: "delete",
                 arguments: { deviceId: "windows-existing-login-retry", force: true, confirmDestructive: true },
             });
         }
@@ -1220,7 +1220,7 @@ exit 0
 
     it("treats Windows Sandbox runtime as one host-wide instance", { timeout: TIMEOUT }, async () => {
         const firstCreate = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: {
                 backend: "windows-sandbox",
                 name: "Win Singleton One",
@@ -1229,7 +1229,7 @@ exit 0
         });
         expect(firstCreate.isError).not.toBe(true);
         const secondCreate = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: {
                 backend: "windows-sandbox",
                 name: "Win Singleton Two",
@@ -1249,14 +1249,14 @@ exit 0
         }));
 
         const firstStart = await client.callTool({
-            name: "device_start",
+            name: "start",
             arguments: { deviceId: "windows-singleton-one" },
         });
         expect(firstStart.isError).not.toBe(true);
         const firstLock = readFileSync(staleLockPath, "utf-8");
         const logBeforeDuplicateStart = readFileSync(logPath, { encoding: "utf-8", flag: "a+" });
         const duplicateFirstStart = await client.callTool({
-            name: "device_start",
+            name: "start",
             arguments: { deviceId: "windows-singleton-one" },
         });
         expect(duplicateFirstStart.isError).toBe(true);
@@ -1265,14 +1265,14 @@ exit 0
         expect(readFileSync(logPath, { encoding: "utf-8", flag: "a+" })).toBe(logBeforeDuplicateStart);
 
         const blockedSecondStart = await client.callTool({
-            name: "device_start",
+            name: "start",
             arguments: { deviceId: "windows-singleton-two" },
         });
         expect(blockedSecondStart.isError).toBe(true);
         expect((blockedSecondStart.content as Array<{ text?: string }>)[0].text).toContain("Windows Sandbox is already claimed on this host");
 
         const lockedInventory = await client.callTool({
-            name: "device_inventory",
+            name: "inventory",
             arguments: { backend: "windows-sandbox" },
         });
         expect(lockedInventory.isError).not.toBe(true);
@@ -1283,35 +1283,35 @@ exit 0
         expect(lockedPayload.hostSandboxes.lock.deviceId).toBe("windows-singleton-one");
 
         const firstStop = await client.callTool({
-            name: "device_stop",
+            name: "stop",
             arguments: { deviceId: "windows-singleton-one" },
         });
         expect(firstStop.isError).not.toBe(true);
 
         const secondStart = await client.callTool({
-            name: "device_start",
+            name: "start",
             arguments: { deviceId: "windows-singleton-two" },
         });
         expect(secondStart.isError).not.toBe(true);
 
         const secondStop = await client.callTool({
-            name: "device_stop",
+            name: "stop",
             arguments: { deviceId: "windows-singleton-two" },
         });
         expect(secondStop.isError).not.toBe(true);
     });
 
     it.each(["start", "stop", "delete"])("preserves successor state and singleton ownership during superseded Windows Sandbox %s", { timeout: TIMEOUT }, async (operation) => {
-        const inventory = await client.callTool({ name: "device_inventory", arguments: { backend: "windows-sandbox" } });
+        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "windows-sandbox" } });
         const ownerId = (JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as { ownerId: string }).ownerId;
         const deviceId = `windows-generation-${operation}-${Date.now()}`;
         const create = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: { backend: "windows-sandbox", name: `Windows ${operation} generation`, deviceId },
         });
         expect(create.isError).not.toBe(true);
         if (operation !== "start") {
-            const start = await client.callTool({ name: "device_start", arguments: { deviceId } });
+            const start = await client.callTool({ name: "start", arguments: { deviceId } });
             expect(start.isError).not.toBe(true);
         }
 
@@ -1345,7 +1345,7 @@ exit 0
         armWindowsReplacement(operation === "start" ? "start" : "stop", statePath, successor, successorLock);
 
         const result = await client.callTool({
-            name: operation === "start" ? "device_start" : operation === "stop" ? "device_stop" : "device_delete",
+            name: operation === "start" ? "start" : operation === "stop" ? "stop" : "delete",
             arguments: operation === "delete"
                 ? { deviceId, force: true, confirmDestructive: true }
                 : { deviceId },
@@ -1362,11 +1362,11 @@ exit 0
 
         disarmWindowsReplacement();
         if (operation !== "start") {
-            const stop = await client.callTool({ name: "device_stop", arguments: { deviceId } });
+            const stop = await client.callTool({ name: "stop", arguments: { deviceId } });
             expect(stop.isError).not.toBe(true);
         }
         const cleanup = await client.callTool({
-            name: "device_delete",
+            name: "delete",
             arguments: { deviceId, force: true, confirmDestructive: true },
         });
         expect(cleanup.isError).not.toBe(true);
@@ -1376,19 +1376,19 @@ exit 0
         const deviceId = `windows-singleton-recovery-${Date.now()}`;
         const lockPath = join(homeDir, ".ccc", "devices", "host-locks", "windows-sandbox.json");
         const create = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: { backend: "windows-sandbox", name: "Windows singleton recovery", deviceId },
         });
         expect(create.isError).not.toBe(true);
-        const start = await client.callTool({ name: "device_start", arguments: { deviceId } });
+        const start = await client.callTool({ name: "start", arguments: { deviceId } });
         expect(start.isError).not.toBe(true);
         rmSync(lockPath, { force: true });
 
-        const recoveredStop = await client.callTool({ name: "device_stop", arguments: { deviceId } });
+        const recoveredStop = await client.callTool({ name: "stop", arguments: { deviceId } });
         expect(recoveredStop.isError).not.toBe(true);
         expect(existsSync(lockPath)).toBe(false);
 
-        const restart = await client.callTool({ name: "device_start", arguments: { deviceId } });
+        const restart = await client.callTool({ name: "start", arguments: { deviceId } });
         expect(restart.isError).not.toBe(true);
         const restarted = JSON.parse(((restart.content as Array<{ text?: string }>)[0].text ?? "{}")) as { device: { sandboxId: string } };
         writeFileSync(lockPath, `${JSON.stringify({
@@ -1399,19 +1399,19 @@ exit 0
             claimId: "foreign-claim",
         }, null, 2)}\n`);
         const before = readFileSync(logPath, { encoding: "utf-8", flag: "a+" });
-        const blockedStop = await client.callTool({ name: "device_stop", arguments: { deviceId } });
+        const blockedStop = await client.callTool({ name: "stop", arguments: { deviceId } });
         expect(blockedStop.isError).toBe(true);
         expect((blockedStop.content as Array<{ text?: string }>)[0].text).toContain("already claimed on this host by owner foreign-owner");
         expect(readFileSync(logPath, { encoding: "utf-8", flag: "a+" }).slice(before.length)).not.toContain("wsb stop");
-        const status = await client.callTool({ name: "device_status", arguments: { deviceId } });
+        const status = await client.callTool({ name: "status", arguments: { deviceId } });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as { device: { status: string } };
         expect(statusPayload.device.status).toBe("running");
 
         rmSync(lockPath, { force: true });
-        const stop = await client.callTool({ name: "device_stop", arguments: { deviceId } });
+        const stop = await client.callTool({ name: "stop", arguments: { deviceId } });
         expect(stop.isError).not.toBe(true);
         const cleanup = await client.callTool({
-            name: "device_delete",
+            name: "delete",
             arguments: { deviceId, confirmDestructive: true },
         });
         expect(cleanup.isError).not.toBe(true);
@@ -1420,11 +1420,11 @@ exit 0
     it("reconciles an interrupted stopped record from its matching singleton generation", { timeout: TIMEOUT }, async () => {
         const deviceId = `windows-stopped-runtime-recovery-${Date.now()}`;
         const create = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: { backend: "windows-sandbox", name: "Windows stopped runtime recovery", deviceId },
         });
         expect(create.isError).not.toBe(true);
-        const start = await client.callTool({ name: "device_start", arguments: { deviceId } });
+        const start = await client.callTool({ name: "start", arguments: { deviceId } });
         expect(start.isError).not.toBe(true);
         const started = JSON.parse(((start.content as Array<{ text?: string }>)[0].text ?? "{}")) as { device: { sandboxId: string } };
 
@@ -1436,13 +1436,13 @@ exit 0
         writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
 
         const before = readFileSync(logPath, { encoding: "utf-8", flag: "a+" });
-        const stop = await client.callTool({ name: "device_stop", arguments: { deviceId } });
+        const stop = await client.callTool({ name: "stop", arguments: { deviceId } });
         expect(stop.isError, (stop.content as Array<{ text?: string }>)[0]?.text).not.toBe(true);
         expect(readFileSync(logPath, { encoding: "utf-8", flag: "a+" }).slice(before.length)).toContain(`wsb stop --id ${started.device.sandboxId}`);
         expect(existsSync(join(homeDir, ".ccc", "devices", "host-locks", "windows-sandbox.json"))).toBe(false);
 
         const cleanup = await client.callTool({
-            name: "device_delete",
+            name: "delete",
             arguments: { deviceId, confirmDestructive: true },
         });
         expect(cleanup.isError).not.toBe(true);
@@ -1451,7 +1451,7 @@ exit 0
     it("rejects malformed Windows Sandbox ownership state without replacing it", { timeout: TIMEOUT }, async () => {
         const lockPath = join(homeDir, ".ccc/devices/host-locks/windows-sandbox.json");
         const create = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: {
                 backend: "windows-sandbox",
                 name: "Win Malformed Lock",
@@ -1465,7 +1465,7 @@ exit 0
 
         try {
             await expect(client.callTool({
-                name: "device_start",
+                name: "start",
                 arguments: { deviceId: "windows-malformed-lock" },
             })).rejects.toThrow("windows-sandbox-lock-state-invalid");
             expect(readFileSync(lockPath, "utf8")).toBe("{not-json");
@@ -1473,7 +1473,7 @@ exit 0
         } finally {
             rmSync(lockPath, { force: true });
             await client.callTool({
-                name: "device_delete",
+                name: "delete",
                 arguments: { deviceId: "windows-malformed-lock", force: true, confirmDestructive: true },
             });
         }

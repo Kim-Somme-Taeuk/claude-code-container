@@ -33,41 +33,37 @@ vi.mock("../../device-lab-mcp/src/backends/linux-vm.mjs", async (importOriginal)
     handleLinuxVmManagementTool: async () => null, handleLinuxVmTool: async () => null,
 }));
 import { startServer } from "../../device-lab-mcp/src/server.mjs";
-import { TOOLS, DEVICE_FLOW_TOOL_NAMES } from "../../device-lab-mcp/src/tools.mjs";
+import { TOOLS, DEVICE_FLOW_TOOL_NAMES, publicToolName } from "../../device-lab-mcp/src/tools.mjs";
 
 const hidden = ["mobile_install_app", "mobile_launch_app", "mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right", "mobile_run_flow"];
-const shared = { deviceId: "target-a", backend: "android-emulator", incarnationId: "a".repeat(32) };
+const shared = { deviceId: "target-a", incarnationId: "a".repeat(32) };
 const direct = { implicitBroker: false };
-const step = (args: Record<string, unknown> = {}, tool = "mobile_tap") => ({ tool, arguments: { ...direct, x: 1, y: 2, ...args } });
+const step = (args: Record<string, unknown> = {}, tool = "click") => ({ tool, arguments: { ...direct, x: 1, y: 2, ...args } });
 const call = (name: string, args: Record<string, unknown>) => fixture.handlers[1]({ params: { name, arguments: args } });
 const parse = (result: any) => JSON.parse(result.content[0].text);
-const flow = (steps: unknown[], args: Record<string, unknown> = {}) => call("device_run_flow", { ...shared, ...args, steps });
+const flow = (steps: unknown[], args: Record<string, unknown> = {}) => call("run_flow", { deviceId: shared.deviceId, incarnationId: shared.incarnationId, ...args, steps });
 beforeAll(async () => { await startServer(); });
 beforeEach(() => { fixture.calls.length = 0; fixture.scope = 0; fixture.nextScope = 0; });
 
 describe("canonical public contract", () => {
-    it("advertises exactly the 87 callable tools", async () => {
+    it("advertises only unique unprefixed callable tools", async () => {
         const catalog = await fixture.handlers[0]({});
         expect(catalog.tools).toEqual(TOOLS);
-        expect(TOOLS).toHaveLength(87);
+        expect(new Set(TOOLS.map(tool => tool.name)).size).toBe(TOOLS.length);
+        expect(TOOLS.every(tool => !/^(device|mobile|display)_/.test(tool.name))).toBe(true);
         expect(Buffer.byteLength(JSON.stringify(catalog.tools))).toBeLessThan(57211);
     });
     it("publishes a finite canonical flow enum, required tool and optional target defaults", () => {
-        const schema: any = TOOLS.find((entry: any) => entry.name === "device_run_flow")!.inputSchema;
+        const schema: any = TOOLS.find((entry: any) => entry.name === "run_flow")!.inputSchema;
         expect(schema.required).toEqual(["steps"]);
         expect(schema.properties.steps).toMatchObject({ minItems: 1, maxItems: 50 });
         expect(schema.properties.steps.items.required).toEqual(["tool"]);
         expect(schema.properties.steps.items.properties).not.toHaveProperty("name");
         expect(schema.properties.steps.items.properties.tool.enum).toEqual(DEVICE_FLOW_TOOL_NAMES);
         expect(new Set(DEVICE_FLOW_TOOL_NAMES).size).toBe(DEVICE_FLOW_TOOL_NAMES.length);
-        for (const key of ["deviceId", "backend", "incarnationId"]) expect(schema.properties).toHaveProperty(key);
-        const visibleMobile = TOOLS.filter((entry: any) => entry.name.startsWith("mobile_")).map((entry: any) => entry.name);
-        const priorDeviceAndDisplay = ["device_inventory", "device_record_video_status", "device_status", "device_screenshot",
-            "device_click", "device_double_click", "device_key", "device_type", "device_scroll", "device_cursor_position",
-            "device_window_list", "device_accessibility_snapshot", "display_current", "display_screenshot", "display_click",
-            "display_double_click", "display_key", "display_type", "display_scroll", "display_cursor_position"];
-        expect([...DEVICE_FLOW_TOOL_NAMES].sort()).toEqual([...priorDeviceAndDisplay, ...visibleMobile, "device_install_app", "device_launch_app"].sort());
-        for (const name of [...hidden, "device_start", "device_exec", "device_run_flow", "device_broker_status"]) expect(DEVICE_FLOW_TOOL_NAMES).not.toContain(name);
+        for (const key of ["deviceId", "incarnationId"]) expect(schema.properties).toHaveProperty(key);
+        expect(DEVICE_FLOW_TOOL_NAMES.every(name => TOOLS.some(tool => tool.name === name))).toBe(true);
+        for (const name of [...hidden, "start", "exec", "run_flow", "broker_status"]) expect(DEVICE_FLOW_TOOL_NAMES).not.toContain(name);
     });
     it.each([...hidden, "device_broker_shutdown", "device_broker_rpc", "device_broker_lease", "device_broker_attach", "device_broker_apple", "device_broker_command", "device_broker_appium", "device_image_create", "device_image_clone"])("rejects removed public tool %s before any broker scope or provider", async (name) => {
         const result = await call(name, { ...shared, ...direct, confirmDestructive: true });
@@ -76,26 +72,26 @@ describe("canonical public contract", () => {
         expect(fixture.calls).toEqual([]);
         expect(fixture.nextScope).toBe(0);
     });
-    it.each(["device_install_app", "device_launch_app"])("accepts canonical %s standalone and in flows", async (tool) => {
+    it.each(["install_app", "launch_app"])("accepts canonical %s standalone and in flows", async (tool) => {
         const args = { ...shared, ...direct, path: "/fixture/app.apk", packageName: "example.app" };
         expect((await call(tool, args)).isError).toBe(false);
         expect(parse(await flow([step(args, tool)])).ok).toBe(true);
-        expect(fixture.calls.map(entry => entry.name)).toEqual([tool, tool]);
+        expect(fixture.calls.map(entry => publicToolName(entry.name))).toEqual([tool, tool]);
     });
-    it.each([{ name: "mobile_tap" }, { name: "mobile_tap", tool: "mobile_tap" }])("rejects legacy step name %j without dispatch", async (item) => {
+    it.each([{ name: "click" }, { name: "click", tool: "click" }])("rejects legacy step name %j without dispatch", async (item) => {
         const result = parse(await flow([{ ...item, arguments: direct }, step()], { stopOnError: false }));
         expect(result.ok).toBe(false);
         expect(result.results[0].error).toContain("name is not supported");
         expect(result.results[1].isError).toBe(false);
         expect(fixture.calls).toHaveLength(1);
     });
-    it.each(DEVICE_FLOW_TOOL_NAMES)("dispatches advertised flow choice %s through the existing handler", async (tool) => {
+    it.each(DEVICE_FLOW_TOOL_NAMES.filter(name => name !== "move"))("dispatches advertised flow choice %s through the existing handler", async (tool) => {
         const arguments_ = { ...direct, key: "HOME", text: "needle", packageName: "example.app", path: "/fixture/app.apk", confirmDestructive: true };
         const result = parse(await flow([{ tool, arguments: arguments_ }]));
         expect(result.ok, JSON.stringify(result)).toBe(true);
-        expect(fixture.calls.map(call => call.name)).toEqual([tool]);
+        expect(fixture.calls.map(call => publicToolName(call.name))).toEqual([tool]);
     });
-    it.each(["mobile_install_app", "mobile_launch_app", "device_start", "device_exec", "device_broker_status", "device_run_flow", "mobile_run_flow", "unknown_action"])("rejects %s in the canonical flow before dispatch", async (name) => {
+    it.each(["mobile_install_app", "mobile_launch_app", "start", "exec", "broker_status", "run_flow", "mobile_run_flow", "unknown_action"])("rejects %s in the canonical flow before dispatch", async (name) => {
         const result = parse(await flow([step({}, name)]));
         expect(result).toMatchObject({ ok: false, stoppedAt: 0 });
         expect(result.results[0].error).toContain("does not allow step tool");
@@ -109,7 +105,7 @@ describe("shared target selection", () => {
         const original = structuredClone(input);
         expect(parse(await flow(input, { viaBroker: true, autolaunch: true, force: true, confirmDestructive: true, token: "private", port: 1234 })).ok).toBe(true);
         expect(fixture.calls.map(call => call.args)).toEqual([
-            { deviceId: shared.deviceId, backend: shared.backend, ...direct, x: 1, y: 2 },
+            { ...shared, ...direct, x: 1, y: 2 },
             { ...shared, ...direct, x: 1, y: 2, incarnationId: "b".repeat(32) },
         ]);
         expect(fixture.calls[0].scope).toBeGreaterThan(0);
@@ -117,11 +113,11 @@ describe("shared target selection", () => {
         expect(input).toEqual(original);
     });
     it("inherits incarnation only for actions that accept it", async () => {
-        expect(parse(await flow([step({}, "device_click"), step({}, "mobile_tap")])).ok).toBe(true);
+        expect(parse(await flow([step({}, "click"), step({}, "home")])).ok).toBe(true);
         expect(fixture.calls[0].args.incarnationId).toBe(shared.incarnationId);
         expect(fixture.calls[1].args).not.toHaveProperty("incarnationId");
     });
-    it.each([{ deviceId: "target-b" }, { backend: "ios-simulator" }])("resets the entire inherited target group on %j", async (override) => {
+    it.each([{ deviceId: "target-b" }])("resets the entire inherited target group on %j", async (override) => {
         expect(parse(await flow([step(override)])).ok).toBe(true);
         expect(fixture.calls[0].args).toEqual({ ...direct, x: 1, y: 2, ...override });
     });
@@ -137,17 +133,21 @@ describe("shared target selection", () => {
         expect(JSON.stringify(result)).toContain("device-id-invalid");
         expect(fixture.calls).toEqual([]);
     });
-    it("does not replace explicitly null incarnation or backend with defaults", async () => {
-        expect(parse(await flow([step({ incarnationId: null }), step({ backend: null })])).ok).toBe(true);
+    it("preserves explicit null incarnation and rejects backend selectors", async () => {
+        expect(parse(await flow([step({ incarnationId: null })])).ok).toBe(true);
         expect(fixture.calls[0].args.incarnationId).toBeNull();
-        expect(fixture.calls[1].args).toEqual({ ...direct, x: 1, y: 2, backend: null });
+        fixture.calls.length = 0;
+        const rejected = parse(await flow([step({ backend: null })]));
+        expect(rejected.ok).toBe(false);
+        expect(JSON.stringify(rejected)).toContain("omit backend");
+        expect(fixture.calls).toEqual([]);
     });
-    it.each(["display_key", "device_inventory"])("does not add target fields to target-neutral %s", async (tool) => {
+    it.each(["inventory"])("does not add target fields to target-neutral %s", async (tool) => {
         expect(parse(await flow([step({}, tool)])).ok).toBe(true);
         expect(fixture.calls[0].args).toEqual({ ...direct, x: 1, y: 2 });
     });
     it.each([null, [], "bad", 7, false])("rejects explicitly malformed arguments %j before dispatch", async (arguments_) => {
-        const result = parse(await flow([{ tool: "mobile_tap", arguments: arguments_ }, step()], { stopOnError: false }));
+        const result = parse(await flow([{ tool: "click", arguments: arguments_ }, step()], { stopOnError: false }));
         expect(result.ok).toBe(false);
         expect(result.results[0].error).toMatch(/arguments.*object/);
         expect(result.results[1].isError).toBe(false);
@@ -156,7 +156,7 @@ describe("shared target selection", () => {
 });
 
 describe("flow policy and bounds", () => {
-    it.each(["mobile_uninstall_app", "mobile_clear_app_data", "mobile_set_battery", "mobile_set_network", "mobile_toggle_airplane_mode"])("does not inherit confirmation for %s", async (tool) => {
+    it.each(["uninstall_app", "clear_app_data", "set_battery", "set_network", "toggle_airplane_mode"])("does not inherit confirmation for %s", async (tool) => {
         const args = { packageName: "example.app", level: 50, wifi: false, enabled: false };
         const denied = parse(await flow([step(args, tool)], { confirmDestructive: true, force: true }));
         expect(denied).toMatchObject({ ok: false, stoppedAt: 0 });
@@ -166,7 +166,7 @@ describe("flow policy and bounds", () => {
         expect(allowed.ok).toBe(true);
         expect(fixture.calls).toHaveLength(1);
     });
-    it.each(["device_run_flow"])("%s rejects empty and oversized flows before dispatch", async (name) => {
+    it.each(["run_flow"])("%s rejects empty and oversized flows before dispatch", async (name) => {
         for (const steps of [[], Array.from({ length: 51 }, () => step())]) {
             const result = await call(name, { ...shared, steps });
             expect(result.isError).toBe(true);

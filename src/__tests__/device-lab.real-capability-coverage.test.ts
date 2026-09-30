@@ -1,3 +1,4 @@
+import { TOOLS, publicToolName } from "../../device-lab-mcp/src/tools.mjs";
 import { createHash } from "crypto";
 import { mkdtempSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
@@ -26,7 +27,7 @@ describe("real provider capability coverage", () => {
         ["Windows Sandbox", windowsBackend().capabilities, "scripts/real-tests/windows-sandbox-e2e.ts"],
     ])("keeps every advertised %s capability in its real E2E scenario", (_provider, capabilities, script) => {
         const calls = scriptedToolCalls(script as string);
-        expect((capabilities as string[]).filter((tool) => !calls.has(tool))).toEqual([]);
+        expect((capabilities as string[]).map(publicToolName).filter(tool => TOOLS.some(entry => entry.name === tool)).filter((tool) => !calls.has(tool))).toEqual([]);
     });
 
     it("allows broker-routed Android physical E2E when this process has no local adb", () => {

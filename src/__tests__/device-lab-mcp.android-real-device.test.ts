@@ -28,8 +28,8 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
 
     it("reports missing explicit Android physical mobile targets instead of unknown tools", { timeout: TIMEOUT }, async () => {
         const result = await client.callTool({
-            name: "mobile_session_status",
-            arguments: { backend: "android-device", deviceId: "missing-android-real-device" },
+            name: "automation_status",
+            arguments: { deviceId: "missing-android-real-device" },
         });
         const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ok: boolean;
@@ -39,17 +39,16 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         };
 
         expect(result.isError).toBe(true);
-        expect(payload).toEqual({
+        expect(payload).toMatchObject({
             ok: false,
             error: "device-not-found",
-            backend: "android-device",
             deviceId: "missing-android-real-device",
         });
     });
 
     it("attaches, uses, and detaches host-connected Android real devices without emulator lifecycle commands", { timeout: TIMEOUT }, async () => {
         const inventory = await client.callTool({
-            name: "device_inventory",
+            name: "inventory",
             arguments: { backend: "android-device" },
         });
         expect(inventory.isError).not.toBe(true);
@@ -66,7 +65,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         ]));
 
         const wirelessStatus = await client.callTool({
-            name: "device_wireless",
+            name: "wireless",
             arguments: { backend: "android-device" },
         });
         expect(wirelessStatus.isError).not.toBe(true);
@@ -79,14 +78,14 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
             expect.objectContaining({ serial: "192.168.1.50:5555", connection: "wifi" }),
         ]));
 
-        const listBeforeWirelessPrepare = await client.callTool({ name: "device_list", arguments: {} });
+        const listBeforeWirelessPrepare = await client.callTool({ name: "list_devices", arguments: {} });
         const listedBeforeWirelessPrepare = JSON.parse(((listBeforeWirelessPrepare.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             devices: Array<{ backend?: string }>;
         };
         expect(listedBeforeWirelessPrepare.devices.some((device) => device.backend === "android-device")).toBe(false);
 
         const usbTcpip = await client.callTool({
-            name: "device_wireless",
+            name: "wireless",
             arguments: { backend: "android-device", action: "usb-tcpip", serial: "R5CREAL123", host: "192.168.1.50", port: 5555 },
         });
         expect(usbTcpip.isError).not.toBe(true);
@@ -106,7 +105,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         expect(usbTcpipPayload.attachNext.arguments).toEqual(expect.objectContaining({ host: "192.168.1.50", port: 5555 }));
 
         const pairConnect = await client.callTool({
-            name: "device_wireless",
+            name: "wireless",
             arguments: {
                 backend: "android-device",
                 action: "pair",
@@ -134,7 +133,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         expect(pairConnectPayload.pair.args).toEqual(["pair", "192.168.1.70:37099", "[redacted]"]);
 
         const pairMissingConnectTarget = await client.callTool({
-            name: "device_wireless",
+            name: "wireless",
             arguments: {
                 backend: "android-device",
                 action: "pair",
@@ -153,7 +152,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         expect(pairMissingConnectTargetPayload.pair.args).toEqual(["pair", "192.168.1.70:37099", "[redacted]"]);
 
         const failedPair = await client.callTool({
-            name: "device_wireless",
+            name: "wireless",
             arguments: { backend: "android-device", action: "pair", pairHost: "192.168.1.70", pairPort: 37099, pairingCode: "000000" },
         });
         expect(failedPair.isError).toBe(true);
@@ -166,7 +165,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         expect(failedPairPayload.command).toEqual(expect.objectContaining({ status: 1, stderr: expect.stringContaining("Failed to pair") }));
         expect(failedPairPayload.command.args).toEqual(["pair", "192.168.1.70:37099", "[redacted]"]);
 
-        const listAfterWirelessPrepare = await client.callTool({ name: "device_list", arguments: {} });
+        const listAfterWirelessPrepare = await client.callTool({ name: "list_devices", arguments: {} });
         const listedAfterWirelessPrepare = JSON.parse(((listAfterWirelessPrepare.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             devices: Array<{ backend?: string }>;
         };
@@ -195,48 +194,48 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
             expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
         }));
         const rejectLeased = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "android-device", name: "Already Leased", serial: "R5LEASED999" },
         });
         expect(rejectLeased.isError).toBe(true);
         expect((rejectLeased.content as Array<{ text?: string }>)[0].text).toContain("already attached or an attach is in progress");
         const rejectWifiLeased = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "android-device", name: "Already Leased WiFi", connection: "wifi", host: "192.168.1.52" },
         });
         expect(rejectWifiLeased.isError).toBe(true);
         expect((rejectWifiLeased.content as Array<{ text?: string }>)[0].text).toContain("already attached or an attach is in progress");
 
         const rejectEmulator = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "android-device", name: "Bad Emulator", serial: "emulator-5554" },
         });
         expect(rejectEmulator.isError).toBe(true);
         expect((rejectEmulator.content as Array<{ text?: string }>)[0].text).toContain("Refusing to attach emulator serial");
 
         const rejectUnauthorized = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "android-device", name: "Unauthorized", serial: "UNAUTHORIZED" },
         });
         expect(rejectUnauthorized.isError).toBe(true);
         expect((rejectUnauthorized.content as Array<{ text?: string }>)[0].text).toContain("adb state is unauthorized");
 
         const rejectWifiMissingHost = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "android-device", name: "WiFi Missing Host", connection: "wifi" },
         });
         expect(rejectWifiMissingHost.isError).toBe(true);
         expect((rejectWifiMissingHost.content as Array<{ text?: string }>)[0].text).toContain("Android Wi-Fi attach requires host");
 
         const rejectWifiConnect = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "android-device", name: "WiFi Bad", connection: "wifi", host: "192.168.1.51" },
         });
         expect(rejectWifiConnect.isError).toBe(true);
         expect((rejectWifiConnect.content as Array<{ text?: string }>)[0].text).toContain("failed to connect");
 
         const attach = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "android-device", name: "Real Pixel", serial: "R5CREAL123" },
         });
         expect(attach.isError).not.toBe(true);
@@ -265,7 +264,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         }));
 
         const wifiAttach = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "android-device", name: "WiFi Pixel", connection: "wifi", host: "192.168.1.50", port: 5555 },
         });
         expect(wifiAttach.isError).not.toBe(true);
@@ -279,7 +278,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
             transport: expect.objectContaining({ type: "wifi", host: "192.168.1.50", port: 5555 }),
         }));
         const wifiSerialAttach = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "android-device", name: "WiFi Serial Pixel", serial: "192.168.1.60:5555" },
         });
         expect(wifiSerialAttach.isError).not.toBe(true);
@@ -294,14 +293,14 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         }));
 
         const duplicate = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "android-device", name: "Real Pixel Duplicate", serial: "R5CREAL123" },
         });
         expect(duplicate.isError).toBe(true);
         expect((duplicate.content as Array<{ text?: string }>)[0].text).toContain("Android serial already attached");
 
         const status = await client.callTool({
-            name: "device_status",
+            name: "status",
             arguments: { deviceId: "android-device-real-pixel" },
         });
         expect(status.isError).not.toBe(true);
@@ -320,18 +319,18 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
 
         const expectedAndroidPng = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...Buffer.from("FAKEPNG")]).toString("base64");
         for (const [tool, args, expectedPayload] of [
-            ["device_exec", { deviceId: "android-device-real-pixel", command: "echo ok" }, { stdout: "ok\n", stderr: "", status: 0 }],
-            ["mobile_tap", { deviceId: "android-device-real-pixel", x: 10, y: 20 }, { provider: "adb", tapped: { x: 10, y: 20 } }],
-            ["mobile_back", { deviceId: "android-device-real-pixel" }, { provider: "adb", key: 4 }],
-            ["mobile_dump_ui", { deviceId: "android-device-real-pixel" }, { provider: "adb-uiautomator", source: expect.stringContaining("<hierarchy>"), remotePath: "/sdcard/window-android-device-real-pixel.xml" }],
-            ["mobile_wait_for_text", { deviceId: "android-device-real-pixel", text: "Hello", timeoutMs: 100, intervalMs: 50 }, { provider: "adb-uiautomator", text: "Hello", found: true }],
-            ["device_install_app", { deviceId: "android-device-real-pixel", path: "/tmp/Real.apk" }, { provider: "adb", installed: "/tmp/Real.apk" }],
-            ["device_launch_app", { deviceId: "android-device-real-pixel", packageName: "com.example.real" }, { provider: "adb", launched: "com.example.real" }],
-            ["device_screenshot", { deviceId: "android-device-real-pixel" }, { type: "image", data: expectedAndroidPng, mimeType: "image/png" }],
+            ["exec", { deviceId: "android-device-real-pixel", command: "echo ok" }, { stdout: "ok\n", stderr: "", status: 0 }],
+            ["click", { deviceId: "android-device-real-pixel", x: 10, y: 20 }, { provider: "adb", tapped: { x: 10, y: 20 } }],
+            ["back", { deviceId: "android-device-real-pixel" }, { provider: "adb", key: 4 }],
+            ["dump_ui", { deviceId: "android-device-real-pixel" }, { provider: "adb-uiautomator", source: expect.stringContaining("<hierarchy>"), remotePath: "/sdcard/window-android-device-real-pixel.xml" }],
+            ["wait_for_text", { deviceId: "android-device-real-pixel", text: "Hello", timeoutMs: 100, intervalMs: 50 }, { provider: "adb-uiautomator", text: "Hello", found: true }],
+            ["install_app", { deviceId: "android-device-real-pixel", path: "/tmp/Real.apk" }, { provider: "adb", installed: "/tmp/Real.apk" }],
+            ["launch_app", { deviceId: "android-device-real-pixel", packageName: "com.example.real" }, { provider: "adb", launched: "com.example.real" }],
+            ["screenshot", { deviceId: "android-device-real-pixel" }, { type: "image", data: expectedAndroidPng, mimeType: "image/png" }],
         ] as Array<[string, Record<string, unknown>, Record<string, unknown>]>) {
             const result = await client.callTool({ name: tool, arguments: args });
             expect(result.isError, tool).not.toBe(true);
-            if (tool === "device_screenshot") {
+            if (tool === "screenshot") {
                 expect((result.content as Array<{ type: string; data: string; mimeType: string }>)[0]).toEqual(expectedPayload);
             } else {
                 expect(parseToolJson(result)).toEqual(expect.objectContaining(expectedPayload));
@@ -342,7 +341,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         writeFileSync(flakyScreencapMarker, "1");
         try {
             const flakyScreenshot = await client.callTool({
-                name: "device_screenshot",
+                name: "screenshot",
                 arguments: { deviceId: "android-device-real-pixel" },
             });
             expect(flakyScreenshot.isError).not.toBe(true);
@@ -359,13 +358,13 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         writeFileSync(realUploadPath, "real upload");
         const logBeforeRejectedRemoteTransfer = readFileSync(logPath, "utf-8");
         const rejectedRemoteUpload = await client.callTool({
-            name: "device_upload",
+            name: "upload",
             arguments: { deviceId: "android-device-real-pixel", localPath: realUploadPath, remotePath: "/sdcard/../escape.txt" },
         });
         expect(rejectedRemoteUpload.isError).toBe(true);
         expect((rejectedRemoteUpload.content as Array<{ text?: string }>)[0].text).toContain("upload-remote-path-traversal-rejected");
         const rejectedRemoteDownload = await client.callTool({
-            name: "device_download",
+            name: "download",
             arguments: { deviceId: "android-device-real-pixel", remotePath: "relative.txt", localPath: join(homeDir, "real-download.txt") },
         });
         expect(rejectedRemoteDownload.isError).toBe(true);
@@ -375,7 +374,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         const realRecordingPath = join(homeDir, "real-recording.mp4");
         writeFileSync(realRecordingPath, "original");
         const realRecordStart = await client.callTool({
-            name: "device_record_video_start",
+            name: "record_video_start",
             arguments: {
                 deviceId: "android-device-real-pixel",
                 remotePath: "/sdcard/fail-once-pull-real-recording.mp4",
@@ -385,14 +384,14 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         });
         expect(realRecordStart.isError).not.toBe(true);
         const failedRealRecordStop = await client.callTool({
-            name: "device_record_video_stop",
+            name: "record_video_stop",
             arguments: { deviceId: "android-device-real-pixel" },
         });
         expect(failedRealRecordStop.isError).toBe(true);
         expect((failedRealRecordStop.content as Array<{ text?: string }>)[0].text).toContain("remains pending finalization");
         expect(readFileSync(realRecordingPath, "utf8")).toBe("original");
         const pendingRealRecording = await client.callTool({
-            name: "device_record_video_status",
+            name: "record_video_status",
             arguments: { deviceId: "android-device-real-pixel" },
         });
         expect(parseToolJson(pendingRealRecording).recording).toEqual(expect.objectContaining({
@@ -400,27 +399,27 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
             remotePath: "/sdcard/fail-once-pull-real-recording.mp4",
         }));
         const retriedRealRecordStop = await client.callTool({
-            name: "device_record_video_stop",
+            name: "record_video_stop",
             arguments: { deviceId: "android-device-real-pixel" },
         });
         expect(retriedRealRecordStop.isError).not.toBe(true);
         expect(readFileSync(realRecordingPath, "utf8")).toBe("downloaded");
 
         const unsafeBattery = await client.callTool({
-            name: "mobile_set_battery",
+            name: "set_battery",
             arguments: { deviceId: "android-device-real-pixel", level: 10, confirmDestructive: true },
         });
         expect(unsafeBattery.isError).toBe(true);
         expect((unsafeBattery.content as Array<{ text?: string }>)[0].text).toContain("Android real devices do not support mobile_set_battery safely");
         const unsafeLocation = await client.callTool({
-            name: "mobile_set_location",
+            name: "set_location",
             arguments: { deviceId: "android-device-real-pixel", latitude: 37.7749, longitude: -122.4194 },
         });
         expect(unsafeLocation.isError).toBe(true);
         expect((unsafeLocation.content as Array<{ text?: string }>)[0].text).toContain("Android real devices do not support mobile_set_location safely");
 
         const stop = await client.callTool({
-            name: "device_stop",
+            name: "stop",
             arguments: { deviceId: "android-device-real-pixel" },
         });
         expect(stop.isError).not.toBe(true);
@@ -432,25 +431,25 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         expect(stopped.device.status).toBe("attached");
 
         const detach = await client.callTool({
-            name: "device_detach",
+            name: "detach",
             arguments: { deviceId: "android-device-real-pixel" },
         });
         expect(detach.isError).not.toBe(true);
         expect(() => readFileSync(join(androidLeaseDir, `${encodeURIComponent("R5CREAL123")}.json`), "utf-8")).toThrow();
         const wifiDetach = await client.callTool({
-            name: "device_detach",
+            name: "detach",
             arguments: { deviceId: "android-device-wifi-pixel" },
         });
         expect(wifiDetach.isError).not.toBe(true);
         expect(() => readFileSync(join(androidLeaseDir, `${encodeURIComponent("192.168.1.50:5555")}.json`), "utf-8")).toThrow();
         const wifiSerialDetach = await client.callTool({
-            name: "device_detach",
+            name: "detach",
             arguments: { deviceId: "android-device-wifi-serial-pixel" },
         });
         expect(wifiSerialDetach.isError).not.toBe(true);
         expect(() => readFileSync(join(androidLeaseDir, `${encodeURIComponent("192.168.1.60:5555")}.json`), "utf-8")).toThrow();
 
-        const list = await client.callTool({ name: "device_list", arguments: {} });
+        const list = await client.callTool({ name: "list_devices", arguments: {} });
         const listed = JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             devices: Array<{ id: string }>;
         };
@@ -487,7 +486,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
 
         try {
             const attach = await client.callTool({
-                name: "device_attach",
+                name: "attach",
                 arguments: {
                     backend: "android-device",
                     name: "Lease Fence Pixel",
@@ -507,10 +506,10 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
             writeFileSync(logPath, "");
 
             for (const request of [
-                { name: "device_status", arguments: { backend: "android-device", deviceId } },
-                { name: "device_exec", arguments: { backend: "android-device", deviceId, command: "echo fenced" } },
-                { name: "device_start", arguments: { backend: "android-device", deviceId } },
-                { name: "device_detach", arguments: { backend: "android-device", deviceId } },
+                { name: "status", arguments: { deviceId } },
+                { name: "exec", arguments: { deviceId, command: "echo fenced" } },
+                { name: "start", arguments: { deviceId } },
+                { name: "detach", arguments: { deviceId } },
             ]) {
                 const result = await client.callTool(request);
                 expect(result.isError).toBe(true);
@@ -522,18 +521,18 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
             if (ownedLease) {
                 writeFileSync(leasePath, ownedLease);
                 const detach = await client.callTool({
-                    name: "device_detach",
-                    arguments: { backend: "android-device", deviceId },
+                    name: "detach",
+                    arguments: { deviceId },
                 });
                 expect(detach.isError).not.toBe(true);
             }
         }
     });
 
-    it("honors explicit Android backend hints when emulator and real-device ids collide", { timeout: TIMEOUT }, async () => {
+    it("rejects ambiguous device IDs without provider effects or changing either owned record", { timeout: TIMEOUT }, async () => {
         const sharedId = "android-shared-target";
         const createEmulator = await client.callTool({
-            name: "device_create",
+            name: "create",
             arguments: {
                 backend: "android-emulator",
                 name: "Shared Target Emulator",
@@ -545,7 +544,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         expect(createEmulator.isError).not.toBe(true);
 
         const attachReal = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: {
                 backend: "android-device",
                 name: "Shared Target Real",
@@ -555,72 +554,38 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         });
         expect(attachReal.isError).not.toBe(true);
 
-        writeFileSync(logPath, "");
-        const realHome = await client.callTool({
-            name: "mobile_home",
-            arguments: { backend: "android-device", deviceId: sharedId },
-        });
-        expect(realHome.isError).not.toBe(true);
-        let log = readFileSync(logPath, "utf-8");
-        expect(log).toContain("adb -s R5CREAL123 shell input keyevent 3");
-        expect(log).not.toContain("adb -s emulator-5590 shell input keyevent 3");
 
-        writeFileSync(logPath, "");
-        const emulatorHome = await client.callTool({
-            name: "mobile_home",
-            arguments: { backend: "android-emulator", deviceId: sharedId },
-        });
-        expect(emulatorHome.isError).not.toBe(true);
-        log = readFileSync(logPath, "utf-8");
-        expect(log).toContain("adb -s emulator-5590 shell input keyevent 3");
-        expect(log).not.toContain("adb -s R5CREAL123 shell input keyevent 3");
+        const attached = parseToolJson(attachReal).device as Record<string, unknown>;
+        const ownerRoot = join(homeDir, ".ccc/devices/owners", String(attached.ownerId));
+        const emulatorFile = join(ownerRoot, "android", "devices.json");
+        const physicalFile = join(ownerRoot, "android-device", "devices.json");
+        const emulatorBefore = readFileSync(emulatorFile, "utf8");
+        const physicalBefore = readFileSync(physicalFile, "utf8");
+        try {
+            for (const name of ["home", "status", "stop", "detach"] ) {
+                writeFileSync(logPath, "");
+                const result = await client.callTool({ name, arguments: { deviceId: sharedId } });
+                expect(result.isError, JSON.stringify(result)).toBe(true);
+                expect(parseToolJson(result)).toMatchObject({ ok: false, error: "ambiguous-device-backend" });
+                expect(readFileSync(logPath, "utf8")).toBe("");
+                expect(readFileSync(emulatorFile, "utf8")).toBe(emulatorBefore);
+                expect(readFileSync(physicalFile, "utf8")).toBe(physicalBefore);
+            }
+        } finally {
+            // Remove the test collision temporarily so each public cleanup call has one owned ID.
+            renameSync(emulatorFile, emulatorFile + ".collision");
+            try {
+                expect((await client.callTool({ name: "detach", arguments: { deviceId: sharedId } })).isError).not.toBe(true);
+            } finally { renameSync(emulatorFile + ".collision", emulatorFile); }
+            expect((await client.callTool({ name: "delete", arguments: { deviceId: sharedId, confirmDestructive: true } })).isError).not.toBe(true);
+        }
 
-        const realStatus = await client.callTool({
-            name: "device_status",
-            arguments: { backend: "android-device", deviceId: sharedId },
-        });
-        expect(realStatus.isError).not.toBe(true);
-        const realStatusPayload = JSON.parse(((realStatus.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            backend: { name: string };
-            device: { backend: string; serial: string };
-        };
-        expect(realStatusPayload.backend.name).toBe("android-device");
-        expect(realStatusPayload.device).toEqual(expect.objectContaining({ backend: "android-device", serial: "R5CREAL123" }));
-
-        const detachReal = await client.callTool({ name: "device_detach", arguments: { deviceId: sharedId } });
-        expect(detachReal.isError).not.toBe(true);
-
-        writeFileSync(logPath, "");
-        const mismatch = await client.callTool({
-            name: "mobile_home",
-            arguments: { backend: "android-device", deviceId: sharedId },
-        });
-        expect(mismatch.isError).toBe(true);
-        const mismatchPayload = JSON.parse(((mismatch.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            ok: boolean;
-            error: string;
-            requestedBackend: string;
-            actualBackend: string;
-        };
-        expect(mismatchPayload).toEqual(expect.objectContaining({
-            ok: false,
-            error: "device-backend-mismatch",
-            requestedBackend: "android-device",
-            actualBackend: "android-emulator",
-        }));
-        expect(readFileSync(logPath, "utf-8")).toBe("");
-
-        const deleteEmulator = await client.callTool({
-            name: "device_delete",
-            arguments: { backend: "android-emulator", deviceId: sharedId, confirmDestructive: true },
-        });
-        expect(deleteEmulator.isError).not.toBe(true);
     });
 
     it("preserves a same-id physical attachment successor during stop and detach", { timeout: TIMEOUT }, async () => {
         const deviceId = "android-real-state-generation";
         const attachedResult = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "android-device", deviceId, name: "Generation Real", serial: "R5CREAL123" },
         });
         expect(attachedResult.isError).not.toBe(true);
@@ -643,26 +608,26 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         };
 
         const stopSuccessor = armConflict("stop");
-        const stop = await client.callTool({ name: "device_stop", arguments: { backend: "android-device", deviceId } });
+        const stop = await client.callTool({ name: "stop", arguments: { deviceId } });
         expect(stop.isError).toBe(true);
         expect((stop.content as Array<{ text?: string }>)[0]?.text).toContain("owner-device-state-conflict");
         expect((JSON.parse(readFileSync(statePath, "utf-8")) as { devices: Array<Record<string, unknown>> }).devices.find((device) => device.id === deviceId)).toEqual(stopSuccessor);
 
         const detachSuccessor = armConflict("detach");
-        const detach = await client.callTool({ name: "device_detach", arguments: { backend: "android-device", deviceId } });
+        const detach = await client.callTool({ name: "detach", arguments: { deviceId } });
         expect(detach.isError).toBe(true);
         expect((detach.content as Array<{ text?: string }>)[0]?.text).toContain("owner-device-state-conflict");
         expect((JSON.parse(readFileSync(statePath, "utf-8")) as { devices: Array<Record<string, unknown>> }).devices.find((device) => device.id === deviceId)).toEqual(detachSuccessor);
         expect(JSON.parse(readFileSync(leasePath, "utf-8"))).toEqual(expect.objectContaining({ deviceId, hardwareId: attached.serial }));
 
-        const cleanup = await client.callTool({ name: "device_detach", arguments: { backend: "android-device", deviceId } });
+        const cleanup = await client.callTool({ name: "detach", arguments: { deviceId } });
         expect(cleanup.isError).not.toBe(true);
     });
 
     it("preserves active recording metadata and the physical lease when stop or detach cannot confirm recorder exit", { timeout: TIMEOUT }, async () => {
         const deviceId = "android-real-recorder-cleanup-retry";
         const attachedResult = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "android-device", deviceId, name: "Recorder Cleanup Retry", serial: "R5CREAL123" },
         });
         expect(attachedResult.isError).not.toBe(true);
@@ -690,8 +655,8 @@ exec "${originalAdbPath}" "$@"
         let stubbornPid: number | undefined;
         try {
             const started = await client.callTool({
-                name: "device_record_video_start",
-                arguments: { backend: "android-device", deviceId, remotePath: "/sdcard/cleanup-failure.mp4" },
+                name: "record_video_start",
+                arguments: { deviceId, remotePath: "/sdcard/cleanup-failure.mp4" },
             });
             expect(started.isError).not.toBe(true);
 
@@ -708,8 +673,8 @@ exec "${originalAdbPath}" "$@"
             }, null, 2));
             writeFileSync(failFallbackMarker, "1");
 
-            for (const tool of ["device_stop", "device_detach"]) {
-                const failed = await client.callTool({ name: tool, arguments: { backend: "android-device", deviceId } });
+            for (const tool of ["stop", "detach"]) {
+                const failed = await client.callTool({ name: tool, arguments: { deviceId } });
                 expect(failed.isError, tool).toBe(true);
                 expect((failed.content as Array<{ text?: string }>)[0]?.text).toContain("preserved for retry");
                 const preserved = (JSON.parse(readFileSync(statePath, "utf-8")) as { devices: Array<Record<string, unknown>> }).devices.find((device) => device.id === deviceId);
@@ -722,18 +687,18 @@ exec "${originalAdbPath}" "$@"
             writeFileSync(statePath, JSON.stringify({
                 devices: stateBeforeRetry.devices.map((device) => device.id === deviceId ? { ...device, recording: originalRecording } : device),
             }, null, 2));
-            const finalized = await client.callTool({ name: "device_record_video_stop", arguments: { backend: "android-device", deviceId } });
+            const finalized = await client.callTool({ name: "record_video_stop", arguments: { deviceId } });
             expect(finalized.isError).not.toBe(true);
 
             writeFileSync(ignoreSignalMarker, "1");
             const stubbornStart = await client.callTool({
-                name: "device_record_video_start",
-                arguments: { backend: "android-device", deviceId, remotePath: "/sdcard/stubborn-cleanup.mp4" },
+                name: "record_video_start",
+                arguments: { deviceId, remotePath: "/sdcard/stubborn-cleanup.mp4" },
             });
             expect(stubbornStart.isError).not.toBe(true);
             stubbornPid = Number((parseToolJson(stubbornStart).recording as Record<string, unknown>).pid);
 
-            const remainsActive = await client.callTool({ name: "device_stop", arguments: { backend: "android-device", deviceId } });
+            const remainsActive = await client.callTool({ name: "stop", arguments: { deviceId } });
             expect(remainsActive.isError).toBe(true);
             expect((remainsActive.content as Array<{ text?: string }>)[0]?.text).toContain("did not exit within 3000ms");
             const preservedActive = (JSON.parse(readFileSync(statePath, "utf-8")) as { devices: Array<Record<string, unknown>> }).devices.find((device) => device.id === deviceId);
@@ -751,7 +716,7 @@ exec "${originalAdbPath}" "$@"
             rmSync(adbPath, { force: true });
             renameSync(originalAdbPath, adbPath);
             await new Promise((resolve) => setTimeout(resolve, 100));
-            await client.callTool({ name: "device_detach", arguments: { backend: "android-device", deviceId } });
+            await client.callTool({ name: "detach", arguments: { deviceId } });
         }
     });
 
@@ -785,7 +750,7 @@ exec "${delegatedAdbPath}" "$@"
 
         try {
             const ipv6 = await client.callTool({
-                name: "device_wireless",
+                name: "wireless",
                 arguments: { backend: "android-device", action: "connect", host: "2001:db8::50", port: 5555 },
             });
             expect(ipv6.isError).not.toBe(true);
@@ -798,7 +763,7 @@ exec "${delegatedAdbPath}" "$@"
             expect(readFileSync(logPath, "utf8")).toContain("adb connect [2001:db8::50]:5555");
 
             const ipv6Pair = await client.callTool({
-                name: "device_wireless",
+                name: "wireless",
                 arguments: {
                     backend: "android-device",
                     action: "pair",
@@ -812,14 +777,14 @@ exec "${delegatedAdbPath}" "$@"
             expect(readFileSync(logPath, "utf8")).toContain("adb pair [2001:db8::70]:37099 123456");
 
             const attached = await client.callTool({
-                name: "device_attach",
+                name: "attach",
                 arguments: { backend: "android-device", deviceId, name: "ADB Result Validation", serial: "R5CREAL123" },
             });
             expect(attached.isError).not.toBe(true);
 
             const startedAt = Date.now();
             const timedOutInstall = await client.callTool({
-                name: "device_install_app",
+                name: "install_app",
                 arguments: { deviceId, path: "/tmp/slow-real-install.apk", helperTimeoutMs: 25 },
             });
             expect(timedOutInstall.isError).toBe(true);
@@ -827,13 +792,13 @@ exec "${delegatedAdbPath}" "$@"
             expect((timedOutInstall.content as Array<{ text?: string }>)[0]?.text).toMatch(/timed out|ETIMEDOUT/i);
 
             const launch = await client.callTool({
-                name: "device_launch_app",
+                name: "launch_app",
                 arguments: { deviceId, packageName: "com.example.real.missing" },
             });
             expect(launch.isError).toBe(true);
             expect((launch.content as Array<{ text?: string }>)[0]?.text).toContain("No activities found");
         } finally {
-            await client.callTool({ name: "device_detach", arguments: { backend: "android-device", deviceId } });
+            await client.callTool({ name: "detach", arguments: { deviceId } });
             rmSync(adbPath, { force: true });
             renameSync(delegatedAdbPath, adbPath);
         }

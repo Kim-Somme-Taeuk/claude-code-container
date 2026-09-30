@@ -7,7 +7,7 @@ import { parse } from "acorn";
 import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import { describe, expect, it } from "vitest";
 import { DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES, evaluateDestructivePolicy } from "../../device-lab-mcp/src/policy/destructive.mjs";
-import { DEVICE_FLOW_TOOL_NAMES, TOOLS } from "../../device-lab-mcp/src/tools.mjs";
+import { DEVICE_FLOW_TOOL_NAMES, TOOLS, publicToolName } from "../../device-lab-mcp/src/tools.mjs";
 import { LINUX_VM_CAPABILITIES } from "../../device-lab-mcp/src/backends/linux-vm.mjs";
 import { androidDeviceE2EPrerequisites, prepareAndroidDeviceApp } from "../../scripts/real-tests/android-device-e2e.ts";
 import { androidEmulatorAppSelection, androidEmulatorCreateRequest, deviceFromPayload } from "../../scripts/real-tests/android-emulator-e2e.ts";
@@ -273,15 +273,15 @@ function realTestCallToolLiteralValues() {
 
 const ALWAYS_DESTRUCTIVE_REAL_E2E_TOOLS = new Set([
     "device_broker_shutdown",
-    "device_delete",
-    "device_reset",
-    "device_snapshot_restore",
-    "device_snapshot_delete",
-    "mobile_uninstall_app",
-    "mobile_clear_app_data",
-    "mobile_set_battery",
-    "mobile_set_network",
-    "mobile_toggle_airplane_mode",
+    "delete",
+    "reset",
+    "snapshot_restore",
+    "snapshot_delete",
+    "uninstall_app",
+    "clear_app_data",
+    "set_battery",
+    "set_network",
+    "toggle_airplane_mode",
 ]);
 
 function realTestDestructiveCallsMissingConfirmation() {
@@ -304,7 +304,7 @@ function realTestCallsMissingAnyOfRequired() {
 function alwaysDestructivePolicyTools() {
     return [...new Set(DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES
         .filter(({ name }) => evaluateDestructivePolicy(name, {}).destructive === true)
-        .map(({ name }) => name))]
+        .map(({ name }) => name === "device_broker_shutdown" ? name : publicToolName(name)))]
         .sort();
 }
 
@@ -353,7 +353,7 @@ function literalStringArrayValues(node: Record<string, unknown> | undefined): st
         .map((element) => String(element.value));
 }
 
-function deviceLabServerLiteralSets() {
+function deviceLabServerLiteralSets(publicNames = true) {
     const text = readFileSync(join(repoRoot, "device-lab-mcp", "src", "server.mjs"), "utf-8");
     const ast = parseModule(text);
     const sets: Array<{ name: string; values: string[] }> = [];
@@ -369,7 +369,7 @@ function deviceLabServerLiteralSets() {
         const values = literalStringArrayValues(arrayArg);
         if (values.length > 0) sets.push({ name: String(id.name), values });
     });
-    return sets;
+    return publicNames ? sets.map(entry => ({ ...entry, values: entry.values.map(publicToolName) })) : sets;
 }
 
 function deviceLabBackendCapabilityTools() {
@@ -397,7 +397,7 @@ function deviceLabBackendCapabilityTools() {
             if (values.length > 0) capabilities.push({ file, values });
         });
     }
-    return capabilities;
+    return capabilities.map(entry => ({ ...entry, values: entry.values.map(publicToolName) }));
 }
 
 function brokerCommandForwardedInputKeys() {
@@ -505,7 +505,7 @@ function brokerMobileRequestToolKeys() {
     const text = readFileSync(join(repoRoot, "device-lab-mcp", "src", "server.mjs"), "utf-8").replace(/\r\n/g, "\n");
     const match = /function brokerMobileRequest\(name, args, backend\) \{([\s\S]*?)\n\}\n\nfunction brokerMobilePayload/.exec(text);
     expect(match).not.toBeNull();
-    return [...new Set([...(match?.[1] || "").matchAll(/\bname === "([^"]+)"/g)].map((item) => item[1]))].sort();
+    return [...new Set([...(match?.[1] || "").matchAll(/\bname === "([^"]+)"/g)].map((item) => publicToolName(item[1])))].sort();
 }
 
 function deviceLabToolSchemaPropertyMap() {
@@ -543,7 +543,7 @@ function deviceLabMcpBackendCapabilities() {
         encoding: "utf-8",
     });
     expect(result.status).toBe(0);
-    return new Map(JSON.parse(result.stdout) as Array<[string, string[]]>);
+    return new Map((JSON.parse(result.stdout) as Array<[string, string[]]>).map(([backend, names]) => [backend, [...new Set(names.map(publicToolName))].sort()]));
 }
 
 function functionSwitchCaseLabels(file: string, functionName: string) {
@@ -562,7 +562,7 @@ function functionSwitchCaseLabels(file: string, functionName: string) {
         const test = node.test as Record<string, unknown> | undefined;
         if (test?.type === "Literal" && typeof test.value === "string") labels.add(String(test.value));
     });
-    return [...labels].sort();
+    return [...new Set([...labels].map(publicToolName))].sort();
 }
 
 function deviceLabBackendHandlerCases() {
@@ -575,20 +575,20 @@ function deviceLabBackendHandlerCases() {
         ["windows-sandbox", functionSwitchCaseLabels(join(backendRoot, "windows-sandbox.mjs"), "handleWindowsToolUnlocked")],
         ["windows-vm", [...quotedArrayConstant(readFileSync(join(repoRoot, "src", "device-lab-broker.ts"), "utf-8"), "HYPER_V_VM_CAPABILITIES")].sort()],
         ["macos-vm", functionSwitchCaseLabels(join(backendRoot, "macos-vm.mjs"), "handleMacosToolUnlocked")],
-        ["linux-vm", [...LINUX_VM_CAPABILITIES].sort()],
+        ["linux-vm", [...LINUX_VM_CAPABILITIES].map(publicToolName).sort()],
     ]);
 }
 
 function quotedSetConstant(text: string, name: string) {
     const match = new RegExp(`const ${name} = new Set\\(\\[([\\s\\S]*?)\\]\\);`).exec(text);
     expect(match).not.toBeNull();
-    return new Set([...(match?.[1] || "").matchAll(/"([^"]+)"/g)].map((item) => item[1]));
+    return new Set([...(match?.[1] || "").matchAll(/"([^"]+)"/g)].map((item) => publicToolName(item[1])));
 }
 
 function quotedArrayConstant(text: string, name: string) {
     const match = new RegExp(`const ${name} = \\[([\\s\\S]*?)\\];`).exec(text);
     expect(match).not.toBeNull();
-    return new Set([...(match?.[1] || "").matchAll(/"([^"]+)"/g)].map((item) => item[1]));
+    return new Set([...(match?.[1] || "").matchAll(/"([^"]+)"/g)].map((item) => publicToolName(item[1])));
 }
 
 function quotedMapKeys(text: string, name: string) {
@@ -607,14 +607,14 @@ function backendAdvertisedSupportDrift() {
     const brokerText = readFileSync(join(repoRoot, "src", "device-lab-broker.ts"), "utf-8");
     const desktopCapabilities = quotedArrayConstant(brokerText, "DESKTOP_DEVICE_CAPABILITIES");
     const currentDisplayCapabilities = new Set([
-        "device_status",
-        "device_screenshot",
-        "device_click",
-        "device_double_click",
-        "device_key",
-        "device_type",
-        "device_scroll",
-        "device_cursor_position",
+        "status",
+        "screenshot",
+        "click",
+        "double_click",
+        "key",
+        "type",
+        "scroll",
+        "cursor_position",
     ]);
     const capabilityCases = new Map([
         ["x11-current-display", currentDisplayCapabilities],
@@ -625,22 +625,23 @@ function backendAdvertisedSupportDrift() {
         ["windows-sandbox", desktopCapabilities],
         ["windows-vm", quotedArrayConstant(brokerText, "HYPER_V_VM_CAPABILITIES")],
         ["macos-vm", new Set([...desktopCapabilities, ...quotedArrayConstant(brokerText, "MACOS_VM_CAPABILITIES")])],
-        ["linux-vm", new Set([...LINUX_VM_CAPABILITIES, ...hyperVLinuxVmCapabilities(brokerText)])],
+        ["linux-vm", new Set([...LINUX_VM_CAPABILITIES.map(publicToolName), ...hyperVLinuxVmCapabilities(brokerText)])],
     ]);
+    for (const backend of ["x11-current-display", "windows-vm", "linux-vm"]) capabilityCases.get(backend)?.add("move");
     const schemas = deviceLabToolBackendEnums();
     const backends = [...capabilityCases.keys()];
     const overAdvertised: Array<{ tool: string; backend: string; actual: string[] }> = [];
     const underAdvertised: Array<{ tool: string; backend: string; advertised: string[] }> = [];
     for (const [tool, advertised] of schemas.entries()) {
         if (advertised.length === 0 || tool.startsWith("device_broker_")) continue;
-        const actual = backends.filter((backend) => tool === "device_run_flow"
+        const actual = backends.filter((backend) => tool === "run_flow"
             ? DEVICE_FLOW_TOOL_NAMES.some((step) => capabilityCases.get(backend)?.has(step))
             : capabilityCases.get(backend)?.has(tool));
         for (const backend of advertised) {
             if (!actual.includes(backend)) overAdvertised.push({ tool, backend, actual });
         }
         for (const backend of actual) {
-            if (!advertised.includes(backend) && tool !== "device_wireless") underAdvertised.push({ tool, backend, advertised });
+            if (!advertised.includes(backend) && tool !== "wireless") underAdvertised.push({ tool, backend, advertised });
         }
     }
     return { overAdvertised, underAdvertised };
@@ -709,7 +710,7 @@ describe("test level runner", () => {
             return { status: 0, stdout: "", stderr: "" };
         };
         const callTool = async (tool: string) => {
-            if (tool === "device_start") return mcpTextResult("CO_E_APPSINGLEUSE", true);
+            if (tool === "start") return mcpTextResult("CO_E_APPSINGLEUSE", true);
             return mcpTextResult({ device: { id: "windows-real-sandbox-test", status: "stopped" } });
         };
 
@@ -742,7 +743,7 @@ describe("test level runner", () => {
         };
         let startCount = 0;
         const callTool = async (tool: string) => {
-            if (tool === "device_status") {
+            if (tool === "status") {
                 return mcpTextResult({ device: { id: "windows-real-sandbox-test", status: "running", sandboxId: ownedId } });
             }
             startCount += 1;
@@ -1204,16 +1205,16 @@ describe("test level runner", () => {
             ],
             records: [],
             toolCoverage: {
-                advertisedTools: ["device_create"],
+                advertisedTools: ["create"],
                 calls: [
-                    { file: "/results/provider-e2e.mjs", tool: "device_create", outcome: "ok", mcpSessionId: "source-session", facets: ["device_create:backend=test-provider"] },
-                    { file: "/results/provider-e2e.mjs", tool: "device_create", outcome: "ok", mcpSessionId: "dist-session", facets: ["device_create:backend=test-provider"] },
+                    { file: "/results/provider-e2e.mjs", tool: "create", outcome: "ok", mcpSessionId: "source-session", facets: ["create:backend=test-provider"] },
+                    { file: "/results/provider-e2e.mjs", tool: "create", outcome: "ok", mcpSessionId: "dist-session", facets: ["create:backend=test-provider"] },
                 ],
             },
         };
         const options = {
-            advertisedTools: ["device_create"],
-            providerSpecs: [{ id: "test-provider", files: ["provider-e2e.mjs"], tools: ["device_create"] }],
+            advertisedTools: ["create"],
+            providerSpecs: [{ id: "test-provider", files: ["provider-e2e.mjs"], tools: ["create"] }],
             requireLinuxVm: false,
         };
 
@@ -1304,7 +1305,7 @@ describe("test level runner", () => {
     });
 
     it("keeps device-lab server literal tool sets deduplicated", () => {
-        const setIssues = deviceLabServerLiteralSets().flatMap(({ name, values }) => {
+        const setIssues = deviceLabServerLiteralSets(false).flatMap(({ name, values }) => {
             const duplicates = values.filter((value, index) => values.indexOf(value) !== index)
                 .map((value) => ({ name, value, issue: "duplicate" }));
             return duplicates;
@@ -1316,14 +1317,15 @@ describe("test level runner", () => {
         const advertised = advertisedDeviceLabTools();
         const sets = new Map(deviceLabServerLiteralSets().map(({ name, values }) => [name, values]));
         const directlyHandled = [
-            "device_backends",
-            "device_broker_status",
-            "device_list",
-            "device_run_flow",
-            "display_current",
+            "backends",
+            "broker_status",
+            "list_devices",
+            "run_flow",
+            "status",
         ];
         const routed = new Set([
             ...directlyHandled,
+            "move",
             ...(sets.get("BROKER_LIFECYCLE_COMMANDS") || []),
             ...(sets.get("BROKER_READONLY_DEVICE_TOOLS") || []),
             ...(sets.get("BROKER_MUTATING_DEVICE_TOOLS") || []),
@@ -1382,8 +1384,8 @@ describe("test level runner", () => {
         const expectedMissing = new Map<string, string[]>([
             ["android-emulator", []],
             ["android-device", []],
-            ["ios-simulator", ["device_inventory"]],
-            ["ios-device", ["device_inventory", "device_wireless"]],
+            ["ios-simulator", ["inventory"]],
+            ["ios-device", ["inventory", "wireless"]],
         ]);
         const drift = [...scripts.entries()].flatMap(([backend, file]) => {
             const calls = realTestCallToolNamesForFile(file);
@@ -1404,36 +1406,36 @@ describe("test level runner", () => {
         const handlerCases = deviceLabBackendHandlerCases();
         const expected = new Map<string, string[]>([
             ["android-device", [
-                "mobile_set_battery",
-                "mobile_set_location",
-                "mobile_set_network",
-                "mobile_toggle_airplane_mode",
+                "set_battery",
+                "set_location",
+                "set_network",
+                "toggle_airplane_mode",
             ]],
             ["ios-simulator", [
-                "mobile_back",
-                "mobile_forward",
-                "mobile_power",
-                "mobile_recents",
-                "mobile_set_battery",
-                "mobile_set_network",
-                "mobile_toggle_airplane_mode",
+                "back",
+                "forward",
+                "power",
+                "recents",
+                "set_battery",
+                "set_network",
+                "toggle_airplane_mode",
             ]],
             ["ios-device", [
-                "device_exec",
-                "mobile_back",
-                "mobile_forward",
-                "mobile_get_clipboard",
-                "mobile_grant_permission",
-                "mobile_open_url",
-                "mobile_power",
-                "mobile_recents",
-                "mobile_revoke_permission",
-                "mobile_set_battery",
-                "mobile_set_clipboard",
-                "mobile_set_location",
-                "mobile_set_network",
-                "mobile_toggle_airplane_mode",
-                "mobile_uninstall_app",
+                "exec",
+                "back",
+                "forward",
+                "get_clipboard",
+                "grant_permission",
+                "open_url",
+                "power",
+                "recents",
+                "revoke_permission",
+                "set_battery",
+                "set_clipboard",
+                "set_location",
+                "set_network",
+                "toggle_airplane_mode",
+                "uninstall_app",
             ]],
         ]);
         const actual = new Map([...handlerCases.entries()].map(([backend, cases]) => {
@@ -1443,7 +1445,7 @@ describe("test level runner", () => {
                 .filter((tool) => !backendCapabilities.has(tool))
                 .sort()];
         }));
-        expect([...actual.entries()].filter(([, tools]) => tools.length > 0)).toEqual([...expected.entries()]);
+        expect([...actual.entries()].filter(([, tools]) => tools.length > 0)).toEqual([...expected.entries()].map(([backend, tools]) => [backend, [...tools].sort()]));
     });
 
     it("keeps hidden broker command forwarded lifecycle inputs explicit in the broker implementation", () => {
@@ -1511,8 +1513,8 @@ describe("test level runner", () => {
         const backendProxyTools = new Set(sets.get("BROKER_BACKEND_MOBILE_TOOLS") || []);
         const appiumRequestTools = new Set(brokerMobileRequestToolKeys());
         const specialCases = new Set([
-            "mobile_session_status",
-            "mobile_wait_for_text",
+            "automation_status",
+            "wait_for_text",
         ]);
         const missing = [...actions]
             .filter((tool) => !backendProxyTools.has(tool) && !appiumRequestTools.has(tool) && !specialCases.has(tool));
@@ -1578,9 +1580,9 @@ describe("test level runner", () => {
     });
 
     it("keeps newly admitted destructive flow actions guarded by per-step confirmation", () => {
-        const actions = DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES.filter(({ name }) => DEVICE_FLOW_TOOL_NAMES.includes(name));
-        expect(actions.map(({ name }) => name)).toEqual([
-            "mobile_uninstall_app", "mobile_clear_app_data", "mobile_set_battery", "mobile_set_network", "mobile_toggle_airplane_mode",
+        const actions = DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES.filter(({ name }) => DEVICE_FLOW_TOOL_NAMES.includes(publicToolName(name)));
+        expect(actions.map(({ name }) => publicToolName(name))).toEqual([
+            "uninstall_app", "clear_app_data", "set_battery", "set_network", "toggle_airplane_mode",
         ]);
         for (const { name, args } of actions) {
             expect(evaluateDestructivePolicy(name, args).ok).toBe(false);
@@ -1593,40 +1595,40 @@ describe("test level runner", () => {
         expect(text).toContain('}, providerMcpSessionOptions(options, "ccc-real-android-emulator-e2e"));');
         expect(text).not.toContain('new Promise((resolvePromise) => {\n        const server = createServer();\n        server.once("error", () => resolvePromise(false));\n        server.listen(port, "127.0.0.1", () => {\n            server.close(() => resolvePromise(true));\n        });\n    }, providerMcpSessionOptions');
         for (const tool of [
-            "mobile_session_status",
-            "mobile_dump_ui",
-            "mobile_home",
-            "mobile_tap",
-            "mobile_double_tap",
-            "mobile_long_press",
-            "mobile_swipe",
-            "mobile_drag",
-            "mobile_type_text",
-            "mobile_key",
-            "mobile_back",
-            "mobile_forward",
-            "mobile_recents",
-            "mobile_lock",
-            "mobile_unlock",
-            "mobile_set_orientation",
-            "mobile_set_orientation",
-            "mobile_set_orientation",
-            "mobile_open_url",
-            "mobile_set_location",
-            "mobile_set_battery",
-            "mobile_grant_permission",
-            "mobile_revoke_permission",
-            "mobile_wait_for_app",
-            "device_record_video_start",
-            "device_record_video_status",
-            "device_record_video_stop",
-            "device_run_flow",
-            "device_screenshot",
-            "mobile_set_clipboard",
-            "mobile_get_clipboard",
-            "device_upload",
-            "device_download",
-            "device_status",
+            "automation_status",
+            "dump_ui",
+            "home",
+            "click",
+            "double_click",
+            "long_press",
+            "swipe",
+            "drag",
+            "type",
+            "key",
+            "back",
+            "forward",
+            "recents",
+            "lock",
+            "unlock",
+            "set_orientation",
+            "set_orientation",
+            "set_orientation",
+            "open_url",
+            "set_location",
+            "set_battery",
+            "grant_permission",
+            "revoke_permission",
+            "wait_for_app",
+            "record_video_start",
+            "record_video_status",
+            "record_video_stop",
+            "run_flow",
+            "screenshot",
+            "set_clipboard",
+            "get_clipboard",
+            "upload",
+            "download",
+            "status",
         ]) {
             expect(text).toContain(`callTool("${tool}"`);
         }
@@ -1639,9 +1641,9 @@ describe("test level runner", () => {
         const androidText = readFileSync(join(repoRoot, "scripts", "real-tests", "android-emulator-e2e.ts"), "utf-8");
         expect(destructiveText).toContain("destructive: true");
         for (const tool of [
-            "mobile_power",
-            "mobile_set_network",
-            "mobile_toggle_airplane_mode",
+            "power",
+            "set_network",
+            "toggle_airplane_mode",
         ]) {
             expect(androidText).toContain(`callTool("${tool}"`);
         }
@@ -1656,15 +1658,15 @@ describe("test level runner", () => {
         expect(text).toContain("appArtifact: \"verified\"");
         expect(text).toContain("appPermission: \"verified\"");
         for (const tool of [
-            "device_install_app",
-            "device_launch_app",
-            "device_reset",
-            "device_install_app",
-            "device_launch_app",
-            "mobile_uninstall_app",
-            "mobile_clear_app_data",
-            "device_upload",
-            "device_download",
+            "install_app",
+            "launch_app",
+            "reset",
+            "install_app",
+            "launch_app",
+            "uninstall_app",
+            "clear_app_data",
+            "upload",
+            "download",
         ]) {
             expect(text).toContain(`callTool("${tool}"`);
         }
@@ -1679,53 +1681,53 @@ describe("test level runner", () => {
         expect(text).not.toContain("if (appArtifactReady)");
         expect(text.indexOf("androidDeviceE2EPrerequisites()")).toBeLessThan(text.indexOf("mkdirSync(artifactRoot"));
         for (const tool of [
-            "device_attach",
-            "device_status",
-            "device_start",
-            "device_exec",
-            "mobile_session_status",
-            "mobile_dump_ui",
-            "mobile_wait_for_text",
-            "mobile_tap",
-            "mobile_double_tap",
-            "mobile_long_press",
-            "mobile_swipe",
-            "mobile_drag",
-            "mobile_type_text",
-            "mobile_key",
-            "mobile_home",
-            "mobile_back",
-            "mobile_forward",
-            "mobile_recents",
-            "mobile_power",
-            "mobile_lock",
-            "mobile_unlock",
-            "mobile_set_orientation",
-            "mobile_set_orientation",
-            "mobile_set_orientation",
-            "mobile_open_url",
-            "mobile_set_clipboard",
-            "mobile_get_clipboard",
-            "device_screenshot",
-            "device_screenshot",
-            "device_record_video_start",
-            "device_record_video_status",
-            "device_record_video_stop",
-            "device_upload",
-            "device_download",
-            "device_install_app",
-            "device_launch_app",
-            "device_install_app",
-            "device_launch_app",
-            "mobile_wait_for_app",
-            "mobile_grant_permission",
-            "mobile_revoke_permission",
-            "mobile_stop_app",
-            "device_reset",
-            "mobile_clear_app_data",
-            "mobile_uninstall_app",
-            "device_stop",
-            "device_detach",
+            "attach",
+            "status",
+            "start",
+            "exec",
+            "automation_status",
+            "dump_ui",
+            "wait_for_text",
+            "click",
+            "double_click",
+            "long_press",
+            "swipe",
+            "drag",
+            "type",
+            "key",
+            "home",
+            "back",
+            "forward",
+            "recents",
+            "power",
+            "lock",
+            "unlock",
+            "set_orientation",
+            "set_orientation",
+            "set_orientation",
+            "open_url",
+            "set_clipboard",
+            "get_clipboard",
+            "screenshot",
+            "screenshot",
+            "record_video_start",
+            "record_video_status",
+            "record_video_stop",
+            "upload",
+            "download",
+            "install_app",
+            "launch_app",
+            "install_app",
+            "launch_app",
+            "wait_for_app",
+            "grant_permission",
+            "revoke_permission",
+            "stop_app",
+            "reset",
+            "clear_app_data",
+            "uninstall_app",
+            "stop",
+            "detach",
         ]) {
             expect(text).toContain(`callTool("${tool}"`);
         }
@@ -1740,13 +1742,13 @@ describe("test level runner", () => {
         expect(text).toContain("missing CCC_REAL_IOS_SIMULATOR_APP/CCC_REAL_IOS_SIMULATOR_BUNDLE_ID");
         expect(text).toContain("missing iOS Appium/XCUITest prerequisites");
         for (const tool of [
-            "device_install_app",
-            "device_launch_app",
-            "device_reset",
-            "device_install_app",
-            "device_launch_app",
-            "mobile_uninstall_app",
-            "mobile_clear_app_data",
+            "install_app",
+            "launch_app",
+            "reset",
+            "install_app",
+            "launch_app",
+            "uninstall_app",
+            "clear_app_data",
         ]) {
             expect(text).toContain(`callTool("${tool}"`);
         }
@@ -1834,20 +1836,20 @@ describe("test level runner", () => {
             ok: false,
             error: "provider-command-failed",
             detail: "stderr: Error: Package path is not valid. Valid system image paths are:",
-        }, "device_create")).toThrow(
-            "device_create returned no device: provider-command-failed: stderr: Error: Package path is not valid. Valid system image paths are:",
+        }, "create")).toThrow(
+            "create returned no device: provider-command-failed: stderr: Error: Package path is not valid. Valid system image paths are:",
         );
     });
 
     it("preserves Android real-test device extraction and legacy diagnostics", () => {
         const device = { id: "android-real-test" };
-        expect(deviceFromPayload({ device }, "device_create")).toBe(device);
+        expect(deviceFromPayload({ device }, "create")).toBe(device);
         expect(() => deviceFromPayload({
             launch: { error: "launch-failed", detail: "emulator exited", command: "emulator" },
             attempts: [{ error: "boot-timeout" }],
-        }, "device_start")).toThrow("device_start returned no device: launch-failed: emulator exited: emulator: boot-timeout");
-        expect(() => deviceFromPayload({}, "device_create")).toThrow("device_create returned no device (keys: none)");
-        expect(() => deviceFromPayload({ ok: false }, "device_create")).toThrow("device_create returned no device (keys: ok)");
+        }, "start")).toThrow("start returned no device: launch-failed: emulator exited: emulator: boot-timeout");
+        expect(() => deviceFromPayload({}, "create")).toThrow("create returned no device (keys: none)");
+        expect(() => deviceFromPayload({ ok: false }, "create")).toThrow("create returned no device (keys: ok)");
     });
 
     it("delegates real Android emulator port allocation to the broker", () => {
@@ -1869,32 +1871,32 @@ describe("test level runner", () => {
     it("covers safe iOS Simulator mobile controls in the real simulator E2E through MCP calls", () => {
         const text = readFileSync(join(repoRoot, "scripts", "real-tests", "ios-e2e.ts"), "utf-8");
         for (const tool of [
-            "mobile_session_status",
-            "mobile_dump_ui",
-            "mobile_tap",
-            "mobile_double_tap",
-            "mobile_long_press",
-            "mobile_swipe",
-            "mobile_drag",
-            "mobile_home",
-            "mobile_lock",
-            "mobile_unlock",
-            "mobile_set_orientation",
-            "mobile_set_orientation",
-            "mobile_set_orientation",
-            "device_screenshot",
-            "mobile_open_url",
-            "mobile_stop_app",
-            "mobile_set_location",
-            "mobile_grant_permission",
-            "mobile_revoke_permission",
-            "mobile_set_clipboard",
-            "mobile_get_clipboard",
-            "mobile_wait_for_app",
-            "device_record_video_start",
-            "device_record_video_status",
-            "device_record_video_stop",
-            "device_status",
+            "automation_status",
+            "dump_ui",
+            "click",
+            "double_click",
+            "long_press",
+            "swipe",
+            "drag",
+            "home",
+            "lock",
+            "unlock",
+            "set_orientation",
+            "set_orientation",
+            "set_orientation",
+            "screenshot",
+            "open_url",
+            "stop_app",
+            "set_location",
+            "grant_permission",
+            "revoke_permission",
+            "set_clipboard",
+            "get_clipboard",
+            "wait_for_app",
+            "record_video_start",
+            "record_video_status",
+            "record_video_stop",
+            "status",
         ]) {
             expect(text).toContain(`callTool("${tool}"`);
         }
@@ -1908,27 +1910,27 @@ describe("test level runner", () => {
         expect(text).toContain("CCC_REAL_DEVICE_LAB_FAIL_ON_SKIP");
         expect(text).toContain("missing iOS real-device Appium/XCUITest prerequisites");
         for (const tool of [
-            "mobile_session_status",
-            "mobile_dump_ui",
-            "device_screenshot",
-            "mobile_tap",
-            "mobile_double_tap",
-            "mobile_long_press",
-            "mobile_swipe",
-            "mobile_drag",
-            "mobile_type_text",
-            "mobile_key",
-            "mobile_home",
-            "mobile_lock",
-            "mobile_unlock",
-            "mobile_set_orientation",
-            "mobile_set_orientation",
-            "mobile_set_orientation",
-            "mobile_wait_for_text",
-            "device_install_app",
-            "device_launch_app",
-            "mobile_wait_for_app",
-            "mobile_stop_app",
+            "automation_status",
+            "dump_ui",
+            "screenshot",
+            "click",
+            "double_click",
+            "long_press",
+            "swipe",
+            "drag",
+            "type",
+            "key",
+            "home",
+            "lock",
+            "unlock",
+            "set_orientation",
+            "set_orientation",
+            "set_orientation",
+            "wait_for_text",
+            "install_app",
+            "launch_app",
+            "wait_for_app",
+            "stop_app",
         ]) {
             expect(text).toContain(`callTool("${tool}"`);
         }
@@ -1939,9 +1941,9 @@ describe("test level runner", () => {
     it("covers macOS VM snapshot restore in the destructive real E2E path", () => {
         const text = readFileSync(join(repoRoot, "scripts", "real-tests", "macos-vm-e2e.ts"), "utf-8");
         for (const tool of [
-            "device_snapshot_create",
-            "device_snapshot_restore",
-            "device_snapshot_delete",
+            "snapshot_create",
+            "snapshot_restore",
+            "snapshot_delete",
         ]) {
             expect(text).toContain(`callTool("${tool}"`);
         }
@@ -1953,39 +1955,39 @@ describe("test level runner", () => {
         expect(level1.args.join("\n")).toContain("scripts/real-tests/level1-display-e2e.ts");
         const text = readFileSync(join(repoRoot, "scripts", "real-tests", "level1-display-e2e.ts"), "utf-8");
         for (const tool of [
-            "display_current",
-            "display_screenshot",
-            "display_click",
-            "display_double_click",
-            "display_key",
-            "display_type",
-            "display_scroll",
-            "display_cursor_position",
-            "device_list",
-            "device_status",
-            "device_screenshot",
-            "device_click",
-            "device_double_click",
-            "device_key",
-            "device_type",
-            "device_scroll",
-            "device_cursor_position",
-            "device_run_flow",
+            "status",
+            "screenshot",
+            "click",
+            "double_click",
+            "key",
+            "type",
+            "scroll",
+            "cursor_position",
+            "list_devices",
+            "status",
+            "screenshot",
+            "click",
+            "double_click",
+            "key",
+            "type",
+            "scroll",
+            "cursor_position",
+            "run_flow",
         ]) {
             expect(text).toContain(`"${tool}"`);
         }
         expect(text).toContain("withDeviceLabMcp");
         expect(text).toContain("\"left\", \"right\"");
         expect(text).toContain("\"up\", \"down\", \"left\", \"right\"");
-        expect(text).toContain("device_list includes current display");
-        expect(text).toContain("device_status current display alias");
-        expect(text).toContain("device_cursor_position current display alias");
-        expect(text).toContain("display_click buttons");
-        expect(text).toContain("display_double_click buttons");
-        expect(text).toContain("display_scroll directions");
-        expect(text).toContain("device_click current display alias buttons");
-        expect(text).toContain("device_double_click current display alias buttons");
-        expect(text).toContain("device_scroll current display alias directions");
+        expect(text).toContain("list_devices includes current display");
+        expect(text).toContain("status current display alias");
+        expect(text).toContain("cursor_position current display alias");
+        expect(text).toContain("click buttons");
+        expect(text).toContain("double_click buttons");
+        expect(text).toContain("scroll directions");
+        expect(text).toContain("click current display alias buttons");
+        expect(text).toContain("double_click current display alias buttons");
+        expect(text).toContain("scroll current display alias directions");
     });
 
     it("reports an unavailable current display E2E as skipped at both levels", () => {
@@ -2004,15 +2006,15 @@ describe("test level runner", () => {
         for (const file of ["windows-sandbox-e2e.ts", "macos-vm-e2e.ts"]) {
             const text = readFileSync(join(repoRoot, "scripts", "real-tests", file), "utf-8");
             for (const tool of [
-                "device_click",
-                "device_double_click",
-                "device_key",
-                "device_type",
-                "device_scroll",
-                "device_window_list",
-                "device_cursor_position",
-                "device_accessibility_snapshot",
-                "device_record_video_status",
+                "click",
+                "double_click",
+                "key",
+                "type",
+                "scroll",
+                "window_list",
+                "cursor_position",
+                "accessibility_snapshot",
+                "record_video_status",
             ]) {
                 expect(text).toContain(`callTool("${tool}"`);
             }
@@ -2031,7 +2033,7 @@ describe("test level runner", () => {
 
     it("covers physical wireless status and safe action diagnostics in real MCP readiness", () => {
         const text = readFileSync(join(repoRoot, "scripts", "real-tests", "level1-real-provider-readiness.ts"), "utf-8");
-        expect(text).toContain("device_wireless");
+        expect(text).toContain("wireless");
         expect(text).toContain("action: \"status\"");
         expect(text).toContain("\"usb-tcpip\", \"pair\", \"connect\"");
         expect(text).toContain("android-wireless-missing-adb");
@@ -2048,7 +2050,7 @@ describe("test level runner", () => {
         const text = readFileSync(join(repoRoot, "scripts", "real-tests", "level2-broker-e2e.ts"), "utf-8");
         const distText = readFileSync(join(repoRoot, "scripts", "real-tests", "level2-dist-broker-e2e.ts"), "utf-8");
         const helperText = readFileSync(join(repoRoot, "scripts", "real-tests", "helpers.ts"), "utf-8");
-        expect(text).toContain("device_broker_status");
+        expect(text).toContain("broker_status");
         expect(text).toContain('callInternal("brokerRpc"');
         expect(text).not.toContain('callTool("device_broker_rpc"');
         expect(text).toContain("broker.echo");
@@ -2057,7 +2059,7 @@ describe("test level runner", () => {
         expect(text).toContain("broker.backends");
         expect(text).toContain("broker RPC status");
         expect(text).toContain("broker RPC inventory");
-        expect(text).toContain("device_backends");
+        expect(text).toContain("backends");
         expect(text).toContain("action: \"status\"");
         expect(text).toContain("action: \"claim\"");
         expect(text).toContain("action: \"heartbeat\"");
@@ -2409,7 +2411,7 @@ describe("test level runner", () => {
             writeFileSync(skippedFile, [
                 "export const name='skipped-scripted';",
                 "export async function run(){",
-                "  const skipped = () => callTool(\"mobile_set_battery\", { backend: \"android-emulator\", deviceId: \"skipped-device\", level: 77, charging: true, confirmDestructive: true });",
+                "  const skipped = () => callTool(\"set_battery\", { backend: \"android-emulator\", deviceId: \"skipped-device\", level: 77, charging: true, confirmDestructive: true });",
                 "  void skipped;",
                 "  return { status: 'SKIP', reason: 'missing adb, emulator' };",
                 "}",
@@ -2447,9 +2449,9 @@ describe("test level runner", () => {
             writeFileSync(scriptedButUncalledFile, [
                 "export const name='scripted-gap';",
                 "export async function run(){",
-                "  const never = () => callTool(\"device_backends\", { backend: \"android-emulator\" });",
+                "  const never = () => callTool(\"backends\", { backend: \"android-emulator\" });",
                 "  void never;",
-                "  return { status: 'PASS', tools: ['device_backends'] };",
+                "  return { status: 'PASS', tools: ['backends'] };",
                 "}",
                 "",
             ].join("\n"));
@@ -2481,10 +2483,10 @@ describe("test level runner", () => {
             writeFileSync(facetFile, [
                 "export const name='boolean-facets';",
                 "export async function run(){",
-                "  const scripted = () => callTool(\"mobile_set_battery\", { backend: \"android-emulator\", deviceId: \"facet-device\", level: 42, status: 2, charging: true, confirmDestructive: true });",
+                "  const scripted = () => callTool(\"set_battery\", { backend: \"android-emulator\", deviceId: \"facet-device\", level: 42, status: 2, charging: true, confirmDestructive: true });",
                 "  void scripted;",
                 "  const key = Symbol.for('ccc.deviceLabRealTests.toolCalls');",
-                "  globalThis[key] = [{ name: 'mobile_set_battery', arguments: { backend: 'android-emulator', deviceId: 'facet-device', level: 42, status: 2, charging: true, confirmDestructive: true }, outcome: 'ok', isError: false }];",
+                "  globalThis[key] = [{ name: 'set_battery', arguments: { backend: 'android-emulator', deviceId: 'facet-device', level: 42, status: 2, charging: true, confirmDestructive: true }, outcome: 'ok', isError: false }];",
                 "  return { status: 'PASS' };",
                 "}",
                 "",
@@ -2504,11 +2506,11 @@ describe("test level runner", () => {
                 };
             };
             const expectedFacets = [
-                "mobile_set_battery:backend=android-emulator",
-                "mobile_set_battery:charging=true",
-                "mobile_set_battery:confirmDestructive=true",
-                "mobile_set_battery:level=42",
-                "mobile_set_battery:status=2",
+                "set_battery:backend=android-emulator",
+                "set_battery:charging=true",
+                "set_battery:confirmDestructive=true",
+                "set_battery:level=42",
+                "set_battery:status=2",
             ];
             expect(summary.toolCoverage.calledArgumentFacets).toEqual(expect.arrayContaining(expectedFacets));
             expect(summary.toolCoverage.scriptedArgumentFacets).toEqual(expect.arrayContaining(expectedFacets));
@@ -2528,7 +2530,7 @@ describe("test level runner", () => {
                 "export const name='enum-facets';",
                 "export async function run(){",
                 "  const key = Symbol.for('ccc.deviceLabRealTests.toolCalls');",
-                "  globalThis[key] = [{ name: 'display_click', arguments: { x: 1, y: 1, button: 'left' }, outcome: 'ok', isError: false }];",
+                "  globalThis[key] = [{ name: 'click', arguments: { x: 1, y: 1, button: 'left' }, outcome: 'ok', isError: false }];",
                 "  return { status: 'PASS' };",
                 "}",
                 "",
@@ -2549,19 +2551,19 @@ describe("test level runner", () => {
                 };
             };
             expect(summary.toolCoverage.advertisedArgumentEnumFacets).toEqual(expect.arrayContaining([
-                "display_click:button=left",
-                "display_click:button=right",
-                "mobile_set_orientation:orientation=reverse-landscape",
+                "click:button=left",
+                "click:button=right",
+                "set_orientation:orientation=reverse-landscape",
             ]));
-            expect(summary.toolCoverage.calledAdvertisedArgumentEnumFacets).toContain("display_click:button=left");
-            expect(summary.toolCoverage.uncalledAdvertisedArgumentEnumFacets).toContain("display_click:button=right");
-            expect(summary.toolCoverage.uncalledAdvertisedArgumentEnumFacets).not.toContain("display_click:button=left");
+            expect(summary.toolCoverage.calledAdvertisedArgumentEnumFacets).toContain("click:button=left");
+            expect(summary.toolCoverage.uncalledAdvertisedArgumentEnumFacets).toContain("click:button=right");
+            expect(summary.toolCoverage.uncalledAdvertisedArgumentEnumFacets).not.toContain("click:button=left");
             expect(summary.toolCoverage.uncalledProviderArgumentEnumFacets).toEqual(expect.arrayContaining([
-                "device_status:backend=android-emulator",
-                "device_create:provider=auto",
+                "inventory:backend=android-emulator",
+                "create:provider=auto",
             ]));
-            expect(summary.toolCoverage.uncalledNonProviderArgumentEnumFacets).toContain("display_click:button=right");
-            expect(summary.toolCoverage.uncalledNonProviderArgumentEnumFacets).not.toContain("device_status:backend=android-emulator");
+            expect(summary.toolCoverage.uncalledNonProviderArgumentEnumFacets).toContain("click:button=right");
+            expect(summary.toolCoverage.uncalledNonProviderArgumentEnumFacets).not.toContain("status:backend=android-emulator");
         } finally {
             rmSync(tempDir, { recursive: true, force: true });
         }
@@ -2576,8 +2578,8 @@ describe("test level runner", () => {
                 "export const name='declared-facets';",
                 "export async function run(){",
                 "  const key = Symbol.for('ccc.deviceLabRealTests.toolCalls');",
-                "  globalThis[key] = [{ name: 'mobile_toggle_airplane_mode', arguments: { backend: 'android-emulator', deviceId: 'facet-device', enabled: false, confirmDestructive: true }, outcome: 'ok', isError: false }];",
-                "  return { status: 'PASS', scriptedArgumentFacets: ['mobile_toggle_airplane_mode:enabled=false', 'mobile_toggle_airplane_mode:confirmDestructive=true'] };",
+                "  globalThis[key] = [{ name: 'toggle_airplane_mode', arguments: { backend: 'android-emulator', deviceId: 'facet-device', enabled: false, confirmDestructive: true }, outcome: 'ok', isError: false }];",
+                "  return { status: 'PASS', scriptedArgumentFacets: ['toggle_airplane_mode:enabled=false', 'toggle_airplane_mode:confirmDestructive=true'] };",
                 "}",
                 "",
             ].join("\n"));
@@ -2596,15 +2598,15 @@ describe("test level runner", () => {
                 };
             };
             expect(summary.toolCoverage.scriptedArgumentFacets).toEqual(expect.arrayContaining([
-                "mobile_toggle_airplane_mode:enabled=false",
-                "mobile_toggle_airplane_mode:confirmDestructive=true",
+                "toggle_airplane_mode:enabled=false",
+                "toggle_airplane_mode:confirmDestructive=true",
             ]));
             expect(summary.toolCoverage.invalidScriptedArgumentFacets).toEqual([]);
             expect(summary.toolCoverage.uncalledScriptedArgumentFacets).toEqual([]);
             expect(summary.toolCoverage.scripted).toEqual(expect.arrayContaining([
                 expect.objectContaining({
                     source: "declared-scripted-argument-facet",
-                    facets: ["mobile_toggle_airplane_mode:enabled=false"],
+                    facets: ["toggle_airplane_mode:enabled=false"],
                 }),
             ]));
         } finally {
@@ -2620,7 +2622,7 @@ describe("test level runner", () => {
             writeFileSync(facetFile, [
                 "export const name='invalid-scripted-facets';",
                 "export async function run(){",
-                "  return { status: 'PASS', scriptedArgumentFacets: ['display_click:bogus=left', 'missing_tool:button=left', 'not-a-facet'] };",
+                "  return { status: 'PASS', scriptedArgumentFacets: ['click:bogus=left', 'missing_tool:button=left', 'not-a-facet'] };",
                 "}",
                 "",
             ].join("\n"));
@@ -2637,7 +2639,7 @@ describe("test level runner", () => {
                 };
             };
             expect(summary.toolCoverage.invalidScriptedArgumentFacets).toEqual([
-                "display_click:bogus=left",
+                "click:bogus=left",
                 "missing_tool:button=left",
                 "not-a-facet",
             ]);
@@ -2654,8 +2656,8 @@ describe("test level runner", () => {
                 "export const name='outcome-gap';",
                 "export async function run(){",
                 "  const key = Symbol.for('ccc.deviceLabRealTests.toolCalls');",
-                "  globalThis[key] = [{ name: 'display_current', arguments: {}, outcome: 'thrown', error: 'boom' }];",
-                "  return { status: 'PASS', scriptedTools: ['display_current'] };",
+                "  globalThis[key] = [{ name: 'status', arguments: { deviceId: 'x11-current-display' }, outcome: 'thrown', error: 'boom' }];",
+                "  return { status: 'PASS', scriptedTools: ['status'] };",
                 "}",
                 "",
             ].join("\n"));
@@ -2679,8 +2681,8 @@ describe("test level runner", () => {
                 "export const name='unexpected-error';",
                 "export async function run(){",
                 "  const key = Symbol.for('ccc.deviceLabRealTests.toolCalls');",
-                "  globalThis[key] = [{ name: 'display_current', arguments: {}, outcome: 'error-result', isError: true }];",
-                "  return { status: 'PASS', scriptedTools: ['display_current'] };",
+                "  globalThis[key] = [{ name: 'status', arguments: { deviceId: 'x11-current-display' }, outcome: 'error-result', isError: true }];",
+                "  return { status: 'PASS', scriptedTools: ['status'] };",
                 "}",
                 "",
             ].join("\n"));
@@ -2704,8 +2706,8 @@ describe("test level runner", () => {
                 "export const name='ok-payload-gap';",
                 "export async function run(){",
                 "  const key = Symbol.for('ccc.deviceLabRealTests.toolCalls');",
-                "  globalThis[key] = [{ name: 'display_current', arguments: {}, outcome: 'ok', isError: false, okPayloadText: true, okPayloadJson: false, okPayloadImage: false }];",
-                "  return { status: 'PASS', scriptedTools: ['display_current'] };",
+                "  globalThis[key] = [{ name: 'status', arguments: { deviceId: 'x11-current-display' }, outcome: 'ok', isError: false, okPayloadText: true, okPayloadJson: false, okPayloadImage: false }];",
+                "  return { status: 'PASS', scriptedTools: ['status'] };",
                 "}",
                 "",
             ].join("\n"));
@@ -2738,10 +2740,10 @@ describe("test level runner", () => {
                 "  globalThis[key] = globalThis[key] || [];",
                 "  globalThis[sessions] = globalThis[sessions] || [];",
                 `  globalThis[sessions].push({ id: 'fixture-session-1', name: 'fixture-session', serverPath: '/tmp/device-lab-mcp/server.mjs', serverSource: 'source', serverFile: { exists: true, size: 123, sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }, advertisedToolSurface: ${JSON.stringify(advertisedToolSurface)}, node: process.execPath, envOverrides: [] });`,
-                "  globalThis[key].push({ name: 'display_current', mcpSessionId: 'fixture-session-1', arguments: {}, outcome: 'ok', isError: false, okPayloadText: true, okPayloadJson: true, okPayloadImage: false });",
+                "  globalThis[key].push({ name: 'status', mcpSessionId: 'fixture-session-1', arguments: { deviceId: 'x11-current-display' }, outcome: 'ok', isError: false, okPayloadText: true, okPayloadJson: true, okPayloadImage: false });",
                 "  globalThis[key].push({ name: 'device_broker_rpc', mcpSessionId: 'fixture-session-1', arguments: { method: 'broker.status' }, outcome: 'error-result', isError: true, expectedError: true, errorPayloadJson: true, errorCode: 'broker-unavailable' });",
-                "  globalThis[key].push({ name: 'device_run_flow', mcpSessionId: 'fixture-session-1', arguments: { steps: [{ tool: 'display_current', arguments: {} }] }, outcome: 'ok', isError: false, okPayloadText: true, okPayloadJson: true, okPayloadImage: false, flowSteps: [{ tool: 'display_current', isError: false, expectedError: false, okPayloadJson: true, okPayloadImage: false }] });",
-                "  return { status: 'PASS', detail: 'provider=display', scriptedTools: ['display_current', 'device_broker_rpc', 'device_run_flow'] };",
+                "  globalThis[key].push({ name: 'run_flow', mcpSessionId: 'fixture-session-1', arguments: { steps: [{ tool: 'status', arguments: { deviceId: 'x11-current-display' } }] }, outcome: 'ok', isError: false, okPayloadText: true, okPayloadJson: true, okPayloadImage: false, flowSteps: [{ tool: 'status', isError: false, expectedError: false, okPayloadJson: true, okPayloadImage: false }] });",
+                "  return { status: 'PASS', detail: 'provider=display', scriptedTools: ['status', 'device_broker_rpc', 'run_flow'] };",
                 "}",
                 "",
             ].join("\n"));
@@ -2814,7 +2816,7 @@ describe("test level runner", () => {
                 strictSkipFailures: 1,
             }));
             expect(summary.records).toEqual([
-                expect.objectContaining({ test: "pass", status: "PASS", detail: "provider=display", tools: ["device_broker_rpc", "device_run_flow", "display_current"] }),
+                expect.objectContaining({ test: "pass", status: "PASS", detail: "provider=display", tools: ["device_broker_rpc", "run_flow", "status"] }),
                 expect.objectContaining({ test: "step-skip", step: "inner", status: "SKIP", reason: "missing adb", detail: "backend=android-device" }),
             ]);
             expect(summary.skipCategories).toEqual([
@@ -2824,16 +2826,16 @@ describe("test level runner", () => {
                     records: [{ test: "step-skip", step: "inner", reason: "missing adb" }],
                 },
             ]);
-            expect(summary.toolCoverage.calledTools).toEqual(["device_broker_rpc", "device_run_flow", "display_current"]);
+            expect(summary.toolCoverage.calledTools).toEqual(["device_broker_rpc", "run_flow", "status"]);
             expect(summary.toolCoverage.canonicalToolSurface).toEqual(canonicalDeviceLabToolSurface());
-            expect(summary.toolCoverage.calledPublicTools).toEqual(["device_run_flow", "display_current"]);
+            expect(summary.toolCoverage.calledPublicTools).toEqual(["run_flow", "status"]);
             expect(summary.toolCoverage.calledArgumentFacets).toEqual(["device_broker_rpc:method=broker.status"]);
             expect(summary.toolCoverage.callOutcomes).toEqual({ "error-result": 1, ok: 2 });
             expect(summary.toolCoverage.toolOutcomeSummary).toEqual(expect.objectContaining({
-                display_current: expect.objectContaining({ ok: 1, expectedError: 0 }),
+                status: expect.objectContaining({ ok: 1, expectedError: 0 }),
                 device_broker_rpc: expect.objectContaining({ ok: 0, expectedError: 1 }),
             }));
-            expect(summary.toolCoverage.toolEvidenceSummary.display_current.evidence).toEqual(["direct-ok", "flow-ok"]);
+            expect(summary.toolCoverage.toolEvidenceSummary.status.evidence).toEqual(["direct-ok", "flow-ok"]);
             expect(summary.toolCoverage.publicToolsWithoutEvidence).toEqual([]);
             expect(summary.toolCoverage.publicToolsWithoutDirectOk).toEqual([]);
             expect(summary.toolCoverage.publicToolsWithOnlyExpectedErrorEvidence).toEqual([]);
@@ -2841,12 +2843,12 @@ describe("test level runner", () => {
             expect(summary.toolCoverage.unjustifiedMissingDirectOkTools).toEqual([]);
             expect(summary.toolCoverage.explainedProviderValues).toEqual([]);
             expect(summary.toolCoverage.unexplainedProviderArgumentEnumFacets).toEqual(expect.arrayContaining([
-                "device_create:backend=android-emulator",
-                "device_create:provider=tart",
+                "create:backend=android-emulator",
+                "create:provider=tart",
             ]));
             expect(summary.toolCoverage.publicToolsWithoutOkOrExpectedError).toEqual([]);
-            expect(summary.toolCoverage.scriptedTools).toEqual(["device_broker_rpc", "device_run_flow", "display_current"]);
-            expect(summary.toolCoverage.scriptedPublicTools).toEqual(["device_run_flow", "display_current"]);
+            expect(summary.toolCoverage.scriptedTools).toEqual(["device_broker_rpc", "run_flow", "status"]);
+            expect(summary.toolCoverage.scriptedPublicTools).toEqual(["run_flow", "status"]);
             expect(summary.toolCoverage.scriptedArgumentFacets).toEqual([]);
             expect(summary.toolCoverage.uncalledScriptedTools).toEqual([]);
             expect(summary.toolCoverage.uncalledScriptedArgumentFacets).toEqual([]);
@@ -2860,12 +2862,12 @@ describe("test level runner", () => {
             expect(summary.toolCoverage.okPublicPayloadFailures).toEqual([]);
             expect(summary.toolCoverage.emptyOkPublicPayloadRecords).toEqual([]);
             expect(summary.toolCoverage.flowStepOutcomeSummary).toEqual({
-                display_current: { total: 1, ok: 1, error: 0 },
+                status: { total: 1, ok: 1, error: 0 },
             });
             expect(summary.toolCoverage.flowStepToolOutcomeSummary).toEqual({
-                display_current: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 },
+                status: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 },
             });
-            expect(summary.toolCoverage.publicFlowStepTools).toEqual(["display_current"]);
+            expect(summary.toolCoverage.publicFlowStepTools).toEqual(["status"]);
             expect(summary.toolCoverage.publicFlowStepToolsWithoutOkOrExpectedError).toEqual([]);
             expect(summary.toolCoverage.expectedFlowStepErrorRecords).toEqual([]);
             expect(summary.toolCoverage.unexpectedFlowStepErrorRecords).toEqual([]);
@@ -2873,14 +2875,14 @@ describe("test level runner", () => {
             expect(summary.toolCoverage.okPublicFlowStepPayloadFailures).toEqual([]);
             expect(summary.toolCoverage.emptyOkPublicFlowStepPayloadRecords).toEqual([]);
             expect(summary.toolCoverage.calls).toEqual([
-                expect.objectContaining({ test: "pass", tool: "display_current", mcpSessionId: "fixture-session-1", schemaValid: true }),
+                expect.objectContaining({ test: "pass", tool: "status", mcpSessionId: "fixture-session-1", schemaValid: true }),
                 expect.objectContaining({ test: "pass", tool: "device_broker_rpc", mcpSessionId: "fixture-session-1", schemaValid: false }),
-                expect.objectContaining({ test: "pass", tool: "device_run_flow", mcpSessionId: "fixture-session-1", schemaValid: true }),
+                expect.objectContaining({ test: "pass", tool: "run_flow", mcpSessionId: "fixture-session-1", schemaValid: true }),
             ]);
             expect(summary.toolCoverage.scripted).toEqual([
-                expect.objectContaining({ test: "pass", tool: "display_current", source: "declared-scripted-result" }),
+                expect.objectContaining({ test: "pass", tool: "status", source: "declared-scripted-result" }),
                 expect.objectContaining({ test: "pass", tool: "device_broker_rpc", source: "declared-scripted-result" }),
-                expect.objectContaining({ test: "pass", tool: "device_run_flow", source: "declared-scripted-result" }),
+                expect.objectContaining({ test: "pass", tool: "run_flow", source: "declared-scripted-result" }),
             ]);
             expect(summary.mcpSessions).toEqual([
                 expect.objectContaining({ test: "pass", id: "fixture-session-1", name: "fixture-session", serverPath: "/tmp/device-lab-mcp/server.mjs", serverSource: "source" }),
@@ -3046,33 +3048,33 @@ describe("test level runner", () => {
                 strictOutcomeFailures: 0,
                 toolCoverage: {
                     canonicalToolSurface,
-                    advertisedTools: ["device_backends", "display_current"],
-                    calledTools: ["device_broker_rpc", "display_current"],
-                    calledPublicTools: ["display_current"],
+                    advertisedTools: ["backends", "status"],
+                    calledTools: ["device_broker_rpc", "status"],
+                    calledPublicTools: ["status"],
                     calledArgumentFacets: ["device_broker_rpc:method=broker.status"],
                     callOutcomes: { "error-result": 1, ok: 1 },
                     toolOutcomeSummary: {
-                        display_current: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 },
+                        status: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 },
                         device_broker_rpc: { total: 1, ok: 0, expectedError: 1, unexpectedError: 0, incomplete: 0 },
                     },
                     toolEvidenceSummary: {
-                        display_current: { direct: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-ok", "flow-ok"] },
-                        device_backends: { direct: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: [] },
+                        status: { direct: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-ok", "flow-ok"] },
+                        backends: { direct: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: [] },
                     },
                     publicToolsWithoutOkOrExpectedError: [],
                     publicToolsWithoutEvidence: [],
-                    publicToolsWithoutDirectOk: ["device_backends"],
+                    publicToolsWithoutDirectOk: ["backends"],
                     publicToolsWithOnlyExpectedErrorEvidence: [],
                     unexplainedDiagnosticOnlyTools: [],
-                    unjustifiedMissingDirectOkTools: ["device_backends"],
+                    unjustifiedMissingDirectOkTools: ["backends"],
                     explainedProviderValues: ["backend=android-device", "backend=android-emulator"],
                     unexplainedProviderArgumentEnumFacets: [],
-                    scriptedTools: ["device_backends", "device_broker_rpc", "display_current"],
-                    scriptedPublicTools: ["device_backends", "display_current"],
+                    scriptedTools: ["backends", "device_broker_rpc", "status"],
+                    scriptedPublicTools: ["backends", "status"],
                     scriptedArgumentFacets: ["device_broker_rpc:method=broker.status"],
-                    uncalledAdvertisedTools: ["device_backends"],
+                    uncalledAdvertisedTools: ["backends"],
                     unscriptedAdvertisedTools: [],
-                    uncalledScriptedTools: ["device_backends"],
+                    uncalledScriptedTools: ["backends"],
                     uncalledScriptedArgumentFacets: [],
                     invalidScriptedArgumentFacets: [],
                     unadvertisedTools: [],
@@ -3087,28 +3089,28 @@ describe("test level runner", () => {
                     okPublicPayloadFailures: [],
                     emptyOkPublicPayloadRecords: [],
                     flowStepOutcomeSummary: {
-                        display_current: { total: 1, ok: 1, error: 0 },
+                        status: { total: 1, ok: 1, error: 0 },
                     },
                     flowStepToolOutcomeSummary: {
-                        display_current: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 },
+                        status: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 },
                     },
-                    publicFlowStepTools: ["display_current"],
+                    publicFlowStepTools: ["status"],
                     publicFlowStepToolsWithoutOkOrExpectedError: [],
                     expectedFlowStepErrorRecords: [
-                        { test: "broker", flowTool: "device_run_flow", tool: "mobile_tap", isError: true, expectedError: true },
+                        { test: "broker", flowTool: "run_flow", tool: "click", isError: true, expectedError: true },
                     ],
                     unexpectedFlowStepErrorRecords: [],
                     expectedFlowStepPayloadFailures: [],
                     okPublicFlowStepPayloadFailures: [],
                     emptyOkPublicFlowStepPayloadRecords: [],
                     calls: [
-                        { test: "display", tool: "display_current", mcpSessionId: "source-session-1" },
+                        { test: "display", tool: "status", mcpSessionId: "source-session-1" },
                         { test: "broker", tool: "device_broker_rpc", mcpSessionId: "source-session-1", outcome: "error-result", expectedError: true, errorPayloadJson: true, errorCode: "broker-unavailable" },
                     ],
                     scripted: [
-                        { test: "display", tool: "display_current", source: "callTool" },
+                        { test: "display", tool: "status", source: "callTool" },
                         { test: "broker", tool: "device_broker_rpc", source: "callTool" },
-                        { test: "backends", tool: "device_backends", source: "callTool" },
+                        { test: "backends", tool: "backends", source: "callTool" },
                     ],
                 },
                 mcpSessions: [
@@ -3163,28 +3165,28 @@ describe("test level runner", () => {
                     calledArgumentFacets: 1,
                     callOutcomes: { "error-result": 1, ok: 1 },
                     toolOutcomeSummary: {
-                        display_current: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 },
+                        status: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 },
                         device_broker_rpc: { total: 1, ok: 0, expectedError: 1, unexpectedError: 0, incomplete: 0 },
                     },
                     toolEvidenceSummary: {
-                        display_current: { direct: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-ok", "flow-ok"] },
-                        device_backends: { direct: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: [] },
+                        status: { direct: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-ok", "flow-ok"] },
+                        backends: { direct: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: [] },
                     },
                     publicToolsWithoutOkOrExpectedError: [],
                     publicToolsWithoutEvidence: [],
-                    publicToolsWithoutDirectOk: ["device_backends"],
+                    publicToolsWithoutDirectOk: ["backends"],
                     publicToolsWithOnlyExpectedErrorEvidence: [],
                     unexplainedDiagnosticOnlyTools: [],
-                    unjustifiedMissingDirectOkTools: ["device_backends"],
+                    unjustifiedMissingDirectOkTools: ["backends"],
                     explainedProviderValues: ["backend=android-device", "backend=android-emulator"],
                     unexplainedProviderArgumentEnumFacets: [],
                     scripted: 3,
                     scriptedPublic: 2,
                     scriptedArgumentFacets: 1,
                     invalidScriptedArgumentFacets: [],
-                    uncalledAdvertisedTools: ["device_backends"],
+                    uncalledAdvertisedTools: ["backends"],
                     unscriptedAdvertisedTools: [],
-                    uncalledScriptedTools: ["device_backends"],
+                    uncalledScriptedTools: ["backends"],
                     uncalledScriptedArgumentFacets: [],
                     unadvertisedTools: [],
                     incompleteOutcomeRecords: [],
@@ -3198,15 +3200,15 @@ describe("test level runner", () => {
                     okPublicPayloadFailures: [],
                     emptyOkPublicPayloadRecords: [],
                     flowStepOutcomeSummary: {
-                        display_current: { total: 1, ok: 1, error: 0 },
+                        status: { total: 1, ok: 1, error: 0 },
                     },
                     flowStepToolOutcomeSummary: {
-                        display_current: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 },
+                        status: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 },
                     },
-                    publicFlowStepTools: ["display_current"],
+                    publicFlowStepTools: ["status"],
                     publicFlowStepToolsWithoutOkOrExpectedError: [],
                     expectedFlowStepErrorRecords: [
-                        { test: "broker", flowTool: "device_run_flow", tool: "mobile_tap", isError: true, expectedError: true },
+                        { test: "broker", flowTool: "run_flow", tool: "click", isError: true, expectedError: true },
                     ],
                     unexpectedFlowStepErrorRecords: [],
                     expectedFlowStepPayloadFailures: [],
@@ -3291,13 +3293,13 @@ describe("test level runner", () => {
                 ],
                 toolCoverage: {
                     canonicalToolSurface: canonicalDeviceLabToolSurface(),
-                    advertisedTools: ["display_current"],
-                    calledPublicTools: ["display_current"],
+                    advertisedTools: ["status"],
+                    calledPublicTools: ["status"],
                     unscriptedAdvertisedTools: [],
                     uncalledAdvertisedTools: [],
                     publicToolsWithoutOkOrExpectedError: [],
                     toolEvidenceSummary: {
-                        display_current: { direct: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-ok"] },
+                        status: { direct: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-ok"] },
                     },
                     publicToolsWithoutEvidence: [],
                     publicToolsWithoutDirectOk: [],
@@ -3306,7 +3308,7 @@ describe("test level runner", () => {
                     uncalledScriptedTools: [],
                     uncalledScriptedArgumentFacets: [],
                     invalidScriptedArgumentFacets: [],
-                    uncalledAdvertisedArgumentEnumFacets: ["device_status:backend=macos-vm", "device_create:provider=tart"],
+                    uncalledAdvertisedArgumentEnumFacets: ["status:backend=macos-vm", "create:provider=tart"],
                     unadvertisedTools: [],
                     incompleteOutcomeRecords: [],
                     argumentSchemaFailureRecords: [],
@@ -3321,8 +3323,8 @@ describe("test level runner", () => {
                     okPublicFlowStepPayloadFailures: [],
                     emptyOkPublicFlowStepPayloadRecords: [],
                     calls: [
-                        { test: "display", tool: "display_current", outcome: "ok", mcpSessionId: "source-session-1" },
-                        { test: "package", tool: "display_current", outcome: "ok", mcpSessionId: "dist-session-1" },
+                        { test: "display", tool: "status", outcome: "ok", mcpSessionId: "source-session-1" },
+                        { test: "package", tool: "status", outcome: "ok", mcpSessionId: "dist-session-1" },
                     ],
                 },
                 mcpSessions: [
@@ -3360,26 +3362,26 @@ describe("test level runner", () => {
                 skipCategories: [{ category: "other", count: 1, records: [{ test: "mystery", reason: "ambiguous skip" }] }],
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
-                    unscriptedAdvertisedTools: ["device_backends"],
-                    uncalledScriptedTools: ["device_backends"],
-                    publicToolsWithoutOkOrExpectedError: ["device_backends"],
-                    publicToolsWithoutEvidence: ["device_backends"],
-                    invalidScriptedArgumentFacets: ["display_click:bogus=left"],
+                    unscriptedAdvertisedTools: ["backends"],
+                    uncalledScriptedTools: ["backends"],
+                    publicToolsWithoutOkOrExpectedError: ["backends"],
+                    publicToolsWithoutEvidence: ["backends"],
+                    invalidScriptedArgumentFacets: ["click:bogus=left"],
                     uncalledAdvertisedArgumentEnumFacets: [
-                        "device_status:backend=macos-vm",
-                        "display_scroll:direction=left",
+                        "status:backend=macos-vm",
+                        "scroll:direction=left",
                     ],
                     unexpectedErrorResultRecords: [{ test: "broker", tool: "device_broker_rpc" }],
-                    argumentSchemaFailureRecords: [{ test: "display", tool: "display_click", schemaValid: false, schemaErrors: ["arguments.x:required"] }],
-                    flowStepArgumentSchemaFailures: [{ test: "display", flowTool: "device_run_flow", index: 0, tool: "display_click", schemaErrors: ["arguments.x:required"], schemaErrorCount: 1 }],
+                    argumentSchemaFailureRecords: [{ test: "display", tool: "click", schemaValid: false, schemaErrors: ["arguments.x:required"] }],
+                    flowStepArgumentSchemaFailures: [{ test: "display", flowTool: "run_flow", index: 0, tool: "click", schemaErrors: ["arguments.x:required"], schemaErrorCount: 1 }],
                     expectedErrorPayloadFailures: [{ test: "broker", tool: "device_broker_rpc", expectedError: true }],
-                    okPublicPayloadFailures: [{ test: "display", tool: "display_current", okPayloadText: true, okPayloadJson: false, okPayloadImage: false }],
-                    emptyOkPublicPayloadRecords: [{ test: "display", tool: "display_current", okPayloadJson: true, okPayloadShape: { kind: "object", keys: [] } }],
-                    publicFlowStepToolsWithoutOkOrExpectedError: ["display_current"],
-                    unexpectedFlowStepErrorRecords: [{ test: "display", flowTool: "device_run_flow", tool: "display_current", isError: true }],
-                    expectedFlowStepPayloadFailures: [{ test: "broker", flowTool: "device_run_flow", tool: "mobile_tap", isError: true, expectedError: true, errorPayloadJson: false }],
-                    okPublicFlowStepPayloadFailures: [{ test: "display", flowTool: "device_run_flow", tool: "display_current", isError: false, okPayloadJson: false, okPayloadImage: false }],
-                    emptyOkPublicFlowStepPayloadRecords: [{ test: "display", flowTool: "device_run_flow", tool: "display_current", isError: false, okPayloadJson: true, okPayloadShape: { kind: "object", keys: [] } }],
+                    okPublicPayloadFailures: [{ test: "display", tool: "status", okPayloadText: true, okPayloadJson: false, okPayloadImage: false }],
+                    emptyOkPublicPayloadRecords: [{ test: "display", tool: "status", okPayloadJson: true, okPayloadShape: { kind: "object", keys: [] } }],
+                    publicFlowStepToolsWithoutOkOrExpectedError: ["status"],
+                    unexpectedFlowStepErrorRecords: [{ test: "display", flowTool: "run_flow", tool: "status", isError: true }],
+                    expectedFlowStepPayloadFailures: [{ test: "broker", flowTool: "run_flow", tool: "click", isError: true, expectedError: true, errorPayloadJson: false }],
+                    okPublicFlowStepPayloadFailures: [{ test: "display", flowTool: "run_flow", tool: "status", isError: false, okPayloadJson: false, okPayloadImage: false }],
+                    emptyOkPublicFlowStepPayloadRecords: [{ test: "display", flowTool: "run_flow", tool: "status", isError: false, okPayloadJson: true, okPayloadShape: { kind: "object", keys: [] } }],
                 },
             }));
             writeFileSync(uncategorizedSkipFile, JSON.stringify({ ...baseSummary, skipCategories: [] }));
@@ -3394,27 +3396,27 @@ describe("test level runner", () => {
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
                     explainedProviderValues: [],
-                    unexplainedProviderArgumentEnumFacets: ["device_status:backend=macos-vm"],
-                    unexplainedDiagnosticOnlyTools: ["display_current"],
-                    unjustifiedMissingDirectOkTools: ["display_current"],
+                    unexplainedProviderArgumentEnumFacets: ["status:backend=macos-vm"],
+                    unexplainedDiagnosticOnlyTools: ["status"],
+                    unjustifiedMissingDirectOkTools: ["status"],
                 },
             }));
             writeFileSync(unexplainedDiagnosticOnlyFile, JSON.stringify({
                 ...baseSummary,
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
-                    advertisedTools: ["display_current", "device_backends"],
-                    calledPublicTools: ["display_current", "device_backends"],
-                    publicToolsWithOnlyExpectedErrorEvidence: ["device_backends"],
+                    advertisedTools: ["status", "backends"],
+                    calledPublicTools: ["status", "backends"],
+                    publicToolsWithOnlyExpectedErrorEvidence: ["backends"],
                     uncalledAdvertisedArgumentEnumFacets: [],
                     toolEvidenceSummary: {
                         ...baseSummary.toolCoverage.toolEvidenceSummary,
-                        device_backends: { direct: { total: 1, ok: 0, expectedError: 1, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-expected-error"] },
+                        backends: { direct: { total: 1, ok: 0, expectedError: 1, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-expected-error"] },
                     },
                     calls: [
                         ...baseSummary.toolCoverage.calls,
-                        { test: "display", tool: "device_backends", outcome: "expected-error", mcpSessionId: "source-session-1" },
-                        { test: "package", tool: "device_backends", outcome: "expected-error", mcpSessionId: "dist-session-1" },
+                        { test: "display", tool: "backends", outcome: "expected-error", mcpSessionId: "source-session-1" },
+                        { test: "package", tool: "backends", outcome: "expected-error", mcpSessionId: "dist-session-1" },
                     ],
                 },
             }));
@@ -3422,18 +3424,18 @@ describe("test level runner", () => {
                 ...baseSummary,
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
-                    advertisedTools: ["device_status"],
-                    calledPublicTools: ["device_status"],
-                    publicToolsWithoutDirectOk: ["device_status"],
-                    publicToolsWithOnlyExpectedErrorEvidence: ["device_status"],
-                    calledAdvertisedArgumentEnumFacets: ["device_status:backend=macos-vm"],
+                    advertisedTools: ["status"],
+                    calledPublicTools: ["status"],
+                    publicToolsWithoutDirectOk: ["status"],
+                    publicToolsWithOnlyExpectedErrorEvidence: ["status"],
+                    calledAdvertisedArgumentEnumFacets: ["status:backend=macos-vm"],
                     uncalledAdvertisedArgumentEnumFacets: [],
                     toolEvidenceSummary: {
-                        device_status: { direct: { total: 1, ok: 0, expectedError: 1, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-expected-error"] },
+                        status: { direct: { total: 1, ok: 0, expectedError: 1, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-expected-error"] },
                     },
                     calls: [
-                        { test: "display", tool: "device_status", outcome: "expected-error", mcpSessionId: "source-session-1" },
-                        { test: "package", tool: "device_status", outcome: "expected-error", mcpSessionId: "dist-session-1" },
+                        { test: "display", tool: "status", outcome: "expected-error", mcpSessionId: "source-session-1" },
+                        { test: "package", tool: "status", outcome: "expected-error", mcpSessionId: "dist-session-1" },
                     ],
                 },
             }));
@@ -3441,10 +3443,10 @@ describe("test level runner", () => {
                 ...baseSummary,
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
-                    publicToolsWithoutDirectOk: ["display_current"],
+                    publicToolsWithoutDirectOk: ["status"],
                     toolEvidenceSummary: {
                         ...baseSummary.toolCoverage.toolEvidenceSummary,
-                        display_current: { direct: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 }, evidence: ["flow-ok"] },
+                        status: { direct: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 }, evidence: ["flow-ok"] },
                     },
                 },
             }));
@@ -3460,7 +3462,7 @@ describe("test level runner", () => {
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
                     calls: [
-                        { test: "display", tool: "display_current", outcome: "ok", mcpSessionId: "source-session-1" },
+                        { test: "display", tool: "status", outcome: "ok", mcpSessionId: "source-session-1" },
                     ],
                 },
                 mcpSessions: [
@@ -3472,8 +3474,8 @@ describe("test level runner", () => {
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
                     calls: [
-                        { test: "display", tool: "display_current", outcome: "ok", mcpSessionId: "source-session-1" },
-                        { test: "package", tool: "display_current", outcome: "declared", mcpSessionId: "dist-session-1" },
+                        { test: "display", tool: "status", outcome: "ok", mcpSessionId: "source-session-1" },
+                        { test: "package", tool: "status", outcome: "declared", mcpSessionId: "dist-session-1" },
                     ],
                 },
             }));
@@ -3482,8 +3484,8 @@ describe("test level runner", () => {
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
                     calls: [
-                        { test: "display", tool: "display_current", outcome: "ok", mcpSessionId: "source-session-1" },
-                        { test: "package", tool: "display_current", outcome: "error-result", expectedError: true, mcpSessionId: "dist-session-1" },
+                        { test: "display", tool: "status", outcome: "ok", mcpSessionId: "source-session-1" },
+                        { test: "package", tool: "status", outcome: "error-result", expectedError: true, mcpSessionId: "dist-session-1" },
                     ],
                 },
             }));
@@ -3500,7 +3502,7 @@ describe("test level runner", () => {
                     ...baseSummary.toolCoverage,
                     calls: [
                         ...baseSummary.toolCoverage.calls,
-                        { test: "display", tool: "display_current", outcome: "ok", mcpSessionId: "missing-session" },
+                        { test: "display", tool: "status", outcome: "ok", mcpSessionId: "missing-session" },
                     ],
                 },
             }));
@@ -3535,7 +3537,7 @@ describe("test level runner", () => {
                 }),
                 unlinkedMcpCallRecords: [],
                 forbiddenMcpSessionEnvOverrides: [],
-                publicToolsByMcpSessionSource: { dist: ["display_current"], source: ["display_current"] },
+                publicToolsByMcpSessionSource: { dist: ["status"], source: ["status"] },
                 missingPublicToolsByMcpSessionSource: {},
                 publicToolsWithoutDirectOkByMcpSessionSource: { dist: [], source: [] },
                 unjustifiedMissingDirectOkToolsByMcpSessionSource: {},
@@ -3679,7 +3681,7 @@ describe("test level runner", () => {
             expect(JSON.parse(unexplainedDiagnosticOnly.stdout)).toEqual(expect.objectContaining({
                 ok: false,
                 failures: ["unexplainedDiagnosticOnlyTools=1"],
-                unexplainedDiagnosticOnlyTools: ["device_backends"],
+                unexplainedDiagnosticOnlyTools: ["backends"],
             }));
 
             const nonExemptDiagnosticOnly = spawnSync(process.execPath, [runner, "--assert-json", nonExemptDiagnosticOnlyFile], {
@@ -3691,7 +3693,7 @@ describe("test level runner", () => {
                 ok: false,
                 failures: ["unjustifiedMissingDirectOkTools=1"],
                 unexplainedDiagnosticOnlyTools: [],
-                unjustifiedMissingDirectOkTools: ["device_status"],
+                unjustifiedMissingDirectOkTools: ["status"],
             }));
 
             const missingDirectOk = spawnSync(process.execPath, [runner, "--assert-json", missingDirectOkFile], {
@@ -3702,7 +3704,7 @@ describe("test level runner", () => {
             expect(JSON.parse(missingDirectOk.stdout)).toEqual(expect.objectContaining({
                 ok: false,
                 failures: ["unjustifiedMissingDirectOkTools=1"],
-                unjustifiedMissingDirectOkTools: ["display_current"],
+                unjustifiedMissingDirectOkTools: ["status"],
             }));
 
             const staleSurface = spawnSync(process.execPath, [runner, "--assert-json", staleSurfaceFile], {
@@ -3733,7 +3735,7 @@ describe("test level runner", () => {
             expect(JSON.parse(missingSessionSourceCoverage.stdout)).toEqual(expect.objectContaining({
                 ok: false,
                 failures: ["missingPublicToolsByMcpSessionSource=1"],
-                missingPublicToolsByMcpSessionSource: { dist: ["display_current"] },
+                missingPublicToolsByMcpSessionSource: { dist: ["status"] },
             }));
 
             const platformResultCoverage = spawnSync(process.execPath, [runner, "--assert-json", missingSessionSourceCoverageFile, "--platform-result"], {
@@ -3744,7 +3746,7 @@ describe("test level runner", () => {
             expect(JSON.parse(platformResultCoverage.stdout)).toEqual(expect.objectContaining({
                 ok: true,
                 failures: [],
-                missingPublicToolsByMcpSessionSource: { dist: ["display_current"] },
+                missingPublicToolsByMcpSessionSource: { dist: ["status"] },
             }));
 
             const missingSessionSourceDirectOk = spawnSync(process.execPath, [runner, "--assert-json", missingSessionSourceDirectOkFile], {
@@ -3755,8 +3757,8 @@ describe("test level runner", () => {
             expect(JSON.parse(missingSessionSourceDirectOk.stdout)).toEqual(expect.objectContaining({
                 ok: false,
                 failures: ["unjustifiedMissingDirectOkToolsByMcpSessionSource=1"],
-                publicToolsWithoutDirectOkByMcpSessionSource: { dist: ["display_current"], source: [] },
-                unjustifiedMissingDirectOkToolsByMcpSessionSource: { dist: ["display_current"] },
+                publicToolsWithoutDirectOkByMcpSessionSource: { dist: ["status"], source: [] },
+                unjustifiedMissingDirectOkToolsByMcpSessionSource: { dist: ["status"] },
             }));
 
             const missingFingerprint = spawnSync(process.execPath, [runner, "--assert-json", missingFingerprintFile], {
@@ -3813,16 +3815,16 @@ describe("canonical real-runner argument interpretation", () => {
             const fixture = join(dir, "calls.mjs");
             const summaryPath = join(dir, "summary.json");
             const targets: Array<[string, string, Record<string, unknown>]> = [
-                ["device_image_list", "linux-vm", {}],
-                ["device_image_import", "linux-vm", { name: "base", sourcePath: "incoming/base.qcow2" }],
-                ["device_target_list", "linux-vm", {}],
-                ...["device_readiness_probe", "device_session_open", "device_workspace_sync", "device_artifacts_export", "device_guest_agent_status", "device_guest_agent_provision"]
+                ["image_list", "linux-vm", {}],
+                ["image_import", "linux-vm", { name: "base", sourcePath: "incoming/base.qcow2" }],
+                ["target_list", "linux-vm", {}],
+                ...["readiness_probe", "session_open", "workspace_sync", "artifacts_export", "guest_agent_status", "guest_agent_provision"]
                     .map(name => [name, "linux-vm", { deviceId: "owned-target" }] as [string, string, Record<string, unknown>]),
-                ["device_base_image_create", "macos-vm", { name: "base", sourceImage: "registry/base" }],
-                ["device_base_image_clone", "macos-vm", { name: "clone", sourceDeviceId: "owned-target" }],
+                ["base_image_create", "macos-vm", { name: "base", sourceImage: "registry/base" }],
+                ["base_image_clone", "macos-vm", { name: "clone", sourceDeviceId: "owned-target" }],
             ];
             const valid: Array<{ name: string; arguments: Record<string, unknown> }> = targets.map(([name, _backend, args]) => ({ name, arguments: { ...args, detail: true } }));
-            valid.push({ name: "device_create", arguments: { backend: "linux-vm", name: "flat", cpus: 2, detail: true } });
+            valid.push({ name: "create", arguments: { backend: "linux-vm", name: "flat", cpus: 2, detail: true } });
             const invalid = targets.flatMap(([name, backend, args]) => [backend, "", null, false, {}, "unsupported"].flatMap(selector => [
                 { name, arguments: { ...args, backend: selector } },
                 { name, arguments: { ...args, options: { backend: selector } } },
@@ -3843,25 +3845,25 @@ describe("canonical real-runner argument interpretation", () => {
             const fixture = join(dir, "calls.mjs");
             const summaryPath = join(dir, "summary.json");
             const valid = [
-                { name: "device_run_flow", arguments: { deviceId: "android-test", backend: "android-emulator", incarnationId: "a".repeat(32), steps: [{ tool: "mobile_tap", arguments: { x: 1, y: 2 } }] } },
-                { name: "device_install_app", arguments: { deviceId: "android-test", path: "/app.apk" } },
-                { name: "device_launch_app", arguments: { deviceId: "android-test", packageName: "com.example" } },
-                { name: "device_screenshot", arguments: { deviceId: "android-test" } },
-                { name: "mobile_set_orientation", arguments: { deviceId: "android-test", orientation: "landscape" } },
-                { name: "device_run_flow", arguments: { deviceId: "vm-a", backend: "windows-vm", incarnationId: "a".repeat(32), steps: [
-                    { tool: "device_click", arguments: { x: 1, y: 2 } },
-                    { tool: "device_click", arguments: { deviceId: "vm-b", backend: "linux-vm", incarnationId: "b".repeat(32), x: 3, y: 4 } },
+                { name: "run_flow", arguments: { deviceId: "android-test", incarnationId: "a".repeat(32), steps: [{ tool: "click", arguments: { x: 1, y: 2 } }] } },
+                { name: "install_app", arguments: { deviceId: "android-test", path: "/app.apk" } },
+                { name: "launch_app", arguments: { deviceId: "android-test", packageName: "com.example" } },
+                { name: "screenshot", arguments: { deviceId: "android-test" } },
+                { name: "set_orientation", arguments: { deviceId: "android-test", orientation: "landscape" } },
+                { name: "run_flow", arguments: { deviceId: "vm-a", incarnationId: "a".repeat(32), steps: [
+                    { tool: "click", arguments: { x: 1, y: 2 } },
+                    { tool: "click", arguments: { deviceId: "vm-b", incarnationId: "b".repeat(32), x: 3, y: 4 } },
                 ] } },
             ];
             const removed = ["mobile_install_app", "mobile_launch_app", "mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right", "mobile_run_flow", "device_broker_rpc"];
             const invalid = [
                 ...removed.map(name => ({ name, arguments: { deviceId: "android-test" } })),
-                { name: "device_run_flow", arguments: { deviceId: "vm-a", steps: [] } },
-                { name: "device_run_flow", arguments: { deviceId: "vm-a", backend: "windows-vm", steps: [
-                    { tool: "device_click", arguments: { backend: "linux-vm", x: 1, y: 2 } },
+                { name: "run_flow", arguments: { deviceId: "vm-a", steps: [] } },
+                { name: "run_flow", arguments: { steps: [
+                    { tool: "click", arguments: { x: 1, y: 2 } },
                 ] } },
-                { name: "device_run_flow", arguments: { deviceId: "vm-a", steps: [{ tool: "device_click", arguments: null }] } },
-                { name: "device_run_flow", arguments: { deviceId: "vm-a", steps: [{ tool: "device_click", name: "device_click", arguments: { x: 1, y: 2 } }] } },
+                { name: "run_flow", arguments: { deviceId: "vm-a", steps: [{ tool: "click", arguments: null }] } },
+                { name: "run_flow", arguments: { deviceId: "vm-a", steps: [{ tool: "click", name: "click", arguments: { x: 1, y: 2 } }] } },
             ];
             writeFileSync(fixture, `export const name='canonical-arguments'; export async function run(){globalThis[Symbol.for('ccc.deviceLabRealTests.toolCalls')]=${JSON.stringify([...valid, ...invalid].map((call) => ({ ...call, outcome: "ok", isError: false })))}; return {status:'PASS'};}`);
             const result = spawnSync(process.execPath, [join(repoRoot, "scripts/real-tests/run.ts"), "--json-summary-file", summaryPath, fixture], { cwd: repoRoot, encoding: "utf8", timeout: 30000 });

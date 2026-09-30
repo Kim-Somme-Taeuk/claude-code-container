@@ -1,3 +1,4 @@
+import { publicToolName } from "../../device-lab-mcp/src/tools.mjs";
 import { describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { hostname, tmpdir, uptime } from "os";
@@ -44,7 +45,7 @@ describe.runIf(enabled)("level 2 real Windows Sandbox helper E2E", () => {
             status: "PASS",
             deviceId: expect.stringMatching(/^windows-real-sandbox-/),
             sandboxId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
-            verifiedCapabilities: expect.arrayContaining(windowsBackend().capabilities),
+            verifiedCapabilities: expect.arrayContaining(windowsBackend().capabilities.map(publicToolName)),
         }));
     }, 240000);
 });
@@ -128,7 +129,7 @@ describe("Windows Sandbox real E2E cleanup preflight", () => {
                 homeDir,
                 ownerId: owner,
                 callTool: async (tool: string) => {
-                    expect(tool).toBe("device_delete");
+                    expect(tool).toBe("delete");
                     return toolResult({ deleted: deviceId });
                 },
             });
@@ -183,7 +184,7 @@ describe("Windows Sandbox real E2E cleanup preflight", () => {
                 },
             });
             expect(stopped).toEqual([[sandboxId]]);
-            expect(tools).toEqual(["device_delete"]);
+            expect(tools).toEqual(["delete"]);
             expect(existsSync(evidence.deviceDir)).toBe(false);
             expect(existsSync(evidence.lockPath)).toBe(false);
         } finally {
@@ -246,7 +247,7 @@ describe("Windows Sandbox real E2E cleanup preflight", () => {
                     throw new Error("stop denied");
                 },
             })).rejects.toThrow(/cleanup was not verified/);
-            expect(calls).toEqual(["device_stop"]);
+            expect(calls).toEqual(["stop"]);
             expect(existsSync(evidence.deviceDir)).toBe(true);
             expect(existsSync(evidence.lockPath)).toBe(true);
             expect(readFileSync(join(evidence.windowsRoot, "devices.json"), "utf-8")).toContain(evidence.deviceId);
@@ -270,7 +271,7 @@ describe("Windows Sandbox real E2E cleanup preflight", () => {
                 ownerId: owner,
                 deviceId: evidence.deviceId,
                 callTool: async () => toolResult("delete failed", true),
-            })).rejects.toThrow(/device_delete failed.*ownership evidence was preserved/);
+            })).rejects.toThrow(/delete failed.*ownership evidence was preserved/);
             expect(existsSync(evidence.deviceDir)).toBe(true);
             expect(existsSync(evidence.lockPath)).toBe(true);
             expect(readFileSync(join(evidence.windowsRoot, "devices.json"), "utf-8")).toContain(evidence.deviceId);
@@ -280,8 +281,8 @@ describe("Windows Sandbox real E2E cleanup preflight", () => {
     });
 
     it.each([
-        { operation: "recording cleanup", recordingActive: true, needsStop: true, firstTool: "device_record_video_stop" },
-        { operation: "device_stop", recordingActive: false, needsStop: true, firstTool: "device_stop" },
+        { operation: "recording cleanup", recordingActive: true, needsStop: true, firstTool: "record_video_stop" },
+        { operation: "stop", recordingActive: false, needsStop: true, firstTool: "stop" },
     ])("preserves finally-path evidence when $operation fails", async ({ recordingActive, needsStop, firstTool }) => {
         const homeDir = join(tmpdir(), `ccc-windows-e2e-provider-failure-${Date.now()}-${Math.random().toString(16).slice(2)}`);
         const owner = "windows-e2e-cleanup-owner";

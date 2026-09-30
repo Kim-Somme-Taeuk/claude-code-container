@@ -31,7 +31,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
 
     it("attaches, inspects, and detaches iOS real devices without simctl lifecycle commands", { timeout: TIMEOUT }, async () => {
         const inventory = await client.callTool({
-            name: "device_inventory",
+            name: "inventory",
             arguments: { backend: "ios-device" },
         });
         expect(inventory.isError).not.toBe(true);
@@ -49,7 +49,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         expect(inventoryPayload.hostDevices.devices.some((device) => device.name.includes("Mac"))).toBe(false);
 
         const wirelessStatus = await client.callTool({
-            name: "device_wireless",
+            name: "wireless",
             arguments: { backend: "ios-device", udid: "00008120-00AA00BB00CC00DD" },
         });
         expect(wirelessStatus.isError).not.toBe(true);
@@ -71,7 +71,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         expect(wirelessStatusPayload.unsupportedActions).toEqual(expect.arrayContaining(["pair", "connect"]));
 
         const networkNamedUsbStatus = await client.callTool({
-            name: "device_wireless",
+            name: "wireless",
             arguments: { backend: "ios-device", udid: "00008111-001C195E0E91801F" },
         });
         expect(networkNamedUsbStatus.isError).not.toBe(true);
@@ -86,7 +86,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
 
         const logBeforeUnsupportedPair = readFileSync(logPath, "utf-8");
         const unsupportedIosPair = await client.callTool({
-            name: "device_wireless",
+            name: "wireless",
             arguments: { backend: "ios-device", action: "pair", udid: "00008110-001C195E0E91801E" },
         });
         expect(unsupportedIosPair.isError).toBe(true);
@@ -102,7 +102,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         }));
         expect(unsupportedIosPairPayload).not.toHaveProperty("networkVisible");
         expect(readFileSync(logPath, "utf-8")).toBe(logBeforeUnsupportedPair);
-        expect(unsupportedIosPairPayload.attachFlow).toContain("device_inventory");
+        expect(unsupportedIosPairPayload.attachFlow).toContain("inventory");
 
         const iosLeaseDir = join(homeDir, ".ccc/devices/physical-leases/ios-device/locks");
         mkdirSync(iosLeaseDir, { recursive: true });
@@ -117,28 +117,28 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
             expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
         }));
         const rejectLeased = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "ios-device", name: "Already Leased iPhone", udid: "00008101-00DEADBEEFCAFE00" },
         });
         expect(rejectLeased.isError).toBe(true);
         expect((rejectLeased.content as Array<{ text?: string }>)[0].text).toContain("already attached or an attach is in progress");
 
         const rejectWifiNotNetworkVisible = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "ios-device", name: "USB As WiFi", udid: "00008110-001C195E0E91801E", connection: "wifi" },
         });
         expect(rejectWifiNotNetworkVisible.isError).toBe(true);
         expect((rejectWifiNotNetworkVisible.content as Array<{ text?: string }>)[0].text).toContain("requires the device to be paired for network use");
 
         const rejectNetworkNamedUsbAsWifi = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "ios-device", name: "Network Named USB iPhone", udid: "00008111-001C195E0E91801F", connection: "wifi" },
         });
         expect(rejectNetworkNamedUsbAsWifi.isError).toBe(true);
         expect((rejectNetworkNamedUsbAsWifi.content as Array<{ text?: string }>)[0].text).toContain("requires the device to be paired for network use");
 
         const attach = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "ios-device", name: "Real iPhone", udid: "00008110-001C195E0E91801E" },
         });
         expect(attach.isError).not.toBe(true);
@@ -166,7 +166,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         }));
 
         const wifiAttach = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: {
                 backend: "ios-device",
                 name: "Network iPhone",
@@ -186,14 +186,14 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         }));
 
         const duplicate = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: { backend: "ios-device", name: "Duplicate iPhone", udid: "00008110-001C195E0E91801E" },
         });
         expect(duplicate.isError).toBe(true);
         expect((duplicate.content as Array<{ text?: string }>)[0].text).toContain("iOS UDID already attached");
 
         const status = await client.callTool({
-            name: "device_status",
+            name: "status",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(status.isError).not.toBe(true);
@@ -213,7 +213,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         expect(statusPayload.appium).toEqual(expect.objectContaining({ automationName: "XCUITest", physical: true }));
 
         const realSession = await client.callTool({
-            name: "mobile_session_status",
+            name: "automation_status",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(realSession.isError).not.toBe(true);
@@ -232,7 +232,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         expect(realSessionPayload.appium.missing).toEqual([]);
 
         const realDump = await client.callTool({
-            name: "mobile_dump_ui",
+            name: "dump_ui",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(realDump.isError, JSON.stringify(realDump)).not.toBe(true);
@@ -251,7 +251,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         expect(realDumpPayload.source).toContain("XCUIElementTypeApplication");
 
         const statusAfterRealDump = await client.callTool({
-            name: "mobile_session_status",
+            name: "automation_status",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         const statusAfterRealDumpPayload = JSON.parse(((statusAfterRealDump.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -265,7 +265,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
 
         // A healthy session needs one fresh server check plus its session check.
         const beforeReadyReuse = readFileSync(logPath, "utf-8").length;
-        const healthyReuse = await client.callTool({ name: "mobile_dump_ui", arguments: { deviceId: "ios-device-real-iphone" } });
+        const healthyReuse = await client.callTool({ name: "dump_ui", arguments: { deviceId: "ios-device-real-iphone" } });
         expect(healthyReuse.isError, JSON.stringify(healthyReuse)).not.toBe(true);
         const readyReuseLog = readFileSync(logPath, "utf-8").slice(beforeReadyReuse);
         expect((readyReuseLog.match(/appium-http GET \/status\n/g) || []).length).toBe(1);
@@ -288,7 +288,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         // owned server is started and must pass its own readiness check.
         writeFileSync(join(homeDir, "fail-ios-status-once"), "1");
         const beforeFailedStatus = readFileSync(logPath, "utf-8").length;
-        const healthRecovered = await client.callTool({ name: "mobile_dump_ui", arguments: { deviceId: "ios-device-real-iphone" } });
+        const healthRecovered = await client.callTool({ name: "dump_ui", arguments: { deviceId: "ios-device-real-iphone" } });
         expect(healthRecovered.isError, JSON.stringify(healthRecovered)).not.toBe(true);
         const failedStatusLog = readFileSync(logPath, "utf-8").slice(beforeFailedStatus);
         expect((failedStatusLog.match(/appium-http GET \/status\n/g) || []).length).toBe(2);
@@ -296,7 +296,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         expect(failedStatusLog.slice(0, failedStatusLog.indexOf("appium-http POST /session"))).not.toContain("appium-http GET /session/");
 
         const realScreenshot = await client.callTool({
-            name: "device_screenshot",
+            name: "screenshot",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(realScreenshot.isError).not.toBe(true);
@@ -307,7 +307,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         });
 
         const realMobileScreenshot = await client.callTool({
-            name: "device_screenshot",
+            name: "screenshot",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(realMobileScreenshot.isError).not.toBe(true);
@@ -318,7 +318,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         });
 
         const realInstall = await client.callTool({
-            name: "device_install_app",
+            name: "install_app",
             arguments: { deviceId: "ios-device-real-iphone", path: "/tmp/Real.app" },
         });
         expect(realInstall.isError).not.toBe(true);
@@ -334,7 +334,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         }));
 
         const realLaunch = await client.callTool({
-            name: "device_launch_app",
+            name: "launch_app",
             arguments: { deviceId: "ios-device-real-iphone", bundleId: "com.example.Real" },
         });
         expect(realLaunch.isError).not.toBe(true);
@@ -350,14 +350,14 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         }));
 
         const missingInstallPath = await client.callTool({
-            name: "device_install_app",
+            name: "install_app",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(missingInstallPath.isError).toBe(true);
         expect((missingInstallPath.content as Array<{ text?: string }>)[0].text).toContain("requires path");
 
         const missingLaunchBundle = await client.callTool({
-            name: "device_launch_app",
+            name: "launch_app",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(missingLaunchBundle.isError).toBe(true);
@@ -365,7 +365,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
 
         writeFileSync(join(homeDir, "stale-ios-session"), "1");
         const realRecoveredDump = await client.callTool({
-            name: "mobile_dump_ui",
+            name: "dump_ui",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(realRecoveredDump.isError, JSON.stringify(realRecoveredDump)).not.toBe(true);
@@ -374,7 +374,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         };
         expect(realRecoveredPayload.sessionId).toBe("IOS-SESSION-1");
         const recoveredSession = await client.callTool({
-            name: "mobile_session_status",
+            name: "automation_status",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         const recoveredSessionPayload = JSON.parse(((recoveredSession.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -391,22 +391,22 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         await new Promise((resolve) => setTimeout(resolve, 100));
 
         const iosRealActions: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
-            ["mobile_tap", { deviceId: "ios-device-real-iphone", x: 10, y: 20 }, { provider: "appium-xcuitest", physical: true, tapped: { x: 10, y: 20 } }],
-            ["mobile_double_tap", { deviceId: "ios-device-real-iphone", x: 11, y: 21 }, { provider: "appium-xcuitest", physical: true, doubleTapped: { x: 11, y: 21 } }],
-            ["mobile_long_press", { deviceId: "ios-device-real-iphone", x: 12, y: 22, durationMs: 900 }, { provider: "appium-xcuitest", physical: true, longPressed: { x: 12, y: 22, durationMs: 900 } }],
-            ["mobile_swipe", { deviceId: "ios-device-real-iphone", x1: 10, y1: 20, x2: 30, y2: 40, durationMs: 250 }, { provider: "appium-xcuitest", physical: true, swiped: { x1: 10, y1: 20, x2: 30, y2: 40, durationMs: 250 } }],
-            ["mobile_drag", { deviceId: "ios-device-real-iphone", x1: 15, y1: 25, x2: 35, y2: 45, durationMs: 800 }, { provider: "appium-xcuitest", physical: true, dragged: { x1: 15, y1: 25, x2: 35, y2: 45, durationMs: 800 } }],
-            ["mobile_type_text", { deviceId: "ios-device-real-iphone", text: "hello real ios" }, { provider: "appium-xcuitest", physical: true, typed: true }],
-            ["mobile_key", { deviceId: "ios-device-real-iphone", key: "Return" }, { provider: "appium-xcuitest", physical: true, key: "Return" }],
-            ["mobile_home", { deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, home: true }],
-            ["mobile_lock", { deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, locked: true }],
-            ["mobile_unlock", { deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, unlocked: true }],
-            ["mobile_set_orientation", { orientation: "landscape", deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, orientation: "LANDSCAPE" }],
-            ["mobile_set_orientation", { orientation: "portrait", deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, orientation: "PORTRAIT" }],
-            ["mobile_set_orientation", { deviceId: "ios-device-real-iphone", orientation: "reverse-landscape" }, { provider: "appium-xcuitest", physical: true, orientation: "LANDSCAPE" }],
-            ["mobile_wait_for_text", { deviceId: "ios-device-real-iphone", text: "Test", timeoutMs: 1000, intervalMs: 50 }, { provider: "appium-xcuitest", physical: true, found: true, text: "Test" }],
-            ["mobile_wait_for_app", { deviceId: "ios-device-real-iphone", bundleId: "com.example.Real", timeoutMs: 1000, intervalMs: 50 }, { provider: "appium-xcuitest", physical: true, found: true, bundleId: "com.example.Real", activeApp: { bundleId: "com.example.Real", name: "Real" } }],
-            ["mobile_stop_app", { deviceId: "ios-device-real-iphone", bundleId: "com.example.Real" }, { provider: "appium-xcuitest", physical: true, stopped: "com.example.Real" }],
+            ["click", { deviceId: "ios-device-real-iphone", x: 10, y: 20 }, { provider: "appium-xcuitest", physical: true, tapped: { x: 10, y: 20 } }],
+            ["double_click", { deviceId: "ios-device-real-iphone", x: 11, y: 21 }, { provider: "appium-xcuitest", physical: true, doubleTapped: { x: 11, y: 21 } }],
+            ["long_press", { deviceId: "ios-device-real-iphone", x: 12, y: 22, durationMs: 900 }, { provider: "appium-xcuitest", physical: true, longPressed: { x: 12, y: 22, durationMs: 900 } }],
+            ["swipe", { deviceId: "ios-device-real-iphone", x1: 10, y1: 20, x2: 30, y2: 40, durationMs: 250 }, { provider: "appium-xcuitest", physical: true, swiped: { x1: 10, y1: 20, x2: 30, y2: 40, durationMs: 250 } }],
+            ["drag", { deviceId: "ios-device-real-iphone", x1: 15, y1: 25, x2: 35, y2: 45, durationMs: 800 }, { provider: "appium-xcuitest", physical: true, dragged: { x1: 15, y1: 25, x2: 35, y2: 45, durationMs: 800 } }],
+            ["type", { deviceId: "ios-device-real-iphone", text: "hello real ios" }, { provider: "appium-xcuitest", physical: true, typed: true }],
+            ["key", { deviceId: "ios-device-real-iphone", key: "Return" }, { provider: "appium-xcuitest", physical: true, key: "Return" }],
+            ["home", { deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, home: true }],
+            ["lock", { deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, locked: true }],
+            ["unlock", { deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, unlocked: true }],
+            ["set_orientation", { orientation: "landscape", deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, orientation: "LANDSCAPE" }],
+            ["set_orientation", { orientation: "portrait", deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, orientation: "PORTRAIT" }],
+            ["set_orientation", { deviceId: "ios-device-real-iphone", orientation: "reverse-landscape" }, { provider: "appium-xcuitest", physical: true, orientation: "LANDSCAPE" }],
+            ["wait_for_text", { deviceId: "ios-device-real-iphone", text: "Test", timeoutMs: 1000, intervalMs: 50 }, { provider: "appium-xcuitest", physical: true, found: true, text: "Test" }],
+            ["wait_for_app", { deviceId: "ios-device-real-iphone", bundleId: "com.example.Real", timeoutMs: 1000, intervalMs: 50 }, { provider: "appium-xcuitest", physical: true, found: true, bundleId: "com.example.Real", activeApp: { bundleId: "com.example.Real", name: "Real" } }],
+            ["stop_app", { deviceId: "ios-device-real-iphone", bundleId: "com.example.Real" }, { provider: "appium-xcuitest", physical: true, stopped: "com.example.Real" }],
         ] as const;
         for (const [name, callArgs, expectedPayload] of iosRealActions) {
             const action = await client.callTool({ name, arguments: callArgs });
@@ -415,28 +415,28 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         }
 
         const missingRealIosKey = await client.callTool({
-            name: "mobile_key",
+            name: "key",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(missingRealIosKey.isError).toBe(true);
-        expect((missingRealIosKey.content as Array<{ text?: string }>)[0].text).toContain("mobile_key requires key or keyCode");
+        expect((missingRealIosKey.content as Array<{ text?: string }>)[0].text).toContain("key requires key or keyCode");
 
         const invalidRealIosOrientation = await client.callTool({
-            name: "mobile_set_orientation",
+            name: "set_orientation",
             arguments: { deviceId: "ios-device-real-iphone", orientation: "upside-down" },
         });
         expect(invalidRealIosOrientation.isError).toBe(true);
         expect((invalidRealIosOrientation.content as Array<{ text?: string }>)[0].text).toContain("requires portrait, landscape, reverse-portrait, or reverse-landscape");
 
         const unsupportedRealIosPower = await client.callTool({
-            name: "mobile_power",
+            name: "power",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(unsupportedRealIosPower.isError).toBe(true);
         expect((unsupportedRealIosPower.content as Array<{ text?: string }>)[0].text).toContain("unavailable or unsafe for physical devices");
 
         const stop = await client.callTool({
-            name: "device_stop",
+            name: "stop",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(stop.isError, (stop.content as Array<{ text?: string }>)[0]?.text).not.toBe(true);
@@ -448,12 +448,12 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         expect(stopped.device.status).toBe("attached");
 
         const detach = await client.callTool({
-            name: "device_detach",
+            name: "detach",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(detach.isError).not.toBe(true);
         const wifiDetach = await client.callTool({
-            name: "device_detach",
+            name: "detach",
             arguments: { deviceId: "ios-device-network-iphone" },
         });
         expect(wifiDetach.isError).not.toBe(true);
@@ -480,7 +480,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
     it("preserves a same-id physical iOS attachment successor during stop and detach", { timeout: TIMEOUT }, async () => {
         const deviceId = "ios-real-state-generation";
         const attachedResult = await client.callTool({
-            name: "device_attach",
+            name: "attach",
             arguments: {
                 backend: "ios-device",
                 deviceId,
@@ -492,7 +492,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         const attached = parseToolJson(attachedResult).device as Record<string, unknown>;
         const statePath = join(homeDir, ".ccc", "devices", "owners", String(attached.ownerId), "ios-device", "devices.json");
         const ensureSession = async () => {
-            const session = await client.callTool({ name: "mobile_dump_ui", arguments: { backend: "ios-device", deviceId } });
+            const session = await client.callTool({ name: "dump_ui", arguments: { deviceId } });
             expect(session.isError, (session.content as Array<{ text?: string }>)[0]?.text).not.toBe(true);
         };
         const armConflict = (marker: string) => {
@@ -513,19 +513,19 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
 
         await ensureSession();
         const stopSuccessor = armConflict("stop");
-        const stop = await client.callTool({ name: "device_stop", arguments: { backend: "ios-device", deviceId } });
+        const stop = await client.callTool({ name: "stop", arguments: { deviceId } });
         expect(stop.isError).toBe(true);
         expect((stop.content as Array<{ text?: string }>)[0]?.text).toContain("owner-device-state-conflict");
         expect((JSON.parse(readFileSync(statePath, "utf-8")) as { devices: Array<Record<string, unknown>> }).devices.find((device) => device.id === deviceId)).toEqual(stopSuccessor);
 
         await ensureSession();
         const detachSuccessor = armConflict("detach");
-        const detach = await client.callTool({ name: "device_detach", arguments: { backend: "ios-device", deviceId } });
+        const detach = await client.callTool({ name: "detach", arguments: { deviceId } });
         expect(detach.isError).toBe(true);
         expect((detach.content as Array<{ text?: string }>)[0]?.text).toContain("owner-device-state-conflict");
         expect((JSON.parse(readFileSync(statePath, "utf-8")) as { devices: Array<Record<string, unknown>> }).devices.find((device) => device.id === deviceId)).toEqual(detachSuccessor);
 
-        const cleanup = await client.callTool({ name: "device_detach", arguments: { backend: "ios-device", deviceId } });
+        const cleanup = await client.callTool({ name: "detach", arguments: { deviceId } });
         expect(cleanup.isError).not.toBe(true);
     });
 });

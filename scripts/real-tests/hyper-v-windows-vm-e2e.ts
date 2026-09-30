@@ -1,3 +1,4 @@
+import { TOOLS, publicToolName } from "../../device-lab-mcp/src/tools.mjs";
 import assert from "assert";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
@@ -362,16 +363,15 @@ export function hyperVWindowsVmE2ECapability(options: any = {}) {
 }
 
 async function cleanupPrevious(callTool: (tool: string, args: any) => Promise<any>) {
-    const inventory = resultValue(payload(await callTool("device_inventory", { backend: "windows-vm" })));
+    const inventory = resultValue(payload(await callTool("inventory", { detail: true, backend: "windows-vm" })));
     const devices = Array.isArray(inventory?.devices) ? inventory.devices : [];
     for (const device of devices.filter((candidate: any) => String(candidate?.id || "").startsWith(DEVICE_PREFIX))) {
         try {
-            await callTool("device_stop", { backend: "windows-vm", deviceId: device.id, incarnationId: device.incarnationId, force: true });
+            await callTool("stop", { detail: true, deviceId: device.id, incarnationId: device.incarnationId, force: true });
         } catch {
             // Deletion is still attempted against the exact owner-scoped VM identity.
         }
-        payload(await callTool("device_delete", {
-            backend: "windows-vm",
+        payload(await callTool("delete", { detail: true,
             deviceId: device.id,
             incarnationId: device.incarnationId,
             ...HYPER_V_WINDOWS_E2E_DELETE_OPTIONS,
@@ -390,7 +390,7 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
     if (!capability.available) return { status: "SKIP", reason: "reason" in capability ? capability.reason : "Hyper-V Windows VM unavailable", capability };
 
     const deviceId = `${DEVICE_PREFIX}${Date.now()}`;
-    const advertisedCapabilities = windowsVmBackend().capabilities;
+    const advertisedCapabilities = [...new Set<string>(windowsVmBackend().capabilities.map(publicToolName))].filter(name => TOOLS.some(tool => tool.name === name));
     const calledCapabilities = new Set<string>();
     const tempParent = join(repoRoot, "results");
     mkdirSync(tempParent, { recursive: true });
@@ -406,7 +406,7 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
             if (advertisedCapabilities.includes(tool)) calledCapabilities.add(tool);
             return rawCallTool(tool, args);
         };
-        const direct: Record<string, unknown> = { backend: "windows-vm", deviceId };
+        const direct: Record<string, unknown> = { deviceId };
         try {
             if (verifyPackagedCandidate) {
                 currentStep = "pack current CCC candidate";
@@ -417,6 +417,7 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
 
             currentStep = "create VM";
             const createArgs = {
+                backend: "windows-vm",
                 ...direct,
                 name: "Real Hyper-V Windows VM Test",
                 profile: capability.profile,
@@ -425,7 +426,7 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
                 networking: true,
                 ...(capability.sourceImage ? { sourceImage: capability.sourceImage } : {}),
             };
-            const createdDevice = lifecycleDevice(payload(await callTool("device_create", createArgs)), "device_create");
+            const createdDevice = lifecycleDevice(payload(await callTool("create", { detail: true, ...createArgs })), "create");
             direct.incarnationId = createdDevice.incarnationId;
             createdVmId = String(createdDevice.vmId || "");
             created = true;
@@ -434,13 +435,13 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
             assert.strictEqual(createdDevice.switchName, "CCC Device Lab");
             const networkAddress = String(createdDevice.networkAddress || "");
             assert.match(networkAddress, /^172\.29\.0\.(?:[1-9]\d?|1\d\d|2[0-4]\d|250)$/);
-            const duplicateCreate = resultValue(payload(await callTool("device_create", createArgs)));
+            const duplicateCreate = resultValue(payload(await callTool("create", { detail: true, ...createArgs })));
             assert.strictEqual(duplicateCreate.idempotent, true);
             assert.strictEqual(duplicateCreate.invoked, false);
             assert.strictEqual(duplicateCreate.device?.incarnationId, createdDevice.incarnationId);
 
             currentStep = "inventory VM";
-            const inventory = resultValue(payload(await callTool("device_inventory", { backend: "windows-vm" })));
+            const inventory = resultValue(payload(await callTool("inventory", { detail: true, backend: "windows-vm" })));
             assert.ok(Array.isArray(inventory.devices) && inventory.devices.some((device: any) => device.id === deviceId));
 
             currentStep = "start and wait for PowerShell Direct";
@@ -458,14 +459,14 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
             });
             let startResult: any;
             try {
-                startResult = await callTool("device_start", { ...direct, waitForBoot: true, bootTimeoutMs: 1200000 });
+                startResult = await callTool("start", { detail: true, ...direct, waitForBoot: true, bootTimeoutMs: 1200000 });
             } finally {
                 stopConsoleTimeline();
             }
-            const started = lifecycleDevice(payload(startResult), "device_start");
+            const started = lifecycleDevice(payload(startResult), "start");
             assert.strictEqual(started.status, "running");
             assert.strictEqual(started.bootReady, true);
-            const startedAgain = lifecycleDevice(payload(await callTool("device_start", { ...direct, waitForBoot: true, bootTimeoutMs: 1200000 })), "device_start");
+            const startedAgain = lifecycleDevice(payload(await callTool("start", { detail: true, ...direct, waitForBoot: true, bootTimeoutMs: 1200000 })), "start");
             assert.strictEqual(startedAgain.status, "running");
 
             currentStep = "verify static guest address and NAT connectivity";
@@ -475,17 +476,17 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
                 "$Outbound = Test-NetConnection -ComputerName 1.1.1.1 -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue",
                 "[ordered]@{ addressPresent = $AddressPresent; outbound = [bool]$Outbound } | ConvertTo-Json -Compress",
             ].join("; ");
-            const networkProbe = resultValue(payload(await callTool("device_exec", { ...direct, command: networkProbeCommand })));
+            const networkProbe = resultValue(payload(await callTool("exec", { detail: true, ...direct, command: networkProbeCommand })));
             const networkResult = JSON.parse(String(networkProbe.stdout || "").trim());
             assert.deepStrictEqual(networkResult, { addressPresent: true, outbound: true });
 
             currentStep = "read VM status";
-            const status = lifecycleDevice(payload(await callTool("device_status", direct)), "device_status");
+            const status = lifecycleDevice(payload(await callTool("status", { detail: true, ...direct })), "status");
             assert.strictEqual(status.id, deviceId);
             assert.strictEqual(status.status, "running");
 
             currentStep = "execute guest command";
-            const executed = resultValue(payload(await callTool("device_exec", { ...direct, command: "Write-Output ccc-hyper-v-e2e-ok" })));
+            const executed = resultValue(payload(await callTool("exec", { detail: true, ...direct, command: "Write-Output ccc-hyper-v-e2e-ok" })));
             assert.strictEqual(executed.provider, "hyper-v-powershell-direct");
             assert.match(executed.stdout || "", /ccc-hyper-v-e2e-ok/);
 
@@ -493,13 +494,13 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
             await runHyperVGuiE2E(callTool, direct, "windows");
 
             currentStep = "reboot VM and wait for PowerShell Direct";
-            const rebooted = lifecycleDevice(payload(await callTool("device_reboot", {
+            const rebooted = lifecycleDevice(payload(await callTool("reboot", { detail: true,
                 ...direct,
                 ...HYPER_V_WINDOWS_E2E_REBOOT_OPTIONS,
-            })), "device_reboot");
+            })), "reboot");
             assert.strictEqual(rebooted.status, "running");
             assert.strictEqual(rebooted.bootReady, true);
-            const afterReboot = resultValue(payload(await callTool("device_exec", { ...direct, command: "Write-Output ccc-hyper-v-reboot-ok" })));
+            const afterReboot = resultValue(payload(await callTool("exec", { detail: true, ...direct, command: "Write-Output ccc-hyper-v-reboot-ok" })));
             assert.match(afterReboot.stdout || "", /ccc-hyper-v-reboot-ok/);
 
             currentStep = "upload and download guest file";
@@ -507,15 +508,15 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
             const downloadPath = join(tempDir, "download.txt");
             const remotePath = "C:\\ccc\\hyper-v-e2e.txt";
             writeFileSync(uploadPath, "ccc-hyper-v-transfer-ok", "utf8");
-            resultValue(payload(await callTool("device_upload", { ...direct, localPath: uploadPath, remotePath })));
+            resultValue(payload(await callTool("upload", { detail: true, ...direct, localPath: uploadPath, remotePath })));
             ensureHyperVWindowsDownloadDestination(repoRoot, downloadPath);
-            resultValue(payload(await callTool("device_download", { ...direct, remotePath, localPath: downloadPath })));
+            resultValue(payload(await callTool("download", { detail: true, ...direct, remotePath, localPath: downloadPath })));
             assert.strictEqual(readFileSync(downloadPath, "utf8"), "ccc-hyper-v-transfer-ok");
 
             if (packagedCandidate) {
                 currentStep = "run packaged CCC candidate inside guest";
                 const guestCandidateRoot = "C:\\ccc\\packaged-candidate";
-                resultValue(payload(await callTool("device_exec", {
+                resultValue(payload(await callTool("exec", { detail: true,
                     ...direct,
                     command: `Remove-Item -LiteralPath '${guestCandidateRoot}' -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Path '${guestCandidateRoot}' -Force | Out-Null`,
                 })));
@@ -523,8 +524,8 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
                 const guestPackagePath = `${guestCandidateRoot}\\candidate.tgz`;
                 const stagedNodePath = join(tempDir, "node.exe");
                 copyFileSync(process.execPath, stagedNodePath);
-                resultValue(payload(await callTool("device_upload", { ...direct, localPath: stagedNodePath, remotePath: guestNodePath, maxFileBytes: 128 * 1024 * 1024 })));
-                resultValue(payload(await callTool("device_upload", { ...direct, localPath: packagedCandidate.packagePath, remotePath: guestPackagePath })));
+                resultValue(payload(await callTool("upload", { detail: true, ...direct, localPath: stagedNodePath, remotePath: guestNodePath, maxFileBytes: 128 * 1024 * 1024 })));
+                resultValue(payload(await callTool("upload", { detail: true, ...direct, localPath: packagedCandidate.packagePath, remotePath: guestPackagePath })));
                 const guestResultPath = `${guestCandidateRoot}\\result.json`;
                 const packageProbe = [
                     "$ErrorActionPreference = 'Stop'",
@@ -538,42 +539,42 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
                     `$Result | ConvertTo-Json -Compress | Set-Content -LiteralPath '${guestResultPath}' -Encoding UTF8`,
                     `$Result | ConvertTo-Json -Compress`,
                 ].join("; ");
-                const packagedExecution = resultValue(payload(await callTool("device_exec", { ...direct, command: packageProbe })));
+                const packagedExecution = resultValue(payload(await callTool("exec", { detail: true, ...direct, command: packageProbe })));
                 const packagedResult = JSON.parse(String(packagedExecution.stdout || "").trim());
                 assert.deepStrictEqual({ ok: packagedResult.ok, version: packagedResult.version, exitCode: packagedResult.exitCode }, { ok: true, version: packagedCandidate.version, exitCode: 0 });
                 const packagedEvidenceRoot = join(repoRoot, "results", "device-lab-real");
                 const packagedEvidencePath = join(packagedEvidenceRoot, "hyper-v-windows-packaged-ccc-latest.json");
                 mkdirSync(packagedEvidenceRoot, { recursive: true });
                 ensureHyperVWindowsDownloadDestination(repoRoot, packagedEvidencePath);
-                resultValue(payload(await callTool("device_download", { ...direct, remotePath: guestResultPath, localPath: packagedEvidencePath })));
+                resultValue(payload(await callTool("download", { detail: true, ...direct, remotePath: guestResultPath, localPath: packagedEvidencePath })));
                 const packagedEvidence = JSON.parse(readFileSync(packagedEvidencePath, "utf8").replace(/^\uFEFF/, ""));
                 assert.strictEqual(packagedEvidence.version, packagedCandidate.version);
             }
 
             currentStep = "create production checkpoint";
-            const snapshot = resultValue(payload(await callTool("device_snapshot_create", { ...direct, snapshotName: "durability" })));
+            const snapshot = resultValue(payload(await callTool("snapshot_create", { detail: true, ...direct, snapshotName: "durability" })));
             const snapshotId = snapshot.snapshot?.id;
             assert.ok(snapshotId);
 
             currentStep = "list production checkpoints";
-            const snapshotList = resultValue(payload(await callTool("device_snapshot_list", direct)));
+            const snapshotList = resultValue(payload(await callTool("snapshot_list", { detail: true, ...direct })));
             assert.ok(Array.isArray(snapshotList.snapshots));
             assert.ok(snapshotList.snapshots.some((candidate: any) => candidate?.id === snapshotId && candidate?.name === "durability"));
 
             currentStep = "restore production checkpoint";
-            resultValue(payload(await callTool("device_snapshot_restore", { ...direct, snapshotId, force: true, confirmDestructive: true })));
+            resultValue(payload(await callTool("snapshot_restore", { detail: true, ...direct, snapshotId, force: true, confirmDestructive: true })));
 
             currentStep = "delete production checkpoint";
-            resultValue(payload(await callTool("device_snapshot_delete", { ...direct, snapshotId, confirmDestructive: true })));
+            resultValue(payload(await callTool("snapshot_delete", { detail: true, ...direct, snapshotId, confirmDestructive: true })));
 
             currentStep = "stop VM";
-            lifecycleDevice(payload(await callTool("device_stop", { ...direct, force: true })), "device_stop");
-            lifecycleDevice(payload(await callTool("device_stop", { ...direct, force: true })), "device_stop");
+            lifecycleDevice(payload(await callTool("stop", { detail: true, ...direct, force: true })), "stop");
+            lifecycleDevice(payload(await callTool("stop", { detail: true, ...direct, force: true })), "stop");
 
             currentStep = "delete VM";
-            payload(await callTool("device_delete", { ...direct, ...HYPER_V_WINDOWS_E2E_DELETE_OPTIONS }));
+            payload(await callTool("delete", { detail: true, ...direct, ...HYPER_V_WINDOWS_E2E_DELETE_OPTIONS }));
             created = false;
-            const duplicateDelete = resultValue(payload(await callTool("device_delete", {
+            const duplicateDelete = resultValue(payload(await callTool("delete", { detail: true,
                 ...direct,
                 ...HYPER_V_WINDOWS_E2E_DELETE_OPTIONS,
             })));
@@ -608,9 +609,9 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
             };
         } finally {
             if (created) {
-                try { await callTool("device_stop", { ...direct, force: true }); } catch { /* best effort */ }
+                try { await callTool("stop", { detail: true, ...direct, force: true }); } catch { /* best effort */ }
                 try {
-                    await callTool("device_delete", { ...direct, ...HYPER_V_WINDOWS_E2E_DELETE_OPTIONS });
+                    await callTool("delete", { detail: true, ...direct, ...HYPER_V_WINDOWS_E2E_DELETE_OPTIONS });
                 } catch { /* evidence remains for the next verified recovery */ }
             }
             rmSync(tempDir, { recursive: true, force: true });

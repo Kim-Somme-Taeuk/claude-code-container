@@ -40,7 +40,7 @@ export async function runRealProviderReadiness(options: any = {}) {
     });
 
     await withDeviceLabMcp(async ({ callTool }) => {
-        const androidWirelessResult = await callTool("device_wireless", {
+        const androidWirelessResult = await callTool("wireless", { detail: true,
             backend: "android-device",
             action: "status",
             timeoutMs: 5000,
@@ -51,21 +51,21 @@ export async function runRealProviderReadiness(options: any = {}) {
             assert.strictEqual(androidWireless.provider, "adb", JSON.stringify(androidWireless));
             steps.push({ name: "Android physical wireless status MCP", status: "PASS" });
 
-            const missingSerial = parseToolResult(await callTool("device_wireless", {
+            const missingSerial = parseToolResult(await callTool("wireless", { detail: true,
                 backend: "android-device",
                 action: "usb-tcpip",
                 timeoutMs: 5000,
             }), { expectedError: true });
             assert.strictEqual(missingSerial.error, "android-wireless-usb-tcpip-requires-serial", JSON.stringify(missingSerial));
 
-            const missingPairTarget = parseToolResult(await callTool("device_wireless", {
+            const missingPairTarget = parseToolResult(await callTool("wireless", { detail: true,
                 backend: "android-device",
                 action: "pair",
                 timeoutMs: 5000,
             }), { expectedError: true });
             assert.strictEqual(missingPairTarget.error, "android-wireless-pair-requires-host-port-code", JSON.stringify(missingPairTarget));
 
-            const missingConnectTarget = parseToolResult(await callTool("device_wireless", {
+            const missingConnectTarget = parseToolResult(await callTool("wireless", { detail: true,
                 backend: "android-device",
                 action: "connect",
                 timeoutMs: 5000,
@@ -76,7 +76,7 @@ export async function runRealProviderReadiness(options: any = {}) {
             assert.strictEqual(androidWireless.error, "android-wireless-missing-adb", JSON.stringify(androidWireless));
             assert.deepStrictEqual(androidWireless.missing, ["adb"], JSON.stringify(androidWireless));
             for (const action of ["usb-tcpip", "pair", "connect"]) {
-                const missingAdb = parseToolResult(await callTool("device_wireless", {
+                const missingAdb = parseToolResult(await callTool("wireless", { detail: true,
                     backend: "android-device",
                     action,
                     timeoutMs: 5000,
@@ -89,7 +89,7 @@ export async function runRealProviderReadiness(options: any = {}) {
         }
 
         if (process.platform === "darwin" && commandPath("xcrun")) {
-            const iosWireless = parseToolPayload(await callTool("device_wireless", {
+            const iosWireless = parseToolPayload(await callTool("wireless", { detail: true,
                 backend: "ios-device",
                 action: "status",
             }));
@@ -105,7 +105,7 @@ export async function runRealProviderReadiness(options: any = {}) {
         }
 
         for (const action of ["pair", "connect"]) {
-            const iosWirelessDiagnostic = parseToolResult(await callTool("device_wireless", {
+            const iosWirelessDiagnostic = parseToolResult(await callTool("wireless", { detail: true,
                 backend: "ios-device",
                 action,
             }), { expectedError: true });

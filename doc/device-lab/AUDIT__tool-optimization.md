@@ -2,10 +2,10 @@
 
 ## Current canonical contract (2026-09-30)
 
-Discovery and public dispatch now share one 87-tool catalog. The historical
+Discovery and public dispatch now share one 76-tool unprefixed catalog. The historical
 compatibility observations below are superseded: six mobile aliases and hidden
 broker/image operations are no longer public MCP calls. Creation arguments are
-flat, single-backend tools reject redundant selectors, and flow steps require
+flat, existing-device tools use deviceId without backend selectors, and flow steps require
 `tool` rather than accepting `name`. Rejected legacy input performs no provider
 work. Internal broker APIs are tested directly, without restoring public aliases.
 
@@ -13,6 +13,12 @@ The normal journey is device list, choose an ID, screenshot, interaction, then
 observe. A flow can share the target once and return its final screenshot in the
 same response. A new call is needed when the next action depends on seeing that
 screen; flows do not make conditional decisions or interpolate prior results.
+Common mobile/desktop actions share click, double_click, type and key; the
+current display uses these same tools with deviceId. Move and cursor queries
+are separate. Simple successful actions return ok, while queries retain useful
+data/native images and errors/warnings retain actionable evidence.
+Serialized discovery schemas measure 45,579 bytes versus 56,825 bytes for the
+prior 87-tool catalog (JSON UTF-8 bytes, not model token counts).
 
 Known ceiling: Internal transport controls remain available to existing route/test
 machinery. Their distinct host-routing contracts are outside this public alias

@@ -38,13 +38,13 @@ function step(index: number, isError: boolean, data: unknown, tool = "mobile_wai
 }
 
 describe("flow output before diagnostic bounds", () => {
-    it.each(["device_run_flow"])("returns two inspectable screenshots in one real stdio %s call", async (name) => {
+    it.each(["run_flow"])("returns two inspectable screenshots in one real stdio %s call", async (name) => {
         const context = await createFakeAndroidMcpContext();
         try {
-            const created = value(await context.client.callTool({ name: "device_create", arguments: {
+            const created = value(await context.client.callTool({ name: "create", arguments: {
                 backend: "android-emulator", name: "Flow images", avdName: "Flow", port: 5582,
             } }));
-            const screenshot = { tool: "device_screenshot", arguments: { deviceId: created.device.id, implicitBroker: false } };
+            const screenshot = { tool: "screenshot", arguments: { deviceId: created.device.id, implicitBroker: false } };
             for (const detail of [false, true]) {
                 const response: any = await context.client.callTool({ name, arguments: { detail, steps: [screenshot, screenshot] } });
                 expect(response.isError).toBe(false);
@@ -61,80 +61,80 @@ describe("flow output before diagnostic bounds", () => {
     });
 
     it.each([
-        ["device_run_flow", false], ["device_run_flow", true],
+        ["run_flow", false], ["run_flow", true],
     ] as const)("bounds malformed metadata over public MCP %s (detail=%s)", async (name, detail) => {
         const context = await createDeviceLabMcpTestContext();
         try {
             const payload = "x".repeat(70000);
             for (const label of [{ payload }, [payload]]) {
                 const result = await context.client.callTool({ name, arguments: { detail, steps: [
-                    { tool: "mobile_key", label, arguments: {} },
+                    { tool: "key", label, arguments: {} },
                 ] } });
                 expect(Buffer.byteLength(text(result))).toBeLessThanOrEqual(65536);
                 expect(value(result)).toMatchObject({ ok: false, stoppedAt: 0, results: [
-                    { index: 0, tool: "mobile_key", label: "mobile_key", isError: true },
+                    { index: 0, tool: "key", label: "key", isError: true },
                 ] });
-                expect(text(result)).toContain("mobile_key requires key or keyCode");
+                expect(text(result)).toContain("key requires key or keyCode");
             }
             for (const malformed of [{ payload }, [payload]]) {
                 for (const field of ["tool", "name"]) {
                     const result = await context.client.callTool({ name, arguments: { detail, stopOnError: false, steps: [
-                        { tool: "mobile_key", label: "prior failure", arguments: {} },
+                        { tool: "key", label: "prior failure", arguments: {} },
                         { [field]: malformed, label: { payload } },
                     ] } });
                     expect(Buffer.byteLength(text(result))).toBeLessThanOrEqual(65536);
                     expect(value(result)).toMatchObject({ ok: false, results: [
-                        { index: 0, tool: "mobile_key", label: "prior failure", isError: true },
+                        { index: 0, tool: "key", label: "prior failure", isError: true },
                         { index: 1, label: "step-2", isError: true, error: "Flow step requires tool; name is not supported" },
                     ] });
-                    expect(text(result)).toContain("mobile_key requires key or keyCode");
+                    expect(text(result)).toContain("key requires key or keyCode");
                 }
             }
         } finally { await cleanupDeviceLabMcpTestContext(context); }
     });
 
-    it.each(["device_run_flow"])("preserves the later failure over public MCP %s", { timeout: 30000 }, async (name) => {
+    it.each(["run_flow"])("preserves the later failure over public MCP %s", { timeout: 30000 }, async (name) => {
         const context = await createFakeAndroidMcpContext();
         try {
             const adb = join(context.binDir, "adb");
             writeFileSync(adb, readFileSync(adb, "utf8").replaceAll(
                 "printf '%s\\n' '<hierarchy><node text=\"Hello\" resource-id=\"com.example:id/title\"/></hierarchy>'",
                 '/bin/cat "$HOME/flow-ui.xml"'));
-            const created = value(await context.client.callTool({ name: "device_create", arguments: {
+            const created = value(await context.client.callTool({ name: "create", arguments: {
                 backend: "android-emulator", name: "Flow", avdName: "Flow", port: 5582,
             } }));
             const deviceId = created.device.id;
             const steps = [
-                { tool: "mobile_wait_for_text", label: "large observation", arguments: { deviceId, text: "Hello", implicitBroker: false, timeoutMs: 1000 } },
-                { tool: "mobile_key", label: "actual failure", arguments: { deviceId, implicitBroker: false } },
+                { tool: "wait_for_text", label: "large observation", arguments: { deviceId, text: "Hello", implicitBroker: false, timeoutMs: 1000 } },
+                { tool: "key", label: "actual failure", arguments: { deviceId, implicitBroker: false } },
             ];
             writeFileSync(join(context.homeDir, "flow-ui.xml"), `<hierarchy><node text="Hello"/>${"x".repeat(70000)}</hierarchy>`);
             const compact = await context.client.callTool({ name, arguments: { detail: false, steps } });
             const parsed = value(compact);
             expect(parsed).toMatchObject({ ok: false, stoppedAt: 1, results: [
-                { index: 0, label: "large observation", tool: "mobile_wait_for_text", isError: false },
-                { index: 1, label: "actual failure", tool: "mobile_key", isError: true },
+                { index: 0, label: "large observation", tool: "wait_for_text", isError: false },
+                { index: 1, label: "actual failure", tool: "key", isError: true },
             ] });
-            expect(text(compact)).toContain("mobile_key requires key or keyCode");
+            expect(text(compact)).toContain("key requires key or keyCode");
             expect(parsed.results[0].content[0].value.source).toBeUndefined();
             expect(Buffer.byteLength(text(compact))).toBeLessThan(2000);
             const detailed = value(await context.client.callTool({ name, arguments: { detail: true, steps } }));
             expect(detailed).toMatchObject({ ok: false, stoppedAt: 1, diagnosticTruncated: true });
             expect(detailed.results[0].content[0]).toMatchObject({ omitted: true, diagnosticTruncated: true });
             expect(detailed.results[0].content[0].originalBytes).toBeGreaterThan(70000);
-            expect(JSON.stringify(detailed.results[1])).toContain("mobile_key requires key or keyCode");
+            expect(JSON.stringify(detailed.results[1])).toContain("key requires key or keyCode");
             const smallSource = '<hierarchy><node text="Hello"/></hierarchy>';
             writeFileSync(join(context.homeDir, "flow-ui.xml"), smallSource);
             const small = value(await context.client.callTool({ name, arguments: { detail: true, steps } }));
             expect(small.results[0].content[0].value.source).toContain(smallSource);
             expect(small.diagnosticTruncated).toBeUndefined();
             const continued = value(await context.client.callTool({ name, arguments: {
-                detail: false, stopOnError: false, steps: [...steps, { tool: "mobile_wait_for_text", arguments: { deviceId } }],
+                detail: false, stopOnError: false, steps: [...steps, { tool: "wait_for_text", arguments: { deviceId } }],
             } }));
             expect(continued.ok).toBe(false);
             expect(continued.stoppedAt).toBeUndefined();
             expect(continued.results.map((item: any) => item.isError)).toEqual([false, true, true]);
-            expect(JSON.stringify(continued.results[2])).toContain("mobile_wait_for_text requires text");
+            expect(JSON.stringify(continued.results[2])).toContain("wait_for_text requires text");
         } finally { await cleanupFakeAndroidMcpContext(context); }
     });
 
@@ -197,12 +197,12 @@ const nativeBlocks = [nativeImage, nativeImage,
     { type: "audio", mimeType: "audio/wav", data: "YXVkaW8=" },
     { type: "resource_link", uri: "file:///capture.png", name: "capture", mimeType: "image/png" },
 ];
-const nativeStep = { tool: "mobile_tap", arguments: { deviceId: "native-flow", implicitBroker: false, x: 1, y: 2 } };
+const nativeStep = { tool: "click", arguments: { deviceId: "native-flow", implicitBroker: false, x: 1, y: 2 } };
 function nativeCall(name: string, args: Record<string, unknown>) {
     return nativeFixture.handlers[1]({ params: { name, arguments: args } });
 }
 
-describe.each(["device_run_flow"])("%s native observations", (name) => {
+describe.each(["run_flow"])("%s native observations", (name) => {
     it("retains prior images when the next provider throws", async () => {
         nativeFixture.calls = 0;
         nativeFixture.throwOnCall = 2;
@@ -211,7 +211,7 @@ describe.each(["device_run_flow"])("%s native observations", (name) => {
             const result = await nativeCall(name, { steps: [nativeStep, nativeStep, nativeStep] });
             expect(result.isError).toBe(true);
             expect(value(result).stoppedAt).toBe(1);
-            expect(value(result).results[1].content[0].text).toContain("provider-disconnected");
+            expect(value(result).results[1].content[0].value.error).toContain("provider-disconnected");
             expect(result.content.slice(1)).toEqual([nativeImage]);
             expect(nativeFixture.calls).toBe(2);
         } finally { nativeFixture.throwOnCall = 0; }
@@ -226,7 +226,7 @@ describe.each(["device_run_flow"])("%s native observations", (name) => {
         expect(nativeFixture.calls).toBe(2);
         expect(result.content.slice(1)).toEqual([...nativeBlocks, ...nativeBlocks]);
         expect(value(result).results).toMatchObject([
-            { contentIndex: 1, contentCount: 5, content: [{ type: "json", value: { value: "observation" } }] },
+            { contentIndex: 1, contentCount: 5, ...(detail ? { content: [{ type: "json", value: { value: "observation" } }] } : {}) },
             { contentIndex: 6, contentCount: 5 },
         ]);
         expect(text(result)).not.toContain(nativeImage.data);
@@ -235,7 +235,7 @@ describe.each(["device_run_flow"])("%s native observations", (name) => {
 
     it.each([false, true])("retains prior observations when a later input is invalid (continue=%s)", async (continueOnError) => {
         nativeFixture.result = { content: [nativeImage], isError: false };
-        const result = await nativeCall(name, { stopOnError: !continueOnError, steps: [nativeStep, { tool: "mobile_key", arguments: {} }, nativeStep] });
+        const result = await nativeCall(name, { stopOnError: !continueOnError, steps: [nativeStep, { tool: "key", arguments: {} }, nativeStep] });
         expect(result.isError).toBe(true);
         expect(value(result).ok).toBe(false);
         expect(result.content.slice(1)).toEqual(continueOnError ? [nativeImage, nativeImage] : [nativeImage]);
@@ -266,7 +266,7 @@ describe.each(["device_run_flow"])("%s native observations", (name) => {
 
     it("omits native references for text-only results and marks an unmet wait as a flow error", async () => {
         nativeFixture.result = { isError: false, content: [{ type: "text", text: '{"found":false}' }] };
-        const result = await nativeCall(name, { steps: [{ tool: "mobile_wait_for_text", arguments: { ...nativeStep.arguments, text: "needle" } }, nativeStep] });
+        const result = await nativeCall(name, { steps: [{ tool: "wait_for_text", arguments: { ...nativeStep.arguments, text: "needle" } }, nativeStep] });
         expect(result.isError).toBe(true);
         expect(result.content).toHaveLength(1);
         expect(value(result).results[0]).not.toHaveProperty("contentIndex");

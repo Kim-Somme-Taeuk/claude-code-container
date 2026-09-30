@@ -151,7 +151,7 @@ describe("iOS Simulator app observation", () => {
 
 describe("public iOS wait and flow errors", () => {
     it.each([false, true])("returns an MCP observation error with the cause (detail=%s)", async (detail) => {
-        const observed = await call("mobile_wait_for_app", { ...args, detail });
+        const observed = await call("wait_for_app", { ...args, detail });
         expect(observed.isError).toBe(true);
         expect(observed.content[0].text).toContain("simulator unavailable");
         expect(observed.content[0].text).not.toContain('"running":false');
@@ -160,15 +160,15 @@ describe("public iOS wait and flow errors", () => {
 
     it("keeps standalone clean absence successful and includes provider and bundle in detail mode", async () => {
         fixture.observe = (argv) => isPgrep(argv) ? result(1) : failed();
-        const observed = await call("mobile_wait_for_app", { ...args, detail: true });
+        const observed = await call("wait_for_app", { ...args, detail: true });
         expect(observed.isError).toBe(false);
         expect(JSON.parse(observed.content[0].text)).toMatchObject({ running: false, bundleId, provider: "simctl", status: 1 });
     });
 
-    it.each(["mobile_run_flow", "device_run_flow"])("%s stops with the original observation error before the next action", async (name) => {
+    it.each(["run_flow"])("%s stops with the original observation error before the next action", async (name) => {
         const observed = await call(name, { steps: [
-            { tool: "mobile_wait_for_app", arguments: args },
-            { tool: "mobile_wait_for_app", arguments: args },
+            { tool: "wait_for_app", arguments: args },
+            { tool: "wait_for_app", arguments: args },
         ] });
         const body = JSON.parse(observed.content[0].text);
         expect(body).toMatchObject({ ok: false, stoppedAt: 0 });

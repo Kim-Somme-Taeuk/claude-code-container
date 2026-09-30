@@ -117,9 +117,9 @@ server.listen(port,'127.0.0.1',()=>process.stdout.write(JSON.stringify({pid:proc
         try {
             await client.connect(transport);
             const result = await client.callTool({
-                name: "device_run_flow",
+                name: "run_flow",
                 arguments: { steps: [0, 1].map(() => ({
-                    tool: "device_inventory", arguments: { ...options, backend: "android-emulator", viaBroker: true },
+                    tool: "inventory", arguments: { ...options, backend: "android-emulator", viaBroker: true },
                 })) },
             });
             expect(result.isError).not.toBe(true);

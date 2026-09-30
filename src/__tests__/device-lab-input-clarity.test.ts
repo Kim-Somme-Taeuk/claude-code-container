@@ -39,13 +39,13 @@ import { normalizeToolArgs, flowStepArguments } from "../../device-lab-mcp/src/t
 import { createLab, ownerId } from "../../device-lab-mcp/src/backends/linux-vm.mjs";
 
 const defaults = {
-    device_image_list: "linux-vm", device_image_import: "linux-vm", device_target_list: "linux-vm",
-    device_readiness_probe: "linux-vm", device_session_open: "linux-vm", device_workspace_sync: "linux-vm",
-    device_artifacts_export: "linux-vm", device_guest_agent_status: "linux-vm", device_guest_agent_provision: "linux-vm",
-    device_base_image_create: "macos-vm", device_base_image_clone: "macos-vm",
+    image_list: "linux-vm", image_import: "linux-vm", target_list: "linux-vm",
+    readiness_probe: "linux-vm", session_open: "linux-vm", workspace_sync: "linux-vm",
+    artifacts_export: "linux-vm", guest_agent_status: "linux-vm", guest_agent_provision: "linux-vm",
+    base_image_create: "macos-vm", base_image_clone: "macos-vm",
 };
 const entries = Object.entries(defaults);
-const ownedActions = ["device_readiness_probe", "device_session_open", "device_workspace_sync", "device_artifacts_export", "device_guest_agent_status", "device_guest_agent_provision"];
+const ownedActions = ["readiness_probe", "session_open", "workspace_sync", "artifacts_export", "guest_agent_status", "guest_agent_provision"];
 const parse = (result: any) => JSON.parse(result.content[0].text);
 const call = (name: string, args: any) => fixture.handlers[1]({ params: { name, arguments: args } });
 
@@ -64,7 +64,7 @@ describe("bounded single-backend argument contract", () => {
         await call(name, input);
         expect(fixture.calls.length).toBeGreaterThan(0);
         expect(fixture.calls.every((entry) => entry.args.backend === backend)).toBe(true);
-        expect(fixture.calls.at(-1)?.provider).toBe(backend === "macos-vm" ? "macos" : name.startsWith("device_image_") ? "linux-management" : "linux");
+        expect(fixture.calls.at(-1)?.provider).toBe(backend === "macos-vm" ? "macos" : name.startsWith("image_") ? "linux-management" : "linux");
         expect(input).toEqual(original);
     });
     it.each(entries)("%s rejects every explicit backend before any provider", async (name, backend) => {
@@ -76,20 +76,20 @@ describe("bounded single-backend argument contract", () => {
         }
     });
     it.each([{}, null, false, { backend: "linux-vm", name: "Old", cpus: 4 }])("rejects options %j before creation", async (options) => {
-        const result = await call("device_create", { backend: "linux-vm", name: "Flat", options });
+        const result = await call("create", { backend: "linux-vm", name: "Flat", options });
         expect(result.isError).toBe(true);
         expect(result.content[0].text).toContain("Use flat tool arguments");
         expect(fixture.calls).toEqual([]);
     });
     it("keeps normalization flat and derives defaults only for relevant tools", () => {
-        expect(normalizeToolArgs({ deviceId: "a", detail: true }, "device_status")).toEqual({ deviceId: "a" });
+        expect(normalizeToolArgs({ deviceId: "a", detail: true }, "status")).toEqual({ deviceId: "a" });
         expect(normalizeToolArgs({}, "unknown")).toEqual({});
-        expect(TOOLS.find((tool: any) => tool.name === "device_create")!.inputSchema.properties).not.toHaveProperty("options");
+        expect(TOOLS.find((tool: any) => tool.name === "create")!.inputSchema.properties).not.toHaveProperty("options");
     });
     it("inherits only declared target fields before deriving the selected backend", () => {
         const shared = { deviceId: "a", backend: "macos-vm", incarnationId: "a".repeat(32) };
-        expect(flowStepArguments("device_guest_agent_status", shared, {})).toEqual({ deviceId: "a" });
-        expect(normalizeToolArgs(flowStepArguments("device_guest_agent_status", shared, { deviceId: "b" }), "device_guest_agent_status")).toEqual({ deviceId: "b", backend: "linux-vm" });
+        expect(flowStepArguments("guest_agent_status", shared, {})).toEqual({ deviceId: "a" });
+        expect(normalizeToolArgs(flowStepArguments("guest_agent_status", shared, { deviceId: "b" }), "device_guest_agent_status")).toEqual({ deviceId: "b", backend: "linux-vm" });
     });
 });
 
@@ -101,10 +101,10 @@ describe("single-backend QEMU owner isolation through MCP", () => {
     let foreignMetadata: string;
     beforeAll(async () => {
         context = await createDeviceLabMcpTestContext({ env: { CCC_PROFILE: "input-clarity" } });
-        const result = parse(await context.client.callTool({ name: "device_create", arguments: { backend: "linux-vm", name: "Owned Target" } }));
+        const result = parse(await context.client.callTool({ name: "create", arguments: { backend: "linux-vm", name: "Owned Target" } }));
         expect(result.ok).toBe(true);
         // Read the authoritative root from the real provider instead of assuming its storage layout.
-        const inventory = parse(await context.client.callTool({ name: "device_inventory", arguments: { backend: "linux-vm", detail: true } }));
+        const inventory = parse(await context.client.callTool({ name: "inventory", arguments: { backend: "linux-vm", detail: true } }));
         root = inventory.discovery.stateRoot;
         ownedMetadata = join(root, "owners", result.device.ownerId, "labs", "owned-target", "lab.json");
         const foreignEnv = { CCC_PROFILE: "input-clarity-foreign", CCC_DEVICE_LAB_OWNER_BASIS: "foreign-owner" };
@@ -114,7 +114,7 @@ describe("single-backend QEMU owner isolation through MCP", () => {
     });
     afterAll(async () => { await cleanupDeviceLabMcpTestContext(context); });
     it("creates from flat inputs and imports an image without backend", async () => {
-        const created = parse(await context.client.callTool({ name: "device_create", arguments: {
+        const created = parse(await context.client.callTool({ name: "create", arguments: {
             backend: "linux-vm", name: "Flat Inputs", cpus: 3, memoryMb: 512,
         } }));
         expect(created.ok).toBe(true);
@@ -122,9 +122,9 @@ describe("single-backend QEMU owner isolation through MCP", () => {
         expect(metadata.resources).toMatchObject({ cpus: 3, memoryMb: 512 });
         mkdirSync(join(root, "incoming"), { recursive: true });
         writeFileSync(join(root, "incoming", "base.qcow2"), "fixture-image");
-        const imported = parse(await context.client.callTool({ name: "device_image_import", arguments: { name: "Input Base", sourcePath: "incoming/base.qcow2" } }));
+        const imported = parse(await context.client.callTool({ name: "image_import", arguments: { name: "Input Base", sourcePath: "incoming/base.qcow2" } }));
         expect(imported).toMatchObject({ ok: true, image: { id: "input-base" } });
-        const listed = parse(await context.client.callTool({ name: "device_image_list", arguments: {} }));
+        const listed = parse(await context.client.callTool({ name: "image_list", arguments: {} }));
         expect(listed).toMatchObject({ ok: true, images: expect.arrayContaining([expect.objectContaining({ id: "input-base" })]) });
     });
     it("rejects removed names and wrapped creation over real stdio without changing device state", async () => {
@@ -132,13 +132,13 @@ describe("single-backend QEMU owner isolation through MCP", () => {
         for (const [name, args] of [
             ["device_broker_rpc", { method: "owner.cleanup" }],
             ["mobile_install_app", { deviceId: "owned-target", path: "/app.apk" }],
-            ["device_create", { options: { backend: "linux-vm", name: "Must Not Exist" } }],
+            ["create", { options: { backend: "linux-vm", name: "Must Not Exist" } }],
         ] as const) {
             const result = await context.client.callTool({ name, arguments: args });
             expect(result.isError).toBe(true);
             expect(readFileSync(ownedMetadata, "utf8")).toBe(before);
         }
-        const listed = parse(await context.client.callTool({ name: "device_list", arguments: {} }));
+        const listed = parse(await context.client.callTool({ name: "list_devices", arguments: {} }));
         expect(JSON.stringify(listed)).not.toContain("must-not-exist");
     });
     it.each(ownedActions)("%s rejects wrong selectors without changing owned QEMU metadata", async (name) => {
@@ -179,7 +179,7 @@ describe("single-backend QEMU owner isolation through MCP", () => {
                 expect(result.isError).toBe(true);
                 expect(parse(result)).toMatchObject({ error: "lab-not-found" });
             }
-            const duplicate = parse(await context.client.callTool({ name: "device_session_open", arguments: {
+            const duplicate = parse(await context.client.callTool({ name: "session_open", arguments: {
                 deviceId: "owned-target", sessionType: "metadata", broker: true, hostCandidates: ["127.0.0.1"], port,
             } }));
             expect(duplicate.ok).toBe(true);
@@ -191,7 +191,7 @@ describe("single-backend QEMU owner isolation through MCP", () => {
         const path = join(root, "owners", JSON.parse(readFileSync(ownedMetadata, "utf8")).ownerId, "labs", "corrupt-target", "lab.json");
         mkdirSync(join(path, ".."), { recursive: true });
         writeFileSync(path, "{broken");
-        await expect(context.client.callTool({ name: "device_readiness_probe", arguments: { deviceId: "corrupt-target" } }))
+        await expect(context.client.callTool({ name: "readiness_probe", arguments: { deviceId: "corrupt-target" } }))
             .rejects.toThrow(/JSON|parse|corrupt|invalid/i);
         expect(readFileSync(path, "utf8")).toBe("{broken");
     });

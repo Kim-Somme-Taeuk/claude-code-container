@@ -1,3 +1,4 @@
+import { toolOperation } from "../../device-lab-mcp/src/tools.mjs";
 import { callInternalBroker } from "./helpers/device-lab-mcp-fixture.js";
 import { createServer } from "http";
 import { mkdirSync, writeFileSync } from "fs";
@@ -428,7 +429,6 @@ describe("device-lab MCP broker Appium routing", () => {
             const baseArgs = {
                 deviceId: "iphone-broker-mobile",
                 viaBroker: true,
-                backend: "ios-device",
                 appiumPort: fakeAppium.port,
                 hostCandidates: ["127.0.0.1"],
                 port: address.port,
@@ -436,7 +436,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 rpcTimeoutMs: 750,
             };
             const dump = await client.callTool({
-                name: "mobile_dump_ui",
+                name: "dump_ui",
                 arguments: baseArgs,
             });
             expect(dump.isError).not.toBe(true);
@@ -455,8 +455,8 @@ describe("device-lab MCP broker Appium routing", () => {
             expect(dumpPayload.broker?.selected?.timeoutMs).toBe(750);
 
             const tap = await client.callTool({
-                name: "mobile_tap",
-                arguments: { ...baseArgs, x: 40, y: 50 },
+                name: "click",
+                arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, rpcTimeoutMs: baseArgs.rpcTimeoutMs, x: 40, y: 50 },
             });
             expect(JSON.parse(((tap.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 provider: "broker-appium",
@@ -464,12 +464,12 @@ describe("device-lab MCP broker Appium routing", () => {
                 requests: 1,
             }));
             for (const [name, args] of [
-                ["mobile_double_tap", { x: 41, y: 51 }],
-                ["mobile_long_press", { x: 42, y: 52, durationMs: 900 }],
-                ["mobile_swipe", { x1: 10, y1: 20, x2: 110, y2: 120, durationMs: 350 }],
-                ["mobile_drag", { x1: 11, y1: 21, x2: 111, y2: 121, durationMs: 950 }],
+                ["double_click", { x: 41, y: 51 }],
+                ["long_press", { x: 42, y: 52, durationMs: 900 }],
+                ["swipe", { x1: 10, y1: 20, x2: 110, y2: 120, durationMs: 350 }],
+                ["drag", { x1: 11, y1: 21, x2: 111, y2: 121, durationMs: 950 }],
             ] as const) {
-                const result = await client.callTool({ name, arguments: { ...baseArgs, ...args } });
+                const result = await client.callTool({ name, arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, rpcTimeoutMs: baseArgs.rpcTimeoutMs, ...args } });
                 expect(result.isError, `${name}: ${JSON.stringify(result)}`).not.toBe(true);
                 expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                     provider: "broker-appium",
@@ -478,8 +478,8 @@ describe("device-lab MCP broker Appium routing", () => {
                 }));
             }
             const typed = await client.callTool({
-                name: "mobile_type_text",
-                arguments: { ...baseArgs, text: "hello" },
+                name: "type",
+                arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, rpcTimeoutMs: baseArgs.rpcTimeoutMs, text: "hello" },
             });
             expect(JSON.parse(((typed.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 provider: "broker-appium",
@@ -487,7 +487,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 requests: 1,
             }));
             const back = await client.callTool({
-                name: "mobile_back",
+                name: "back",
                 arguments: baseArgs,
             });
             expect(JSON.parse(((back.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -496,8 +496,8 @@ describe("device-lab MCP broker Appium routing", () => {
                 requests: 1,
             }));
             const wait = await client.callTool({
-                name: "mobile_wait_for_text",
-                arguments: { ...baseArgs, text: "Welcome", intervalMs: 50 },
+                name: "wait_for_text",
+                arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, rpcTimeoutMs: baseArgs.rpcTimeoutMs, text: "Welcome", intervalMs: 50 },
             });
             expect(JSON.parse(((wait.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 found: true,
@@ -652,47 +652,46 @@ describe("device-lab MCP broker Appium routing", () => {
             const baseArgs = {
                 deviceId: "ios-sim-broker-apps",
                 viaBroker: true,
-                backend: "ios-simulator",
                 appiumPort: fakeAppium.port,
                 hostCandidates: ["127.0.0.1"],
                 port: address.port,
                 timeoutMs: 500,
             };
-            const screenshot = await client.callTool({ name: "device_screenshot", arguments: baseArgs });
+            const screenshot = await client.callTool({ name: "screenshot", arguments: baseArgs });
             expect(screenshot.isError, JSON.stringify(screenshot)).not.toBe(true);
             expect(screenshot.content).toEqual([{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }]);
 
             for (const [name, args] of [
-                ["mobile_open_url", { url: "https://example.test" }],
-                ["device_install_app", { path: join(repoRoot, "Test.app") }],
-                ["device_launch_app", { bundleId: "com.example.Test" }],
-                ["mobile_stop_app", { bundleId: "com.example.Test" }],
-                ["mobile_uninstall_app", { bundleId: "com.example.Test", confirmDestructive: true }],
-                ["mobile_set_location", { latitude: 37.5, longitude: 127.0, altitude: 42 }],
-                ["mobile_set_clipboard", { text: "hello broker" }],
+                ["open_url", { url: "https://example.test" }],
+                ["install_app", { path: join(repoRoot, "Test.app") }],
+                ["launch_app", { bundleId: "com.example.Test" }],
+                ["stop_app", { bundleId: "com.example.Test" }],
+                ["uninstall_app", { bundleId: "com.example.Test", confirmDestructive: true }],
+                ["set_location", { latitude: 37.5, longitude: 127.0, altitude: 42 }],
+                ["set_clipboard", { text: "hello broker" }],
             ] as const) {
-                const result = await client.callTool({ name, arguments: { ...baseArgs, ...args } });
+                const result = await client.callTool({ name, arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, ...args } });
                 expect(result.isError, `${name}: ${JSON.stringify(result)}`).not.toBe(true);
                 const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"));
-                if (name.startsWith("device_")) {
+                if (["install_app", "launch_app"].includes(name)) {
                     expect(payload).toEqual({ ok: true, provider: "native-fixture" });
-                    expect(deviceCalls.at(-1)).toMatchObject({ tool: name, deviceId: baseArgs.deviceId, params: args });
+                    expect(deviceCalls.at(-1)).toMatchObject({ tool: toolOperation(name), deviceId: baseArgs.deviceId, params: args });
                 } else {
-                    expect(payload).toMatchObject({ provider: "broker-appium", backend: baseArgs.backend, requests: 1 });
+                    expect(payload).toMatchObject({ provider: "broker-appium", backend: "ios-simulator", requests: 1 });
                 }
             }
 
-            expect(deviceCalls.map(call => call.tool)).toEqual([
-                "device_screenshot", "device_install_app", "device_launch_app",
+            expect(deviceCalls.map(call => call.tool.replace(/^device_/, ""))).toEqual([
+                "screenshot", "install_app", "launch_app",
             ]);
             expect(deviceCalls[0]).toMatchObject({ deviceId: baseArgs.deviceId });
-            const clipboard = await client.callTool({ name: "mobile_get_clipboard", arguments: baseArgs });
+            const clipboard = await client.callTool({ name: "get_clipboard", arguments: baseArgs });
             expect(JSON.parse(((clipboard.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 provider: "broker-appium",
                 backend: "ios-simulator",
                 text: "hello broker",
             }));
-            const waitForApp = await client.callTool({ name: "mobile_wait_for_app", arguments: { ...baseArgs, bundleId: "com.example.Test", intervalMs: 50 } });
+            const waitForApp = await client.callTool({ name: "wait_for_app", arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, bundleId: "com.example.Test", intervalMs: 50 } });
             expect(JSON.parse(((waitForApp.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 found: true,
                 provider: "broker-appium",
@@ -777,14 +776,14 @@ describe("device-lab MCP broker Appium routing", () => {
                 timeoutMs: 500,
             };
             for (const [name, args] of [
-                ["mobile_key", { keyCode: 82 }],
-                ["mobile_forward", {}],
-                ["mobile_recents", {}],
-                ["mobile_power", {}],
-                ["mobile_lock", {}],
-                ["mobile_unlock", {}],
+                ["key", { keyCode: 82 }],
+                ["forward", {}],
+                ["recents", {}],
+                ["power", {}],
+                ["lock", {}],
+                ["unlock", {}],
             ] as const) {
-                const result = await client.callTool({ name, arguments: { ...baseArgs, ...args } });
+                const result = await client.callTool({ name, arguments: { deviceId: baseArgs.deviceId, broker: baseArgs.broker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, ...args } });
                 expect(result.isError, `${name}: ${JSON.stringify(result)}`).not.toBe(true);
                 expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                     provider: "broker-appium",
@@ -794,8 +793,8 @@ describe("device-lab MCP broker Appium routing", () => {
             }
 
             const reverse = await client.callTool({
-                name: "mobile_set_orientation",
-                arguments: { ...baseArgs, orientation: "reverse-landscape" },
+                name: "set_orientation",
+                arguments: { deviceId: baseArgs.deviceId, broker: baseArgs.broker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, orientation: "reverse-landscape" },
             });
             expect(reverse.isError).not.toBe(true);
             expect(JSON.parse(((reverse.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -804,8 +803,8 @@ describe("device-lab MCP broker Appium routing", () => {
                 requests: 2,
             }));
             const deniedNetwork = await client.callTool({
-                name: "mobile_set_network",
-                arguments: { ...baseArgs, wifi: false },
+                name: "set_network",
+                arguments: { deviceId: baseArgs.deviceId, broker: baseArgs.broker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, wifi: false },
             });
             expect(deniedNetwork.isError).toBe(true);
             expect(JSON.parse(((deniedNetwork.content as Array<{ text?: string }>)[0].text ?? "{}")).policy).toEqual(expect.objectContaining({
@@ -814,8 +813,8 @@ describe("device-lab MCP broker Appium routing", () => {
             }));
 
             const network = await client.callTool({
-                name: "mobile_set_network",
-                arguments: { ...baseArgs, wifi: false, data: true, confirmDestructive: true },
+                name: "set_network",
+                arguments: { deviceId: baseArgs.deviceId, broker: baseArgs.broker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, wifi: false, data: true, confirmDestructive: true },
             });
             expect(network.isError).not.toBe(true);
             expect(JSON.parse(((network.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -825,8 +824,8 @@ describe("device-lab MCP broker Appium routing", () => {
             }));
 
             const airplane = await client.callTool({
-                name: "mobile_toggle_airplane_mode",
-                arguments: { ...baseArgs, enabled: true, confirmDestructive: true },
+                name: "toggle_airplane_mode",
+                arguments: { deviceId: baseArgs.deviceId, broker: baseArgs.broker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, enabled: true, confirmDestructive: true },
             });
             expect(airplane.isError).not.toBe(true);
             expect(JSON.parse(((airplane.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -919,48 +918,47 @@ describe("device-lab MCP broker Appium routing", () => {
             const baseArgs = {
                 deviceId: "android-broker-apps",
                 broker: true,
-                backend: "android-emulator",
                 appiumPort: fakeAppium.port,
                 hostCandidates: ["127.0.0.1"],
                 port: address.port,
                 timeoutMs: 500,
             };
-            const screenshot = await client.callTool({ name: "device_screenshot", arguments: baseArgs });
+            const screenshot = await client.callTool({ name: "screenshot", arguments: baseArgs });
             expect(screenshot.isError, JSON.stringify(screenshot)).not.toBe(true);
             expect(screenshot.content).toEqual([{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }]);
 
             for (const [name, args] of [
-                ["mobile_open_url", { url: "https://android.example.test" }],
-                ["device_install_app", { path: join(repoRoot, "test.apk") }],
-                ["device_launch_app", { packageName: "com.example.android" }],
-                ["device_launch_app", { component: "com.example.android/.MainActivity" }],
-                ["mobile_stop_app", { packageName: "com.example.android" }],
-                ["mobile_uninstall_app", { packageName: "com.example.android", confirmDestructive: true }],
-                ["mobile_set_location", { latitude: 35.1, longitude: 129.2 }],
-                ["mobile_set_clipboard", { text: "hello broker" }],
+                ["open_url", { url: "https://android.example.test" }],
+                ["install_app", { path: join(repoRoot, "test.apk") }],
+                ["launch_app", { packageName: "com.example.android" }],
+                ["launch_app", { component: "com.example.android/.MainActivity" }],
+                ["stop_app", { packageName: "com.example.android" }],
+                ["uninstall_app", { packageName: "com.example.android", confirmDestructive: true }],
+                ["set_location", { latitude: 35.1, longitude: 129.2 }],
+                ["set_clipboard", { text: "hello broker" }],
             ] as const) {
-                const result = await client.callTool({ name, arguments: { ...baseArgs, ...args } });
+                const result = await client.callTool({ name, arguments: { deviceId: baseArgs.deviceId, broker: baseArgs.broker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, ...args } });
                 expect(result.isError, `${name}: ${JSON.stringify(result)}`).not.toBe(true);
                 const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"));
-                if (name.startsWith("device_")) {
+                if (["install_app", "launch_app"].includes(name)) {
                     expect(payload).toEqual({ ok: true, provider: "native-fixture" });
-                    expect(deviceCalls.at(-1)).toMatchObject({ tool: name, deviceId: baseArgs.deviceId, params: args });
+                    expect(deviceCalls.at(-1)).toMatchObject({ tool: toolOperation(name), deviceId: baseArgs.deviceId, params: args });
                 } else {
-                    expect(payload).toMatchObject({ provider: "broker-appium", backend: baseArgs.backend, requests: 1 });
+                    expect(payload).toMatchObject({ provider: "broker-appium", backend: "android-emulator", requests: 1 });
                 }
             }
 
-            expect(deviceCalls.map(call => call.tool)).toEqual([
-                "device_screenshot", "device_install_app", "device_launch_app", "device_launch_app",
+            expect(deviceCalls.map(call => call.tool.replace(/^device_/, ""))).toEqual([
+                "screenshot", "install_app", "launch_app", "launch_app",
             ]);
             expect(deviceCalls[0]).toMatchObject({ deviceId: baseArgs.deviceId });
-            const clipboard = await client.callTool({ name: "mobile_get_clipboard", arguments: baseArgs });
+            const clipboard = await client.callTool({ name: "get_clipboard", arguments: baseArgs });
             expect(JSON.parse(((clipboard.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 provider: "broker-appium",
                 backend: "android-emulator",
                 text: "hello broker",
             }));
-            const waitForApp = await client.callTool({ name: "mobile_wait_for_app", arguments: { ...baseArgs, packageName: "com.example.android", intervalMs: 50 } });
+            const waitForApp = await client.callTool({ name: "wait_for_app", arguments: { deviceId: baseArgs.deviceId, broker: baseArgs.broker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, packageName: "com.example.android", intervalMs: 50 } });
             expect(JSON.parse(((waitForApp.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 found: true,
                 provider: "broker-appium",
@@ -986,101 +984,114 @@ describe("device-lab MCP broker Appium routing", () => {
     });
 
     it("rejects unsupported broker mobile controls before starting a broker Appium session", { timeout: TIMEOUT }, async () => {
+        const server = createDeviceBrokerServer({ cwd: repoRoot, host: "127.0.0.1", port: 0 });
+        await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+        const port = (server.address() as AddressInfo).port;
+        const echo = await callInternalBroker(client, { operation: "brokerRpc", arguments: { method: "broker.echo", params: {}, hostCandidates: ["127.0.0.1"], port, timeoutMs: 500 } });
+        const owner = JSON.parse((echo.content as Array<{text: string}>)[0].text).ownerId;
+        writeIosPhysicalAttachment(owner, "iphone-broker-mobile", "REAL-UDID-2");
+        writeBrokerDevices(owner, "android-device", [{ id: "android-real-owned", backend: "android-device", serial: "physical-device" }]);
+        try {
+
         const result = await client.callTool({
-            name: "mobile_power",
+            name: "power",
             arguments: {
                 deviceId: "iphone-broker-mobile",
                 viaBroker: true,
-                backend: "ios-device",
                 hostCandidates: ["127.0.0.1"],
-                port: 9,
-                timeoutMs: 50,
+                port,
+                timeoutMs: 500,
             },
         });
         expect(result.isError).toBe(true);
         expect((result.content as Array<{ text?: string }>)[0].text).toContain("mobile_power is only supported by Android broker routing");
 
         const clearData = await client.callTool({
-            name: "mobile_clear_app_data",
+            name: "clear_app_data",
             arguments: {
                 deviceId: "iphone-broker-mobile",
                 viaBroker: true,
-                backend: "ios-device",
                 bundleId: "com.example.Test",
                 confirmDestructive: true,
                 hostCandidates: ["127.0.0.1"],
-                port: 9,
-                timeoutMs: 50,
+                port,
+                timeoutMs: 500,
             },
         });
         expect(clearData.isError).toBe(true);
         expect((clearData.content as Array<{ text?: string }>)[0].text).toContain("mobile_clear_app_data is not supported by iOS physical devices");
 
         const missingAppId = await client.callTool({
-            name: "mobile_wait_for_app",
+            name: "wait_for_app",
             arguments: {
                 deviceId: "iphone-broker-mobile",
                 viaBroker: true,
-                backend: "ios-device",
                 hostCandidates: ["127.0.0.1"],
-                port: 9,
-                timeoutMs: 50,
+                port,
+                timeoutMs: 500,
             },
         });
         expect(missingAppId.isError).toBe(true);
         expect((missingAppId.content as Array<{ text?: string }>)[0].text).toContain("mobile_wait_for_app requires bundleId");
 
         const unsafePhysicalLocation = await client.callTool({
-            name: "mobile_set_location",
+            name: "set_location",
             arguments: {
                 deviceId: "android-real-owned",
                 viaBroker: true,
-                backend: "android-device",
                 latitude: 1,
                 longitude: 2,
                 hostCandidates: ["127.0.0.1"],
-                port: 9,
-                timeoutMs: 50,
+                port,
+                timeoutMs: 500,
             },
         });
         expect(unsafePhysicalLocation.isError).toBe(true);
         expect((unsafePhysicalLocation.content as Array<{ text?: string }>)[0].text).toContain("Android real devices do not support mobile_set_location safely through broker routing");
 
         const unsafeIosPhysicalLocation = await client.callTool({
-            name: "mobile_set_location",
+            name: "set_location",
             arguments: {
                 deviceId: "iphone-broker-mobile",
                 viaBroker: true,
-                backend: "ios-device",
                 latitude: 1,
                 longitude: 2,
                 hostCandidates: ["127.0.0.1"],
-                port: 9,
-                timeoutMs: 50,
+                port,
+                timeoutMs: 500,
             },
         });
         expect(unsafeIosPhysicalLocation.isError).toBe(true);
         expect((unsafeIosPhysicalLocation.content as Array<{ text?: string }>)[0].text).toContain("iOS real devices do not support mobile_set_location safely through broker routing");
+        } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+
     });
 
-    it("fails high-level broker mobile actions before contacting the broker when the owner device is unknown", { timeout: TIMEOUT }, async () => {
+    it("fails high-level broker mobile actions before Appium when broker inventory has no owned device", { timeout: TIMEOUT }, async () => {
+        const server = createDeviceBrokerServer({ cwd: repoRoot, host: "127.0.0.1", port: 0 });
+        await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+        const port = (server.address() as AddressInfo).port;
+        try {
+
         const result = await client.callTool({
-            name: "mobile_dump_ui",
+            name: "dump_ui",
             arguments: {
                 deviceId: "not-owned-by-this-container",
                 viaBroker: true,
                 hostCandidates: ["127.0.0.1"],
-                port: 9,
-                timeoutMs: 50,
+                port,
+                timeoutMs: 500,
             },
         });
         expect(result.isError).toBe(true);
         expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: false,
             error: "device-backend-not-found",
+            matches: [],
             routedBy: "mobile-broker-appium",
             deviceId: "not-owned-by-this-container",
-            matches: [],
         }));
+        } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+
     });
 });

@@ -1,3 +1,4 @@
+import { toolOperation } from "../../device-lab-mcp/src/tools.mjs";
 import { createHash } from "crypto";
 import { readFileSync, statSync } from "fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -23,12 +24,12 @@ const HYPER_V_LINUX_GUI_TIMEOUT_MS = 17 * 60 * 1000;
 const HYPER_V_CLEANUP_RESERVE_MS = 5 * 60 * 1000;
 const REAL_MCP_CLIENT_RPC_BUFFER_MS = 30000;
 const HYPER_V_LIFECYCLE_TOOLS = new Set([
-    "device_create",
-    "device_status",
-    "device_start",
-    "device_stop",
-    "device_reboot",
-    "device_delete",
+    "create",
+    "status",
+    "start",
+    "stop",
+    "reboot",
+    "delete",
 ]);
 
 function boundedBrokerDiagnosticCode(value: unknown): string | undefined {
@@ -39,10 +40,10 @@ function boundedBrokerDiagnosticCode(value: unknown): string | undefined {
 
 export function realMcpToolRequestTimeoutMs(name: string, args: Record<string, any> = {}) {
     const hyperVBackend = args?.backend === "windows-vm" || args?.backend === "linux-vm";
-    if (hyperVBackend && name === "device_create") {
+    if (hyperVBackend && name === "create") {
         return HYPER_V_MAX_SERVER_RPC_TIMEOUT_MS + REAL_MCP_CLIENT_RPC_BUFFER_MS;
     }
-    if (hyperVBackend && (name === "device_start" || name === "device_reboot")) {
+    if (hyperVBackend && (name === "start" || name === "reboot")) {
         const bootTimeoutMs = args?.waitForBoot === false
             ? 0
             : Number.isFinite(args?.bootTimeoutMs)
@@ -70,18 +71,18 @@ export function realMcpToolRequestTimeoutMs(name: string, args: Record<string, a
     if (Number.isFinite(helperTimeoutMs)) {
         return Math.min(MAX_REAL_MCP_TOOL_TIMEOUT_MS, Math.max(DEFAULT_REAL_MCP_TOOL_TIMEOUT_MS, helperTimeoutMs + 30000));
     }
-    if (name === "device_create" && args?.createAvd === true) return LONG_REAL_MCP_TOOL_TIMEOUT_MS;
-    if (name === "device_start" && args?.waitForBoot === true) {
+    if (name === "create" && args?.createAvd === true) return LONG_REAL_MCP_TOOL_TIMEOUT_MS;
+    if (name === "start" && args?.waitForBoot === true) {
         const bootTimeoutMs = Number(args?.bootTimeoutMs);
         return Number.isFinite(bootTimeoutMs)
             ? Math.min(MAX_REAL_MCP_TOOL_TIMEOUT_MS, Math.max(DEFAULT_REAL_MCP_TOOL_TIMEOUT_MS, bootTimeoutMs + 30000))
             : LONG_REAL_MCP_TOOL_TIMEOUT_MS;
     }
-    if (name === "device_delete" && args?.deleteAvd === true) return LONG_REAL_MCP_TOOL_TIMEOUT_MS;
-    if (name === "device_broker_appium" || name === "mobile_set_clipboard" || name === "mobile_get_clipboard") {
+    if (name === "delete" && args?.deleteAvd === true) return LONG_REAL_MCP_TOOL_TIMEOUT_MS;
+    if (name === "device_broker_appium" || name === "set_clipboard" || name === "get_clipboard") {
         return LONG_REAL_MCP_TOOL_TIMEOUT_MS;
     }
-    if (typeof args?.backend === "string" && args.backend.startsWith("ios") && name.startsWith("mobile_")) {
+    if (typeof args?.backend === "string" && args.backend.startsWith("ios") && (toolOperation(name)?.startsWith("mobile_") || ["click", "double_click", "key", "type"].includes(name))) {
         return LONG_REAL_MCP_TOOL_TIMEOUT_MS;
     }
     return DEFAULT_REAL_MCP_TOOL_TIMEOUT_MS;
@@ -178,6 +179,7 @@ export function summarizeToolResultForProof(result) {
         }
     } else {
         summary.okPayloadText = text.trim().length > 0;
+        if (content.length === 1 && content[0]?.type === "text" && content[0].text === "ok") summary.okPayloadAction = true;
         summary.okPayloadImage = imagePayload;
         summary.okPayloadJson = Boolean(jsonPayload);
         if (jsonPayload) summary.okPayloadShape = jsonPayloadShape(jsonPayload);
@@ -200,6 +202,7 @@ function summarizeFlowStepPayload(step) {
         const errorPayload = jsonItems.map((item) => item?.value).find((value) => validJsonContentValue(value) && typeof value.error === "string" && value.error);
         if (errorPayload) summary.errorCode = errorPayload.error;
     } else {
+        if (content.length === 1 && content[0]?.type === "text" && content[0].text === "ok") summary.okPayloadAction = true;
         const okJsonPayload = jsonItems.map((item) => item?.value).find(validJsonContentValue);
         summary.okPayloadJson = Boolean(okJsonPayload);
         if (okJsonPayload) summary.okPayloadShape = jsonPayloadShape(okJsonPayload);
@@ -210,6 +213,58 @@ function summarizeFlowStepPayload(step) {
         ));
     }
     return summary;
+}
+
+const PROOF_BACKENDS = new Set(["android-emulator", "android-device", "ios-simulator", "ios-device", "windows-vm", "windows-sandbox", "linux-vm", "macos-vm", "x11-current-display"]);
+
+// Session-scoped evidence only: a successful owner inventory or lifecycle result
+// must identify the device before later image/"ok" responses earn provider credit.
+export function createTargetBackendEvidence() {
+    const identities = new Map<string, Set<string>>();
+    const stateBackends = { android: "android-emulator", "android-device": "android-device", ios: "ios-simulator", "ios-device": "ios-device", windows: "windows-sandbox", macos: "macos-vm", "windows-vm": "windows-vm", "linux-vm": "linux-vm" };
+    const validBackend = (value: unknown) => value === "x11" ? "x11-current-display"
+        : typeof value === "string" && PROOF_BACKENDS.has(value) ? value : undefined;
+    const remember = (device: any, inherited?: string) => {
+        if (!device || typeof device !== "object" || Array.isArray(device) || device.ok === false || device.error) return;
+        const backend = validBackend(device.backend) || inherited;
+        const id = device.id || device.deviceId;
+        if (typeof id !== "string" || !id || !backend) return;
+        const known = identities.get(id) || new Set<string>();
+        known.add(backend);
+        identities.set(id, known);
+    };
+    const lookup = (id: unknown) => {
+        const known = typeof id === "string" ? identities.get(id) : undefined;
+        return known?.size === 1 ? [...known][0] : undefined;
+    };
+    return {
+        lookup,
+        observe(name: string, args: Record<string, any>, result: any) {
+            if (result?.isError === true) return undefined;
+            if (!["create", "attach", "inventory", "list_devices", "status"].includes(name)) return lookup(args.deviceId);
+            const payload: any = jsonContentPayload(resultContent(result));
+            if (payload?.ok === false || payload?.error) return undefined;
+            const selector = ["create", "attach", "inventory"].includes(name) ? validBackend(args.backend) : undefined;
+            const observeEnvelope = (value: any, inherited?: string) => {
+                if (!value || typeof value !== "object" || value.ok === false || value.error) return;
+                const backend = validBackend(value.backend) || validBackend(stateBackends[value.stateKey]) || inherited;
+                if (Array.isArray(value)) value.forEach(device => remember(device, backend));
+                else {
+                    remember(value, backend);
+                    remember(value.device, backend);
+                    for (const device of Array.isArray(value.devices) ? value.devices : []) remember(device, backend);
+                    for (const group of Array.isArray(value.backends) ? value.backends : []) {
+                        if (!group || group.ok === false || group.error) continue;
+                        const groupBackend = validBackend(group.backend) || validBackend(stateBackends[group.stateKey]);
+                        for (const device of Array.isArray(group.devices) ? group.devices : []) remember(device, groupBackend);
+                    }
+                }
+            };
+            observeEnvelope(payload, selector);
+            observeEnvelope(payload?.result, validBackend(payload?.backend) || selector);
+            return lookup(args.deviceId);
+        },
+    };
 }
 
 function changedEnvKeys(env = {}) {
@@ -277,11 +332,13 @@ export async function withDeviceLabMcp(callback, options: any = {}) {
     try {
         const listed = await client.listTools();
         sessionRecord.advertisedToolSurface = toolSurfaceFingerprint(Array.isArray(listed?.tools) ? listed.tools : []);
+        const targetBackends = createTargetBackendEvidence();
         const callTool = async (name: string, args: Record<string, any> = {}) => {
             const record: Record<string, any> = { name, arguments: args, outcome: "pending", mcpSessionId: sessionId };
             toolCalls().push(record);
             try {
-                const timeout = realMcpToolRequestTimeoutMs(name, args);
+                const knownBackend = targetBackends.lookup(args.deviceId);
+                const timeout = realMcpToolRequestTimeoutMs(name, knownBackend ? { ...args, backend: knownBackend } : args);
                 const result = await client.callTool(
                     { name, arguments: args },
                     undefined,
@@ -290,7 +347,9 @@ export async function withDeviceLabMcp(callback, options: any = {}) {
                 record.outcome = result?.isError === true ? "error-result" : "ok";
                 record.isError = result?.isError === true;
                 Object.assign(record, summarizeToolResultForProof(result));
-                if (name === "device_run_flow" && result?.isError !== true) {
+                const observedBackend = targetBackends.observe(name, args, result);
+                if (observedBackend) record.observedBackend = observedBackend;
+                if (name === "run_flow" && result?.isError !== true) {
                     try {
                         const payload = jsonContentPayload(resultContent(result)) || {};
                         if (Array.isArray(payload?.results)) {
@@ -323,7 +382,7 @@ export async function withDeviceLabMcp(callback, options: any = {}) {
             callTool,
             callContractTool: async (name, args = {}) => {
                 if (!hasDeviceLabOutputContract(name)) throw new Error(`No output contract registered for ${name}`);
-                return validateDeviceLabToolOutput(name, parseToolPayload(await callTool(name, args)));
+                return parseContractToolPayload(name, await callTool(name, args));
             },
         });
     } finally {
@@ -769,6 +828,10 @@ export function formatBrokerToolFailure(value: any, fallback: string) {
 export function parseContractToolPayload<K extends keyof DeviceLabToolOutputMap>(name: K, result: any): DeviceLabToolOutputMap[K] {
     if (!hasDeviceLabOutputContract(name)) throw new Error(`No output contract registered for ${name}`);
     if (DEVICE_LAB_OUTPUT_CONTRACTS[name] === "image-content-v1") return validateDeviceLabToolOutput(name, result);
+    if (DEVICE_LAB_OUTPUT_CONTRACTS[name] === "action-v1" && result?.isError !== true
+        && result?.content?.length === 1 && result.content[0]?.type === "text" && result.content[0].text === "ok") {
+        return validateDeviceLabToolOutput(name, "ok");
+    }
     return validateDeviceLabToolOutput(name, parseToolPayload(result));
 }
 

@@ -35,93 +35,82 @@ export function installedMcpSmokeSample(toolName) {
     const macosId = "dist-macos-smoke";
     const linuxId = "dist-linux-smoke";
     const byName = {
-        device_backends: { ...direct },
-        device_broker_status: { ...brokerProbe },
-        device_list: {},
-        device_inventory: { ...direct, backend: "android-emulator" },
-        device_image_list: { },
-        device_image_import: { name: "Missing image smoke", sourcePath: "missing-smoke.qcow2" },
-        device_wireless: { backend: "android-device", action: "status", timeoutMs: 1 },
-        display_current: {},
-        display_screenshot: {},
-        display_click: { x: 1, y: 1, button: "left" },
-        display_double_click: { x: 1, y: 1, button: "left" },
-        display_key: { key: "Escape" },
-        display_type: { text: "" },
-        display_scroll: { x: 1, y: 1, direction: "down", amount: 1 },
-        display_cursor_position: {},
-        device_create: { ...direct, backend: "android-emulator", name: "Dist Android smoke", deviceId: androidId },
-        device_attach: { ...direct, backend: "android-device", name: "Dist attach smoke", serial: "SERIAL-SMOKE" },
-        device_detach: { ...brokerProbe, broker: true, deviceId: "missing-detach-smoke" },
-        device_delete: { ...brokerProbe, broker: true, backend: "android-emulator", deviceId: "missing-delete-smoke", confirmDestructive: true },
-        device_start: { ...direct, backend: "android-emulator", deviceId: androidId, waitForBoot: false, bootTimeoutMs: 1 },
-        device_stop: { ...direct, backend: "android-emulator", deviceId: androidId },
-        device_reboot: { backend: "linux-vm", deviceId: linuxId },
-        device_status: { ...direct, backend: "android-emulator", deviceId: androidId },
-        device_disk_materialize: { backend: "linux-vm", deviceId: linuxId },
-        device_target_list: { },
-        device_readiness_probe: { deviceId: linuxId },
-        device_session_open: { deviceId: linuxId },
-        device_workspace_sync: { deviceId: linuxId },
-        device_artifacts_export: { deviceId: linuxId },
-        device_guest_agent_status: { deviceId: linuxId, timeoutMs: 1 },
-        device_guest_agent_provision: { deviceId: linuxId, timeoutMs: 1 },
-        device_exec: { ...direct, backend: "android-emulator", deviceId: androidId, command: "true", helperTimeoutMs: 1 },
-        device_screenshot: { ...direct, backend: "android-emulator", deviceId: androidId, helperTimeoutMs: 1 },
-        device_click: { ...direct, backend: "windows-sandbox", deviceId: windowsId, x: 1, y: 1, helperTimeoutMs: 1 },
-        device_double_click: { ...direct, backend: "windows-sandbox", deviceId: windowsId, x: 1, y: 1, helperTimeoutMs: 1 },
-        device_key: { ...direct, backend: "windows-sandbox", deviceId: windowsId, key: "Escape", helperTimeoutMs: 1 },
-        device_type: { ...direct, backend: "windows-sandbox", deviceId: windowsId, text: "", helperTimeoutMs: 1 },
-        device_scroll: { ...direct, backend: "windows-sandbox", deviceId: windowsId, x: 1, y: 1, direction: "down", amount: 1, helperTimeoutMs: 1 },
-        device_cursor_position: { ...direct, backend: "windows-sandbox", deviceId: windowsId, helperTimeoutMs: 1 },
-        device_window_list: { ...direct, backend: "windows-sandbox", deviceId: windowsId, helperTimeoutMs: 1 },
-        device_accessibility_snapshot: { ...direct, backend: "windows-sandbox", deviceId: windowsId, maxDepth: 1, maxNodes: 1, helperTimeoutMs: 1 },
-        device_base_image_create: { name: "Base image smoke", sourceImage: "missing-source" },
-        device_base_image_clone: { name: "Base clone smoke", sourceDeviceId: macosId },
-        device_snapshot_list: { ...direct, backend: "linux-vm", deviceId: linuxId },
-        device_snapshot_create: { ...direct, backend: "macos-vm", deviceId: macosId, snapshotName: "smoke" },
-        device_snapshot_restore: { ...direct, backend: "macos-vm", deviceId: macosId, snapshotName: "smoke", force: true, confirmDestructive: true },
-        device_snapshot_delete: { ...direct, backend: "macos-vm", deviceId: macosId, snapshotName: "smoke", confirmDestructive: true },
-        device_record_video_start: { ...direct, backend: "android-emulator", deviceId: androidId, remotePath: "/sdcard/smoke.mp4", timeLimitSec: 1 },
-        device_record_video_stop: { ...direct, backend: "android-emulator", deviceId: androidId, helperTimeoutMs: 1 },
-        device_record_video_status: { ...direct, backend: "android-emulator", deviceId: androidId, helperTimeoutMs: 1 },
-        device_upload: { ...direct, backend: "android-emulator", deviceId: androidId, localPath: "/tmp/missing-smoke.txt", remotePath: "/sdcard/missing-smoke.txt", helperTimeoutMs: 1 },
-        device_download: { ...direct, backend: "android-emulator", deviceId: androidId, remotePath: "/sdcard/missing-smoke.txt", localPath: "/tmp/device-lab-smoke-download.txt", helperTimeoutMs: 1 },
-        device_reset: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
-        device_install_app: { ...direct, backend: "android-emulator", deviceId: androidId, path: "/tmp/missing-smoke.apk" },
-        device_launch_app: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke" },
-        mobile_session_status: { ...direct, backend: "android-emulator", deviceId: androidId },
-        mobile_dump_ui: { ...direct, backend: "android-emulator", deviceId: androidId },
-        mobile_tap: { ...direct, backend: "android-emulator", deviceId: androidId, x: 1, y: 1 },
-        mobile_double_tap: { ...direct, backend: "android-emulator", deviceId: androidId, x: 1, y: 1 },
-        mobile_long_press: { ...direct, backend: "android-emulator", deviceId: androidId, x: 1, y: 1, durationMs: 1 },
-        mobile_swipe: { ...direct, backend: "android-emulator", deviceId: androidId, x1: 1, y1: 1, x2: 2, y2: 2, durationMs: 1 },
-        mobile_drag: { ...direct, backend: "android-emulator", deviceId: androidId, x1: 1, y1: 1, x2: 2, y2: 2, durationMs: 1 },
-        mobile_type_text: { ...direct, backend: "android-emulator", deviceId: androidId, text: "smoke" },
-        mobile_key: { ...direct, backend: "android-emulator", deviceId: androidId, keyCode: 4 },
-        mobile_home: { ...direct, backend: "android-emulator", deviceId: androidId },
-        mobile_back: { ...direct, backend: "android-emulator", deviceId: androidId },
-        mobile_forward: { ...direct, backend: "android-emulator", deviceId: androidId },
-        mobile_recents: { ...direct, backend: "android-emulator", deviceId: androidId },
-        mobile_power: { ...direct, backend: "android-emulator", deviceId: androidId },
-        mobile_lock: { ...direct, backend: "android-emulator", deviceId: androidId },
-        mobile_unlock: { ...direct, backend: "android-emulator", deviceId: androidId },
-        mobile_set_orientation: { ...direct, backend: "android-emulator", deviceId: androidId, orientation: "portrait" },
-        mobile_open_url: { ...direct, backend: "android-emulator", deviceId: androidId, url: "https://example.invalid" },
-        mobile_uninstall_app: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
-        mobile_stop_app: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke" },
-        mobile_clear_app_data: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
-        mobile_grant_permission: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke", permission: "android.permission.CAMERA" },
-        mobile_revoke_permission: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke", permission: "android.permission.CAMERA" },
-        mobile_set_location: { ...direct, backend: "android-emulator", deviceId: androidId, latitude: 1, longitude: 2 },
-        mobile_set_battery: { ...direct, backend: "android-emulator", deviceId: androidId, level: 50, confirmDestructive: true },
-        mobile_set_network: { ...direct, backend: "android-emulator", deviceId: androidId, wifi: true, confirmDestructive: true },
-        mobile_toggle_airplane_mode: { ...direct, backend: "android-emulator", deviceId: androidId, enabled: false, confirmDestructive: true },
-        mobile_set_clipboard: { ...direct, backend: "android-emulator", deviceId: androidId, text: "smoke" },
-        mobile_get_clipboard: { ...direct, backend: "android-emulator", deviceId: androidId },
-        mobile_wait_for_text: { ...direct, backend: "android-emulator", deviceId: androidId, text: "smoke", timeoutMs: 1, intervalMs: 50 },
-        mobile_wait_for_app: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke", timeoutMs: 1, intervalMs: 50 },
-        device_run_flow: { steps: [{ tool: "mobile_session_status", arguments: { ...direct, backend: "android-emulator", deviceId: androidId } }] },
+        backends: { ...direct },
+        broker_status: { ...brokerProbe },
+        list_devices: {},
+        inventory: { ...direct, backend: "android-emulator" },
+        image_list: { },
+        image_import: { name: "Missing image smoke", sourcePath: "missing-smoke.qcow2" },
+        wireless: { backend: "android-device", action: "status", timeoutMs: 1 },
+        create: { ...direct, backend: "android-emulator", name: "Dist Android smoke", deviceId: androidId },
+        attach: { ...direct, backend: "android-device", name: "Dist attach smoke", serial: "SERIAL-SMOKE" },
+        detach: { ...brokerProbe, broker: true, deviceId: "missing-detach-smoke" },
+        delete: { ...brokerProbe, broker: true, deviceId: "missing-delete-smoke", confirmDestructive: true },
+        start: { ...direct, deviceId: androidId, waitForBoot: false, bootTimeoutMs: 1 },
+        stop: { ...direct, deviceId: androidId },
+        reboot: { deviceId: linuxId },
+        status: { ...direct, deviceId: androidId },
+        disk_materialize: { deviceId: linuxId },
+        target_list: { },
+        readiness_probe: { deviceId: linuxId },
+        session_open: { deviceId: linuxId },
+        workspace_sync: { deviceId: linuxId },
+        artifacts_export: { deviceId: linuxId },
+        guest_agent_status: { deviceId: linuxId, timeoutMs: 1 },
+        guest_agent_provision: { deviceId: linuxId, timeoutMs: 1 },
+        exec: { ...direct, deviceId: androidId, command: "true", helperTimeoutMs: 1 },
+        screenshot: { ...direct, deviceId: androidId, helperTimeoutMs: 1 },
+        scroll: { ...direct, deviceId: windowsId, x: 1, y: 1, direction: "down", amount: 1, helperTimeoutMs: 1 },
+        move: { deviceId: "x11-current-display", x: 1, y: 1 },
+        cursor_position: { ...direct, deviceId: windowsId, helperTimeoutMs: 1 },
+        window_list: { ...direct, deviceId: windowsId, helperTimeoutMs: 1 },
+        accessibility_snapshot: { ...direct, deviceId: windowsId, maxDepth: 1, maxNodes: 1, helperTimeoutMs: 1 },
+        base_image_create: { name: "Base image smoke", sourceImage: "missing-source" },
+        base_image_clone: { name: "Base clone smoke", sourceDeviceId: macosId },
+        snapshot_list: { ...direct, deviceId: linuxId },
+        snapshot_create: { ...direct, deviceId: macosId, snapshotName: "smoke" },
+        snapshot_restore: { ...direct, deviceId: macosId, snapshotName: "smoke", force: true, confirmDestructive: true },
+        snapshot_delete: { ...direct, deviceId: macosId, snapshotName: "smoke", confirmDestructive: true },
+        record_video_start: { ...direct, deviceId: androidId, remotePath: "/sdcard/smoke.mp4", timeLimitSec: 1 },
+        record_video_stop: { ...direct, deviceId: androidId, helperTimeoutMs: 1 },
+        record_video_status: { ...direct, deviceId: androidId, helperTimeoutMs: 1 },
+        upload: { ...direct, deviceId: androidId, localPath: "/tmp/missing-smoke.txt", remotePath: "/sdcard/missing-smoke.txt", helperTimeoutMs: 1 },
+        download: { ...direct, deviceId: androidId, remotePath: "/sdcard/missing-smoke.txt", localPath: "/tmp/device-lab-smoke-download.txt", helperTimeoutMs: 1 },
+        reset: { ...direct, deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
+        install_app: { ...direct, deviceId: androidId, path: "/tmp/missing-smoke.apk" },
+        launch_app: { ...direct, deviceId: androidId, packageName: "com.example.smoke" },
+        automation_status: { ...direct, deviceId: androidId },
+        dump_ui: { ...direct, deviceId: androidId },
+        click: { ...direct, deviceId: androidId, x: 1, y: 1 },
+        double_click: { ...direct, deviceId: androidId, x: 1, y: 1 },
+        long_press: { ...direct, deviceId: androidId, x: 1, y: 1, durationMs: 1 },
+        swipe: { ...direct, deviceId: androidId, x1: 1, y1: 1, x2: 2, y2: 2, durationMs: 1 },
+        drag: { ...direct, deviceId: androidId, x1: 1, y1: 1, x2: 2, y2: 2, durationMs: 1 },
+        type: { ...direct, deviceId: androidId, text: "smoke" },
+        key: { ...direct, deviceId: androidId, keyCode: 4 },
+        home: { ...direct, deviceId: androidId },
+        back: { ...direct, deviceId: androidId },
+        forward: { ...direct, deviceId: androidId },
+        recents: { ...direct, deviceId: androidId },
+        power: { ...direct, deviceId: androidId },
+        lock: { ...direct, deviceId: androidId },
+        unlock: { ...direct, deviceId: androidId },
+        set_orientation: { ...direct, deviceId: androidId, orientation: "portrait" },
+        open_url: { ...direct, deviceId: androidId, url: "https://example.invalid" },
+        uninstall_app: { ...direct, deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
+        stop_app: { ...direct, deviceId: androidId, packageName: "com.example.smoke" },
+        clear_app_data: { ...direct, deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
+        grant_permission: { ...direct, deviceId: androidId, packageName: "com.example.smoke", permission: "android.permission.CAMERA" },
+        revoke_permission: { ...direct, deviceId: androidId, packageName: "com.example.smoke", permission: "android.permission.CAMERA" },
+        set_location: { ...direct, deviceId: androidId, latitude: 1, longitude: 2 },
+        set_battery: { ...direct, deviceId: androidId, level: 50, confirmDestructive: true },
+        set_network: { ...direct, deviceId: androidId, wifi: true, confirmDestructive: true },
+        toggle_airplane_mode: { ...direct, deviceId: androidId, enabled: false, confirmDestructive: true },
+        set_clipboard: { ...direct, deviceId: androidId, text: "smoke" },
+        get_clipboard: { ...direct, deviceId: androidId },
+        wait_for_text: { ...direct, deviceId: androidId, text: "smoke", timeoutMs: 1, intervalMs: 50 },
+        wait_for_app: { ...direct, deviceId: androidId, packageName: "com.example.smoke", timeoutMs: 1, intervalMs: 50 },
+        run_flow: { steps: [{ tool: "automation_status", arguments: { ...direct, deviceId: androidId } }] },
     };
     return byName[toolName] || {};
 }
@@ -167,41 +156,41 @@ export async function runInstalledMcpSmoke(options: any = {}) {
             if (JSON.stringify(listedSchemas) !== JSON.stringify(canonicalSchemas)) {
                 failures.push("advertised tool schemas do not match canonical device-lab MCP tools");
             }
-            if (!toolNames.includes("device_backends")) failures.push("device_backends must be advertised");
-            if (!toolNames.includes("device_status")) failures.push("device_status must be advertised");
-            if (!toolNames.includes("device_run_flow")) failures.push("device_run_flow must be advertised");
+            if (!toolNames.includes("backends")) failures.push("backends must be advertised");
+            if (!toolNames.includes("status")) failures.push("status must be advertised");
+            if (!toolNames.includes("run_flow")) failures.push("run_flow must be advertised");
 
-            const backendsResult = await callTool("device_backends", { implicitBroker: false });
-            recordDispatchMismatch(failures, "device_backends", backendsResult);
+            const backendsResult = await callTool("backends", { detail: true, implicitBroker: false });
+            recordDispatchMismatch(failures, "backends", backendsResult);
             const backends = backendsResult?.isError ? {} : parseToolPayload(backendsResult);
             const currentDisplay = backends.backends?.find((backend) => backend?.name === "x11-current-display");
             if (!currentDisplay) failures.push("x11-current-display backend must be advertised");
-            if (currentDisplay && !currentDisplay.capabilities?.includes("device_status")) {
-                failures.push("x11-current-display must expose device_status alias capability");
+            if (currentDisplay && !currentDisplay.capabilities?.includes("status")) {
+                failures.push("x11-current-display must expose status capability");
             }
 
-            const statusResult = await callTool("device_status", { deviceId: "x11-current-display" });
-            recordDispatchMismatch(failures, "device_status", statusResult);
+            const statusResult = await callTool("status", { detail: true, deviceId: "x11-current-display" });
+            recordDispatchMismatch(failures, "status", statusResult);
             if (statusResult?.isError) {
-                failures.push(`device_status current-display alias returned isError=true: ${contentText(statusResult)}`);
+                failures.push(`status current-display returned isError=true: ${contentText(statusResult)}`);
             } else {
                 const status = parseToolPayload(statusResult);
-                if (status.id !== "x11-current-display") failures.push(`device_status returned id=${JSON.stringify(status.id)}`);
-                if (status.kind !== "display") failures.push(`device_status returned kind=${JSON.stringify(status.kind)}`);
-                if (status.backend !== "x11") failures.push(`device_status returned backend=${JSON.stringify(status.backend)}`);
+                if (status.id !== "x11-current-display") failures.push(`status returned id=${JSON.stringify(status.id)}`);
+                if (status.kind !== "display") failures.push(`status returned kind=${JSON.stringify(status.kind)}`);
+                if (status.backend !== "x11") failures.push(`status returned backend=${JSON.stringify(status.backend)}`);
             }
 
-            const flowResult = await callTool("device_run_flow", {
-                steps: [{ tool: "device_status", arguments: { deviceId: "x11-current-display" } }],
+            const flowResult = await callTool("run_flow", { detail: true,
+                steps: [{ tool: "status", arguments: { deviceId: "x11-current-display" } }],
             });
-            recordDispatchMismatch(failures, "device_run_flow", flowResult);
+            recordDispatchMismatch(failures, "run_flow", flowResult);
             if (flowResult?.isError) {
-                failures.push(`device_run_flow current-display alias returned isError=true: ${contentText(flowResult)}`);
+                failures.push(`run_flow current-display returned isError=true: ${contentText(flowResult)}`);
             } else {
                 const flow = parseToolPayload(flowResult);
-                if (flow.ok !== true) failures.push(`device_run_flow returned ok=${JSON.stringify(flow.ok)}`);
-                if (flow.results?.[0]?.tool !== "device_status") failures.push("device_run_flow did not run device_status");
-                if (flow.results?.[0]?.isError !== false) failures.push("device_run_flow device_status step returned an error");
+                if (flow.ok !== true) failures.push(`run_flow returned ok=${JSON.stringify(flow.ok)}`);
+                if (flow.results?.[0]?.tool !== "status") failures.push("run_flow did not run status");
+                if (flow.results?.[0]?.isError !== false) failures.push("run_flow status step returned an error");
             }
 
             for (const args of [
@@ -210,7 +199,7 @@ export async function runInstalledMcpSmoke(options: any = {}) {
                 { implicitBroker: false, backend: "windows-sandbox", name: "Dist Windows smoke", deviceId: "dist-windows-smoke" },
                 { implicitBroker: false, backend: "macos-vm", name: "Dist macOS smoke", deviceId: "dist-macos-smoke", image: "missing-image" },
             ]) {
-                markExpectedToolError(await callTool("device_create", args));
+                markExpectedToolError(await callTool("create", { detail: true, ...args }));
             }
 
             const missingRequiredSamples = listed.tools.flatMap((tool) => {
@@ -247,11 +236,11 @@ export async function runInstalledMcpSmoke(options: any = {}) {
 
             let publicDispatchTools = 0;
             for (const tool of listed.tools) {
-                const result = await callTool(tool.name, installedMcpSmokeSample(tool.name));
+                const result = await callTool(tool.name, { detail: true, ...installedMcpSmokeSample(tool.name) });
                 recordDispatchMismatch(failures, tool.name, result);
                 markExpectedToolError(result);
-                if (tool.name === "device_run_flow") {
-                    markExpectedFlowStepErrors(result, ["mobile_session_status"]);
+                if (tool.name === "run_flow") {
+                    markExpectedFlowStepErrors(result, ["automation_status"]);
                 }
                 publicDispatchTools += 1;
             }
@@ -265,7 +254,7 @@ export async function runInstalledMcpSmoke(options: any = {}) {
                 serverPath,
                 tools: toolNames.length,
                 publicDispatchTools,
-                currentDisplayAliases: (currentDisplay?.capabilities || []).filter((capability) => capability.startsWith("device_")),
+                currentDisplayCapabilities: currentDisplay?.capabilities || [],
             };
         }, {
             name: options.name || "ccc-installed-device-lab-mcp-smoke",

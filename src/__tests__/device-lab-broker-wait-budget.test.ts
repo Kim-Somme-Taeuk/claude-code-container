@@ -59,6 +59,7 @@ const server=http.createServer((req,res)=>{
   if(h['x-ccc-device-auth']!==expected)return send(401,{ok:false,error:'bad-generation-auth'});
   const rpc=JSON.parse(body);
   fs.appendFileSync(log,JSON.stringify(rpc)+'\\n');
+  if(rpc.method==='broker.inventory')return send(200,{ok:true,result:{backends:[{stateKey:'android',devices:[{id:'pixel',backend:'android-emulator'}]}]}});
   if(rpc.method==='broker.appium.session.ensure')return send(200,{ok:true,result:{appium:{sessionId:'WAIT'}}});
   if(state.stallBody){res.writeHead(200,{'content-type':'application/json'});res.write('{"ok":true,"result":{"response":{"body":{"value":"matching text');return;}
   setTimeout(()=>send(200,{ok:true,result:{response:{body:{value:state.value||'<App>absent</App>'}}}}),state.rpcDelay||0);
@@ -136,8 +137,8 @@ server.listen(port,'127.0.0.1',()=>process.stdout.write(JSON.stringify({pid:proc
         const client = new Client({ name: "broker-wait-contract", version: "1.0.0" });
         await client.connect(transport);
         try {
-            const result = await client.callTool({ name: "mobile_wait_for_text", arguments: {
-                ...options, viaBroker: true, backend: "android-emulator", deviceId: "pixel",
+            const result = await client.callTool({ name: "wait_for_text", arguments: {
+                ...options, viaBroker: true, deviceId: "pixel",
                 text: "matching text", timeoutMs: 500, intervalMs: 300, detail: true,
             } });
             const payload = JSON.parse((result.content as Array<{ text: string }>)[0].text);

@@ -1,3 +1,4 @@
+import { TOOLS, publicToolName } from "../../device-lab-mcp/src/tools.mjs";
 import assert from "assert";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { hostname, homedir, uptime } from "os";
@@ -261,8 +262,7 @@ export async function cleanupCurrentWindowsSandboxE2E(options: any = {}) {
 
     if (options.recordingActive === true) {
         try {
-            assertRecordingStoppedCleanupResult(await callTool("device_record_video_stop", {
-                backend: "windows-sandbox",
+            assertRecordingStoppedCleanupResult(await callTool("record_video_stop", { detail: true,
                 deviceId,
                 helperTimeoutMs: options.recordingStopTimeoutMs || 10000,
             }));
@@ -272,20 +272,19 @@ export async function cleanupCurrentWindowsSandboxE2E(options: any = {}) {
     }
     if (options.needsStop === true) {
         try {
-            assertStoppedCleanupResult(await callTool("device_stop", { backend: "windows-sandbox", deviceId }), deviceId);
+            assertStoppedCleanupResult(await callTool("stop", { detail: true, deviceId }), deviceId);
         } catch (error) {
-            throw cleanupFailure("device_stop", deviceId, error);
+            throw cleanupFailure("stop", deviceId, error);
         }
     }
     try {
-        assertDeletedCleanupResult(await callTool("device_delete", {
-            backend: "windows-sandbox",
+        assertDeletedCleanupResult(await callTool("delete", { detail: true,
             deviceId,
             force: true,
             confirmDestructive: true,
         }), deviceId);
     } catch (error) {
-        throw cleanupFailure("device_delete", deviceId, error);
+        throw cleanupFailure("delete", deviceId, error);
     }
 
     removeVerifiedWindowsSandboxE2EEvidence(homeDir, owner, deviceId);
@@ -370,12 +369,12 @@ export async function cleanupPreviousWindowsSandboxE2E(options: any = {}) {
 export async function startWindowsSandboxE2EDevice(callTool, deviceId, options: any = {}) {
     const direct = { backend: "windows-sandbox" };
     const preExisting = listRunningWindowsSandboxSessions(options);
-    const startResult = await callTool("device_start", { ...direct, deviceId });
+    const startResult = await callTool("start", { detail: true, deviceId });
     if (!isWindowsSandboxSingleUseError(startResult)) return parsePayload(startResult);
     if (!preExisting.ok) return parsePayload(startResult);
     let status;
     try {
-        status = parsePayload(await callTool("device_status", { ...direct, deviceId }));
+        status = parsePayload(await callTool("status", { detail: true, deviceId }));
     } catch {
         return parsePayload(startResult);
     }
@@ -389,7 +388,7 @@ export async function startWindowsSandboxE2EDevice(callTool, deviceId, options: 
     if (!recovery.ok || recovery.stopped.length !== 1) return parsePayload(startResult);
     const retryDelayMs = options.retryDelayMs ?? 500;
     if (retryDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-    return parsePayload(await callTool("device_start", { ...direct, deviceId }));
+    return parsePayload(await callTool("start", { detail: true, deviceId }));
 }
 
 export function windowsSandboxE2ECapability(level = Number(process.env.CCC_TEST_LEVEL || "0")) {
@@ -413,7 +412,7 @@ export async function runWindowsSandboxE2E(options: any = {}) {
     let stopped = false;
     let deleted = false;
     let recordingActive = false;
-    const advertisedCapabilities = windowsBackend().capabilities;
+    const advertisedCapabilities = [...new Set<string>(windowsBackend().capabilities.map(publicToolName))].filter(name => TOOLS.some(tool => tool.name === name));
     const calledCapabilities = new Set();
 
     return withDeviceLabMcp(async ({ callTool: rawCallTool }) => {
@@ -428,7 +427,7 @@ export async function runWindowsSandboxE2E(options: any = {}) {
         let passResult = null;
         let currentStep = "create device";
         try {
-            const createResult = parsePayload(await callTool("device_create", {
+            const createResult = parsePayload(await callTool("create", { detail: true,
                 ...direct,
                 name: "Real Windows Sandbox Test",
                 deviceId,
@@ -442,7 +441,7 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             assert.strictEqual(createResult.device.status, "stopped");
 
             currentStep = "inventory created device";
-            const inventory = parsePayload(await callTool("device_inventory", direct));
+            const inventory = parsePayload(await callTool("inventory", { detail: true, ...direct }));
             const inventoryDevices = inventory.devices || inventory.result?.devices;
             assert.ok(Array.isArray(inventoryDevices));
             assert.ok(inventoryDevices.some((device) => device.id === deviceId));
@@ -453,21 +452,20 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             assert.ok(String(started.device.configPath || "").includes(`${deviceId}.wsb`));
 
             currentStep = "read running status";
-            const status = parsePayload(await callTool("device_status", { ...direct, deviceId }));
+            const status = parsePayload(await callTool("status", { detail: true, deviceId }));
             assert.strictEqual(status.device.id, deviceId);
             assert.strictEqual(status.device.status, "running");
             assert.strictEqual(status.device.sandboxId, started.device.sandboxId);
 
             currentStep = "execute helper command";
-            parsePayload(await callTool("device_exec", {
-                ...direct,
+            parsePayload(await callTool("exec", { detail: true,
                 deviceId,
                 command: "Write-Output ccc-windows-e2e-ok",
                 helperTimeoutMs,
             }));
 
             currentStep = "capture screenshot";
-            const screenshot = await callTool("device_screenshot", { ...direct, deviceId, helperTimeoutMs: screenshotTimeoutMs });
+            const screenshot = await callTool("screenshot", { detail: true, deviceId, helperTimeoutMs: screenshotTimeoutMs });
             const screenshotImage = findImageContent(screenshot);
             assert.ok(screenshotImage, `Windows Sandbox screenshot returned no image content: ${responseText(screenshot)}`);
             assert.strictEqual(screenshotImage.mimeType, "image/png");
@@ -475,31 +473,31 @@ export async function runWindowsSandboxE2E(options: any = {}) {
 
             currentStep = "click controls";
             for (const button of ["left", "right"]) {
-                const click = parsePayload(await callTool("device_click", { ...direct, deviceId, x: 20, y: 20, button, helperTimeoutMs }));
+                const click = parsePayload(await callTool("click", { detail: true, deviceId, x: 20, y: 20, button, helperTimeoutMs }));
                 assert.strictEqual(click.provider, "windows-helper");
                 assert.deepStrictEqual(click.clicked, { x: 20, y: 20, button });
             }
 
             currentStep = "double-click controls";
             for (const button of ["left", "right"]) {
-                const doubleClick = parsePayload(await callTool("device_double_click", { ...direct, deviceId, x: 30, y: 30, button, helperTimeoutMs }));
+                const doubleClick = parsePayload(await callTool("double_click", { detail: true, deviceId, x: 30, y: 30, button, helperTimeoutMs }));
                 assert.strictEqual(doubleClick.provider, "windows-helper");
                 assert.deepStrictEqual(doubleClick.doubleClicked, { x: 30, y: 30, button });
             }
 
             currentStep = "keyboard control";
-            const key = parsePayload(await callTool("device_key", { ...direct, deviceId, key: "Escape", helperTimeoutMs }));
+            const key = parsePayload(await callTool("key", { detail: true, deviceId, key: "Escape", helperTimeoutMs }));
             assert.strictEqual(key.provider, "windows-helper");
             assert.strictEqual(key.key.key, "Escape");
 
             currentStep = "text input";
-            const type = parsePayload(await callTool("device_type", { ...direct, deviceId, text: "ccc-windows-type-e2e", helperTimeoutMs }));
+            const type = parsePayload(await callTool("type", { detail: true, deviceId, text: "ccc-windows-type-e2e", helperTimeoutMs }));
             assert.strictEqual(type.provider, "windows-helper");
             assert.strictEqual(type.typed.text, "ccc-windows-type-e2e");
 
             currentStep = "scroll controls";
             for (const direction of ["up", "down", "left", "right"]) {
-                const scroll = parsePayload(await callTool("device_scroll", { ...direct, deviceId, x: 40, y: 40, direction, amount: 1, helperTimeoutMs }));
+                const scroll = parsePayload(await callTool("scroll", { detail: true, deviceId, x: 40, y: 40, direction, amount: 1, helperTimeoutMs }));
                 assert.strictEqual(scroll.provider, "windows-helper");
                 assert.deepStrictEqual(scroll.scrolled, { x: 40, y: 40, direction, amount: 1 });
             }
@@ -508,8 +506,7 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             const uploadSource = join(tempDir, "upload.txt");
             writeFileSync(uploadSource, "ccc-upload-ok");
             const uploadRemote = "C:\\Users\\WDAGUtilityAccount\\Desktop\\ccc-upload.txt";
-            const upload = parsePayload(await callTool("device_upload", {
-                ...direct,
+            const upload = parsePayload(await callTool("upload", { detail: true,
                 deviceId,
                 localPath: uploadSource,
                 remotePath: uploadRemote,
@@ -521,8 +518,7 @@ export async function runWindowsSandboxE2E(options: any = {}) {
 
             currentStep = "verify uploaded file";
             const uploadVerificationTarget = join(tempDir, "upload-verification.txt");
-            parsePayload(await callTool("device_download", {
-                ...direct,
+            parsePayload(await callTool("download", { detail: true,
                 deviceId,
                 remotePath: uploadRemote,
                 localPath: uploadVerificationTarget,
@@ -533,14 +529,12 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             currentStep = "download file";
             const downloadRemote = "C:\\Users\\WDAGUtilityAccount\\Desktop\\ccc-download.txt";
             const downloadTarget = join(tempDir, "download.txt");
-            const createDownloadRemote = parsePayload(await callTool("device_exec", {
-                ...direct,
+            const createDownloadRemote = parsePayload(await callTool("exec", { detail: true,
                 deviceId,
                 command: `Set-Content -Path ${downloadRemote} -Value ccc-download-ok -Encoding ASCII`,
                 helperTimeoutMs,
             }));
-            const download = parsePayload(await callTool("device_download", {
-                ...direct,
+            const download = parsePayload(await callTool("download", { detail: true,
                 deviceId,
                 remotePath: downloadRemote,
                 localPath: downloadTarget,
@@ -552,24 +546,23 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             assert.match(readFileSync(downloadTarget, "utf-8"), /ccc-download-ok/);
 
             currentStep = "list windows";
-            const windows = parsePayload(await callTool("device_window_list", { ...direct, deviceId, helperTimeoutMs }));
+            const windows = parsePayload(await callTool("window_list", { detail: true, deviceId, helperTimeoutMs }));
             assert.strictEqual(windows.provider, "windows-process-main-window");
             assert.ok(Array.isArray(windows.windows));
 
             currentStep = "read cursor position";
-            const cursor = parsePayload(await callTool("device_cursor_position", { ...direct, deviceId, helperTimeoutMs }));
+            const cursor = parsePayload(await callTool("cursor_position", { detail: true, deviceId, helperTimeoutMs }));
             assert.strictEqual(cursor.provider, "windows-helper");
             assert.ok(cursor.cursor === null || typeof cursor.cursor === "object");
 
             currentStep = "capture accessibility snapshot";
-            const accessibility = parsePayload(await callTool("device_accessibility_snapshot", { ...direct, deviceId, maxDepth: 1, maxNodes: 20, helperTimeoutMs }));
+            const accessibility = parsePayload(await callTool("accessibility_snapshot", { detail: true, deviceId, maxDepth: 1, maxNodes: 20, helperTimeoutMs }));
             assert.strictEqual(accessibility.provider, "windows-uiautomation");
             assert.ok(accessibility.accessibility === null || typeof accessibility.accessibility === "object");
 
             currentStep = "start recording";
             const recordingPath = join(tempDir, "windows-recording.zip");
-            const recordingStart = windowsRecordingPayload(parsePayload(await callTool("device_record_video_start", {
-                ...direct,
+            const recordingStart = windowsRecordingPayload(parsePayload(await callTool("record_video_start", { detail: true,
                 deviceId,
                 localPath: recordingPath,
                 timeLimitSec: 10,
@@ -582,14 +575,13 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             await new Promise((resolve) => setTimeout(resolve, 1500));
 
             currentStep = "read recording status";
-            const recordingStatus = windowsRecordingPayload(parsePayload(await callTool("device_record_video_status", { ...direct, deviceId, helperTimeoutMs: 5000 })));
+            const recordingStatus = windowsRecordingPayload(parsePayload(await callTool("record_video_status", { detail: true, deviceId, helperTimeoutMs: 5000 })));
             const recordingState = windowsRecordingState(recordingStatus);
             assert.ok(recordingState, `Windows Sandbox recording status returned no recording: ${JSON.stringify(recordingStatus)}`);
             assert.strictEqual(recordingState.active, true, `Windows Sandbox recording is not active: ${JSON.stringify(recordingStatus)}`);
 
             currentStep = "stop recording";
-            const recordingStop = windowsRecordingPayload(parsePayload(await callTool("device_record_video_stop", {
-                ...direct,
+            const recordingStop = windowsRecordingPayload(parsePayload(await callTool("record_video_stop", { detail: true,
                 deviceId,
                 localPath: recordingPath,
                 helperTimeoutMs,
@@ -601,13 +593,13 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             assert.ok(readFileSync(recordingPath).length > 0);
 
             currentStep = "stop device";
-            const stoppedPayload = parsePayload(await callTool("device_stop", { ...direct, deviceId }));
+            const stoppedPayload = parsePayload(await callTool("stop", { detail: true, deviceId }));
             assert.strictEqual(stoppedPayload.device.id, deviceId);
             assert.strictEqual(stoppedPayload.device.status, "stopped");
             stopped = true;
 
             currentStep = "delete device";
-            const deleteResult = parsePayload(await callTool("device_delete", { ...direct, deviceId, force: true, confirmDestructive: true }));
+            const deleteResult = parsePayload(await callTool("delete", { detail: true, deviceId, force: true, confirmDestructive: true }));
             assert.strictEqual(deleteResult.deleted, deviceId);
             deleted = true;
 

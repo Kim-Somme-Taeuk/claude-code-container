@@ -38,12 +38,12 @@ const unexpectedSkipCategories = skipCategories.filter((item) => !allowedSkipCat
 const providerGapSkipCategories = new Set(["provider-prerequisite", "host-platform", "host-permission", "host-virtualization"]);
 const providerValues = new Set(["auto", "tart", "vz", "utmctl"]);
 const directOkExemptDiagnosticTools = new Set([
-    "device_base_image_clone",
-    "device_base_image_create",
-    "device_snapshot_create",
-    "device_snapshot_delete",
-    "device_snapshot_restore",
-    "device_wireless",
+    "base_image_clone",
+    "base_image_create",
+    "snapshot_create",
+    "snapshot_delete",
+    "snapshot_restore",
+    "wireless",
 ]);
 function canonicalToolSurface() {
     const tools = DEVICE_LAB_MCP_TOOLS.map((tool) => ({

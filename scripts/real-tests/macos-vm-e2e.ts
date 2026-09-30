@@ -186,7 +186,7 @@ export async function runMacosVmE2E(options: any = {}) {
     return withDeviceLabMcp(async ({ callTool }) => {
         const direct = { backend: "macos-vm" };
         try {
-            const create = await timedStep(timings, "createMs", async () => parsePayload(await callTool("device_base_image_create", {
+            const create = await timedStep(timings, "createMs", async () => parsePayload(await callTool("base_image_create", { detail: true,
                 name,
                 deviceId,
                 sourceImage: cap.source,
@@ -205,8 +205,7 @@ export async function runMacosVmE2E(options: any = {}) {
         assert.ok(createdDevice.providerInstance);
         managedProviderInstances.push(createdDevice.providerInstance);
 
-            const start = await timedStep(timings, "startMs", async () => parseContractToolPayload("device_start", await callTool("device_start", {
-                ...direct,
+            const start = await timedStep(timings, "startMs", async () => parseContractToolPayload("start", await callTool("start", { detail: true,
                 deviceId,
                 headless: true,
                 waitForBoot: !ssh.sshHost,
@@ -227,7 +226,7 @@ export async function runMacosVmE2E(options: any = {}) {
             assert.strictEqual(startedDevice.helper.ssh.user, ssh.sshUser);
         }
 
-            const status = await timedStep(timings, "statusMs", async () => parseContractToolPayload("device_status", await callTool("device_status", { ...direct, deviceId })));
+            const status = await timedStep(timings, "statusMs", async () => parseContractToolPayload("status", await callTool("status", { detail: true, deviceId })));
         const statusDevice = lifecycleDevice(status, "macOS VM device_status");
         assert.strictEqual(statusDevice.id, deviceId);
         assert.ok(["running", "starting"].includes(statusDevice.status));
@@ -243,8 +242,7 @@ export async function runMacosVmE2E(options: any = {}) {
                     typedOptions.helperTimeoutMs,
                     Number(process.env.CCC_REAL_MACOS_VM_HELPER_TIMEOUT_MS || process.env.CCC_MACOS_VM_HELPER_TIMEOUT_MS || 30000),
                 );
-                const exec = parsePayload(await callTool("device_exec", {
-                    ...direct,
+                const exec = parsePayload(await callTool("exec", { detail: true,
                     deviceId,
                     command: "printf ccc-macos-vm-e2e-ok",
                     helperTimeoutMs,
@@ -256,8 +254,7 @@ export async function runMacosVmE2E(options: any = {}) {
                 const remotePath = `/tmp/ccc-macos-vm-e2e-${suffix}.txt`;
                 writeFileSync(uploadLocalPath, `ccc-macos-vm-e2e-file-${suffix}`);
                 try {
-                    const upload = parsePayload(await callTool("device_upload", {
-                        ...direct,
+                    const upload = parsePayload(await callTool("upload", { detail: true,
                         deviceId,
                         localPath: uploadLocalPath,
                         remotePath,
@@ -267,8 +264,7 @@ export async function runMacosVmE2E(options: any = {}) {
                     assert.strictEqual(upload.uploaded.localPath, uploadLocalPath);
                     assert.strictEqual(upload.uploaded.remotePath, remotePath);
 
-                    const download = parsePayload(await callTool("device_download", {
-                        ...direct,
+                    const download = parsePayload(await callTool("download", { detail: true,
                         deviceId,
                         remotePath,
                         localPath: downloadLocalPath,
@@ -279,53 +275,53 @@ export async function runMacosVmE2E(options: any = {}) {
                     assert.strictEqual(download.downloaded.localPath, downloadLocalPath);
                     assert.strictEqual(readFileSync(downloadLocalPath, "utf-8"), `ccc-macos-vm-e2e-file-${suffix}`);
                 } finally {
-                    try { await callTool("device_exec", { ...direct, deviceId, command: `rm -f '${remotePath.replace(/'/g, "'\\''")}'`, helperTimeoutMs }); } catch { /* preserve primary failure */ }
+                    try { await callTool("exec", { detail: true, deviceId, command: `rm -f '${remotePath.replace(/'/g, "'\\''")}'`, helperTimeoutMs }); } catch { /* preserve primary failure */ }
                     rmSync(uploadLocalPath, { force: true });
                     rmSync(downloadLocalPath, { force: true });
                 }
 
-                const screenshot = await callTool("device_screenshot", { ...direct, deviceId, helperTimeoutMs });
+                const screenshot = await callTool("screenshot", { detail: true, deviceId, helperTimeoutMs });
                 assert.strictEqual(screenshot?.content?.[0]?.type, "image");
                 assert.ok(String(screenshot.content[0].data || "").length > 64);
 
                 for (const button of ["left", "right"]) {
-                    const click = parsePayload(await callTool("device_click", { ...direct, deviceId, x: 20, y: 20, button, helperTimeoutMs }));
+                    const click = parsePayload(await callTool("click", { detail: true, deviceId, x: 20, y: 20, button, helperTimeoutMs }));
                     assert.strictEqual(click.provider, "ssh-macos-helper");
                     assert.deepStrictEqual(click.clicked, { x: 20, y: 20, button });
                 }
 
                 for (const button of ["left", "right"]) {
-                    const doubleClick = parsePayload(await callTool("device_double_click", { ...direct, deviceId, x: 30, y: 30, button, helperTimeoutMs }));
+                    const doubleClick = parsePayload(await callTool("double_click", { detail: true, deviceId, x: 30, y: 30, button, helperTimeoutMs }));
                     assert.strictEqual(doubleClick.provider, "ssh-macos-helper");
                     assert.deepStrictEqual(doubleClick.doubleClicked, { x: 30, y: 30, button });
                 }
 
-                const key = parsePayload(await callTool("device_key", { ...direct, deviceId, key: "Escape", helperTimeoutMs }));
+                const key = parsePayload(await callTool("key", { detail: true, deviceId, key: "Escape", helperTimeoutMs }));
                 assert.strictEqual(key.provider, "ssh-macos-helper");
                 assert.deepStrictEqual(key.key, { key: "Escape", keyCode: 53, modifiers: [] });
 
-                const type = parsePayload(await callTool("device_type", { ...direct, deviceId, text: "ccc-macos-type-e2e", helperTimeoutMs }));
+                const type = parsePayload(await callTool("type", { detail: true, deviceId, text: "ccc-macos-type-e2e", helperTimeoutMs }));
                 assert.strictEqual(type.provider, "ssh-macos-helper");
                 assert.deepStrictEqual(type.typed, { text: "ccc-macos-type-e2e" });
 
                 for (const direction of ["up", "down", "left", "right"]) {
-                    const scroll = parsePayload(await callTool("device_scroll", { ...direct, deviceId, direction, amount: 1, helperTimeoutMs }));
+                    const scroll = parsePayload(await callTool("scroll", { detail: true, deviceId, direction, amount: 1, helperTimeoutMs }));
                     assert.strictEqual(scroll.provider, "ssh-macos-helper");
                     assert.deepStrictEqual(scroll.scrolled, { direction, amount: 1 });
                 }
 
-                const windows = parsePayload(await callTool("device_window_list", { ...direct, deviceId, helperTimeoutMs }));
+                const windows = parsePayload(await callTool("window_list", { detail: true, deviceId, helperTimeoutMs }));
                 assert.ok(Array.isArray(windows.windows));
 
-                const cursor = parsePayload(await callTool("device_cursor_position", { ...direct, deviceId, helperTimeoutMs }));
+                const cursor = parsePayload(await callTool("cursor_position", { detail: true, deviceId, helperTimeoutMs }));
                 assert.strictEqual(cursor.provider, "ssh-macos-helper");
                 assert.ok(cursor.cursor === null || typeof cursor.cursor === "object");
 
-                const accessibility = parsePayload(await callTool("device_accessibility_snapshot", { ...direct, deviceId, maxDepth: 1, maxNodes: 20, helperTimeoutMs }));
+                const accessibility = parsePayload(await callTool("accessibility_snapshot", { detail: true, deviceId, maxDepth: 1, maxNodes: 20, helperTimeoutMs }));
                 assert.ok(["macos-system-events", "ssh-macos-helper"].includes(accessibility.provider));
                 assert.ok(accessibility.accessibility === null || typeof accessibility.accessibility === "object");
 
-                const recordingStatus = parsePayload(await callTool("device_record_video_status", { ...direct, deviceId }));
+                const recordingStatus = parsePayload(await callTool("record_video_status", { detail: true, deviceId }));
                 assert.strictEqual(recordingStatus.provider, "ssh-screencapture-video");
                 assert.strictEqual(recordingStatus.deviceId, deviceId);
                 return {
@@ -340,7 +336,7 @@ export async function runMacosVmE2E(options: any = {}) {
             });
         }
 
-            const stop = await timedStep(timings, "stopMs", async () => parseContractToolPayload("device_stop", await callTool("device_stop", { ...direct, deviceId })));
+            const stop = await timedStep(timings, "stopMs", async () => parseContractToolPayload("stop", await callTool("stop", { detail: true, deviceId })));
         stopped = true;
         assert.strictEqual(stop.device.status, "stopped");
         const tartAfterStop = inspectTartInstance(cap.tart, createdDevice.providerInstance);
@@ -350,13 +346,13 @@ export async function runMacosVmE2E(options: any = {}) {
         let snapshot = null;
         if (typedOptions.snapshot === true) {
             snapshot = await timedStep(timings, "snapshotMs", async () => {
-                const createdSnapshot = parsePayload(await callTool("device_snapshot_create", { ...direct, deviceId, snapshotName })).snapshot;
+                const createdSnapshot = parsePayload(await callTool("snapshot_create", { detail: true, deviceId, snapshotName })).snapshot;
                 assert.ok(createdSnapshot.providerInstance);
                 managedProviderInstances.push(createdSnapshot.providerInstance);
-                const snapshotRestore = parsePayload(await callTool("device_snapshot_restore", { ...direct, deviceId, snapshotName, force: true, confirmDestructive: true }));
+                const snapshotRestore = parsePayload(await callTool("snapshot_restore", { detail: true, deviceId, snapshotName, force: true, confirmDestructive: true }));
                 assert.strictEqual(snapshotRestore.device.restoredFrom.id, createdSnapshot.id);
                 assert.strictEqual(snapshotRestore.device.restoredFrom.name, snapshotName);
-                const snapshotDelete = parsePayload(await callTool("device_snapshot_delete", { ...direct, deviceId, snapshotName, confirmDestructive: true }));
+                const snapshotDelete = parsePayload(await callTool("snapshot_delete", { detail: true, deviceId, snapshotName, confirmDestructive: true }));
                 assert.strictEqual(snapshotDelete.deleted, createdSnapshot.id);
                 managedProviderInstances.splice(managedProviderInstances.indexOf(createdSnapshot.providerInstance), 1);
                 return createdSnapshot;
@@ -365,7 +361,7 @@ export async function runMacosVmE2E(options: any = {}) {
 
         if (typedOptions.imageTools === true) {
             await timedStep(timings, "imageToolsMs", async () => {
-                const createViaBase = parsePayload(await callTool("device_base_image_create", {
+                const createViaBase = parsePayload(await callTool("base_image_create", { detail: true,
                     name: `Base create ${suffix}`,
                     deviceId: `${deviceId}-base-create`,
                     sourceImage: cap.source,
@@ -376,7 +372,7 @@ export async function runMacosVmE2E(options: any = {}) {
                 assert.strictEqual(createViaBase.operation, "base-image-create");
                 assert.ok(createViaBase.device.providerInstance);
 
-                const cloneViaBase = parsePayload(await callTool("device_base_image_clone", {
+                const cloneViaBase = parsePayload(await callTool("base_image_clone", { detail: true,
                     name: `Base clone ${suffix}`,
                     deviceId: `${deviceId}-base-clone`,
                     sourceDeviceId: deviceId,
@@ -388,7 +384,7 @@ export async function runMacosVmE2E(options: any = {}) {
                 assert.ok(cloneViaBase.device.providerInstance);
 
                 for (const disposableId of [...disposableDeviceIds]) {
-                    const removed = parseContractToolPayload("device_delete", await callTool("device_delete", { ...direct, deviceId: disposableId, force: true, confirmDestructive: true }));
+                    const removed = parseContractToolPayload("delete", await callTool("delete", { detail: true, deviceId: disposableId, force: true, confirmDestructive: true }));
                     assert.strictEqual(removed.deleted, disposableId);
                     disposableDeviceIds.splice(disposableDeviceIds.indexOf(disposableId), 1);
                     for (const providerInstance of removed.providerDeleted || []) {
@@ -399,12 +395,12 @@ export async function runMacosVmE2E(options: any = {}) {
             });
         }
 
-            const del = await timedStep(timings, "deleteMs", async () => parseContractToolPayload("device_delete", await callTool("device_delete", { ...direct, deviceId, force: true, confirmDestructive: true })));
+            const del = await timedStep(timings, "deleteMs", async () => parseContractToolPayload("delete", await callTool("delete", { detail: true, deviceId, force: true, confirmDestructive: true })));
         deleted = true;
         assert.strictEqual(del.deleted, deviceId);
             const tartAfterDelete = inspectTartInstance(cap.tart, createdDevice.providerInstance);
             assert.strictEqual(tartAfterDelete.found, false, `Tart instance survived delete: ${createdDevice.providerInstance}`);
-            const listAfterDelete = await timedStep(timings, "statusAfterDeleteMs", async () => parsePayload(await callTool("device_list")));
+            const listAfterDelete = await timedStep(timings, "statusAfterDeleteMs", async () => parsePayload(await callTool("list_devices", { detail: true })));
             assert.strictEqual(listAfterDelete.devices.some((device) => device.id === deviceId), false);
         const timingDetail = Object.entries(timings).map(([key, value]) => `${key}=${value}`).join(" ");
 
@@ -425,15 +421,15 @@ export async function runMacosVmE2E(options: any = {}) {
         };
         } finally {
             if (created && !stopped) {
-                try { await callTool("device_stop", { ...direct, deviceId }); } catch { /* preserve primary failure */ }
+                try { await callTool("stop", { detail: true, deviceId }); } catch { /* preserve primary failure */ }
             }
             if (created && !deleted) {
-                try { await callTool("device_delete", { ...direct, deviceId, force: true, confirmDestructive: true }); } catch { /* preserve primary failure */ }
+                try { await callTool("delete", { detail: true, deviceId, force: true, confirmDestructive: true }); } catch { /* preserve primary failure */ }
                 cleanupTartInstances(cap.tart, managedProviderInstances);
                 cleanupMacosStateDevice(deviceId);
             }
             for (const disposableId of disposableDeviceIds) {
-                try { await callTool("device_delete", { ...direct, deviceId: disposableId, force: true, confirmDestructive: true }); } catch { /* preserve primary failure */ }
+                try { await callTool("delete", { detail: true, deviceId: disposableId, force: true, confirmDestructive: true }); } catch { /* preserve primary failure */ }
                 cleanupMacosStateDevice(disposableId);
             }
         }

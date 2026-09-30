@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TOOLS } from "../../device-lab-mcp/src/tools.mjs";
+import { TOOLS } from "../../device-lab-mcp/src/operation-tools.mjs";
 import { cleanupDeviceLabMcpTestContext, createDeviceLabMcpTestContext } from "./helpers/device-lab-mcp-fixture.js";
 import { compactToolResult } from "../../device-lab-mcp/src/public-output.mjs";
 
@@ -95,11 +95,10 @@ const imageTools = ["display_screenshot", "device_screenshot"];
 function reply(value: unknown, isError = false) { return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], isError }; }
 function project(name: string, value: unknown) { return JSON.parse(compactToolResult(name, reply(value)).content[0].text); }
 
-describe("every advertised Device Lab tool has a minimal public contract", () => {
-    it("covers exactly the full advertised registry with tool-specific success data", () => {
+describe("every internal Device Lab operation has a compact diagnostic projection", () => {
+    it("covers exactly the internal operation registry with operation-specific success data", () => {
         expect([...Object.keys(fixtures), ...imageTools].sort()).toEqual(TOOLS.map((tool: { name: string }) => tool.name).sort());
-        expect(TOOLS).toHaveLength(87);
-        expect(TOOLS).toHaveLength(87);
+        expect(new Set(TOOLS.map(tool => tool.name)).size).toBe(TOOLS.length);
     });
     it.each(Object.entries(fixtures))("%s preserves semantic success data and removes known transport echoes", (name, fixture) => {
         const original = structuredClone(fixture.input);
@@ -155,8 +154,8 @@ describe("minimal schemas and diagnostic bypass", () => {
     it("uses minimal display output by default and retains the complete diagnostic result on request", { timeout: 30000 }, async () => {
         const context = await createDeviceLabMcpTestContext();
         try {
-            const detailed = await context.client.callTool({ name: "display_current", arguments: { detail: true } });
-            const minimal = await context.client.callTool({ name: "display_current", arguments: { detail: false } });
+            const detailed = await context.client.callTool({ name: "status", arguments: { deviceId: "x11-current-display", detail: true } });
+            const minimal = await context.client.callTool({ name: "status", arguments: { deviceId: "x11-current-display", detail: false } });
             const detailedValue = JSON.parse((detailed.content as Array<{ text: string }>)[0].text);
             const minimalValue = JSON.parse((minimal.content as Array<{ text: string }>)[0].text);
             expect(detailedValue).toHaveProperty("ownerId");
@@ -164,7 +163,8 @@ describe("minimal schemas and diagnostic bypass", () => {
             expect(minimalValue).not.toHaveProperty("ownerId");
             expect(minimalValue).not.toHaveProperty("targetStatus");
             expect(minimalValue.id).toBe(detailedValue.id);
-            expect(minimal).toEqual(compactToolResult("display_current", detailed));
+            expect(detailedValue.capabilities).toContain("screenshot");
+            expect(detailedValue.capabilities).not.toContain("device_screenshot");
         } finally { await cleanupDeviceLabMcpTestContext(context); }
     });
 });

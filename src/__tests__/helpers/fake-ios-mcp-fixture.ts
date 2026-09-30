@@ -309,7 +309,7 @@ export async function exerciseStaleExternalIosSession(context: FakeIosMcpContext
     writeFileSync(join(context.homeDir, "stale-ios-session"), "1");
     const before = readFileSync(context.logPath, "utf8").length;
     try {
-        const result = await context.client.callTool({ name: "mobile_dump_ui", arguments: { deviceId } });
+        const result = await context.client.callTool({ name: "dump_ui", arguments: { deviceId } });
         const log = readFileSync(context.logPath, "utf8").slice(before);
         return { result, log, previousSessionId: owned.sessionId };
     } finally {

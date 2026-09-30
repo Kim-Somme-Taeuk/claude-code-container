@@ -42,20 +42,20 @@ function toolProperty(toolName: string, property: string): Record<string, unknow
 describe("device-lab public timeout bounds", () => {
     it("advertises finite helper and wait limits on every affected public tool", () => {
         const helperTools = [
-            "device_exec",
-            "device_screenshot",
-            "device_click",
-            "device_double_click",
-            "device_key",
-            "device_type",
-            "device_scroll",
-            "device_cursor_position",
-            "device_window_list",
-            "device_accessibility_snapshot",
-            "device_record_video_stop",
-            "device_record_video_status",
-            "device_upload",
-            "device_download",
+            "exec",
+            "screenshot",
+            "click",
+            "double_click",
+            "key",
+            "type",
+            "scroll",
+            "cursor_position",
+            "window_list",
+            "accessibility_snapshot",
+            "record_video_stop",
+            "record_video_status",
+            "upload",
+            "download",
         ];
         for (const tool of helperTools) {
             expect(toolProperty(tool, "helperTimeoutMs"), tool).toEqual(expect.objectContaining({
@@ -65,15 +65,15 @@ describe("device-lab public timeout bounds", () => {
             }));
         }
 
-        expect(toolProperty("device_start", "bootTimeoutMs")).toEqual(expect.objectContaining({
+        expect(toolProperty("start", "bootTimeoutMs")).toEqual(expect.objectContaining({
             minimum: 1,
             maximum: HYPER_V_MAX_BOOT_TIMEOUT_MS,
         }));
-        expect(toolProperty("device_reboot", "bootTimeoutMs")).toEqual(expect.objectContaining({
+        expect(toolProperty("reboot", "bootTimeoutMs")).toEqual(expect.objectContaining({
             minimum: 1,
             maximum: HYPER_V_MAX_BOOT_TIMEOUT_MS,
         }));
-        for (const tool of ["mobile_wait_for_text", "mobile_wait_for_app"]) {
+        for (const tool of ["wait_for_text", "wait_for_app"]) {
             expect(toolProperty(tool, "timeoutMs"), tool).toEqual(expect.objectContaining({
                 minimum: 1,
                 maximum: MAX_DEVICE_OPERATION_TIMEOUT_MS,

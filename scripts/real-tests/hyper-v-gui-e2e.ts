@@ -4,7 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { parseToolPayload } from "./device-lab-mcp-client.ts";
 import { unfilteredHyperVConsolePixels } from "./hyper-v-console-host.ts";
 
-const GUI_TOOLS = ["device_screenshot", "device_click", "device_double_click", "device_key", "device_type", "device_scroll", "device_cursor_position"] as const;
+const GUI_TOOLS = ["screenshot", "click", "double_click", "key", "type", "scroll", "cursor_position", "move"] as const;
 
 function accepted(result: any, tool: string): any {
     const value = parseToolPayload(result);
@@ -66,7 +66,7 @@ export async function proveHyperVLinuxGuiKeyboardFile(
     const fileExists = async (attempts: number): Promise<boolean> => {
         for (let attempt = 0; attempt < attempts; attempt++) {
             try {
-                const result = accepted(await callTool("device_exec", { ...direct, command: `test -f ${path} && printf ${nonce}` }), "device_exec");
+                const result = accepted(await callTool("exec", { detail: true, ...direct, command: `test -f ${path} && printf ${nonce}` }), "exec");
                 if (String(result.stdout || "").trim() === nonce) return true;
             } catch { /* keyboard input may still be reaching the guest */ }
             await wait(500);
@@ -74,8 +74,8 @@ export async function proveHyperVLinuxGuiKeyboardFile(
         return false;
     };
     const typeFileCommand = async () => {
-        accepted(await callTool("device_type", { ...direct, text: `touch ${path}` }), "device_type");
-        accepted(await callTool("device_key", { ...direct, key: "Enter" }), "device_key");
+        accepted(await callTool("type", { detail: true, ...direct, text: `touch ${path}` }), "type");
+        accepted(await callTool("key", { detail: true, ...direct, key: "Enter" }), "key");
     };
     const focusTerminal = async (): Promise<{ focused: boolean; stage: string }> => {
         const command = [
@@ -93,7 +93,7 @@ export async function proveHyperVLinuxGuiKeyboardFile(
         let stage = "rpc-failed";
         for (let attempt = 0; attempt < 6; attempt++) {
             try {
-                const result = accepted(await callTool("device_exec", { ...direct, command, helperTimeoutMs: 5000 }), "device_exec");
+                const result = accepted(await callTool("exec", { detail: true, ...direct, command, helperTimeoutMs: 5000 }), "exec");
                 const marker = String(result.stdout || "").trim();
                 if (marker === "ccc-terminal-focused") return { focused: true, stage: "focused" };
                 if (/^ccc-focus-(?:tool-missing|display-unavailable|window-missing|activate-failed|active-mismatch)$/.test(marker)) {
@@ -105,11 +105,11 @@ export async function proveHyperVLinuxGuiKeyboardFile(
         return { focused: false, stage };
     };
 
-    accepted(await callTool("device_key", { ...direct, key: "Ctrl+Alt+T" }), "device_key");
+    accepted(await callTool("key", { detail: true, ...direct, key: "Ctrl+Alt+T" }), "key");
     await wait(1500);
     // The XFCE launcher can remain above an open terminal. The disposable
     // desktop places the terminal's text viewport in this upper-left region.
-    accepted(await callTool("device_click", { ...direct, x: 100, y: 100 }), "device_click");
+    accepted(await callTool("click", { detail: true, ...direct, x: 100, y: 100 }), "click");
     if ((await focusTerminal()).focused) {
         await typeFileCommand();
         if (await fileExists(3)) return;
@@ -117,12 +117,12 @@ export async function proveHyperVLinuxGuiKeyboardFile(
 
     // A terminal process or a changed frame does not prove keyboard focus. Try
     // the XFCE application launcher and accept only the guest file as proof.
-    accepted(await callTool("device_key", { ...direct, key: "Alt+F2" }), "device_key");
+    accepted(await callTool("key", { detail: true, ...direct, key: "Alt+F2" }), "key");
     await wait(800);
-    accepted(await callTool("device_type", { ...direct, text: "xfce4-terminal" }), "device_type");
-    accepted(await callTool("device_key", { ...direct, key: "Enter" }), "device_key");
+    accepted(await callTool("type", { detail: true, ...direct, text: "xfce4-terminal" }), "type");
+    accepted(await callTool("key", { detail: true, ...direct, key: "Enter" }), "key");
     await wait(1500);
-    accepted(await callTool("device_click", { ...direct, x: 100, y: 100 }), "device_click");
+    accepted(await callTool("click", { detail: true, ...direct, x: 100, y: 100 }), "click");
     const terminal = await focusTerminal();
     assert.ok(terminal.focused, `hyper-v-gui-linux-terminal-not-focused[stage=${terminal.stage}]`);
     await typeFileCommand();
@@ -135,12 +135,12 @@ export async function runHyperVGuiE2E(
     guest: "windows" | "linux",
 ): Promise<{ tools: readonly string[]; visibleChange: boolean }> {
     const nonce = randomBytes(6).toString("hex");
-    const first = screenshot(await callTool("device_screenshot", direct), String(direct.incarnationId));
+    const first = screenshot(await callTool("screenshot", { detail: true, ...direct }), String(direct.incarnationId));
     if (guest === "windows") {
-        accepted(await callTool("device_key", { ...direct, key: "Win+R" }), "device_key");
+        accepted(await callTool("key", { detail: true, ...direct, key: "Win+R" }), "key");
         await delay(800);
-        accepted(await callTool("device_type", { ...direct, text: `cmd /c echo ${nonce} > "%PUBLIC%\\Documents\\ccc-gui-${nonce}.txt"` }), "device_type");
-        accepted(await callTool("device_key", { ...direct, key: "Enter" }), "device_key");
+        accepted(await callTool("type", { detail: true, ...direct, text: `cmd /c echo ${nonce} > "%PUBLIC%\\Documents\\ccc-gui-${nonce}.txt"` }), "type");
+        accepted(await callTool("key", { detail: true, ...direct, key: "Enter" }), "key");
     } else {
         await proveHyperVLinuxGuiKeyboardFile(callTool, direct, nonce);
     }
@@ -149,7 +149,7 @@ export async function runHyperVGuiE2E(
         let observed = "";
         for (let attempt = 0; attempt < 8; attempt++) {
             try {
-                const execution = accepted(await callTool("device_exec", { ...direct, command: `Get-Content -LiteralPath '${file}'` }), "device_exec");
+                const execution = accepted(await callTool("exec", { detail: true, ...direct, command: `Get-Content -LiteralPath '${file}'` }), "exec");
                 observed = String(execution.stdout || "").trim();
                 if (observed === nonce) break;
             } catch { /* the input may still be reaching the guest */ }
@@ -160,39 +160,39 @@ export async function runHyperVGuiE2E(
     if (guest === "windows") {
         // Keep a visible editor open: the earlier `cmd /c` Run action closes immediately,
         // so its successful guest-file proof alone cannot prove a changed final frame.
-        accepted(await callTool("device_key", { ...direct, key: "Win+R" }), "device_key");
+        accepted(await callTool("key", { detail: true, ...direct, key: "Win+R" }), "key");
         await delay(800);
-        accepted(await callTool("device_type", { ...direct, text: "notepad" }), "device_type");
-        accepted(await callTool("device_key", { ...direct, key: "Enter" }), "device_key");
+        accepted(await callTool("type", { detail: true, ...direct, text: "notepad" }), "type");
+        accepted(await callTool("key", { detail: true, ...direct, key: "Enter" }), "key");
         await delay(1500);
-        accepted(await callTool("device_key", { ...direct, key: "Win+Up" }), "device_key");
+        accepted(await callTool("key", { detail: true, ...direct, key: "Win+Up" }), "key");
         // The lines must be visually distinct: a wheel movement over nearly identical
         // line numbers changes too few pixels to prove a real viewport scroll.
-        accepted(await callTool("device_type", { ...direct, text: Array.from({ length: 40 }, (_, index) => `CCC ${index.toString().padStart(2, "0")} ${String.fromCharCode(65 + index % 26).repeat(28)}\r\n`).join("") }), "device_type");
+        accepted(await callTool("type", { detail: true, ...direct, text: Array.from({ length: 40 }, (_, index) => `CCC ${index.toString().padStart(2, "0")} ${String.fromCharCode(65 + index % 26).repeat(28)}\r\n`).join("") }), "type");
     } else {
-        accepted(await callTool("device_type", { ...direct, text: "awk 'BEGIN {for(n=0;n<200;n++){c=sprintf(\"%c\",65+n%26);s=\"\";for(i=0;i<60;i++)s=s c;print n,s}}'" }), "device_type");
-        accepted(await callTool("device_key", { ...direct, key: "Enter" }), "device_key");
+        accepted(await callTool("type", { detail: true, ...direct, text: "awk 'BEGIN {for(n=0;n<200;n++){c=sprintf(\"%c\",65+n%26);s=\"\";for(i=0;i<60;i++)s=s c;print n,s}}'" }), "type");
+        accepted(await callTool("key", { detail: true, ...direct, key: "Enter" }), "key");
     }
-    const rejected = await callTool("device_click", { ...direct, x: 640, y: 240 });
+    const rejected = await callTool("click", { detail: true, ...direct, x: 640, y: 240 });
     assert.ok(/hyper-v-console-pixel-invalid/.test(JSON.stringify(rejected)), "hyper-v-gui-out-of-bounds-click-accepted");
-    accepted(await callTool("device_cursor_position", { ...direct, x: 10, y: 10 }), "device_cursor_position");
-    const movedAway = accepted(await callTool("device_cursor_position", direct), "device_cursor_position");
+    accepted(await callTool("move", { detail: true, ...direct, x: 10, y: 10 }), "cursor_position");
+    const movedAway = accepted(await callTool("cursor_position", { detail: true, ...direct }), "cursor_position");
     assert.ok(Math.abs(Number(movedAway.x) - 10) <= 2 && Math.abs(Number(movedAway.y) - 10) <= 2,
         "hyper-v-gui-cursor-first-position-failed");
-    accepted(await callTool("device_cursor_position", { ...direct, x: 320, y: 240 }), "device_cursor_position");
-    const cursor = accepted(await callTool("device_cursor_position", direct), "device_cursor_position");
+    accepted(await callTool("move", { detail: true, ...direct, x: 320, y: 240 }), "cursor_position");
+    const cursor = accepted(await callTool("cursor_position", { detail: true, ...direct }), "cursor_position");
     assert.ok(Math.abs(Number(cursor.x) - 320) <= 2 && Math.abs(Number(cursor.y) - 240) <= 2,
         "hyper-v-gui-cursor-second-position-failed");
-    accepted(await callTool("device_click", { ...direct, x: 320, y: 240 }), "device_click");
-    accepted(await callTool("device_double_click", { ...direct, x: 320, y: 240 }), "device_double_click");
+    accepted(await callTool("click", { detail: true, ...direct, x: 320, y: 240 }), "click");
+    accepted(await callTool("double_click", { detail: true, ...direct, x: 320, y: 240 }), "double_click");
     await delay(700);
-    const beforeScroll = screenshot(await callTool("device_screenshot", direct), String(direct.incarnationId));
-    accepted(await callTool("device_scroll", { ...direct, x: 320, y: 240, direction: "up", amount: 10 }), "device_scroll");
+    const beforeScroll = screenshot(await callTool("screenshot", { detail: true, ...direct }), String(direct.incarnationId));
+    accepted(await callTool("scroll", { detail: true, ...direct, x: 320, y: 240, direction: "up", amount: 10 }), "scroll");
     let last = beforeScroll;
     let scrollChangedBytes = 0;
     for (let attempt = 0; attempt < 5; attempt++) {
         await delay(700);
-        last = screenshot(await callTool("device_screenshot", direct), String(direct.incarnationId));
+        last = screenshot(await callTool("screenshot", { detail: true, ...direct }), String(direct.incarnationId));
         scrollChangedBytes = changedHyperVGuiViewportBytes(beforeScroll, last);
         if (scrollChangedBytes >= 3000) break;
     }

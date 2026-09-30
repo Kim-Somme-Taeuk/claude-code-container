@@ -59,6 +59,10 @@ function cursorPositionPayload(stdout) {
 
 export async function handleDisplayTool(name, args) {
     switch (name) {
+        case "display_move": {
+            const r = run("xdotool", ["mousemove", String(args.x), String(args.y)]);
+            return r.status === 0 ? jsonResult({ ok: true }) : fail(r);
+        }
         case "display_current":
             return jsonResult(currentDisplayTarget());
 

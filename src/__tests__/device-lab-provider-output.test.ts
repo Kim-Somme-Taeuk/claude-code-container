@@ -148,21 +148,23 @@ describe("known VM provider output", () => {
             writeFileSync(join(root, "incoming", "base.qcow2"), "fixture-image");
         } });
         const call = async (name: string, args: Record<string, unknown>) => {
-            const result = await context.client.callTool({ name, arguments: { backend: "linux-vm", ...args } });
+            const result = await context.client.callTool({ name, arguments: args });
             expect(result.isError, JSON.stringify(result)).not.toBe(true);
             return JSON.parse((result.content as Array<{ text: string }>)[0].text);
         };
         try {
-            const created = await call("device_create", { deviceId: "compact-lab", name: "Compact lab", sourceImage: "incoming/base.qcow2", detail: true });
-            const detailed = await call("device_status", { deviceId: created.device.id, detail: true });
-            const compact = await call("device_status", { deviceId: created.device.id, detail: false });
-            expect(compact).toEqual(compactToolValue("device_status", detailed));
+            const created = await call("create", { backend: "linux-vm", deviceId: "compact-lab", name: "Compact lab", sourceImage: "incoming/base.qcow2", detail: true });
+            const detailed = await call("status", { deviceId: created.device.id, detail: true });
+            const compact = await call("status", { deviceId: created.device.id, detail: false });
+            const { ok: _statusOk, ...expectedStatus } = compactToolValue("device_status", detailed);
+            expect(compact).toEqual(expectedStatus);
             expect(compact.device.paths).not.toHaveProperty("labDir");
             expect(compact.device.paths.artifactsDir).toBe(detailed.device.paths.artifactsDir);
-            expect(await call("device_status", { deviceId: created.device.id, detail: true })).toEqual(detailed);
-            const rawInventory = await call("device_inventory", { detail: true });
-            const inventory = await call("device_inventory", { detail: false });
-            expect(inventory).toEqual(compactToolValue("device_inventory", rawInventory));
+            expect(await call("status", { deviceId: created.device.id, detail: true })).toEqual(detailed);
+            const rawInventory = await call("inventory", { backend: "linux-vm", detail: true });
+            const inventory = await call("inventory", { backend: "linux-vm", detail: false });
+            const { ok: _inventoryOk, ...expectedInventory } = compactToolValue("device_inventory", rawInventory);
+            expect(inventory).toEqual(expectedInventory);
             expect(inventory.discovery).not.toHaveProperty("qemu");
             expect(inventory.discovery).not.toHaveProperty("stateRoot");
         } finally { await cleanupDeviceLabMcpTestContext(context); }

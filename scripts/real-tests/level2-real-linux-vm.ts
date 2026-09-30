@@ -28,7 +28,7 @@ export async function run() {
     let startedPid = null;
     await withDeviceLabMcp(async ({ callTool }) => {
         try {
-            const created = parseToolPayload(await callTool("device_create", {
+            const created = parseToolPayload(await callTool("create", { detail: true,
                 backend: "linux-vm",
                 name: `Real Linux VM Test ${basename(cap.imagePath)}`,
                 deviceId: labId,
@@ -37,42 +37,41 @@ export async function run() {
                 cpus: 1,
             }));
             assert.strictEqual(created.ok, true, JSON.stringify(created));
-            assert.strictEqual(lifecycleDevice(created, "device_create").id, labId);
+            assert.strictEqual(lifecycleDevice(created, "create").id, labId);
 
-            await callTool("device_image_list", {});
-            markExpectedToolError(await callTool("device_image_import", {
+            await callTool("image_list", { detail: true,});
+            markExpectedToolError(await callTool("image_import", { detail: true,
                 name: "Missing Linux VM smoke image",
                 sourcePath: "images/__missing-linux-vm-smoke__.qcow2",
             }));
-            markExpectedToolError(await callTool("device_disk_materialize", {
-                backend: "linux-vm",
+            markExpectedToolError(await callTool("disk_materialize", { detail: true,
                 deviceId: labId,
                 dryRun: true,
             }));
-            await callTool("device_target_list", { deviceId: labId });
-            markExpectedToolError(await callTool("device_readiness_probe", { deviceId: labId }));
-            await callTool("device_session_open", {
+            await callTool("target_list", { detail: true, deviceId: labId });
+            markExpectedToolError(await callTool("readiness_probe", { detail: true, deviceId: labId }));
+            await callTool("session_open", { detail: true,
                 deviceId: labId,
                 sessionType: "metadata",
             });
-            markExpectedToolError(await callTool("device_workspace_sync", {
+            markExpectedToolError(await callTool("workspace_sync", { detail: true,
                 deviceId: labId,
                 sourcePath: stateRoot,
             }));
-            markExpectedToolError(await callTool("device_artifacts_export", { deviceId: labId }));
-            markExpectedToolError(await callTool("device_guest_agent_status", { deviceId: labId }));
-            markExpectedToolError(await callTool("device_guest_agent_provision", { deviceId: labId }));
-            markExpectedToolError(await callTool("device_reboot", { backend: "linux-vm", deviceId: labId }));
+            markExpectedToolError(await callTool("artifacts_export", { detail: true, deviceId: labId }));
+            markExpectedToolError(await callTool("guest_agent_status", { detail: true, deviceId: labId }));
+            markExpectedToolError(await callTool("guest_agent_provision", { detail: true, deviceId: labId }));
+            markExpectedToolError(await callTool("reboot", { detail: true, deviceId: labId }));
 
-            const started = parseToolPayload(await callTool("device_start", { backend: "linux-vm", deviceId: labId }));
+            const started = parseToolPayload(await callTool("start", { detail: true, deviceId: labId }));
             assert.strictEqual(started.ok, true, JSON.stringify(started));
-            startedPid = Number(lifecycleDevice(started, "device_start").runtime?.pid || started.started?.pid || 0) || null;
+            startedPid = Number(lifecycleDevice(started, "start").runtime?.pid || started.started?.pid || 0) || null;
             assert.ok(startedPid, "qemu pid should be recorded");
             await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
             assert.doesNotThrow(() => process.kill(startedPid, 0));
         } finally {
-            if (startedPid) await callTool("device_stop", { backend: "linux-vm", deviceId: labId, force: true });
-            await callTool("device_delete", { backend: "linux-vm", deviceId: labId, force: true, confirmDestructive: true });
+            if (startedPid) await callTool("stop", { detail: true, deviceId: labId, force: true });
+            await callTool("delete", { detail: true, deviceId: labId, force: true, confirmDestructive: true });
         }
     }, { env: providerEnv });
     return { status: "PASS" };

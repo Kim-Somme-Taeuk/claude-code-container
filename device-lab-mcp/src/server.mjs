@@ -14,15 +14,17 @@ import { ownerId } from "./context.mjs";
 import { currentDisplayTarget, handleDisplayTool } from "./display/x11.mjs";
 import { evaluateDestructivePolicy } from "./policy/destructive.mjs";
 import { flowJsonResult, jsonResult, textResult } from "./responses.mjs";
-import { compactToolResult, compactToolValue } from "./public-output.mjs";
+import { compactToolValue } from "./public-output.mjs";
 import { OWNER_DEVICE_ID_PATTERN } from "./state/owner-device-state.mjs";
 import { readOwnerDevices } from "./state/device-store.mjs";
-import { DEVICE_FLOW_TOOL_NAMES, TOOLS } from "./tools.mjs";
+import { DEVICE_FLOW_TOOL_NAMES, TOOLS, toolOperation } from "./tools.mjs";
+import { TOOLS as OPERATION_TOOLS } from "./operation-tools.mjs";
+import { actionResult } from "./action-output.mjs";
 import { flowStepArguments, normalizeToolArgs, toolInputError } from "./tool-arguments.mjs";
 import { createWaitBudget } from "./wait-budget.mjs";
 
 const FLOW_MAX_STEPS = 50;
-const DEVICE_REQUIRED_TOOLS = new Set(TOOLS
+const DEVICE_REQUIRED_TOOLS = new Set(OPERATION_TOOLS
     .filter((tool) => tool.inputSchema?.required?.includes("deviceId"))
     .map((tool) => tool.name));
 const DEVICE_FLOW_ALLOWED_TOOLS = new Set(DEVICE_FLOW_TOOL_NAMES);
@@ -108,6 +110,19 @@ const DIRECT_DEVICE_BACKEND_HINT_TOOLS = new Set([
     "device_snapshot_delete",
 ]);
 const CURRENT_DISPLAY_DEVICE_ID = "x11-current-display";
+const MOBILE_COMMON_OPERATIONS = new Map([
+    ["device_click", "mobile_tap"], ["device_double_click", "mobile_double_tap"],
+    ["device_type", "mobile_type_text"], ["device_key", "mobile_key"],
+]);
+function commonOperation(name, backend, args) {
+    if (!["android-emulator", "android-device", "ios-simulator", "ios-device"].includes(backend)) {
+        if (name === "device_key" && args.keyCode !== undefined) return { error: "keyCode is supported only on Android; use key on this device" };
+        return { name };
+    }
+    if ((name === "device_click" || name === "device_double_click") && args.button !== undefined && args.button !== "left") return { error: "Mobile click supports only the left button" };
+    if (name === "device_key" && backend.startsWith("ios") && args.keyCode !== undefined) return { error: "keyCode is supported only on Android; use key on iOS" };
+    return { name: MOBILE_COMMON_OPERATIONS.get(name) || name };
+}
 const DISPLAY_DEVICE_TOOL_MAP = new Map([
     ["device_screenshot", "display_screenshot"],
     ["device_click", "display_click"],
@@ -787,8 +802,7 @@ function explicitBackendMismatchResult(name, args) {
 }
 
 function wantsCurrentDisplayDevice(name, args = {}) {
-    if (args?.deviceId === CURRENT_DISPLAY_DEVICE_ID) return name === "device_status" || DISPLAY_DEVICE_TOOL_MAP.has(name);
-    return args?.backend === CURRENT_DISPLAY_DEVICE_ID && DISPLAY_DEVICE_TOOL_MAP.has(name);
+    return args?.deviceId === CURRENT_DISPLAY_DEVICE_ID && (name === "device_status" || DISPLAY_DEVICE_TOOL_MAP.has(name));
 }
 
 async function handleCurrentDisplayDeviceTool(name, args = {}) {
@@ -799,6 +813,9 @@ async function handleCurrentDisplayDeviceTool(name, args = {}) {
 }
 
 async function handleBrokerLifecycleTool(name, args) {
+    if (name !== "device_create" && !args?.backend) {
+        return maybeHandleImplicitBrokerLifecycleTool(name, { ...args, implicitBroker: true, broker: true, viaBroker: true });
+    }
     const deviceId = typeof args?.deviceId === "string" ? args.deviceId : "";
     const backend = typeof args?.backend === "string" && args.backend ? args.backend : name === "device_create" ? { ok: false, error: "missing-backend", matches: [] } : inferLifecycleBackend(deviceId);
     if (backend?.ok === false) {
@@ -1028,6 +1045,10 @@ async function maybeHandleImplicitBrokerPhysicalTool(name, args) {
 }
 
 async function handleBrokerDeviceTool(name, args) {
+    if (MOBILE_COMMON_OPERATIONS.has(name) || (args?.deviceId && !args?.backend)) {
+        // The shared operation needs the same owner inventory validation as implicit calls.
+        return maybeHandleImplicitBrokerDeviceTool(name, { ...args, implicitBroker: true, broker: true, viaBroker: true });
+    }
     const result = await brokerDeviceTool({
         ...brokerRouteOptions(brokerDeviceToolRouteArgs(name, args)),
         ...brokerDeviceToolExecutionTimeout(name, args),
@@ -1083,12 +1104,19 @@ async function maybeHandleImplicitBrokerDeviceTool(name, args) {
     if (isCursorMove(name, args) && !HYPER_V_LIFECYCLE_BACKENDS.has(brokerBackend)) {
         return cursorMoveBackendUnsupportedResult();
     }
+    const common = commonOperation(name, brokerBackend, args);
+    if (common.error) return textResult(false, common.error);
+    if (common.name !== name && wantsBrokerMobile(common.name, args)) {
+        return handleBrokerMobileTool(common.name, {
+            ...args, ...selectedBrokerProbeOptions(probe, inventory), backend: brokerBackend,
+        });
+    }
     const result = await brokerDeviceTool({
         ...routedArgs,
         ...selectedBrokerProbeOptions(probe, inventory),
         ...brokerDeviceToolExecutionTimeout(name, args),
         ...(brokerBackend ? { backend: brokerBackend } : {}),
-        tool: name,
+        tool: common.name,
     });
     if (result.ok && result.result?.mcpResult?.content) return result.result.mcpResult;
     const routedBy = BROKER_MUTATING_DEVICE_TOOLS.has(name) ? "device-mutating-broker-implicit" : "device-readonly-broker-implicit";
@@ -1159,7 +1187,15 @@ async function maybeHandleImplicitBrokerMobileTool(name, args) {
 
 async function handleBrokerMobileTool(name, args) {
     const deviceId = typeof args?.deviceId === "string" ? args.deviceId : "";
-    const backend = typeof args?.backend === "string" && args.backend ? args.backend : inferMobileBackend(deviceId);
+    let backend = args?.backend;
+    if (!backend) {
+        const probe = implicitBrokerProbeOptions(args || {}, { allowDefault: true });
+        if (!probe) return implicitBrokerUnavailableResult("mobile-broker-appium");
+        const inventory = await brokerRpc({ ...probe, method: "broker.inventory" });
+        if (!inventory.ok) return jsonResult({ ...inventory, routedBy: "mobile-broker-appium" });
+        backend = inferBrokerInventoryLifecycleBackend(inventory, deviceId);
+        args = { ...args, ...selectedBrokerProbeOptions(probe, inventory) };
+    }
     if (backend?.ok === false) {
         return jsonResult({
             ok: false,
@@ -1170,6 +1206,9 @@ async function handleBrokerMobileTool(name, args) {
         });
     }
     const resolvedBackend = typeof backend === "string" ? backend : backend.backend;
+    if (!["android-emulator", "android-device", "ios-simulator", "ios-device"].includes(resolvedBackend)) {
+        return jsonResult({ ok: false, error: "unsupported-mobile-backend", deviceId });
+    }
     const routeArgs = brokerRouteOptions(args);
     const appiumOptions = brokerAppiumOptions(routeArgs);
     if (name === "mobile_clear_app_data" && resolvedBackend === "ios-device") {
@@ -1399,7 +1438,7 @@ function cursorMoveBackendUnsupportedResult() {
 function unhandledDeviceToolResult(name, args) {
     if (!DEVICE_REQUIRED_TOOLS.has(name)) return null;
     const deviceId = args.deviceId;
-    const detail = "Use device_list to choose a device.";
+    const detail = "Use list_devices to choose a device.";
     let diagnostic;
     if (deviceId === undefined) {
         diagnostic = { ok: false, error: "missing-device-id", detail };
@@ -1425,6 +1464,10 @@ function unhandledDeviceToolResult(name, args) {
 
 async function dispatchTool(name, rawArgs) {
     const args = normalizeToolArgs(rawArgs, name);
+    if (MOBILE_COMMON_OPERATIONS.has(name) && args.backend !== undefined) {
+        const common = commonOperation(name, args.backend, args);
+        if (common.error) return textResult(false, common.error);
+    }
     if (name === "mobile_key"
         && !(typeof args.key === "string" && args.key.length > 0)
         && !(typeof args.keyCode === "number" && Number.isFinite(args.keyCode))) {
@@ -1437,6 +1480,7 @@ async function dispatchTool(name, rawArgs) {
         if (!Number.isInteger(args.x) || args.x < 0 || !Number.isInteger(args.y) || args.y < 0) {
             return jsonResult({ ok: false, error: "device-cursor-coordinates-invalid", detail: "Provide both x and y as nonnegative screenshot pixels." });
         }
+        if (args.deviceId === CURRENT_DISPLAY_DEVICE_ID && (args.backend === undefined || args.backend === CURRENT_DISPLAY_DEVICE_ID)) return handleDisplayTool("display_move", args);
         // An omitted backend is resolved from the owner inventory below; only a named
         // non-Hyper-V backend, or no device to resolve, can be refused here.
         // Opting out of the implicit broker skips that resolution, and direct handlers only read.
@@ -1457,6 +1501,11 @@ async function dispatchTool(name, rawArgs) {
     const policy = evaluateDestructivePolicy(name, args);
     if (!policy.ok) return policyDeniedResult(policy);
 
+    const directTarget = optsOutOfImplicitBroker(args) && args.deviceId
+        && name !== "device_create" && name !== "device_attach"
+        ? inferLifecycleBackend(args.deviceId) : null;
+    if (directTarget?.error === "ambiguous-device-backend") return jsonResult(directTarget);
+
     const hyperVLinuxResult = await maybeHandleHyperVLinuxVmTool(name, args);
     if (hyperVLinuxResult) return hyperVLinuxResult;
 
@@ -1466,7 +1515,12 @@ async function dispatchTool(name, rawArgs) {
     const linuxVmResult = await handleLinuxVmTool(name, args);
     if (linuxVmResult) return linuxVmResult;
 
-    if (wantsCurrentDisplayDevice(name, args)) return handleCurrentDisplayDeviceTool(name, args);
+    if (wantsCurrentDisplayDevice(name, args)) {
+        if (args.backend !== undefined && args.backend !== CURRENT_DISPLAY_DEVICE_ID) return jsonResult({ ok: false, error: "device-backend-mismatch", actualBackend: CURRENT_DISPLAY_DEVICE_ID });
+        const common = commonOperation(name, CURRENT_DISPLAY_DEVICE_ID, args);
+        if (common.error) return textResult(false, common.error);
+        return handleCurrentDisplayDeviceTool(name, args);
+    }
 
     if (wantsBrokerLifecycle(name, args)) return handleBrokerLifecycleTool(name, args);
     if (wantsBrokerDeviceTool(name, args)) return handleBrokerDeviceTool(name, args);
@@ -1487,6 +1541,14 @@ async function dispatchTool(name, rawArgs) {
 
     const explicitMismatch = explicitBackendMismatchResult(name, args);
     if (explicitMismatch) return explicitMismatch;
+
+    if (MOBILE_COMMON_OPERATIONS.has(name)) {
+        const inferred = directTarget || inferLifecycleBackend(args.deviceId);
+        if (inferred.error === "ambiguous-device-backend") return jsonResult(inferred);
+        const common = commonOperation(name, inferred.ok ? inferred.backend : args.backend, args);
+        if (common.error) return textResult(false, common.error);
+        name = common.name;
+    }
 
     const androidResult = await handleAndroidTool(name, args);
     if (androidResult) return androidResult;
@@ -1558,11 +1620,15 @@ async function handleRunFlow(args, { toolName, toolAllowed, detail }) {
         // A preceding step may have changed the broker or device state.
         let result;
         try {
-            result = await withBrokerOperation(() => dispatchTool(tool, flowStepArguments(tool, args, step.arguments)));
+            result = await withBrokerOperation(() => dispatchTool(toolOperation(tool), flowStepArguments(tool, args, step.arguments)));
         } catch (err) {
             result = textResult(false, `Unexpected error: ${err.message}`);
         }
-        const summary = { index, label, tool, ...summarizeToolResult(tool, result, nativeContent) };
+        const operation = toolOperation(tool);
+        const classified = summarizeToolResult(operation, result, []);
+        const presented = actionResult(tool, operation, result, { detail });
+        const summary = { index, label, tool, ...summarizeToolResult(operation, presented, nativeContent),
+            ...(classified.isError ? { isError: true } : {}) };
         results.push(summary);
         if (summary.isError && stopOnError) return finish({ ok: false, stoppedAt: index, results });
     }
@@ -1583,9 +1649,10 @@ export async function startServer() {
     server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
-        const { name, arguments: rawArgs = {} } = request.params;
-        const inputError = toolInputError(name, rawArgs);
-        if (inputError) return textResult(false, inputError);
+        const { name: publicName, arguments: rawArgs = {} } = request.params;
+        const inputError = toolInputError(publicName, rawArgs);
+        if (inputError) return jsonResult({ ok: false, error: inputError });
+        const name = toolOperation(publicName);
         const args = normalizeToolArgs(rawArgs, name);
         const result = await withBrokerOperation(async () => {
             try {
@@ -1613,8 +1680,8 @@ export async function startServer() {
                 return textResult(false, `Unexpected error: ${err.message}`);
             }
         });
-        return rawArgs?.detail === true || name === "device_run_flow"
-            ? result : compactToolResult(name, result);
+        return name === "device_run_flow"
+            ? result : actionResult(publicName, name, result, { detail: rawArgs?.detail === true });
     });
 
     const transport = new StdioServerTransport();

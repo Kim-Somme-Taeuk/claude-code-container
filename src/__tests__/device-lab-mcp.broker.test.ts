@@ -446,7 +446,7 @@ describe("device-lab MCP", () => {
     });
 
     it("reports persistent device-lab storage boundaries without starting the broker", { timeout: TIMEOUT }, async () => {
-        const status = await client.callTool({ name: "device_broker_status", arguments: { probe: false, autolaunch: false } });
+        const status = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
         expect(status.isError).not.toBe(true);
         const payload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             available: boolean;
@@ -506,7 +506,7 @@ describe("device-lab MCP", () => {
     });
 
     it("enables default implicit broker probing without runtime metadata", { timeout: TIMEOUT }, async () => {
-        const status = await client.callTool({ name: "device_broker_status", arguments: { probe: false, autolaunch: false } });
+        const status = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
         const payload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             state: { runtimeFile: string };
         };
@@ -1223,7 +1223,7 @@ describe("device-lab MCP", () => {
     });
 
     it("uses shared ccc-host runtime metadata for zero-config broker status", { timeout: TIMEOUT }, async () => {
-        const initial = await client.callTool({ name: "device_broker_status", arguments: { probe: false, autolaunch: false } });
+        const initial = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
         const initialPayload = JSON.parse(((initial.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             state: { runtimeFile: string };
         };
@@ -1257,7 +1257,7 @@ describe("device-lab MCP", () => {
         }));
 
         try {
-            const result = await client.callTool({ name: "device_broker_status", arguments: { probe: true } });
+            const result = await client.callTool({ name: "broker_status", arguments: { probe: true } });
             expect(result.isError).not.toBe(true);
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
                 mode: string;
@@ -1287,7 +1287,7 @@ describe("device-lab MCP", () => {
         // refused it and no device tool could run until the image was rebuilt.
         const newerFamilies = REQUIRED_CCC_HOST_BROKER_CAPABILITIES.map((capability: string) =>
             capability.replace(/-v(\d+)$/, (_match: string, version: string) => `-v${Number(version) + 1}`));
-        const initial = await client.callTool({ name: "device_broker_status", arguments: { probe: false, autolaunch: false } });
+        const initial = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
         const initialPayload = JSON.parse(((initial.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             state: { runtimeFile: string };
         };
@@ -1319,7 +1319,7 @@ describe("device-lab MCP", () => {
         }));
 
         try {
-            const result = await client.callTool({ name: "device_broker_status", arguments: { probe: true } });
+            const result = await client.callTool({ name: "broker_status", arguments: { probe: true } });
             expect(result.isError).not.toBe(true);
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
                 mode: string;
@@ -1337,7 +1337,7 @@ describe("device-lab MCP", () => {
     });
 
     it("rejects a ccc-host runtime missing required broker capabilities without version metadata", { timeout: TIMEOUT }, async () => {
-        const initial = await client.callTool({ name: "device_broker_status", arguments: { probe: false, autolaunch: false } });
+        const initial = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
         const initialPayload = JSON.parse(((initial.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             state: { runtimeFile: string };
         };
@@ -1368,7 +1368,7 @@ describe("device-lab MCP", () => {
         }));
 
         try {
-            const result = await client.callTool({ name: "device_broker_status", arguments: { probe: true } });
+            const result = await client.callTool({ name: "broker_status", arguments: { probe: true } });
             expect(result.isError).not.toBe(true);
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
                 mode: string;
@@ -1563,7 +1563,7 @@ describe("device-lab MCP", () => {
     }, TIMEOUT);
 
     it("does not signal a PID claimed by incompatible MCP runtime metadata", { timeout: TIMEOUT }, async () => {
-        const initial = await client.callTool({ name: "device_broker_status", arguments: { probe: false, autolaunch: false } });
+        const initial = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
         const initialPayload = JSON.parse(((initial.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -1597,7 +1597,7 @@ describe("device-lab MCP", () => {
 
         try {
             const result = await client.callTool({
-                name: "device_broker_status",
+                name: "broker_status",
                 arguments: { probe: true, autolaunch: true, hostCandidates: ["127.0.0.1"], port, timeoutMs: 300 },
             });
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -1616,7 +1616,7 @@ describe("device-lab MCP", () => {
     });
 
     it.runIf(process.platform !== "win32")("atomically replaces a linked MCP runtime without mutating its target", { timeout: TIMEOUT }, async () => {
-        const initial = await client.callTool({ name: "device_broker_status", arguments: { probe: false, autolaunch: false } });
+        const initial = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
         const initialPayload = JSON.parse(((initial.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             state: { runtimeFile: string };
         };
@@ -1663,7 +1663,7 @@ describe("device-lab MCP", () => {
     });
 
     it.runIf(process.platform !== "win32")("refuses MCP broker autolaunch through a linked log directory", { timeout: TIMEOUT }, async () => {
-        const initial = await client.callTool({ name: "device_broker_status", arguments: { probe: false, autolaunch: false } });
+        const initial = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
         const initialPayload = JSON.parse(((initial.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             state: { runtimeFile: string; logsRoot: string };
         };
@@ -1767,7 +1767,7 @@ describe("device-lab MCP", () => {
         }));
 
         const status = await client.callTool({
-            name: "device_broker_status",
+            name: "broker_status",
             arguments: { probe: true, hostCandidates: ["127.0.0.1"], port, timeoutMs: 300 },
         });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -1869,11 +1869,14 @@ describe("device-lab MCP", () => {
             }),
         }));
 
+        mkdirSync(join(homeDir, ".ccc/devices/owners", firstPayload.launch.runtime.ownerId, "windows"), { recursive: true });
+        writeFileSync(join(homeDir, ".ccc/devices/owners", firstPayload.launch.runtime.ownerId, "windows", "devices.json"), JSON.stringify({
+            devices: [{ id: "win-autolaunch", backend: "windows-sandbox", status: "stopped", configPath: "C:/ccc/win-autolaunch.wsb" }],
+        }));
         const brokerFlagCommand = await client.callTool({
-            name: "device_status",
+            name: "status",
             arguments: {
                 broker: true,
-                backend: "windows-sandbox",
                 deviceId: "win-autolaunch",
                 hostCandidates: ["127.0.0.1"],
                 port,
@@ -1881,23 +1884,15 @@ describe("device-lab MCP", () => {
             },
         });
         expect(JSON.parse(((brokerFlagCommand.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
-            ok: true,
-            launch: expect.objectContaining({ launched: false, reused: true }),
-            result: expect.objectContaining({
                 backend: "windows-sandbox",
                 command: "device_status",
                 deviceId: "win-autolaunch",
                 invoked: true,
-            }),
-            routedBy: "device-lifecycle-broker",
+            routedBy: "device-lifecycle-broker-implicit",
         }));
 
-        mkdirSync(join(homeDir, ".ccc/devices/owners", firstPayload.launch.runtime.ownerId, "windows"), { recursive: true });
-        writeFileSync(join(homeDir, ".ccc/devices/owners", firstPayload.launch.runtime.ownerId, "windows", "devices.json"), JSON.stringify({
-            devices: [{ id: "win-autolaunch", backend: "windows-sandbox", status: "stopped", configPath: "C:/ccc/win-autolaunch.wsb" }],
-        }));
         const lifecycleStart = await client.callTool({
-            name: "device_start",
+            name: "start",
             arguments: {
                 deviceId: "win-autolaunch",
                 autolaunch: true,
@@ -1907,14 +1902,11 @@ describe("device-lab MCP", () => {
             },
         });
         expect(JSON.parse(((lifecycleStart.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
-            ok: true,
-            result: expect.objectContaining({
                 backend: "windows-sandbox",
                 command: "device_start",
                 deviceId: "win-autolaunch",
                 invoked: true,
                 execution: expect.objectContaining({ mode: "exec", providerExecution: "fake" }),
-            }),
         }));
 
         const shutdown = await callInternalBroker(client, { operation: "brokerShutdown", arguments: { confirmDestructive: true } });
@@ -1955,7 +1947,7 @@ describe("device-lab MCP", () => {
         };
         expect(launchedPayload.ok).toBe(true);
         const status = await client.callTool({
-            name: "device_broker_status",
+            name: "broker_status",
             arguments: { probe: true, hostCandidates: ["127.0.0.1"], port, timeoutMs: 300 },
         });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as { state: { runtimeFile: string } };
@@ -1992,7 +1984,7 @@ describe("device-lab MCP", () => {
         };
         expect(launchedPayload.ok).toBe(true);
         const status = await client.callTool({
-            name: "device_broker_status",
+            name: "broker_status",
             arguments: { probe: true, hostCandidates: ["127.0.0.1"], port, timeoutMs: 300 },
         });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as { state: { runtimeFile: string } };
@@ -2033,7 +2025,7 @@ describe("device-lab MCP", () => {
         };
         expect(launchedPayload.ok).toBe(true);
         const status = await client.callTool({
-            name: "device_broker_status",
+            name: "broker_status",
             arguments: { probe: true, hostCandidates: ["127.0.0.1"], port, timeoutMs: 300 },
         });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as { state: { runtimeFile: string } };
@@ -2139,7 +2131,7 @@ setInterval(() => {}, 1000);
     });
 
     it("cleans stale broker runtime metadata and reports launch failures", { timeout: TIMEOUT }, async () => {
-        const status = await client.callTool({ name: "device_broker_status", arguments: {} });
+        const status = await client.callTool({ name: "broker_status", arguments: {} });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -2179,7 +2171,7 @@ setInterval(() => {}, 1000);
     });
 
     it("relaunches an MCP-owned broker when runtime metadata points at a dead process", { timeout: TIMEOUT }, async () => {
-        const status = await client.callTool({ name: "device_broker_status", arguments: { probe: false, autolaunch: false } });
+        const status = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -2233,7 +2225,7 @@ setInterval(() => {}, 1000);
     });
 
     it("refuses to autolaunch over another owner's broker runtime metadata", { timeout: TIMEOUT }, async () => {
-        const status = await client.callTool({ name: "device_broker_status", arguments: {} });
+        const status = await client.callTool({ name: "broker_status", arguments: {} });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             state: { runtimeFile: string };
         };
@@ -2272,7 +2264,7 @@ setInterval(() => {}, 1000);
     });
 
     it("ignores another owner's broker runtime metadata on a different requested port", { timeout: TIMEOUT }, async () => {
-        const status = await client.callTool({ name: "device_broker_status", arguments: { probe: false, autolaunch: false } });
+        const status = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -2322,7 +2314,7 @@ setInterval(() => {}, 1000);
     });
 
     it("refuses to shut down broker runtime metadata not managed by device-lab-mcp", { timeout: TIMEOUT }, async () => {
-        const status = await client.callTool({ name: "device_broker_status", arguments: {} });
+        const status = await client.callTool({ name: "broker_status", arguments: {} });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -2404,7 +2396,7 @@ setInterval(() => {}, 1000);
         });
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
-        const status = await client.callTool({ name: "device_broker_status", arguments: {} });
+        const status = await client.callTool({ name: "broker_status", arguments: {} });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -2421,7 +2413,7 @@ setInterval(() => {}, 1000);
         }));
         try {
             const result = await client.callTool({
-                name: "device_status",
+                name: "status",
                 arguments: { deviceId: "win-host-runtime" },
             });
             expect(result.isError).not.toBe(true);
@@ -2551,7 +2543,7 @@ setInterval(() => {}, 1000);
         }
     });
 
-    it("forwards lifecycle delete options and long RPC timeouts to the host broker", { timeout: TIMEOUT }, async () => {
+    it("forwards lifecycle delete options after owner inventory resolution", { timeout: TIMEOUT }, async () => {
         const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
         const server = createServer((req, res) => {
             if (req.url === "/health") {
@@ -2576,6 +2568,10 @@ setInterval(() => {}, 1000);
                 const parsed = JSON.parse(body);
                 requests.push({ method: parsed.method, params: parsed.params || {} });
                 res.setHeader("content-type", "application/json");
+                if (parsed.method === "broker.inventory") {
+                    res.end(JSON.stringify({ ok: true, result: { backends: [{ stateKey: "android", devices: [{ id: "android-delete-options", backend: "android-emulator" }] }] } }));
+                    return;
+                }
                 res.end(JSON.stringify({
                     ok: true,
                     result: {
@@ -2593,10 +2589,9 @@ setInterval(() => {}, 1000);
         const address = server.address() as AddressInfo;
         try {
             const result = await client.callTool({
-                name: "device_delete",
+                name: "delete",
                 arguments: {
                     deviceId: "android-delete-options",
-                    backend: "android-emulator",
                     broker: true,
                     deleteAvd: false,
                     confirmDestructive: true,
@@ -2605,14 +2600,14 @@ setInterval(() => {}, 1000);
                     timeoutMs: 10000,
                 },
             });
-            expect(result.isError).not.toBe(true);
+            expect(result.isError, JSON.stringify(result)).not.toBe(true);
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
                 ok: boolean;
                 selected: { timeoutMs: number };
             };
             expect(payload.ok).toBe(true);
-            expect(payload.selected.timeoutMs).toBe(10000);
-            expect(requests).toEqual([{
+            expect(payload).toMatchObject({ backend: "android-emulator", command: "device_delete", deviceId: "android-delete-options" });
+            expect(requests).toEqual([{ method: "broker.inventory", params: {} }, {
                 method: "broker.command.invoke",
                 params: expect.objectContaining({
                     backend: "android-emulator",
@@ -2647,6 +2642,10 @@ setInterval(() => {}, 1000);
                 const parsed = JSON.parse(body);
                 requests.push({ method: parsed.method, params: parsed.params || {} });
                 res.setHeader("content-type", "application/json");
+                if (parsed.method === "broker.inventory") {
+                    res.end(JSON.stringify({ ok: true, result: { backends: [{ stateKey: "windows", devices: [{ id: "win-proxy", backend: "windows-sandbox" }] }] } }));
+                    return;
+                }
                 res.end(JSON.stringify({
                     ok: true,
                     result: {
@@ -2666,7 +2665,7 @@ setInterval(() => {}, 1000);
         const address = server.address() as AddressInfo;
         try {
             const result = await client.callTool({
-                name: "device_exec",
+                name: "exec",
                 arguments: {
                     deviceId: "win-proxy",
                     command: "Write-Output proxied",
@@ -2676,9 +2675,9 @@ setInterval(() => {}, 1000);
                     timeoutMs: 500,
                 },
             });
-            expect(result.isError).not.toBe(true);
+            expect(result.isError, JSON.stringify(result)).not.toBe(true);
             expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual({ stdout: "proxied ok", status: 0 });
-            expect(requests).toEqual([{
+            expect(requests).toEqual([{ method: "broker.inventory", params: {} }, {
                 method: "broker.device.tool.invoke",
                 params: expect.objectContaining({
                     tool: "device_exec",
@@ -2753,7 +2752,7 @@ setInterval(() => {}, 1000);
         });
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
-        const status = await client.callTool({ name: "device_broker_status", arguments: {} });
+        const status = await client.callTool({ name: "broker_status", arguments: {} });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -2770,7 +2769,7 @@ setInterval(() => {}, 1000);
         }));
         try {
             const result = await client.callTool({
-                name: "device_exec",
+                name: "exec",
                 arguments: {
                     deviceId: "win-implicit-proxy",
                     command: "Write-Output implicit",
@@ -2797,10 +2796,10 @@ setInterval(() => {}, 1000);
     });
 
     it.each([
-        { label: "default discovery budget", delay: 1400, rpcTimeoutMs: undefined, succeeds: true, tool: "device_backends" },
-        { label: "explicit longer RPC budget", delay: 1400, rpcTimeoutMs: 2500, succeeds: true, tool: "device_backends" },
-        { label: "explicit shorter RPC budget", delay: 250, rpcTimeoutMs: 50, succeeds: false, tool: "device_backends" },
-        { label: "implicit Hyper-V discovery budget", delay: 1400, rpcTimeoutMs: undefined, succeeds: true, tool: "device_inventory" },
+        { label: "default discovery budget", delay: 1400, rpcTimeoutMs: undefined, succeeds: true, tool: "backends" },
+        { label: "explicit longer RPC budget", delay: 1400, rpcTimeoutMs: 2500, succeeds: true, tool: "backends" },
+        { label: "explicit shorter RPC budget", delay: 250, rpcTimeoutMs: 50, succeeds: false, tool: "backends" },
+        { label: "implicit Hyper-V discovery budget", delay: 1400, rpcTimeoutMs: undefined, succeeds: true, tool: "inventory" },
     ])("keeps $label separate from the implicit health probe budget", { timeout: TIMEOUT }, async ({ delay, rpcTimeoutMs, succeeds, tool }) => {
         const methods: string[] = [];
         const invocations: unknown[] = [];
@@ -2830,7 +2829,7 @@ setInterval(() => {}, 1000);
             });
         });
         await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-        const status = await client.callTool({ name: "device_broker_status", arguments: { probe: false, autolaunch: false } });
+        const status = await client.callTool({ name: "broker_status", arguments: { probe: false, autolaunch: false } });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}"));
         mkdirSync(join(homeDir, ".ccc/devices/broker"), { recursive: true });
         writeFileSync(statusPayload.state.runtimeFile, JSON.stringify({
@@ -2839,11 +2838,11 @@ setInterval(() => {}, 1000);
         }));
         try {
             const result = await client.callTool({ name: tool, arguments: {
-                ...(tool === "device_inventory" ? { backend: "linux-vm" } : {}),
+                ...(tool === "inventory" ? { backend: "linux-vm" } : {}),
                 ...(rpcTimeoutMs === undefined ? {} : { rpcTimeoutMs }),
             } });
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"));
-            if (tool === "device_inventory") {
+            if (tool === "inventory") {
                 expect(result.isError).not.toBe(true);
                 expect(methods).toEqual(["broker.backends", "broker.device.tool.invoke"]);
                 expect(invocations).toEqual([expect.objectContaining({ tool: "device_inventory", backend: "linux-vm" })]);
@@ -2906,7 +2905,7 @@ setInterval(() => {}, 1000);
                                     status: "available",
                                     missing: [],
                                     tools: { wsb: "C:\\Users\\TestUser\\AppData\\Local\\Microsoft\\WindowsApps\\wsb.exe" },
-                                    capabilities: ["device_inventory", "device_start", "device_stop"],
+                                    capabilities: ["inventory", "start", "stop"],
                                 },
                             ],
                         },
@@ -2919,7 +2918,7 @@ setInterval(() => {}, 1000);
         });
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
-        const status = await client.callTool({ name: "device_broker_status", arguments: {} });
+        const status = await client.callTool({ name: "broker_status", arguments: {} });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -2936,7 +2935,7 @@ setInterval(() => {}, 1000);
         }));
         try {
             const result = await client.callTool({
-                name: "device_backends",
+                name: "backends",
                 arguments: {},
             });
             expect(result.isError).not.toBe(true);
@@ -2975,7 +2974,7 @@ setInterval(() => {}, 1000);
         });
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
-        const status = await client.callTool({ name: "device_broker_status", arguments: {} });
+        const status = await client.callTool({ name: "broker_status", arguments: {} });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             state: { runtimeFile: string };
@@ -2996,7 +2995,7 @@ setInterval(() => {}, 1000);
         }));
         try {
             const result = await client.callTool({
-                name: "device_status",
+                name: "status",
                 arguments: { deviceId: "win-unmanaged-runtime-direct" },
             });
             expect(result.isError).toBe(true);
@@ -3006,7 +3005,7 @@ setInterval(() => {}, 1000);
                 routedBy: "device-lifecycle-broker-implicit",
             }));
             const inventory = await client.callTool({
-                name: "device_inventory",
+                name: "inventory",
                 arguments: { backend: "android-device" },
             });
             expect(JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -3026,7 +3025,7 @@ setInterval(() => {}, 1000);
     it("clamps explicit broker probe candidate count and timeout", { timeout: TIMEOUT }, async () => {
         const candidates = Array.from({ length: 12 }, (_, index) => `127.0.0.${index + 1}`);
         const result = await client.callTool({
-            name: "device_broker_status",
+            name: "broker_status",
             arguments: { probe: false, hostCandidates: candidates, timeoutMs: 999999 },
         });
         expect(result.isError).not.toBe(true);
@@ -3056,7 +3055,7 @@ setInterval(() => {}, 1000);
         const address = server.address() as AddressInfo;
         try {
             const result = await client.callTool({
-                name: "device_broker_status",
+                name: "broker_status",
                 arguments: { probe: true, hostCandidates: ["127.0.0.1"], port: address.port, timeoutMs: 500 },
             });
             expect(result.isError).not.toBe(true);
@@ -3122,7 +3121,7 @@ setInterval(() => {}, 1000);
         const address = server.address() as AddressInfo;
         try {
             const result = await client.callTool({
-                name: "device_broker_status",
+                name: "broker_status",
                 arguments: { probe: true, hostCandidates: ["127.0.0.1"], port: address.port, timeoutMs: 500 },
             });
             expect(result.isError).not.toBe(true);

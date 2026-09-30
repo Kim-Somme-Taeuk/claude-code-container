@@ -12,8 +12,8 @@ vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({ StdioServerTranspo
 vi.mock("../../device-lab-mcp/src/backends/android.mjs", async (importOriginal) => ({
     ...await importOriginal<Record<string, unknown>>(),
     handleAndroidTool: async (name: string) => {
-        fixture.calls.push(name);
-        return fixture.observations.get(name) || { content: [{ type: "text", text: '{"ok":true}' }], isError: false };
+        fixture.calls.push(publicToolName(name));
+        return fixture.observations.get(publicToolName(name)) || { content: [{ type: "text", text: '{"ok":true}' }], isError: false };
     },
 }));
 vi.mock("../../device-lab-mcp/src/backends/linux-vm.mjs", async (importOriginal) => ({
@@ -21,11 +21,12 @@ vi.mock("../../device-lab-mcp/src/backends/linux-vm.mjs", async (importOriginal)
     handleLinuxVmManagementTool: async () => null,
     handleLinuxVmTool: async () => null,
 }));
+import { publicToolName } from "../../device-lab-mcp/src/tools.mjs";
 import { startServer } from "../../device-lab-mcp/src/server.mjs";
 
 const wrap = (data: unknown, isError = false) => ({ content: [{ type: "text", text: JSON.stringify(data) }], isError });
 const args = { deviceId: "flow-wait-fixture", implicitBroker: false, text: "needle", packageName: "example.app" };
-const action = { tool: "mobile_tap", arguments: { ...args, x: 1, y: 2 } };
+const action = { tool: "click", arguments: { ...args, x: 1, y: 2 } };
 const parse = (result: any) => JSON.parse(result.content[0].text);
 async function call(name: string, arguments_: Record<string, unknown>) {
     return fixture.handlers[1]({ params: { name, arguments: arguments_ } });
@@ -38,11 +39,11 @@ async function flow(name: string, tool: string, detail: boolean, stopOnError?: b
 beforeAll(async () => { await startServer(); });
 beforeEach(() => { fixture.observations.clear(); fixture.calls.length = 0; });
 
-describe.each(["device_run_flow"])("%s wait conditions", (name) => {
+describe.each(["run_flow"])("%s wait conditions", (name) => {
     it.each([
-        ["mobile_wait_for_text", { found: false }],
-        ["mobile_wait_for_app", { found: false }],
-        ["mobile_wait_for_app", { running: false }],
+        ["wait_for_text", { found: false }],
+        ["wait_for_app", { found: false }],
+        ["wait_for_app", { running: false }],
     ] as const)("stops before the next action for %s %j in compact and detail modes", async (tool, observation) => {
         fixture.observations.set(tool, wrap(observation));
         for (const detail of [false, true]) {
@@ -59,53 +60,53 @@ describe.each(["device_run_flow"])("%s wait conditions", (name) => {
     });
 
     it("continues only when requested, retains all failed observations and overall failure", async () => {
-        fixture.observations.set("mobile_wait_for_text", wrap({ found: false }));
-        fixture.observations.set("mobile_wait_for_app", wrap({ running: false }));
+        fixture.observations.set("wait_for_text", wrap({ found: false }));
+        fixture.observations.set("wait_for_app", wrap({ running: false }));
         const result = parse(await call(name, { detail: false, stopOnError: false, steps: [
-            { tool: "mobile_wait_for_text", arguments: args }, action,
-            { tool: "mobile_wait_for_app", arguments: args },
+            { tool: "wait_for_text", arguments: args }, action,
+            { tool: "wait_for_app", arguments: args },
         ] }));
         expect(result.ok).toBe(false);
         expect(result.stoppedAt).toBeUndefined();
         expect(result.results.map((item: any) => item.isError)).toEqual([true, false, true]);
-        expect(fixture.calls).toEqual(["mobile_wait_for_text", "mobile_tap", "mobile_wait_for_app"]);
+        expect(fixture.calls).toEqual(["wait_for_text", "click", "wait_for_app"]);
     });
 
     it.each([
-        ["mobile_wait_for_text", { found: true }],
-        ["mobile_wait_for_app", { running: true }],
-        ["mobile_wait_for_app", { found: true }],
-        ["mobile_wait_for_text", { result: { found: false }, running: false }],
-        ["mobile_wait_for_app", { result: { found: false, running: false } }],
-        ["mobile_get_clipboard", { found: false, running: false, text: "unchanged" }],
-        ["mobile_wait_for_text", { found: "false" }],
+        ["wait_for_text", { found: true }],
+        ["wait_for_app", { running: true }],
+        ["wait_for_app", { found: true }],
+        ["wait_for_text", { result: { found: false }, running: false }],
+        ["wait_for_app", { result: { found: false, running: false } }],
+        ["get_clipboard", { found: false, running: false, text: "unchanged" }],
+        ["wait_for_text", { found: "false" }],
     ] as const)("does not misclassify %s %j", async (tool, observation) => {
         fixture.observations.set(tool, wrap(observation));
         const result = parse(await flow(name, tool, false));
         expect(result.ok).toBe(true);
         expect(result.results.map((item: any) => item.isError)).toEqual([false, false]);
         expect(result.results[0].error).toBeUndefined();
-        expect(fixture.calls).toEqual([tool, "mobile_tap"]);
+        expect(fixture.calls).toEqual([tool, "click"]);
     });
 
     it.each([false, true])("retains existing JSON or MCP provider errors (MCP error=%s)", async (isError) => {
         const observation = { ...(isError ? {} : { ok: false }), found: false, error: "transport-unavailable",
             cause: "connection-closed", remedy: "reconnect", cleanup: { complete: false } };
-        fixture.observations.set("mobile_wait_for_text", wrap(observation, isError));
-        const result = parse(await flow(name, "mobile_wait_for_text", true));
+        fixture.observations.set("wait_for_text", wrap(observation, isError));
+        const result = parse(await flow(name, "wait_for_text", true));
         expect(result).toMatchObject({ ok: false, stoppedAt: 0 });
         expect(result.results[0].error).toBeUndefined();
         expect(result.results[0].content[0].value).toEqual(observation);
-        expect(fixture.calls).toEqual(["mobile_wait_for_text"]);
+        expect(fixture.calls).toEqual(["wait_for_text"]);
     });
 
     it("retains plain-text provider errors and status failures", async () => {
-        fixture.observations.set("mobile_wait_for_app", { content: [{ type: "text", text: "Error: process observation failed" }], isError: true });
-        const failed = parse(await flow(name, "mobile_wait_for_app", false));
-        expect(failed.results[0]).toMatchObject({ isError: true, content: [{ type: "text", text: "Error: process observation failed" }] });
+        fixture.observations.set("wait_for_app", { content: [{ type: "text", text: "Error: process observation failed" }], isError: true });
+        const failed = parse(await flow(name, "wait_for_app", false));
+        expect(failed.results[0]).toMatchObject({ isError: true, content: [{ type: "json", value: { error: "Error: process observation failed" } }] });
         expect(failed.results[0].error).toBeUndefined();
-        fixture.observations.set("mobile_session_status", wrap({ ok: false, error: "session-unavailable" }));
-        const status = parse(await flow(name, "mobile_session_status", false));
+        fixture.observations.set("automation_status", wrap({ ok: false, error: "session-unavailable" }));
+        const status = parse(await flow(name, "automation_status", false));
         expect(status).toMatchObject({ ok: false, stoppedAt: 0 });
         expect(status.results[0].content[0].value.error).toBe("session-unavailable");
     });

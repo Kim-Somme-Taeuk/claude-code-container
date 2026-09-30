@@ -1,6 +1,33 @@
 # Minimal Device Lab output
 
+## Action-first public interface
+
+Public names have no device/mobile/display prefix. Common actions are
+`screenshot`, `click`, `double_click`, `type`, `key`, `scroll`, `move` and
+`cursor_position`. Mobile taps use `click`; the current X11 display is another
+explicit deviceId. The owner-scoped device determines the implementation.
+There is no remembered selection. Unsupported gestures, buttons and cursor
+operations fail explicitly rather than silently becoming different actions.
+`move` requires x and y; `cursor_position` only queries position.
+
+Successful simple actions return literal MCP text `ok`. Queries return useful
+data or native images, without repeating success or request arguments. Errors
+set MCP isError and retain the cause and necessary recovery evidence. Warnings,
+partial failures, lifecycle IDs, artifact paths and screenshot incarnationId
+must survive. Detailed diagnostic output remains available with detail:true.
+Flows use the same public names, preserve step identity and native images, and
+classify failed waits before simplifying output. Old prefixed calls are rejected.
+These rules supersede historical prefixed names in the sections below.
+
 ## Canonical inputs
+
+Existing-device tools accept `deviceId`, never `backend`. The server resolves
+the owned device’s provider internally. `run_flow` inherits only `deviceId`
+and `incarnationId` within that request. Explicit backend input is rejected
+before dispatch. Creation and discovery may still select a kind because no
+existing device is targeted.
+Unknown or ambiguous device IDs fail without choosing a provider or sending an
+action. No ID-prefix guessing or remembered target is permitted.
 
 The advertised tool catalog is the callable public contract. Removed mobile
 aliases and unadvertised broker/image operations are rejected before provider
@@ -9,7 +36,7 @@ Backward compatibility is not a requirement for this interface.
 
 Each individual device operation explicitly supplies its deviceId. The server
 does not remember a selected device across requests or MCP clients: subagents may
-share a connection. Only a single device_run_flow request may share its target
+share a connection. Only a single run_flow request may share its target
 between steps; one request cannot change another request's target.
 
 Pass inputs directly, without an `options` wrapper. Single-backend tools select
@@ -45,7 +72,8 @@ Flows retain per-step outcomes and apply the same presentation to known tool
 results. Failures retain their cause, actionable recovery information and
 partial cleanup/containment outcomes. Unknown shapes are preserved.
 
-MCP callers can request `detail: true` for the original diagnostic response.
+MCP callers can request `detail: true` for the diagnostic response; capability
+names still describe callable public tools rather than private provider operations.
 Default JSON text is serialized without indentation. Broker CLI status shows
 verified readiness and endpoint; `--verbose` retains the original diagnostic
 fields for attestation and troubleshooting. Unverified status never claims ready.
@@ -169,8 +197,8 @@ screenshots are native image blocks in the same response, so inspection requires
 no follow-up screenshot call. The canonical catalog contract below defines the
 consolidated tool identities.
 
-Within either flow, an explicit unmet condition from mobile_wait_for_text
-(found:false) or mobile_wait_for_app (found:false or running:false) is a failed
+Within a flow, an explicit unmet condition from wait_for_text
+(found:false) or wait_for_app (found:false or running:false) is a failed
 step with error wait-condition-not-met. Default stopOnError prevents subsequent
 actions; false continues while the flow remains unsuccessful. Original wait
 observations and provider errors remain available. Successful waits, standalone
@@ -193,7 +221,7 @@ ownership checks, and clean-absence response shape remain unchanged.
 When no provider handles a registered tool requiring deviceId, the terminal
 diagnostic distinguishes omitted IDs (missing-device-id), absent owner-local
 devices (device-not-found), and unsupported operations on known targets
-(device-tool-unsupported). Missing/absent targets give a short device_list hint.
+(device-tool-unsupported). Missing/absent targets give a short list_devices hint.
 Truly unknown tool names retain Unknown tool. Invalid IDs, provider/broker
 errors, backend mismatch, policy refusals and successful results keep precedence.
 Diagnostic lookup must not query providers or other owners, mutate state, mask
@@ -213,9 +241,9 @@ and dry-run plans stay reviewable. Detailed responses remain original.
 
 ## Canonical tools and shared flow target
 
-Advertise canonical device install/launch/screenshot, explicit mobile orientation,
-and one device_run_flow. The six legacy mobile aliases (install_app, launch_app,
-screenshot, rotate_left, rotate_right, run_flow) are not callable. Discovery and
+Advertise unprefixed install_app/launch_app/screenshot, set_orientation,
+and one run_flow. All old device_, mobile_ and display_ prefixed names are
+not callable. Discovery and
 public dispatch use the same catalog; detailed internal capabilities may include
 provider operation names, which are not additional public tools.
 The canonical catalog must shrink from its 57,211-byte starting size.
