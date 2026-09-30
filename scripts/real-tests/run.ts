@@ -3,13 +3,13 @@ import { spawn, spawnSync } from "child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
-import { ALL_TOOLS as ACCEPTED_DEVICE_LAB_MCP_TOOLS, TOOLS as DEVICE_LAB_MCP_TOOLS } from "../../device-lab-mcp/src/tools.mjs";
+import { TOOLS as DEVICE_LAB_MCP_TOOLS } from "../../device-lab-mcp/src/tools.mjs";
 import { consumeDeviceLabMcpToolCalls, consumeDeviceLabMcpToolSessions } from "./device-lab-mcp-client.ts";
 import { normalizeProviderConcurrency, partitionProviderFiles, runResourceAware } from "./provider-parallelism.ts";
 import { aggregateStepResult } from "./result-status.ts";
 import { compactMessage } from "./compact-message.ts";
 
-import { flowStepArguments, normalizeToolArgs } from "../../device-lab-mcp/src/tool-arguments.mjs";
+import { flowStepArguments, toolInputError } from "../../device-lab-mcp/src/tool-arguments.mjs";
 
 let failed = false;
 const counts = { PASS: 0, SKIP: 0, FAIL: 0 };
@@ -18,19 +18,7 @@ const records: any[] = [];
 const toolCallRecords: any[] = [];
 const toolSessionRecords: any[] = [];
 
-const hiddenCompatibilityTools = new Set([
-    ...ACCEPTED_DEVICE_LAB_MCP_TOOLS.filter((tool) => !DEVICE_LAB_MCP_TOOLS.some((visible) => visible.name === tool.name)).map((tool) => tool.name),
-    "device_broker_shutdown",
-    "device_broker_rpc",
-    "device_broker_lease",
-    "device_broker_attach",
-    "device_broker_apple",
-    "device_broker_command",
-    "device_broker_appium",
-    "device_image_create",
-    "device_image_clone",
-]);
-const hiddenLegacyTransportKeys = new Set([
+const internalTransportKeys = new Set([
     "broker",
     "viaBroker",
     "implicitBroker",
@@ -43,7 +31,7 @@ const hiddenLegacyTransportKeys = new Set([
     "rpcTimeoutMs",
     "launchTimeoutMs",
 ]);
-const toolSchemasByName = new Map<string, any>(ACCEPTED_DEVICE_LAB_MCP_TOOLS.map((tool) => [tool.name, tool.inputSchema || {}]));
+const toolSchemasByName = new Map<string, any>(DEVICE_LAB_MCP_TOOLS.map((tool) => [tool.name, tool.inputSchema || {}]));
 
 function canonicalToolSurface() {
     const tools = DEVICE_LAB_MCP_TOOLS.map((tool) => ({
@@ -101,7 +89,7 @@ function toolArgumentFacets(tool, value) {
         }
     };
     collect(value);
-    if ((tool === "device_run_flow" || tool === "mobile_run_flow") && Array.isArray(value.steps)) {
+    if (tool === "device_run_flow" && Array.isArray(value.steps)) {
         for (const step of value.steps) collect(step?.arguments);
     }
     return uniqueSorted(facets);
@@ -161,7 +149,7 @@ function validateSchemaValue(schema: any = {}, value: any, path = "arguments", o
         for (const key of Object.keys(value)) {
             if (key in properties) {
                 errors.push(...validateSchemaValue(properties[key], value[key], `${path}.${key}`, options));
-            } else if (propertyNames.length > 0 && !(options.allowHiddenTransportKeys && hiddenLegacyTransportKeys.has(key))) {
+            } else if (propertyNames.length > 0 && !(options.allowHiddenTransportKeys && internalTransportKeys.has(key))) {
                 errors.push(`${path}.${key}:unknown`);
             }
         }
@@ -171,15 +159,17 @@ function validateSchemaValue(schema: any = {}, value: any, path = "arguments", o
 
 function validateToolArguments(tool, args) {
     const schema = toolSchemasByName.get(tool);
-    if (!schema) return hiddenCompatibilityTools.has(tool) ? [] : [`${tool}:unadvertised`];
-    return validateSchemaValue(schema, normalizeToolArgs(args, tool), "arguments", { allowHiddenTransportKeys: true });
+    if (!schema) return [`${tool}:unadvertised`];
+    const inputError = toolInputError(tool, args);
+    if (inputError) return [inputError];
+    return validateSchemaValue(schema, args, "arguments", { allowHiddenTransportKeys: true });
 }
 
 function flowStepArgumentSchemaFailures(flowTool, rawArgs) {
-    const args = normalizeToolArgs(rawArgs);
-    if ((flowTool !== "device_run_flow" && flowTool !== "mobile_run_flow") || !Array.isArray(args?.steps)) return [];
+    const args = rawArgs;
+    if (flowTool !== "device_run_flow" || !Array.isArray(args?.steps)) return [];
     return args.steps.flatMap((step, index) => {
-        const tool = String(step?.tool || step?.name || "");
+        const tool = String(step?.tool || "");
         if (!tool) return [];
         const malformed = step?.arguments !== undefined && (!step.arguments || typeof step.arguments !== "object" || Array.isArray(step.arguments));
         const errors = malformed ? ["arguments:type=object"] : validateToolArguments(tool, flowStepArguments(tool, args, step?.arguments));
@@ -706,7 +696,6 @@ const effectiveScriptedRecords = scriptedRecords.filter((record) => !record.file
 const advertisedTools = uniqueSorted(DEVICE_LAB_MCP_TOOLS.map((tool) => tool.name));
 const calledTools = uniqueSorted(toolCallRecords.map((record) => record.tool));
 const calledPublicTools = calledTools.filter((tool) => advertisedTools.includes(tool));
-const calledHiddenCompatibilityTools = calledTools.filter((tool) => hiddenCompatibilityTools.has(tool));
 const calledArgumentFacets = uniqueSorted(toolCallRecords.flatMap((record) => Array.isArray(record.facets) ? record.facets : []));
 const advertisedArgumentEnumFacetsList = advertisedArgumentEnumFacets();
 const calledAdvertisedArgumentEnumFacets = calledArgumentFacets.filter((facet) => advertisedArgumentEnumFacetsList.includes(facet));
@@ -718,19 +707,18 @@ const callOutcomes = Object.fromEntries([...new Set(toolCallRecords.map((record)
     .map((outcome) => [outcome, toolCallRecords.filter((record) => (record.outcome || "unknown") === outcome).length]));
 const scriptedTools = uniqueSorted(effectiveScriptedRecords.map((record) => record.tool));
 const scriptedPublicTools = scriptedTools.filter((tool) => advertisedTools.includes(tool));
-const scriptedHiddenCompatibilityTools = scriptedTools.filter((tool) => hiddenCompatibilityTools.has(tool));
 const scriptedArgumentFacets = uniqueSorted(effectiveScriptedRecords.flatMap((record) => Array.isArray(record.facets) ? record.facets : []));
 const invalidScriptedArgumentFacets = scriptedArgumentFacets.filter((facet) => {
     const parts = argumentFacetParts(facet);
     if (!parts) return true;
     if (!ARGUMENT_FACET_KEYS.includes(parts.key)) return true;
-    return !advertisedTools.includes(parts.tool) && !hiddenCompatibilityTools.has(parts.tool);
+    return !advertisedTools.includes(parts.tool);
 });
 const uncalledAdvertisedTools = advertisedTools.filter((tool) => !calledPublicTools.includes(tool));
 const unscriptedAdvertisedTools = advertisedTools.filter((tool) => !scriptedPublicTools.includes(tool));
 const uncalledScriptedTools = scriptedTools.filter((tool) => !calledTools.includes(tool));
 const uncalledScriptedArgumentFacets = scriptedArgumentFacets.filter((facet) => !calledArgumentFacets.includes(facet));
-const unadvertisedTools = calledTools.filter((tool) => !advertisedTools.includes(tool) && !hiddenCompatibilityTools.has(tool));
+const unadvertisedTools = calledTools.filter((tool) => !advertisedTools.includes(tool));
 const incompleteOutcomeRecords = toolCallRecords.filter((record) => ["pending", "unknown", "thrown"].includes(record.outcome || "unknown"));
 const argumentSchemaFailureRecords = toolCallRecords.filter((record) => record.schemaValid === false);
 const flowStepArgumentSchemaFailureRecords = toolCallRecords.flatMap((record) => (Array.isArray(record.flowStepArgumentSchemaFailures) ? record.flowStepArgumentSchemaFailures : []).map((failure) => ({
@@ -887,7 +875,6 @@ const summaryPayload = {
         advertisedTools,
         calledTools,
         calledPublicTools,
-        calledHiddenCompatibilityTools,
         calledArgumentFacets,
         advertisedArgumentEnumFacets: advertisedArgumentEnumFacetsList,
         calledAdvertisedArgumentEnumFacets,
@@ -907,7 +894,6 @@ const summaryPayload = {
         unjustifiedMissingDirectOkTools,
         scriptedTools,
         scriptedPublicTools,
-        scriptedHiddenCompatibilityTools,
         scriptedArgumentFacets,
         invalidScriptedArgumentFacets,
         uncalledAdvertisedTools,

@@ -1,17 +1,33 @@
 # Minimal Device Lab output
 
+## Canonical inputs
+
+The advertised tool catalog is the callable public contract. Removed mobile
+aliases and unadvertised broker/image operations are rejected before provider
+execution. Internal broker APIs remain available to the host implementation.
+Backward compatibility is not a requirement for this interface.
+
+Each individual device operation explicitly supplies its deviceId. The server
+does not remember a selected device across requests or MCP clients: subagents may
+share a connection. Only a single device_run_flow request may share its target
+between steps; one request cannot change another request's target.
+
+Pass inputs directly, without an `options` wrapper. Single-backend tools select
+their backend internally and reject an explicit `backend`. Flow steps use
+`tool`, `arguments`, and optional `label`; `name` is not an alternative to `tool`.
+Rejected legacy inputs must not silently execute with defaults. Canonical calls
+retain ownership checks, destructive confirmation, and useful failure results.
+
 ## Inputs with one supported backend
 
 Discovery omits `backend` for container-QEMU image list/import, target list,
 readiness probe, session open, workspace sync, artifact export, guest-agent
 status/provision, and macOS base-image create/clone. The server supplies their
-sole backend only when the normalized argument is omitted. Compatible explicit
-backend arguments remain accepted; contradictory or malformed values fail before
-provider execution. These QEMU operations do not select host Hyper-V guests.
+sole backend after checking raw inputs. Explicit backend arguments are rejected
+before provider execution, including values matching the internal default. These QEMU operations do not select host Hyper-V guests.
 Defaults are applied after flow target inheritance and do not broaden ownership.
 
-Creation advertises typed inputs instead of a generic `options` wrapper. Existing
-wrappers still work, with top-level values taking precedence. Descriptions identify
+Creation advertises typed inputs instead of a generic `options` wrapper. Wrappers are rejected before execution. Descriptions identify
 platform-specific alternatives without implying unsupported defaults or key syntax.
 The real-provider test runner validates the same effective arguments as the server.
 
@@ -89,8 +105,8 @@ artifact paths and unique failure/containment evidence remain available.
 `detail: true` preserves the original diagnostic payload.
 
 Advertised inputs describe the requested action and target. Internal mobile
-connection settings need not be repeated in every tool schema; legacy callers
-may still provide them. Destructive confirmation and input constraints remain.
+connection settings are retained for internal routing and test machinery rather
+than advertised as user choices. Destructive confirmation and input constraints remain.
 
 Provider discovery and status formatting may share a fresh snapshot within one
 list operation. They must not share snapshots across requests or replace fresh
@@ -132,8 +148,7 @@ new executable availability.
 
 Missing or invalid mobile key/text-wait arguments fail before target or broker
 preparation, including inside flows. Zero key codes and whitespace text remain
-valid. Advertised schemas require an action value, and legacy nested options are
-normalized before validation.
+valid. Advertised schemas require an action value, and nested options are rejected before validation.
 
 Default flow output is projected before failed-response size limits, so a large
 successful observation cannot erase a later failure's identity and cause.
@@ -200,20 +215,20 @@ and dry-run plans stay reviewable. Detailed responses remain original.
 
 Advertise canonical device install/launch/screenshot, explicit mobile orientation,
 and one device_run_flow. The six legacy mobile aliases (install_app, launch_app,
-screenshot, rotate_left, rotate_right, run_flow) remain callable through their
-original routes but are omitted from tools/list. Accepted-tool diagnostics and
-projection still cover those names; detailed raw capabilities may include them.
+screenshot, rotate_left, rotate_right, run_flow) are not callable. Discovery and
+public dispatch use the same catalog; detailed internal capabilities may include
+provider operation names, which are not additional public tools.
 The canonical catalog must shrink from its 57,211-byte starting size.
 
 The canonical flow schema enumerates supported visible step tools, including
-mobile app/system actions and canonical app install/launch. Existing allowed
-legacy screenshot/rotation steps remain accepted. Device lifecycle, arbitrary
+mobile app/system actions and canonical app install/launch. Only canonical
+step names are accepted. Device lifecycle, arbitrary
 commands, broker management and nested flows remain disallowed. Every destructive
 step requires its own confirmation. Empty flows and malformed step arguments fail.
-Legacy mobile flows and step.name remain accepted; the advertised step field is tool.
+Flow steps require tool; name is rejected even when tool is also present.
 
 Optional flow-level deviceId/backend/incarnationId apply only to device-targeted
-steps. Normalize legacy nested step options first. If an explicit step deviceId
+steps. Step arguments are flat. If an explicit step deviceId
 or backend differs from a provided default, inherit none of the target group.
 Otherwise fill only omitted target fields supported by that step tool (mobile
 actions do not receive an inherited incarnationId). Explicit invalid values still fail

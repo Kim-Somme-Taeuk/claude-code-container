@@ -7,7 +7,7 @@ import { parse } from "acorn";
 import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import { describe, expect, it } from "vitest";
 import { DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES, evaluateDestructivePolicy } from "../../device-lab-mcp/src/policy/destructive.mjs";
-import { ALL_TOOLS, DEVICE_FLOW_TOOL_NAMES, TOOLS } from "../../device-lab-mcp/src/tools.mjs";
+import { DEVICE_FLOW_TOOL_NAMES, TOOLS } from "../../device-lab-mcp/src/tools.mjs";
 import { LINUX_VM_CAPABILITIES } from "../../device-lab-mcp/src/backends/linux-vm.mjs";
 import { androidDeviceE2EPrerequisites, prepareAndroidDeviceApp } from "../../scripts/real-tests/android-device-e2e.ts";
 import { androidEmulatorAppSelection, androidEmulatorCreateRequest, deviceFromPayload } from "../../scripts/real-tests/android-emulator-e2e.ts";
@@ -40,18 +40,6 @@ const HIDDEN_LEGACY_TRANSPORT_KEYS = new Set([
     "timeoutMs",
     "rpcTimeoutMs",
     "launchTimeoutMs",
-]);
-const HIDDEN_COMPATIBILITY_TOOLS = new Set([
-    "mobile_install_app", "mobile_launch_app", "mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right", "mobile_run_flow",
-    "device_broker_shutdown",
-    "device_broker_rpc",
-    "device_broker_lease",
-    "device_broker_attach",
-    "device_broker_apple",
-    "device_broker_command",
-    "device_broker_appium",
-    "device_image_create",
-    "device_image_clone",
 ]);
 const HIDDEN_PROVIDER_REAL_E2E_TRANSPORT_KEYS = new Set(
     [...HIDDEN_LEGACY_TRANSPORT_KEYS].filter((key) => key !== "port" && key !== "timeoutMs"),
@@ -1315,16 +1303,11 @@ describe("test level runner", () => {
         expect(mcpBrokerText).not.toContain("device_broker_service");
     });
 
-    it("keeps device-lab server literal tool sets deduplicated and accepted", () => {
-        const advertised = new Set(ALL_TOOLS.map((tool) => tool.name));
+    it("keeps device-lab server literal tool sets deduplicated", () => {
         const setIssues = deviceLabServerLiteralSets().flatMap(({ name, values }) => {
             const duplicates = values.filter((value, index) => values.indexOf(value) !== index)
                 .map((value) => ({ name, value, issue: "duplicate" }));
-            const unadvertisedTools = values
-                .filter((value) => /^(?:device|mobile|display)_/.test(value))
-                .filter((value) => !advertised.has(value))
-                .map((value) => ({ name, value, issue: "unadvertised-tool" }));
-            return [...duplicates, ...unadvertisedTools];
+            return duplicates;
         });
         expect(setIssues).toEqual([]);
     });
@@ -1338,7 +1321,6 @@ describe("test level runner", () => {
             "device_list",
             "device_run_flow",
             "display_current",
-            "mobile_run_flow",
         ];
         const routed = new Set([
             ...directlyHandled,
@@ -1350,11 +1332,7 @@ describe("test level runner", () => {
             ...deviceLabBackendCapabilityTools().flatMap(({ values }) => values),
         ]);
         const missing = advertised.filter((tool) => !routed.has(tool));
-        const hiddenOrUnadvertised = [...routed]
-            .filter((tool) => /^(?:device|mobile|display)_/.test(tool))
-            .filter((tool) => !advertised.includes(tool) && !HIDDEN_COMPATIBILITY_TOOLS.has(tool));
         expect(missing).toEqual([]);
-        expect(hiddenOrUnadvertised).toEqual([]);
     });
 
     it("keeps advertised backend enums aligned with direct and broker-supported handlers", () => {
@@ -1410,7 +1388,7 @@ describe("test level runner", () => {
         const drift = [...scripts.entries()].flatMap(([backend, file]) => {
             const calls = realTestCallToolNamesForFile(file);
             const missing = (capabilities.get(backend) || [])
-                .filter((tool) => !calls.has(tool))
+                .filter((tool) => TOOLS.some((entry) => entry.name === tool) && !calls.has(tool))
                 .sort();
             const expected = [...(expectedMissing.get(backend) || [])].sort();
             return JSON.stringify(missing) === JSON.stringify(expected)
@@ -1422,7 +1400,6 @@ describe("test level runner", () => {
 
     it("keeps backend handler-only tool cases explicitly classified", () => {
         const advertised = new Set(advertisedDeviceLabTools());
-        const compatibility = new Set(HIDDEN_COMPATIBILITY_TOOLS);
         const capabilities = deviceLabMcpBackendCapabilities();
         const handlerCases = deviceLabBackendHandlerCases();
         const expected = new Map<string, string[]>([
@@ -1462,7 +1439,7 @@ describe("test level runner", () => {
         const actual = new Map([...handlerCases.entries()].map(([backend, cases]) => {
             const backendCapabilities = new Set(capabilities.get(backend) || []);
             return [backend, cases
-                .filter((tool) => advertised.has(tool) || compatibility.has(tool))
+                .filter((tool) => advertised.has(tool))
                 .filter((tool) => !backendCapabilities.has(tool))
                 .sort()];
         }));
@@ -1631,8 +1608,8 @@ describe("test level runner", () => {
             "mobile_recents",
             "mobile_lock",
             "mobile_unlock",
-            "mobile_rotate_left",
-            "mobile_rotate_right",
+            "mobile_set_orientation",
+            "mobile_set_orientation",
             "mobile_set_orientation",
             "mobile_open_url",
             "mobile_set_location",
@@ -1643,8 +1620,8 @@ describe("test level runner", () => {
             "device_record_video_start",
             "device_record_video_status",
             "device_record_video_stop",
-            "mobile_run_flow",
-            "mobile_screenshot",
+            "device_run_flow",
+            "device_screenshot",
             "mobile_set_clipboard",
             "mobile_get_clipboard",
             "device_upload",
@@ -1682,8 +1659,8 @@ describe("test level runner", () => {
             "device_install_app",
             "device_launch_app",
             "device_reset",
-            "mobile_install_app",
-            "mobile_launch_app",
+            "device_install_app",
+            "device_launch_app",
             "mobile_uninstall_app",
             "mobile_clear_app_data",
             "device_upload",
@@ -1724,12 +1701,12 @@ describe("test level runner", () => {
             "mobile_lock",
             "mobile_unlock",
             "mobile_set_orientation",
-            "mobile_rotate_left",
-            "mobile_rotate_right",
+            "mobile_set_orientation",
+            "mobile_set_orientation",
             "mobile_open_url",
             "mobile_set_clipboard",
             "mobile_get_clipboard",
-            "mobile_screenshot",
+            "device_screenshot",
             "device_screenshot",
             "device_record_video_start",
             "device_record_video_status",
@@ -1738,8 +1715,8 @@ describe("test level runner", () => {
             "device_download",
             "device_install_app",
             "device_launch_app",
-            "mobile_install_app",
-            "mobile_launch_app",
+            "device_install_app",
+            "device_launch_app",
             "mobile_wait_for_app",
             "mobile_grant_permission",
             "mobile_revoke_permission",
@@ -1766,8 +1743,8 @@ describe("test level runner", () => {
             "device_install_app",
             "device_launch_app",
             "device_reset",
-            "mobile_install_app",
-            "mobile_launch_app",
+            "device_install_app",
+            "device_launch_app",
             "mobile_uninstall_app",
             "mobile_clear_app_data",
         ]) {
@@ -1902,10 +1879,10 @@ describe("test level runner", () => {
             "mobile_home",
             "mobile_lock",
             "mobile_unlock",
-            "mobile_rotate_left",
-            "mobile_rotate_right",
             "mobile_set_orientation",
-            "mobile_screenshot",
+            "mobile_set_orientation",
+            "mobile_set_orientation",
+            "device_screenshot",
             "mobile_open_url",
             "mobile_stop_app",
             "mobile_set_location",
@@ -1933,7 +1910,7 @@ describe("test level runner", () => {
         for (const tool of [
             "mobile_session_status",
             "mobile_dump_ui",
-            "mobile_screenshot",
+            "device_screenshot",
             "mobile_tap",
             "mobile_double_tap",
             "mobile_long_press",
@@ -1944,12 +1921,12 @@ describe("test level runner", () => {
             "mobile_home",
             "mobile_lock",
             "mobile_unlock",
-            "mobile_rotate_left",
-            "mobile_rotate_right",
+            "mobile_set_orientation",
+            "mobile_set_orientation",
             "mobile_set_orientation",
             "mobile_wait_for_text",
-            "mobile_install_app",
-            "mobile_launch_app",
+            "device_install_app",
+            "device_launch_app",
             "mobile_wait_for_app",
             "mobile_stop_app",
         ]) {
@@ -2072,7 +2049,8 @@ describe("test level runner", () => {
         const distText = readFileSync(join(repoRoot, "scripts", "real-tests", "level2-dist-broker-e2e.ts"), "utf-8");
         const helperText = readFileSync(join(repoRoot, "scripts", "real-tests", "helpers.ts"), "utf-8");
         expect(text).toContain("device_broker_status");
-        expect(text).toContain("device_broker_rpc");
+        expect(text).toContain('callInternal("brokerRpc"');
+        expect(text).not.toContain('callTool("device_broker_rpc"');
         expect(text).toContain("broker.echo");
         expect(text).toContain("broker.status");
         expect(text).toContain("broker.inventory");
@@ -2109,7 +2087,7 @@ describe("test level runner", () => {
         expect(text).toContain("broker lifecycle command invoke missing-device diagnostic");
         expect(text).toContain("\"device_create\", \"device_status\", \"device_start\", \"device_stop\", \"device_delete\"");
         expect(text).toContain("broker lifecycle command plan enum diagnostics");
-        expect(text).toContain("broker lifecycle command options flattening");
+        expect(text).toContain("broker lifecycle command flat arguments");
         expect(text).toContain("devicePort: 5598");
         expect(text).toContain("autolaunch: true");
         expect(text).toContain("ccc-broker-e2e-home-");
@@ -2231,15 +2209,15 @@ describe("test level runner", () => {
         const advertised = advertisedDeviceLabTools();
         const intentionallyNotSafeInGenericRealE2E: string[] = [];
         const missing = advertised.filter((tool) => !calledTools.has(tool));
-        const unadvertised = [...calledTools].filter((tool) => !advertised.includes(tool) && !HIDDEN_COMPATIBILITY_TOOLS.has(tool));
+        const unadvertised = [...calledTools].filter((tool) => !advertised.includes(tool));
         expect(missing).toEqual(intentionallyNotSafeInGenericRealE2E);
         expect(unadvertised).toEqual([]);
     });
 
-    it("keeps provider real E2E scripts on accepted public or legacy device-lab tools", () => {
+    it("keeps provider real E2E scripts on advertised public device-lab tools", () => {
         const hiddenProviderCalls = realTestCallToolArgumentKeys()
             .filter((call) => call.file !== "level2-broker-e2e.ts")
-            .filter((call) => HIDDEN_COMPATIBILITY_TOOLS.has(call.tool) && !ALL_TOOLS.some((tool) => tool.name === call.tool));
+            .filter((call) => !TOOLS.some((tool) => tool.name === call.tool));
         expect(hiddenProviderCalls).toEqual([]);
     });
 
@@ -2266,7 +2244,6 @@ describe("test level runner", () => {
         const schemas = advertisedDeviceLabToolSchemas();
         const unknownKeys = realTestCallToolArgumentKeys().flatMap((call) => {
             const properties = schemas.get(call.tool);
-            if (HIDDEN_COMPATIBILITY_TOOLS.has(call.tool)) return [];
             if (!properties) return [{ file: call.file, tool: call.tool, unknown: "<unadvertised-tool>" }];
             return call.keys
                 .filter((key) => !properties.has(key) && !HIDDEN_LEGACY_TRANSPORT_KEYS.has(key))
@@ -2789,7 +2766,6 @@ describe("test level runner", () => {
                     canonicalToolSurface: { toolCount: number; sha256: string };
                     calledTools: string[];
                     calledPublicTools: string[];
-                    calledHiddenCompatibilityTools: string[];
                     calledArgumentFacets: string[];
                     callOutcomes: Record<string, number>;
                     toolEvidenceSummary: Record<string, { evidence: string[] }>;
@@ -2802,7 +2778,6 @@ describe("test level runner", () => {
                     unexplainedProviderArgumentEnumFacets: string[];
                     scriptedTools: string[];
                     scriptedPublicTools: string[];
-                    scriptedHiddenCompatibilityTools: string[];
                     scriptedArgumentFacets: string[];
                     uncalledAdvertisedTools: string[];
                     unscriptedAdvertisedTools: string[];
@@ -2852,7 +2827,6 @@ describe("test level runner", () => {
             expect(summary.toolCoverage.calledTools).toEqual(["device_broker_rpc", "device_run_flow", "display_current"]);
             expect(summary.toolCoverage.canonicalToolSurface).toEqual(canonicalDeviceLabToolSurface());
             expect(summary.toolCoverage.calledPublicTools).toEqual(["device_run_flow", "display_current"]);
-            expect(summary.toolCoverage.calledHiddenCompatibilityTools).toEqual(["device_broker_rpc"]);
             expect(summary.toolCoverage.calledArgumentFacets).toEqual(["device_broker_rpc:method=broker.status"]);
             expect(summary.toolCoverage.callOutcomes).toEqual({ "error-result": 1, ok: 2 });
             expect(summary.toolCoverage.toolOutcomeSummary).toEqual(expect.objectContaining({
@@ -2873,12 +2847,11 @@ describe("test level runner", () => {
             expect(summary.toolCoverage.publicToolsWithoutOkOrExpectedError).toEqual([]);
             expect(summary.toolCoverage.scriptedTools).toEqual(["device_broker_rpc", "device_run_flow", "display_current"]);
             expect(summary.toolCoverage.scriptedPublicTools).toEqual(["device_run_flow", "display_current"]);
-            expect(summary.toolCoverage.scriptedHiddenCompatibilityTools).toEqual(["device_broker_rpc"]);
             expect(summary.toolCoverage.scriptedArgumentFacets).toEqual([]);
             expect(summary.toolCoverage.uncalledScriptedTools).toEqual([]);
             expect(summary.toolCoverage.uncalledScriptedArgumentFacets).toEqual([]);
-            expect(summary.toolCoverage.unadvertisedTools).toEqual([]);
-            expect(summary.toolCoverage.argumentSchemaFailureRecords).toEqual([]);
+            expect(summary.toolCoverage.unadvertisedTools).toEqual(["device_broker_rpc"]);
+            expect(summary.toolCoverage.argumentSchemaFailureRecords).toEqual([expect.objectContaining({ tool: "device_broker_rpc", schemaErrors: ["device_broker_rpc:unadvertised"] })]);
             expect(summary.toolCoverage.flowStepArgumentSchemaFailures).toEqual([]);
             expect(summary.toolCoverage.expectedErrorResultRecords).toEqual([
                 expect.objectContaining({ test: "pass", tool: "device_broker_rpc", expectedError: true, errorPayloadJson: true, errorCode: "broker-unavailable" }),
@@ -2901,7 +2874,7 @@ describe("test level runner", () => {
             expect(summary.toolCoverage.emptyOkPublicFlowStepPayloadRecords).toEqual([]);
             expect(summary.toolCoverage.calls).toEqual([
                 expect.objectContaining({ test: "pass", tool: "display_current", mcpSessionId: "fixture-session-1", schemaValid: true }),
-                expect.objectContaining({ test: "pass", tool: "device_broker_rpc", mcpSessionId: "fixture-session-1", schemaValid: true }),
+                expect.objectContaining({ test: "pass", tool: "device_broker_rpc", mcpSessionId: "fixture-session-1", schemaValid: false }),
                 expect.objectContaining({ test: "pass", tool: "device_run_flow", mcpSessionId: "fixture-session-1", schemaValid: true }),
             ]);
             expect(summary.toolCoverage.scripted).toEqual([
@@ -3076,7 +3049,6 @@ describe("test level runner", () => {
                     advertisedTools: ["device_backends", "display_current"],
                     calledTools: ["device_broker_rpc", "display_current"],
                     calledPublicTools: ["display_current"],
-                    calledHiddenCompatibilityTools: ["device_broker_rpc"],
                     calledArgumentFacets: ["device_broker_rpc:method=broker.status"],
                     callOutcomes: { "error-result": 1, ok: 1 },
                     toolOutcomeSummary: {
@@ -3097,7 +3069,6 @@ describe("test level runner", () => {
                     unexplainedProviderArgumentEnumFacets: [],
                     scriptedTools: ["device_backends", "device_broker_rpc", "display_current"],
                     scriptedPublicTools: ["device_backends", "display_current"],
-                    scriptedHiddenCompatibilityTools: ["device_broker_rpc"],
                     scriptedArgumentFacets: ["device_broker_rpc:method=broker.status"],
                     uncalledAdvertisedTools: ["device_backends"],
                     unscriptedAdvertisedTools: [],
@@ -3124,7 +3095,7 @@ describe("test level runner", () => {
                     publicFlowStepTools: ["display_current"],
                     publicFlowStepToolsWithoutOkOrExpectedError: [],
                     expectedFlowStepErrorRecords: [
-                        { test: "broker", flowTool: "mobile_run_flow", tool: "mobile_tap", isError: true, expectedError: true },
+                        { test: "broker", flowTool: "device_run_flow", tool: "mobile_tap", isError: true, expectedError: true },
                     ],
                     unexpectedFlowStepErrorRecords: [],
                     expectedFlowStepPayloadFailures: [],
@@ -3189,7 +3160,6 @@ describe("test level runner", () => {
                         advertised: 2,
                     called: 2,
                     calledPublic: 1,
-                    calledHiddenCompatibility: 1,
                     calledArgumentFacets: 1,
                     callOutcomes: { "error-result": 1, ok: 1 },
                     toolOutcomeSummary: {
@@ -3210,7 +3180,6 @@ describe("test level runner", () => {
                     unexplainedProviderArgumentEnumFacets: [],
                     scripted: 3,
                     scriptedPublic: 2,
-                    scriptedHiddenCompatibility: 1,
                     scriptedArgumentFacets: 1,
                     invalidScriptedArgumentFacets: [],
                     uncalledAdvertisedTools: ["device_backends"],
@@ -3237,7 +3206,7 @@ describe("test level runner", () => {
                     publicFlowStepTools: ["display_current"],
                     publicFlowStepToolsWithoutOkOrExpectedError: [],
                     expectedFlowStepErrorRecords: [
-                        { test: "broker", flowTool: "mobile_run_flow", tool: "mobile_tap", isError: true, expectedError: true },
+                        { test: "broker", flowTool: "device_run_flow", tool: "mobile_tap", isError: true, expectedError: true },
                     ],
                     unexpectedFlowStepErrorRecords: [],
                     expectedFlowStepPayloadFailures: [],
@@ -3408,7 +3377,7 @@ describe("test level runner", () => {
                     emptyOkPublicPayloadRecords: [{ test: "display", tool: "display_current", okPayloadJson: true, okPayloadShape: { kind: "object", keys: [] } }],
                     publicFlowStepToolsWithoutOkOrExpectedError: ["display_current"],
                     unexpectedFlowStepErrorRecords: [{ test: "display", flowTool: "device_run_flow", tool: "display_current", isError: true }],
-                    expectedFlowStepPayloadFailures: [{ test: "broker", flowTool: "mobile_run_flow", tool: "mobile_tap", isError: true, expectedError: true, errorPayloadJson: false }],
+                    expectedFlowStepPayloadFailures: [{ test: "broker", flowTool: "device_run_flow", tool: "mobile_tap", isError: true, expectedError: true, errorPayloadJson: false }],
                     okPublicFlowStepPayloadFailures: [{ test: "display", flowTool: "device_run_flow", tool: "display_current", isError: false, okPayloadJson: false, okPayloadImage: false }],
                     emptyOkPublicFlowStepPayloadRecords: [{ test: "display", flowTool: "device_run_flow", tool: "display_current", isError: false, okPayloadJson: true, okPayloadShape: { kind: "object", keys: [] } }],
                 },
@@ -3837,8 +3806,8 @@ describe("test level runner", () => {
 });
 
 
-describe("canonical and compatible real-runner argument interpretation", () => {
-    it("validates all eleven omitted defaults and legacy selectors while rejecting explicit invalid selectors", () => {
+describe("canonical real-runner argument interpretation", () => {
+    it("validates omitted backend defaults and flat inputs while rejecting explicit selectors and wrappers", () => {
         const dir = mkdtempSync(join(tmpdir(), "ccc-input-clarity-runner-"));
         try {
             const fixture = join(dir, "calls.mjs");
@@ -3852,16 +3821,12 @@ describe("canonical and compatible real-runner argument interpretation", () => {
                 ["device_base_image_create", "macos-vm", { name: "base", sourceImage: "registry/base" }],
                 ["device_base_image_clone", "macos-vm", { name: "clone", sourceDeviceId: "owned-target" }],
             ];
-            const valid = targets.flatMap(([name, backend, args]) => [
-                { name, arguments: args }, { name, arguments: { ...args, backend } },
-                { name, arguments: { ...args, options: { backend } } },
-                { name, arguments: { ...args, backend, options: { backend: "wrong" } } },
-            ]);
-            valid.push({ name: "device_create", arguments: { options: { backend: "linux-vm", name: "legacy", cpus: 2 } } });
-            const invalid = targets.flatMap(([name, backend, args]) => ["", null, false, {}, "unsupported"].flatMap(wrong => [
-                { name, arguments: { ...args, backend: wrong } },
-                { name, arguments: { ...args, options: { backend: wrong } } },
-                { name, arguments: { ...args, backend: wrong, options: { backend } } },
+            const valid: Array<{ name: string; arguments: Record<string, unknown> }> = targets.map(([name, _backend, args]) => ({ name, arguments: { ...args, detail: true } }));
+            valid.push({ name: "device_create", arguments: { backend: "linux-vm", name: "flat", cpus: 2, detail: true } });
+            const invalid = targets.flatMap(([name, backend, args]) => [backend, "", null, false, {}, "unsupported"].flatMap(selector => [
+                { name, arguments: { ...args, backend: selector } },
+                { name, arguments: { ...args, options: { backend: selector } } },
+                { name, arguments: { ...args, backend: selector, options: { backend } } },
             ]));
             writeFileSync(fixture, `export const name='input-clarity'; export async function run(){globalThis[Symbol.for('ccc.deviceLabRealTests.toolCalls')]=${JSON.stringify([...valid, ...invalid].map(call => ({ ...call, outcome: "ok", isError: false })))};return {status:'PASS'};}`);
             const result = spawnSync(process.execPath, [join(repoRoot, "scripts/real-tests/run.ts"), "--json-summary-file", summaryPath, fixture], { cwd: repoRoot, encoding: "utf8", timeout: 30000 });
@@ -3872,38 +3837,39 @@ describe("canonical and compatible real-runner argument interpretation", () => {
             expect(coverage.calls.slice(valid.length).every((call: any) => call.schemaValid === false)).toBe(true);
         } finally { rmSync(dir, { recursive: true, force: true }); }
     });
-    it("recognizes hidden aliases and validates normalized shared flow targets", () => {
+    it("rejects removed aliases and validates canonical shared flow targets", () => {
         const dir = mkdtempSync(join(tmpdir(), "ccc-canonical-runner-"));
         try {
             const fixture = join(dir, "calls.mjs");
             const summaryPath = join(dir, "summary.json");
             const valid = [
                 { name: "device_run_flow", arguments: { deviceId: "android-test", backend: "android-emulator", incarnationId: "a".repeat(32), steps: [{ tool: "mobile_tap", arguments: { x: 1, y: 2 } }] } },
-                { name: "mobile_install_app", arguments: { deviceId: "android-test", path: "/app.apk" } },
-                { name: "mobile_launch_app", arguments: { deviceId: "android-test", packageName: "com.example" } },
-                ...["mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right"].map((name) => ({ name, arguments: { deviceId: "android-test" } })),
-                { name: "mobile_run_flow", arguments: { deviceId: "android-test", steps: [{ name: "mobile_home" }] } },
-                { name: "device_run_flow", arguments: { options: { deviceId: "vm-a", backend: "windows-vm", incarnationId: "a".repeat(32) }, steps: [
+                { name: "device_install_app", arguments: { deviceId: "android-test", path: "/app.apk" } },
+                { name: "device_launch_app", arguments: { deviceId: "android-test", packageName: "com.example" } },
+                { name: "device_screenshot", arguments: { deviceId: "android-test" } },
+                { name: "mobile_set_orientation", arguments: { deviceId: "android-test", orientation: "landscape" } },
+                { name: "device_run_flow", arguments: { deviceId: "vm-a", backend: "windows-vm", incarnationId: "a".repeat(32), steps: [
                     { tool: "device_click", arguments: { x: 1, y: 2 } },
-                    { name: "device_click", arguments: { options: { deviceId: "vm-b", backend: "linux-vm", incarnationId: "b".repeat(32) }, x: 3, y: 4 } },
+                    { tool: "device_click", arguments: { deviceId: "vm-b", backend: "linux-vm", incarnationId: "b".repeat(32), x: 3, y: 4 } },
                 ] } },
             ];
+            const removed = ["mobile_install_app", "mobile_launch_app", "mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right", "mobile_run_flow", "device_broker_rpc"];
             const invalid = [
-                { name: "mobile_install_app", arguments: { deviceId: "android-test" } },
+                ...removed.map(name => ({ name, arguments: { deviceId: "android-test" } })),
                 { name: "device_run_flow", arguments: { deviceId: "vm-a", steps: [] } },
                 { name: "device_run_flow", arguments: { deviceId: "vm-a", backend: "windows-vm", steps: [
                     { tool: "device_click", arguments: { backend: "linux-vm", x: 1, y: 2 } },
                 ] } },
                 { name: "device_run_flow", arguments: { deviceId: "vm-a", steps: [{ tool: "device_click", arguments: null }] } },
+                { name: "device_run_flow", arguments: { deviceId: "vm-a", steps: [{ tool: "device_click", name: "device_click", arguments: { x: 1, y: 2 } }] } },
             ];
             writeFileSync(fixture, `export const name='canonical-arguments'; export async function run(){globalThis[Symbol.for('ccc.deviceLabRealTests.toolCalls')]=${JSON.stringify([...valid, ...invalid].map((call) => ({ ...call, outcome: "ok", isError: false })))}; return {status:'PASS'};}`);
             const result = spawnSync(process.execPath, [join(repoRoot, "scripts/real-tests/run.ts"), "--json-summary-file", summaryPath, fixture], { cwd: repoRoot, encoding: "utf8", timeout: 30000 });
             expect(result.status, result.stderr).toBe(0);
             const coverage = JSON.parse(readFileSync(summaryPath, "utf8")).toolCoverage;
-            expect(coverage.unadvertisedTools).toEqual([]);
-            expect(coverage.calledHiddenCompatibilityTools).toHaveLength(6);
+            expect(coverage.unadvertisedTools).toEqual([...removed].sort());
             expect(coverage.calls.slice(0, valid.length).every((call: any) => call.schemaValid)).toBe(true);
-            expect(coverage.argumentSchemaFailureRecords).toHaveLength(3);
+            expect(coverage.argumentSchemaFailureRecords).toHaveLength(removed.length + 3);
             expect(coverage.flowStepArgumentSchemaFailures).toHaveLength(2);
             expect(coverage.flowStepArgumentSchemaFailures[0].schemaErrors).toContain("arguments.deviceId:required");
             expect(coverage.flowStepArgumentSchemaFailures[1].schemaErrors).toContain("arguments:type=object");

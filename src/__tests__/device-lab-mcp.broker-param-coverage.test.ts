@@ -41,8 +41,8 @@ const BROKER_DEVICE_TOOL_ROUTABLE_TOOLS = new Set([
     "mobile_rotate_right",
     "mobile_set_orientation",
     "mobile_open_url",
-    "mobile_install_app",
-    "mobile_launch_app",
+    "device_install_app",
+    "device_launch_app",
     "mobile_uninstall_app",
     "mobile_stop_app",
     "mobile_clear_app_data",
@@ -56,7 +56,7 @@ const BROKER_DEVICE_TOOL_ROUTABLE_TOOLS = new Set([
     "mobile_get_clipboard",
     "mobile_wait_for_text",
     "mobile_wait_for_app",
-    "mobile_screenshot",
+    "device_screenshot",
 ]);
 
 const BROKER_ROUTE_ONLY_PROPERTIES = new Set([

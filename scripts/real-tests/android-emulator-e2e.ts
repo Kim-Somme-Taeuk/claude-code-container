@@ -377,11 +377,11 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             assert.strictEqual(unlock.provider, "adb");
             assert.strictEqual(unlock.unlocked, true);
 
-            const rotateLeft = parsePayload(await callTool("mobile_rotate_left", { ...direct, deviceId }));
+            const rotateLeft = parsePayload(await callTool("mobile_set_orientation", { orientation: "landscape", ...direct, deviceId }));
             assert.strictEqual(rotateLeft.provider, "adb");
             assert.strictEqual(rotateLeft.orientation, "landscape");
 
-            const rotateRight = parsePayload(await callTool("mobile_rotate_right", { ...direct, deviceId }));
+            const rotateRight = parsePayload(await callTool("mobile_set_orientation", { orientation: "reverse-landscape", ...direct, deviceId }));
             assert.strictEqual(rotateRight.provider, "adb");
             assert.strictEqual(rotateRight.orientation, "reverse-landscape");
 
@@ -485,7 +485,7 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
                 assert.strictEqual(clearAppData.provider, "adb");
                 assert.deepStrictEqual(clearAppData.reset, { packageName: appPackage });
 
-                const mobileLaunch = parsePayload(await callTool("mobile_launch_app", {
+                const mobileLaunch = parsePayload(await callTool("device_launch_app", {
                     ...direct,
                     deviceId,
                     packageName: appPackage,
@@ -502,7 +502,7 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
                 assert.strictEqual(mobileUninstall.provider, "adb");
                 assert.strictEqual(mobileUninstall.uninstalled, appPackage);
 
-                const mobileInstall = parsePayload(await callTool("mobile_install_app", {
+                const mobileInstall = parsePayload(await callTool("device_install_app", {
                     ...direct,
                     deviceId,
                     path: appApk,
@@ -578,7 +578,7 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             assert.strictEqual(recordingStatus.provider, "adb-screenrecord");
             assert.strictEqual(recordingStatus.recording.active, true);
 
-            const mobileFlow = parsePayload(await callTool("mobile_run_flow", {
+            const mobileFlow = parsePayload(await callTool("device_run_flow", {
                 steps: [
                     { tool: "mobile_session_status", arguments: { ...direct, deviceId } },
                     { tool: "mobile_home", arguments: { ...direct, deviceId } },
@@ -595,7 +595,7 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             assert.ok(existsSync(recordingPath));
             assert.ok(readFileSync(recordingPath).length > 0);
 
-            const mobileScreenshot = await callTool("mobile_screenshot", { ...direct, deviceId });
+            const mobileScreenshot = await callTool("device_screenshot", { ...direct, deviceId });
             assert.strictEqual(mobileScreenshot?.content?.[0]?.type, "image");
             assert.ok(String(mobileScreenshot.content[0].data || "").length > 64);
 

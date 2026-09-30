@@ -5,7 +5,7 @@ import {
     hasDeviceLabOutputContract,
     validateDeviceLabToolOutput,
 } from "../../device-lab-mcp/src/contracts/tool-contracts.mjs";
-import { ALL_TOOLS, TOOLS } from "../../device-lab-mcp/src/tools.mjs";
+import { TOOLS } from "../../device-lab-mcp/src/tools.mjs";
 
 function schemaShape(value: any): any {
     if (Array.isArray(value)) return value.map(schemaShape);
@@ -13,15 +13,8 @@ function schemaShape(value: any): any {
     return value;
 }
 
-describe("exact input schema compatibility", () => {
-    it("keeps accepted schema shapes from 06594d27 intact", () => {
-        expect(createHash("sha256").update(JSON.stringify(schemaShape(ALL_TOOLS))).digest("hex"))
-            .toBe("d7b207778e6543a005c03dc329e1b84709f61fbce76a479330340b0f702c21bf");
-    });
-    it("changes public schema shapes only by the twelve prescribed field removals", () => {
-        // Hash calculated from git show 06594d27:device-lab-mcp/src/tools.mjs,
-        // projecting backend out of the explicit eleven tools and options out of
-        // device_create. All unrelated shapes and constraints remain covered.
+describe("canonical public input schemas", () => {
+    it("preserves advertised input shapes while removing compatibility-only acceptance", () => {
         expect(createHash("sha256").update(JSON.stringify(schemaShape(TOOLS))).digest("hex"))
             .toBe("2f58e206309a13ae21c4b09c03dc6b6db5f9a182c832e568ec001b152b6b3f84");
     });
@@ -42,11 +35,11 @@ describe("device-lab public output contracts", () => {
         expect(hasDeviceLabOutputContract("not_a_public_tool")).toBe(false);
     });
 
-    it("covers every accepted tool including hidden compatibility names exactly once", () => {
-        const accepted = ALL_TOOLS.map((tool: { name: string }) => tool.name).sort();
+    it("covers every advertised tool exactly once", () => {
+        const accepted = TOOLS.map((tool: { name: string }) => tool.name).sort();
         const contracted = Object.keys(DEVICE_LAB_OUTPUT_CONTRACTS).sort();
         expect(contracted).toEqual(accepted);
-        expect(contracted).toHaveLength(93);
+        expect(contracted).toHaveLength(87);
         expect(TOOLS).toHaveLength(87);
         expect(TOOLS.every((tool: { name: string }) => contracted.includes(tool.name))).toBe(true);
     });

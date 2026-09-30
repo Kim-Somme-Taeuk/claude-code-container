@@ -241,7 +241,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         }));
 
         const installApp = await client.callTool({
-            name: "mobile_install_app",
+            name: "device_install_app",
             arguments: { deviceId: ownedDeviceId, path: "/tmp/Test.app" },
         });
         expect(installApp.isError).not.toBe(true);
@@ -252,7 +252,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         }));
 
         const launchApp = await client.callTool({
-            name: "mobile_launch_app",
+            name: "device_launch_app",
             arguments: { deviceId: ownedDeviceId, bundleId: "com.example.Test" },
         });
         expect(launchApp.isError).not.toBe(true);
@@ -423,7 +423,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         expect((missingRemoteDownload.content as Array<{ text?: string }>)[0].text).toContain("remotePath does not exist");
 
         const screenshot = await client.callTool({
-            name: "mobile_screenshot",
+            name: "device_screenshot",
             arguments: { deviceId: ownedDeviceId },
         });
         expect(screenshot.isError).not.toBe(true);
@@ -736,8 +736,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
             ["mobile_home", { deviceId: ownedDeviceId }],
             ["mobile_lock", { deviceId: ownedDeviceId }],
             ["mobile_unlock", { deviceId: ownedDeviceId }],
-            ["mobile_rotate_left", { deviceId: ownedDeviceId }],
-            ["mobile_rotate_right", { deviceId: ownedDeviceId }],
+            ["mobile_set_orientation", { orientation: "landscape", deviceId: ownedDeviceId }],
             ["mobile_set_orientation", { deviceId: ownedDeviceId, orientation: "reverse-landscape" }],
             ["mobile_wait_for_text", { deviceId: ownedDeviceId, text: "Test", timeoutMs: 1000, intervalMs: 50 }],
         ] as const;

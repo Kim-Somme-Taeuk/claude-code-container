@@ -38,7 +38,7 @@ function step(index: number, isError: boolean, data: unknown, tool = "mobile_wai
 }
 
 describe("flow output before diagnostic bounds", () => {
-    it.each(["device_run_flow", "mobile_run_flow"])("returns two inspectable screenshots in one real stdio %s call", async (name) => {
+    it.each(["device_run_flow"])("returns two inspectable screenshots in one real stdio %s call", async (name) => {
         const context = await createFakeAndroidMcpContext();
         try {
             const created = value(await context.client.callTool({ name: "device_create", arguments: {
@@ -61,7 +61,6 @@ describe("flow output before diagnostic bounds", () => {
     });
 
     it.each([
-        ["mobile_run_flow", false], ["mobile_run_flow", true],
         ["device_run_flow", false], ["device_run_flow", true],
     ] as const)("bounds malformed metadata over public MCP %s (detail=%s)", async (name, detail) => {
         const context = await createDeviceLabMcpTestContext();
@@ -86,7 +85,7 @@ describe("flow output before diagnostic bounds", () => {
                     expect(Buffer.byteLength(text(result))).toBeLessThanOrEqual(65536);
                     expect(value(result)).toMatchObject({ ok: false, results: [
                         { index: 0, tool: "mobile_key", label: "prior failure", isError: true },
-                        { index: 1, label: "step-2", isError: true, error: "Flow step requires tool or name" },
+                        { index: 1, label: "step-2", isError: true, error: "Flow step requires tool; name is not supported" },
                     ] });
                     expect(text(result)).toContain("mobile_key requires key or keyCode");
                 }
@@ -94,7 +93,7 @@ describe("flow output before diagnostic bounds", () => {
         } finally { await cleanupDeviceLabMcpTestContext(context); }
     });
 
-    it.each(["mobile_run_flow", "device_run_flow"])("preserves the later failure over public MCP %s", { timeout: 30000 }, async (name) => {
+    it.each(["device_run_flow"])("preserves the later failure over public MCP %s", { timeout: 30000 }, async (name) => {
         const context = await createFakeAndroidMcpContext();
         try {
             const adb = join(context.binDir, "adb");
@@ -142,7 +141,7 @@ describe("flow output before diagnostic bounds", () => {
     it("keeps in-bounds detail exact and compact projection preserves failure evidence", () => {
         const original = { ok: false, stoppedAt: 1, results: [step(0, false, { matched: true, source: "raw hierarchy" }), step(1, true, evidence)] };
         expect(value(flowJsonResult(original, { detail: true }))).toEqual(original);
-        const compact = value(flowJsonResult(compactToolValue("mobile_run_flow", original)));
+        const compact = value(flowJsonResult(compactToolValue("device_run_flow", original)));
         expect(compact.results[0].content[0].value.source).toBeUndefined();
         expect(compact.results[1].content[0].value).toEqual(evidence);
     });
@@ -203,7 +202,7 @@ function nativeCall(name: string, args: Record<string, unknown>) {
     return nativeFixture.handlers[1]({ params: { name, arguments: args } });
 }
 
-describe.each(["device_run_flow", "mobile_run_flow"])("%s native observations", (name) => {
+describe.each(["device_run_flow"])("%s native observations", (name) => {
     it("retains prior images when the next provider throws", async () => {
         nativeFixture.calls = 0;
         nativeFixture.throwOnCall = 2;

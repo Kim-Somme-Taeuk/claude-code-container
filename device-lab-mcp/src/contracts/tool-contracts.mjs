@@ -20,7 +20,7 @@ const contractGroups = {
     "vm-session-v1": ["device_session_open"],
     "wireless-status-v1": ["device_wireless"],
     "display-target-v1": ["display_current"],
-    "image-content-v1": ["display_screenshot", "device_screenshot", "mobile_screenshot"],
+    "image-content-v1": ["display_screenshot", "device_screenshot"],
     "pointer-action-v1": ["display_click", "display_double_click", "device_click", "device_double_click", "mobile_tap", "mobile_double_tap", "mobile_long_press", "mobile_swipe", "mobile_drag"],
     "key-action-v1": ["display_key", "device_key", "mobile_key", "mobile_home", "mobile_back", "mobile_forward", "mobile_recents", "mobile_power", "mobile_lock", "mobile_unlock"],
     "text-action-v1": ["display_type", "device_type", "mobile_type_text"],
@@ -44,11 +44,11 @@ const contractGroups = {
     "file-upload-v1": ["device_upload"],
     "file-download-v1": ["device_download"],
     "device-reset-v1": ["device_reset"],
-    "app-install-v1": ["device_install_app", "mobile_install_app"],
-    "app-launch-v1": ["device_launch_app", "mobile_launch_app"],
+    "app-install-v1": ["device_install_app"],
+    "app-launch-v1": ["device_launch_app"],
     "mobile-session-status-v1": ["mobile_session_status"],
     "ui-hierarchy-v1": ["mobile_dump_ui"],
-    "orientation-v1": ["mobile_rotate_left", "mobile_rotate_right", "mobile_set_orientation"],
+    "orientation-v1": ["mobile_set_orientation"],
     "url-open-v1": ["mobile_open_url"],
     "app-uninstall-v1": ["mobile_uninstall_app"],
     "app-stop-v1": ["mobile_stop_app"],
@@ -61,7 +61,7 @@ const contractGroups = {
     "clipboard-get-v1": ["mobile_get_clipboard"],
     "wait-text-v1": ["mobile_wait_for_text"],
     "wait-app-v1": ["mobile_wait_for_app"],
-    "flow-result-v1": ["mobile_run_flow", "device_run_flow"],
+    "flow-result-v1": ["device_run_flow"],
 };
 
 export const DEVICE_LAB_OUTPUT_CONTRACTS = Object.freeze(Object.fromEntries(

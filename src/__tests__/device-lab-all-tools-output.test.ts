@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ALL_TOOLS, TOOLS } from "../../device-lab-mcp/src/tools.mjs";
+import { TOOLS } from "../../device-lab-mcp/src/tools.mjs";
 import { cleanupDeviceLabMcpTestContext, createDeviceLabMcpTestContext } from "./helpers/device-lab-mcp-fixture.js";
 import { compactToolResult } from "../../device-lab-mcp/src/public-output.mjs";
 
@@ -77,12 +77,9 @@ action("mobile_drag", { dragged: { x1: 12, y1: 34, x2: 56, y2: 78, durationMs: 7
 action("mobile_type_text", { typed: true });
 action("mobile_key", { key: "KEYCODE_ENTER" });
 for (const [name, key] of [["home", "home"], ["back", "back"], ["forward", "forward"], ["recents", "recents"], ["power", "power"], ["lock", "locked"], ["unlock", "unlocked"]]) action(`mobile_${name}`, { [key]: true });
-action("mobile_rotate_left", { orientation: "landscape", rotation: "1" });
-action("mobile_rotate_right", { orientation: "reverse-landscape", rotation: "3" });
 action("mobile_set_orientation", { orientation: "portrait", rotation: "0" });
 action("mobile_open_url", { openedUrl: "https://example.test/path" });
-action("mobile_install_app", { installed: "/project/test.apk" });
-for (const [name, key] of [["launch_app", "launched"], ["uninstall_app", "uninstalled"], ["stop_app", "stopped"], ["clear_app_data", "cleared"]]) action(`mobile_${name}`, { [key]: "com.example.app" });
+for (const [name, key] of [["uninstall_app", "uninstalled"], ["stop_app", "stopped"], ["clear_app_data", "cleared"]]) action(`mobile_${name}`, { [key]: "com.example.app" });
 action("mobile_grant_permission", { granted: "android.permission.CAMERA", packageName: "com.example.app" });
 action("mobile_revoke_permission", { revoked: "android.permission.CAMERA", packageName: "com.example.app" });
 action("mobile_set_location", { location: { latitude: 37.5, longitude: 127.0, altitude: 0 } });
@@ -93,15 +90,15 @@ action("mobile_set_clipboard", { clipboard: true });
 add("mobile_get_clipboard", { text: "copied text\nwith newline", provider: "appium" }, { text: "copied text\nwith newline" });
 add("mobile_wait_for_text", { found: false, text: "not found", timeoutMs: 1000, source: '<node text="other content"/>', provider: "adb-uiautomator" }, { found: false, text: "not found", timeoutMs: 1000 }, ["source"]);
 add("mobile_wait_for_app", { found: false, packageName: "com.example.app", timeoutMs: 1000, appState: 1 }, { found: false, packageName: "com.example.app", timeoutMs: 1000, appState: 1 });
-for (const name of ["mobile_run_flow", "device_run_flow"]) add(name, { results: [{ tool: "device_window_list", ok: true, content: [{ type: "json", value: { windows: [{ title: "Editor" }], response: { ok: true, windows: [{ title: "Editor" }] } } }] }] }, { results: [{ tool: "device_window_list", ok: true, content: [{ type: "json", value: { windows: [{ title: "Editor" }] } }] }] });
-const imageTools = ["display_screenshot", "device_screenshot", "mobile_screenshot"];
+for (const name of ["device_run_flow"]) add(name, { results: [{ tool: "device_window_list", ok: true, content: [{ type: "json", value: { windows: [{ title: "Editor" }], response: { ok: true, windows: [{ title: "Editor" }] } } }] }] }, { results: [{ tool: "device_window_list", ok: true, content: [{ type: "json", value: { windows: [{ title: "Editor" }] } }] }] });
+const imageTools = ["display_screenshot", "device_screenshot"];
 function reply(value: unknown, isError = false) { return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], isError }; }
 function project(name: string, value: unknown) { return JSON.parse(compactToolResult(name, reply(value)).content[0].text); }
 
 describe("every advertised Device Lab tool has a minimal public contract", () => {
     it("covers exactly the full advertised registry with tool-specific success data", () => {
-        expect([...Object.keys(fixtures), ...imageTools].sort()).toEqual(ALL_TOOLS.map((tool: { name: string }) => tool.name).sort());
-        expect(ALL_TOOLS).toHaveLength(93);
+        expect([...Object.keys(fixtures), ...imageTools].sort()).toEqual(TOOLS.map((tool: { name: string }) => tool.name).sort());
+        expect(TOOLS).toHaveLength(87);
         expect(TOOLS).toHaveLength(87);
     });
     it.each(Object.entries(fixtures))("%s preserves semantic success data and removes known transport echoes", (name, fixture) => {
@@ -115,7 +112,7 @@ describe("every advertised Device Lab tool has a minimal public contract", () =>
         const result = { content: [image, { type: "resource", resource: { uri: "file:///image", mimeType: "image/png", blob: image.data } }] };
         expect(compactToolResult(name, result)).toEqual(result);
     });
-    it.each(ALL_TOOLS.map((tool: { name: string }) => tool.name))("%s preserves actionable failure and partial cleanup evidence", (name) => {
+    it.each(TOOLS.map((tool: { name: string }) => tool.name))("%s preserves actionable failure and partial cleanup evidence", (name) => {
         // Policy/ownership/transport failures share this structured server envelope,
         // unlike the distinct per-tool success payloads above.
         const failed = { ok: false, error: "owner-device-state-conflict", tool: name, deviceId: id,

@@ -1,3 +1,4 @@
+import { callInternalBroker } from "./helpers/device-lab-mcp-fixture.js";
 import { createHash } from "crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { createServer } from "http";
@@ -680,8 +681,7 @@ describe("device-lab MCP broker routing", () => {
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
         try {
-            const result = await client.callTool({
-                name: "device_broker_rpc",
+            const result = await callInternalBroker(client, { operation: "brokerRpc",
                 arguments: {
                     method: "broker.echo",
                     params: { wifiRealDevice: true },
@@ -1186,12 +1186,12 @@ describe("device-lab MCP broker routing", () => {
             const implicitMobileCases = [
                 ["mobile_key", { keyCode: 224 }],
                 ["mobile_tap", { x: 10, y: 20 }],
-                ["mobile_screenshot", {}],
+                ["device_screenshot", {}],
                 ["mobile_dump_ui", { appiumPort: 4729, serverPort: 8209, automationName: "UiAutomator2", provider: "appium", physical: true }],
                 ["mobile_wait_for_text", { text: "Ready", timeoutMs: 100, intervalMs: 50 }],
                 ["mobile_open_url", { url: "https://example.test/route" }],
-                ["mobile_install_app", { path: projectTestPath("Route.apk") }],
-                ["mobile_launch_app", { packageName: "com.example.route" }],
+                ["device_install_app", { path: projectTestPath("Route.apk") }],
+                ["device_launch_app", { packageName: "com.example.route" }],
                 ["mobile_stop_app", { packageName: "com.example.route" }],
             ] as const;
 
@@ -1808,8 +1808,7 @@ describe("device-lab MCP broker routing", () => {
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
         try {
-            const result = await client.callTool({
-                name: "device_broker_apple",
+            const result = await callInternalBroker(client, { operation: "brokerApple",
                 arguments: {
                     action: "status",
                     backend: "ios-device",
@@ -1845,8 +1844,7 @@ describe("device-lab MCP broker routing", () => {
             expect(payload.result.manualSteps.join("\n")).not.toContain("device_broker_apple");
             expect(payload.result.manualSteps.join("\n")).not.toContain("device_broker_attach");
 
-            const connect = await client.callTool({
-                name: "device_broker_apple",
+            const connect = await callInternalBroker(client, { operation: "brokerApple",
                 arguments: {
                     action: "connect",
                     backend: "ios-device",
@@ -1867,8 +1865,7 @@ describe("device-lab MCP broker routing", () => {
     });
 
     it("reports broker RPC failures as structured diagnostics without starting a broker", { timeout: TIMEOUT }, async () => {
-        const unavailable = await client.callTool({
-            name: "device_broker_rpc",
+        const unavailable = await callInternalBroker(client, { operation: "brokerRpc",
             arguments: {
                 method: "broker.echo",
                 hostCandidates: ["127.0.0.1"],
@@ -1886,8 +1883,7 @@ describe("device-lab MCP broker routing", () => {
         expect(unavailablePayload.error).toBe("broker-rpc-unavailable");
         expect(unavailablePayload.attempts).toEqual([expect.objectContaining({ ok: false, status: null })]);
 
-        const tooLarge = await client.callTool({
-            name: "device_broker_rpc",
+        const tooLarge = await callInternalBroker(client, { operation: "brokerRpc",
             arguments: {
                 method: "broker.echo",
                 params: { payload: "x".repeat(70 * 1024) },
@@ -1903,8 +1899,7 @@ describe("device-lab MCP broker routing", () => {
             attempts: [],
         }));
 
-        const unsupportedLeaseRpc = await client.callTool({
-            name: "device_broker_rpc",
+        const unsupportedLeaseRpc = await callInternalBroker(client, { operation: "brokerRpc",
             arguments: {
                 method: "broker.lease.claim",
                 params: { backend: "android-device", hardwareId: "x" },
@@ -1920,8 +1915,7 @@ describe("device-lab MCP broker routing", () => {
             attempts: [],
         }));
 
-        const unsupportedServiceRpc = await client.callTool({
-            name: "device_broker_rpc",
+        const unsupportedServiceRpc = await callInternalBroker(client, { operation: "brokerRpc",
             arguments: {
                 method: "broker.service.manager",
                 params: { action: "start" },
@@ -1948,8 +1942,7 @@ describe("device-lab MCP broker routing", () => {
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
         try {
-            const claim = await client.callTool({
-                name: "device_broker_lease",
+            const claim = await callInternalBroker(client, { operation: "brokerLease",
                 arguments: {
                     action: "claim",
                     backend: "android-device",
@@ -1979,8 +1972,7 @@ describe("device-lab MCP broker routing", () => {
                 }),
             }));
 
-            const heartbeat = await client.callTool({
-                name: "device_broker_lease",
+            const heartbeat = await callInternalBroker(client, { operation: "brokerLease",
                 arguments: {
                     action: "heartbeat",
                     backend: "android-device",
@@ -2001,8 +1993,7 @@ describe("device-lab MCP broker routing", () => {
                 }),
             }));
 
-            const list = await client.callTool({
-                name: "device_broker_lease",
+            const list = await callInternalBroker(client, { operation: "brokerLease",
                 arguments: {
                     action: "list",
                     backend: "android-device",
@@ -2019,8 +2010,7 @@ describe("device-lab MCP broker routing", () => {
             expect(listPayload.ok).toBe(true);
             expect(listPayload.result.leases).toEqual([expect.objectContaining({ hardwareId: "10.0.0.8:5555" })]);
 
-            const prune = await client.callTool({
-                name: "device_broker_lease",
+            const prune = await callInternalBroker(client, { operation: "brokerLease",
                 arguments: {
                     action: "prune",
                     backend: "android-device",
@@ -2035,8 +2025,7 @@ describe("device-lab MCP broker routing", () => {
                 result: expect.objectContaining({ pruned: [] }),
             }));
 
-            const release = await client.callTool({
-                name: "device_broker_lease",
+            const release = await callInternalBroker(client, { operation: "brokerLease",
                 arguments: {
                     action: "release",
                     backend: "android-device",
@@ -2081,8 +2070,7 @@ describe("device-lab MCP broker routing", () => {
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
         try {
-            const androidAttach = await client.callTool({
-                name: "device_broker_attach",
+            const androidAttach = await callInternalBroker(client, { operation: "brokerPhysical",
                 arguments: {
                     action: "attach",
                     backend: "android-device",
@@ -2108,8 +2096,7 @@ describe("device-lab MCP broker routing", () => {
                 }),
             }));
 
-            const iosAttach = await client.callTool({
-                name: "device_broker_attach",
+            const iosAttach = await callInternalBroker(client, { operation: "brokerPhysical",
                 arguments: {
                     action: "attach",
                     backend: "ios-device",
@@ -2133,8 +2120,7 @@ describe("device-lab MCP broker routing", () => {
                 }),
             }));
 
-            const list = await client.callTool({
-                name: "device_broker_attach",
+            const list = await callInternalBroker(client, { operation: "brokerPhysical",
                 arguments: { action: "list", backend: "android-device", hostCandidates: ["127.0.0.1"], port: address.port, timeoutMs: 500 },
             });
             expect(JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -2142,8 +2128,7 @@ describe("device-lab MCP broker routing", () => {
                 result: expect.objectContaining({ devices: [expect.objectContaining({ id: "android-broker-wifi" })] }),
             }));
 
-            const detach = await client.callTool({
-                name: "device_broker_attach",
+            const detach = await callInternalBroker(client, { operation: "brokerPhysical",
                 arguments: { action: "detach", backend: "android-device", deviceId: "android-broker-wifi", hostCandidates: ["127.0.0.1"], port: address.port, timeoutMs: 500 },
             });
             expect(JSON.parse(((detach.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -2294,8 +2279,7 @@ describe("device-lab MCP broker routing", () => {
     });
 
     it("reports broker lease validation and unavailable broker failures without autolaunch", { timeout: TIMEOUT }, async () => {
-        const invalidAction = await client.callTool({
-            name: "device_broker_lease",
+        const invalidAction = await callInternalBroker(client, { operation: "brokerLease",
             arguments: { action: "steal", backend: "android-device" },
         });
         expect(invalidAction.isError).toBe(true);
@@ -2305,8 +2289,7 @@ describe("device-lab MCP broker routing", () => {
             attempts: [],
         }));
 
-        const unavailable = await client.callTool({
-            name: "device_broker_lease",
+        const unavailable = await callInternalBroker(client, { operation: "brokerLease",
             arguments: {
                 action: "list",
                 backend: "ios-device",
@@ -2334,8 +2317,7 @@ describe("device-lab MCP broker routing", () => {
         const address = server.address() as AddressInfo;
         const serial = "10.0.0.9:5555";
         try {
-            const claim = await client.callTool({
-                name: "device_broker_lease",
+            const claim = await callInternalBroker(client, { operation: "brokerLease",
                 arguments: {
                     action: "claim",
                     backend: "android-device",
@@ -2349,8 +2331,7 @@ describe("device-lab MCP broker routing", () => {
             expect(claim.isError).not.toBe(true);
             expect(JSON.parse(((claim.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({ ok: true }));
 
-            const duplicate = await client.callTool({
-                name: "device_broker_lease",
+            const duplicate = await callInternalBroker(client, { operation: "brokerLease",
                 arguments: {
                     action: "release",
                     backend: "android-device",
@@ -2369,8 +2350,7 @@ describe("device-lab MCP broker routing", () => {
                 selected: expect.objectContaining({ status: 409 }),
             }));
 
-            const invalid = await client.callTool({
-                name: "device_broker_lease",
+            const invalid = await callInternalBroker(client, { operation: "brokerLease",
                 arguments: {
                     action: "claim",
                     backend: "android-device",
@@ -2446,8 +2426,7 @@ describe("device-lab MCP broker routing", () => {
                 }),
             }));
 
-            const plan = await client.callTool({
-                name: "device_broker_command",
+            const plan = await callInternalBroker(client, { operation: "brokerCommand",
                 arguments: {
                     action: "plan",
                     backend: "windows-sandbox",
@@ -2470,14 +2449,13 @@ describe("device-lab MCP broker routing", () => {
                 }),
             }));
 
-            const dryRun = await client.callTool({
-                name: "device_broker_command",
+            const dryRun = await callInternalBroker(client, { operation: "brokerCommand",
                 arguments: {
                     action: "invoke",
                     backend: "windows-sandbox",
                     command: "device_start",
                     deviceId: "win-broker-plan",
-                    options: { dryRun: true },
+                    dryRun: true,
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
                     timeoutMs: 500,
@@ -2493,8 +2471,7 @@ describe("device-lab MCP broker routing", () => {
                 }),
             }));
 
-            const realRun = await client.callTool({
-                name: "device_broker_command",
+            const realRun = await callInternalBroker(client, { operation: "brokerCommand",
                 arguments: {
                     action: "invoke",
                     backend: "windows-sandbox",
@@ -2642,8 +2619,7 @@ describe("device-lab MCP broker routing", () => {
                 }),
             }));
 
-            const failedRun = await client.callTool({
-                name: "device_broker_command",
+            const failedRun = await callInternalBroker(client, { operation: "brokerCommand",
                 arguments: {
                     action: "invoke",
                     backend: "windows-sandbox",
@@ -2671,8 +2647,7 @@ describe("device-lab MCP broker routing", () => {
                 }),
             }));
 
-            const missingMetadata = await client.callTool({
-                name: "device_broker_command",
+            const missingMetadata = await callInternalBroker(client, { operation: "brokerCommand",
                 arguments: {
                     action: "invoke",
                     backend: "windows-sandbox",
@@ -3344,8 +3319,7 @@ describe("device-lab MCP broker routing", () => {
     });
 
     it("reports broker command validation and unavailable broker failures without autolaunch", { timeout: TIMEOUT }, async () => {
-        const invalidAction = await client.callTool({
-            name: "device_broker_command",
+        const invalidAction = await callInternalBroker(client, { operation: "brokerCommand",
             arguments: { action: "run", backend: "android-emulator", command: "device_start", deviceId: "android-x" },
         });
         expect(invalidAction.isError).toBe(true);
@@ -3367,8 +3341,7 @@ describe("device-lab MCP broker routing", () => {
             routedBy: "device-lifecycle-broker",
         }));
 
-        const unavailable = await client.callTool({
-            name: "device_broker_command",
+        const unavailable = await callInternalBroker(client, { operation: "brokerCommand",
             arguments: {
                 action: "plan",
                 backend: "ios-simulator",

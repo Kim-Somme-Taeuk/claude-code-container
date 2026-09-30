@@ -1,17 +1,25 @@
-import { ALL_TOOLS, SINGLE_BACKEND_TOOL_DEFAULTS } from "./tools.mjs";
+import { TOOLS, SINGLE_BACKEND_TOOL_DEFAULTS } from "./tools.mjs";
 
-const DEVICE_TARGET_PROPERTIES = new Map(ALL_TOOLS
+const DEVICE_TARGET_PROPERTIES = new Map(TOOLS
     .filter((tool) => tool.inputSchema?.required?.includes("deviceId"))
     .map((tool) => [tool.name, tool.inputSchema.properties]));
 
+const TOOL_NAMES = new Set(TOOLS.map((tool) => tool.name));
+
+// Check the external shape before supplying internal provider defaults.
+export function toolInputError(name, args = {}) {
+    if (!TOOL_NAMES.has(name)) return `Unknown tool: ${name}`;
+    if (!args || typeof args !== "object" || Array.isArray(args)) return "Tool arguments must be an object";
+    if (Object.hasOwn(args, "options")) return "Use flat tool arguments; options is not supported";
+    if (Object.hasOwn(SINGLE_BACKEND_TOOL_DEFAULTS, name) && Object.hasOwn(args, "backend")) {
+        return `${name} selects its backend automatically; omit backend`;
+    }
+    return null;
+}
+
 export function normalizeToolArgs(args = {}, toolName) {
     if (!args || typeof args !== "object" || Array.isArray(args)) args = {};
-    const { options, detail: _detail, ...rest } = args;
-    let normalized = rest;
-    if (options && typeof options === "object" && !Array.isArray(options)) {
-        const { detail: _optionDetail, ...providerOptions } = options;
-        normalized = { ...providerOptions, ...rest };
-    }
+    const { detail: _detail, ...normalized } = args;
     if (normalized.backend === undefined && Object.hasOwn(SINGLE_BACKEND_TOOL_DEFAULTS, toolName)) {
         normalized.backend = SINGLE_BACKEND_TOOL_DEFAULTS[toolName];
     }

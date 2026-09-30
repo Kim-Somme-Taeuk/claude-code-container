@@ -39,8 +39,8 @@ export function installedMcpSmokeSample(toolName) {
         device_broker_status: { ...brokerProbe },
         device_list: {},
         device_inventory: { ...direct, backend: "android-emulator" },
-        device_image_list: { backend: "linux-vm" },
-        device_image_import: { backend: "linux-vm", name: "Missing image smoke", sourcePath: "missing-smoke.qcow2" },
+        device_image_list: { },
+        device_image_import: { name: "Missing image smoke", sourcePath: "missing-smoke.qcow2" },
         device_wireless: { backend: "android-device", action: "status", timeoutMs: 1 },
         display_current: {},
         display_screenshot: {},
@@ -59,13 +59,13 @@ export function installedMcpSmokeSample(toolName) {
         device_reboot: { backend: "linux-vm", deviceId: linuxId },
         device_status: { ...direct, backend: "android-emulator", deviceId: androidId },
         device_disk_materialize: { backend: "linux-vm", deviceId: linuxId },
-        device_target_list: { backend: "linux-vm" },
-        device_readiness_probe: { backend: "linux-vm", deviceId: linuxId },
-        device_session_open: { backend: "linux-vm", deviceId: linuxId },
-        device_workspace_sync: { backend: "linux-vm", deviceId: linuxId },
-        device_artifacts_export: { backend: "linux-vm", deviceId: linuxId },
-        device_guest_agent_status: { backend: "linux-vm", deviceId: linuxId, timeoutMs: 1 },
-        device_guest_agent_provision: { backend: "linux-vm", deviceId: linuxId, timeoutMs: 1 },
+        device_target_list: { },
+        device_readiness_probe: { deviceId: linuxId },
+        device_session_open: { deviceId: linuxId },
+        device_workspace_sync: { deviceId: linuxId },
+        device_artifacts_export: { deviceId: linuxId },
+        device_guest_agent_status: { deviceId: linuxId, timeoutMs: 1 },
+        device_guest_agent_provision: { deviceId: linuxId, timeoutMs: 1 },
         device_exec: { ...direct, backend: "android-emulator", deviceId: androidId, command: "true", helperTimeoutMs: 1 },
         device_screenshot: { ...direct, backend: "android-emulator", deviceId: androidId, helperTimeoutMs: 1 },
         device_click: { ...direct, backend: "windows-sandbox", deviceId: windowsId, x: 1, y: 1, helperTimeoutMs: 1 },
@@ -76,8 +76,8 @@ export function installedMcpSmokeSample(toolName) {
         device_cursor_position: { ...direct, backend: "windows-sandbox", deviceId: windowsId, helperTimeoutMs: 1 },
         device_window_list: { ...direct, backend: "windows-sandbox", deviceId: windowsId, helperTimeoutMs: 1 },
         device_accessibility_snapshot: { ...direct, backend: "windows-sandbox", deviceId: windowsId, maxDepth: 1, maxNodes: 1, helperTimeoutMs: 1 },
-        device_base_image_create: { backend: "macos-vm", name: "Base image smoke", sourceImage: "missing-source" },
-        device_base_image_clone: { backend: "macos-vm", name: "Base clone smoke", sourceDeviceId: macosId },
+        device_base_image_create: { name: "Base image smoke", sourceImage: "missing-source" },
+        device_base_image_clone: { name: "Base clone smoke", sourceDeviceId: macosId },
         device_snapshot_list: { ...direct, backend: "linux-vm", deviceId: linuxId },
         device_snapshot_create: { ...direct, backend: "macos-vm", deviceId: macosId, snapshotName: "smoke" },
         device_snapshot_restore: { ...direct, backend: "macos-vm", deviceId: macosId, snapshotName: "smoke", force: true, confirmDestructive: true },
@@ -106,12 +106,8 @@ export function installedMcpSmokeSample(toolName) {
         mobile_power: { ...direct, backend: "android-emulator", deviceId: androidId },
         mobile_lock: { ...direct, backend: "android-emulator", deviceId: androidId },
         mobile_unlock: { ...direct, backend: "android-emulator", deviceId: androidId },
-        mobile_rotate_left: { ...direct, backend: "android-emulator", deviceId: androidId },
-        mobile_rotate_right: { ...direct, backend: "android-emulator", deviceId: androidId },
         mobile_set_orientation: { ...direct, backend: "android-emulator", deviceId: androidId, orientation: "portrait" },
         mobile_open_url: { ...direct, backend: "android-emulator", deviceId: androidId, url: "https://example.invalid" },
-        mobile_install_app: { ...direct, backend: "android-emulator", deviceId: androidId, path: "/tmp/missing-smoke.apk" },
-        mobile_launch_app: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke" },
         mobile_uninstall_app: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
         mobile_stop_app: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke" },
         mobile_clear_app_data: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke", confirmDestructive: true },
@@ -125,9 +121,7 @@ export function installedMcpSmokeSample(toolName) {
         mobile_get_clipboard: { ...direct, backend: "android-emulator", deviceId: androidId },
         mobile_wait_for_text: { ...direct, backend: "android-emulator", deviceId: androidId, text: "smoke", timeoutMs: 1, intervalMs: 50 },
         mobile_wait_for_app: { ...direct, backend: "android-emulator", deviceId: androidId, packageName: "com.example.smoke", timeoutMs: 1, intervalMs: 50 },
-        mobile_screenshot: { ...direct, backend: "android-emulator", deviceId: androidId },
-        mobile_run_flow: { steps: [{ tool: "mobile_session_status", arguments: { ...direct, backend: "android-emulator", deviceId: androidId } }] },
-        device_run_flow: { steps: [{ tool: "display_current", arguments: {} }] },
+        device_run_flow: { steps: [{ tool: "mobile_session_status", arguments: { ...direct, backend: "android-emulator", deviceId: androidId } }] },
     };
     return byName[toolName] || {};
 }
@@ -254,7 +248,7 @@ export async function runInstalledMcpSmoke(options: any = {}) {
                 const result = await callTool(tool.name, installedMcpSmokeSample(tool.name));
                 recordDispatchMismatch(failures, tool.name, result);
                 markExpectedToolError(result);
-                if (tool.name === "mobile_run_flow") {
+                if (tool.name === "device_run_flow") {
                     markExpectedFlowStepErrors(result, ["mobile_session_status"]);
                 }
                 publicDispatchTools += 1;

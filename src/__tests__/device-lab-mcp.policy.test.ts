@@ -1,3 +1,4 @@
+import { callInternalBroker } from "./helpers/device-lab-mcp-fixture.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES, evaluateDestructivePolicy } from "../../device-lab-mcp/src/policy/destructive.mjs";
 import { TOOLS } from "../../device-lab-mcp/src/tools.mjs";
@@ -153,84 +154,14 @@ describe("device-lab destructive action policy", () => {
         expect(textPayload(confirmed)).not.toContain("destructive-action-confirmation-required");
     });
 
-    it("denies destructive broker calls before broker routing unless confirmed", { timeout: TIMEOUT }, async () => {
-        const deniedCommand = await client.callTool({
-            name: "device_broker_command",
-            arguments: {
-                action: "invoke",
-                backend: "windows-sandbox",
-                command: "device_delete",
-                deviceId: "win-force-delete",
-                hostCandidates: ["127.0.0.1"],
-                port: 9,
-                timeoutMs: 50,
-            },
-        });
-        expect(deniedCommand.isError).toBe(true);
-        expect(jsonPayload(deniedCommand).policy).toEqual(expect.objectContaining({
-            error: "destructive-action-confirmation-required",
-            actions: ["broker-device-delete"],
-        }));
-
-        const confirmedCommand = await client.callTool({
-            name: "device_broker_command",
-            arguments: {
-                action: "invoke",
-                backend: "windows-sandbox",
-                command: "device_delete",
-                deviceId: "win-force-delete",
-                confirmDestructive: true,
-                hostCandidates: ["127.0.0.1"],
-                port: 9,
-                timeoutMs: 50,
-            },
-        });
-        expect(confirmedCommand.isError).toBe(true);
-        expect(jsonPayload(confirmedCommand)).toEqual(expect.objectContaining({
-            ok: false,
-            error: "broker-rpc-unavailable",
-        }));
-
-        const deniedAppium = await client.callTool({
-            name: "device_broker_appium",
-            arguments: {
-                action: "request",
-                backend: "android-emulator",
-                deviceId: "android-owned",
-                method: "POST",
-                path: "/appium/device/remove_app",
-                body: { appId: "com.example" },
-                hostCandidates: ["127.0.0.1"],
-                port: 9,
-                timeoutMs: 50,
-            },
-        });
-        expect(deniedAppium.isError).toBe(true);
-        expect(jsonPayload(deniedAppium).policy).toEqual(expect.objectContaining({
-            error: "destructive-action-confirmation-required",
-            actions: ["app-uninstall"],
-        }));
-
-        const confirmedAppium = await client.callTool({
-            name: "device_broker_appium",
-            arguments: {
-                action: "request",
-                backend: "android-emulator",
-                deviceId: "android-owned",
-                method: "POST",
-                path: "/appium/device/remove_app",
-                body: { appId: "com.example" },
-                confirmDestructive: true,
-                hostCandidates: ["127.0.0.1"],
-                port: 9,
-                timeoutMs: 50,
-            },
-        });
-        expect(confirmedAppium.isError).toBe(true);
-        expect(jsonPayload(confirmedAppium)).toEqual(expect.objectContaining({
-            ok: false,
-            error: "broker-rpc-unavailable",
-        }));
+    it("rejects removed broker entry points regardless of destructive confirmation", { timeout: TIMEOUT }, async () => {
+        for (const name of HIDDEN_DESTRUCTIVE_POLICY_TOOLS) {
+            for (const confirmDestructive of [false, true]) {
+                const result = await client.callTool({ name, arguments: { confirmDestructive } });
+                expect(result.isError).toBe(true);
+                expect(textPayload(result)).toBe(`Unknown tool: ${name}`);
+            }
+        }
     });
 
     it("does not gate non-destructive status tools", { timeout: TIMEOUT }, async () => {
@@ -241,8 +172,7 @@ describe("device-lab destructive action policy", () => {
             devices: expect.any(Array),
         }));
 
-        const brokerPlan = await client.callTool({
-            name: "device_broker_command",
+        const brokerPlan = await callInternalBroker(client, { operation: "brokerCommand",
             arguments: {
                 action: "plan",
                 backend: "windows-sandbox",
@@ -271,9 +201,9 @@ describe("device-lab destructive action policy", () => {
         }));
     });
 
-    it("enforces destructive policy inside mobile_run_flow steps", { timeout: TIMEOUT }, async () => {
+    it("enforces destructive policy inside device_run_flow steps", { timeout: TIMEOUT }, async () => {
         const denied = await client.callTool({
-            name: "mobile_run_flow",
+            name: "device_run_flow",
             arguments: {
                 steps: [
                     {
@@ -306,7 +236,7 @@ describe("device-lab destructive action policy", () => {
         }));
 
         const confirmed = await client.callTool({
-            name: "mobile_run_flow",
+            name: "device_run_flow",
             arguments: {
                 steps: [
                     {
@@ -322,12 +252,12 @@ describe("device-lab destructive action policy", () => {
         expect(JSON.stringify(payload)).not.toContain("destructive-action-confirmation-required");
     });
 
-    it("enforces destructive policy for every destructive mobile_run_flow step", { timeout: TIMEOUT }, async () => {
+    it("enforces destructive policy for every destructive device_run_flow step", { timeout: TIMEOUT }, async () => {
         const mobileExamples = DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES
             .filter(({ name }) => name.startsWith("mobile_"))
             .map(({ name, args }) => ({ tool: name, arguments: { deviceId: "android-flow-owned", ...args } }));
         const denied = await client.callTool({
-            name: "mobile_run_flow",
+            name: "device_run_flow",
             arguments: {
                 stopOnError: false,
                 steps: mobileExamples,

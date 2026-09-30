@@ -40,7 +40,7 @@ import { HYPER_V_IMAGE_CATALOG } from "../device-lab/hyper-v-images.js";
 import { readDeviceRuntimeProcessStartToken } from "../device-lab-process-identity.js";
 import { CLI_VERSION } from "../utils.js";
 import { cleanupOwner, close, listen, ownerRpcHeaders, writeBrokerDevices } from "./helpers/host-broker-test-fixture.js";
-import { ALL_TOOLS as DEVICE_LAB_MCP_TOOLS } from "../../device-lab-mcp/src/tools.mjs";
+import { TOOLS as DEVICE_LAB_MCP_TOOLS } from "../../device-lab-mcp/src/tools.mjs";
 import { REQUIRED_CCC_HOST_BROKER_CAPABILITIES } from "../../device-lab-mcp/src/broker.mjs";
 
 function fakeBrokerPortProcess(pid: number, commandLine: string | null) {
@@ -854,7 +854,9 @@ describe("device-lab host broker daemon", () => {
                 source: "host-broker-provider-discovery",
                 startsDevices: false,
             }));
-            const acceptedToolNames = new Set(DEVICE_LAB_MCP_TOOLS.map((tool) => tool.name));
+            // Internal host diagnostics also expose native provider operation names.
+            const acceptedToolNames = new Set([...DEVICE_LAB_MCP_TOOLS.map((tool) => tool.name),
+                "mobile_install_app", "mobile_launch_app", "mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right"]);
             for (const backend of body.result.backends) {
                 expect((backend.capabilities || []).filter((capability) => !acceptedToolNames.has(capability))).toEqual([]);
             }

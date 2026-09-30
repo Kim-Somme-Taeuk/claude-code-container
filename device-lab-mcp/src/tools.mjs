@@ -212,27 +212,6 @@ const RUN_FLOW_INPUT_SCHEMA = {
     required: ["steps"],
 };
 
-// Accepted legacy flows keep name aliases and legacy step names; discovery is canonical.
-const LEGACY_RUN_FLOW_INPUT_SCHEMA = {
-    ...RUN_FLOW_INPUT_SCHEMA,
-    properties: {
-        ...RUN_FLOW_INPUT_SCHEMA.properties,
-        steps: {
-            ...RUN_FLOW_INPUT_SCHEMA.properties.steps,
-            items: {
-                ...RUN_FLOW_INPUT_SCHEMA.properties.steps.items,
-                properties: {
-                    ...RUN_FLOW_INPUT_SCHEMA.properties.steps.items.properties,
-                    tool: { type: "string" },
-                    name: { type: "string" },
-                },
-                required: [],
-                anyOf: [{ required: ["tool"] }, { required: ["name"] }],
-            },
-        },
-    },
-};
-
 const DEVICE_BASE_IMAGE_CREATE_INPUT_SCHEMA = {
     type: "object",
     properties: {
@@ -319,12 +298,26 @@ const DEVICE_CREATE_INPUT_SCHEMA = {
         networking: { type: "boolean" },
         clipboard: { type: "boolean" },
         vgpu: { type: "boolean" },
-        options: { type: "object" },
     },
     required: ["backend", "name"],
 };
 
-export const ALL_TOOLS = [
+export const SINGLE_BACKEND_TOOL_DEFAULTS = Object.freeze({
+    device_image_list: "linux-vm",
+    device_image_import: "linux-vm",
+    device_target_list: "linux-vm",
+    device_readiness_probe: "linux-vm",
+    device_session_open: "linux-vm",
+    device_workspace_sync: "linux-vm",
+    device_artifacts_export: "linux-vm",
+    device_guest_agent_status: "linux-vm",
+    device_guest_agent_provision: "linux-vm",
+    device_base_image_create: "macos-vm",
+    device_base_image_clone: "macos-vm",
+});
+
+
+export const TOOLS = [
     { name: "device_backends", description: "Check backend prerequisites without starting devices; detail:true adds capabilities. Use device_list for owned IDs.", inputSchema: { type: "object", properties: {}, required: [] } },
     { name: "device_broker_status", description: "Inspect the zero-configuration host broker contract without starting devices", inputSchema: { type: "object", properties: { probe: { type: "boolean" } }, required: [] } },
     { name: "device_list", description: "Find owned device IDs and the current display. Use device_backends for prerequisites or device_inventory for host candidates.", inputSchema: { type: "object", properties: {}, required: [] } },
@@ -396,12 +389,8 @@ export const ALL_TOOLS = [
     { name: "mobile_power", description: "Toggle mobile power control", inputSchema: { type: "object", properties: typedMobileBrokerProperties(ANDROID_BACKEND_PROPERTY, { deviceId: DEVICE_ID_PROPERTY }), required: ["deviceId"] } },
     { name: "mobile_lock", description: "Lock a mobile device", inputSchema: { type: "object", properties: mobileBrokerProperties({ deviceId: DEVICE_ID_PROPERTY }), required: ["deviceId"] } },
     { name: "mobile_unlock", description: "Wake or unlock a mobile device", inputSchema: { type: "object", properties: mobileBrokerProperties({ deviceId: DEVICE_ID_PROPERTY }), required: ["deviceId"] } },
-    { name: "mobile_rotate_left", description: "Rotate a mobile device left", inputSchema: { type: "object", properties: mobileBrokerProperties({ deviceId: DEVICE_ID_PROPERTY }), required: ["deviceId"] } },
-    { name: "mobile_rotate_right", description: "Rotate a mobile device right", inputSchema: { type: "object", properties: mobileBrokerProperties({ deviceId: DEVICE_ID_PROPERTY }), required: ["deviceId"] } },
     { name: "mobile_set_orientation", description: "Set mobile orientation", inputSchema: { type: "object", properties: mobileBrokerProperties({ deviceId: DEVICE_ID_PROPERTY, orientation: { type: "string", enum: ["portrait", "landscape", "reverse-portrait", "reverse-landscape"] } }), required: ["deviceId", "orientation"] } },
     { name: "mobile_open_url", description: "Open a URL on a mobile device", inputSchema: { type: "object", properties: typedMobileBrokerProperties(MOBILE_WITHOUT_IOS_DEVICE_BACKEND_PROPERTY, { deviceId: DEVICE_ID_PROPERTY, url: { type: "string" } }), required: ["deviceId", "url"] } },
-    { name: "mobile_install_app", description: "Install an app on a mobile device", inputSchema: { type: "object", properties: mobileBrokerProperties({ deviceId: DEVICE_ID_PROPERTY, path: { type: "string" }, helperTimeoutMs: HELPER_TIMEOUT_PROPERTY }), required: ["deviceId", "path"] } },
-    { name: "mobile_launch_app", description: "Launch an app on a mobile device", inputSchema: { type: "object", properties: mobileBrokerProperties({ deviceId: DEVICE_ID_PROPERTY, bundleId: { type: "string", description: "iOS app ID." }, packageName: { type: "string", description: "Android app ID." }, component: { type: "string", description: "Android package/activity for native launch." } }), required: ["deviceId"], anyOf: APP_LAUNCH_ANY_OF } },
     { name: "mobile_uninstall_app", description: "Uninstall an app on a mobile device", inputSchema: { type: "object", properties: typedMobileBrokerProperties(MOBILE_WITHOUT_IOS_DEVICE_BACKEND_PROPERTY, { deviceId: DEVICE_ID_PROPERTY, packageName: { type: "string", description: "Android app ID." }, bundleId: { type: "string", description: "iOS app ID." }, ...CONFIRM_DESTRUCTIVE_PROPERTY }), required: ["deviceId"], anyOf: APP_ID_ANY_OF } },
     { name: "mobile_stop_app", description: "Stop an app on a mobile device", inputSchema: { type: "object", properties: mobileBrokerProperties({ deviceId: DEVICE_ID_PROPERTY, packageName: { type: "string", description: "Android app ID." }, bundleId: { type: "string", description: "iOS app ID." } }), required: ["deviceId"], anyOf: APP_ID_ANY_OF } },
     { name: "mobile_clear_app_data", description: "Clear app data on a mobile device", inputSchema: { type: "object", properties: typedMobileBrokerProperties(RESET_BACKEND_PROPERTY, { deviceId: DEVICE_ID_PROPERTY, packageName: { type: "string", description: "Android app ID." }, bundleId: { type: "string", description: "iOS app ID." }, containerType: { type: "string" }, ...CONFIRM_DESTRUCTIVE_PROPERTY }), required: ["deviceId"], anyOf: APP_ID_ANY_OF } },
@@ -415,54 +404,15 @@ export const ALL_TOOLS = [
     { name: "mobile_get_clipboard", description: "Get mobile clipboard text", inputSchema: { type: "object", properties: typedMobileBrokerProperties(MOBILE_WITHOUT_IOS_DEVICE_BACKEND_PROPERTY, { deviceId: DEVICE_ID_PROPERTY }), required: ["deviceId"] } },
     { name: "mobile_wait_for_text", description: "Wait for UI text. An unmet condition returns found:false; observation errors fail. Unmet waits fail flow steps.", inputSchema: { type: "object", properties: mobileBrokerProperties({ deviceId: DEVICE_ID_PROPERTY, text: { type: "string", minLength: 1 }, timeoutMs: BOUNDED_WAIT_TIMEOUT_PROPERTY, intervalMs: BOUNDED_WAIT_INTERVAL_PROPERTY }), required: ["deviceId", "text"] } },
     { name: "mobile_wait_for_app", description: "Wait for the backend’s app-running/foreground condition, not UI readiness. An unmet condition returns found:false or running:false; unmet waits fail flow steps.", inputSchema: { type: "object", properties: mobileBrokerProperties({ deviceId: DEVICE_ID_PROPERTY, packageName: { type: "string", description: "Android app ID." }, bundleId: { type: "string", description: "iOS app ID." }, timeoutMs: BOUNDED_WAIT_TIMEOUT_PROPERTY, intervalMs: BOUNDED_WAIT_INTERVAL_PROPERTY }), required: ["deviceId"], anyOf: APP_ID_ANY_OF } },
-    { name: "mobile_screenshot", description: "Capture a mobile screenshot", inputSchema: { type: "object", properties: mobileBrokerProperties({ deviceId: DEVICE_ID_PROPERTY }), required: ["deviceId"] } },
-    { name: "mobile_run_flow", description: "Run mobile actions plus device_status/device_screenshot; no nested flows. Fixed arguments, no result interpolation. Unmet waits fail steps. Screenshots return viewable images with step references.", inputSchema: LEGACY_RUN_FLOW_INPUT_SCHEMA },
-    { name: "device_run_flow", description: "Run desktop/mobile actions in order; share deviceId/backend/incarnationId once. Each destructive step needs confirmation. No lifecycle or nested flows. Fixed arguments, no result interpolation. Unmet waits fail. Screenshots return viewable images with step references.", inputSchema: LEGACY_RUN_FLOW_INPUT_SCHEMA },
+    { name: "device_run_flow", description: "Run desktop/mobile actions in order; share deviceId/backend/incarnationId once. Each destructive step needs confirmation. No lifecycle or nested flows. Fixed arguments, no result interpolation. Unmet waits fail. Screenshots return viewable images with step references.", inputSchema: RUN_FLOW_INPUT_SCHEMA },
 ].map((tool) => ({
     ...tool,
     inputSchema: {
         ...tool.inputSchema,
+        required: (tool.inputSchema.required || []).filter((key) => key !== "backend" || !Object.hasOwn(SINGLE_BACKEND_TOOL_DEFAULTS, tool.name)),
         properties: {
-            ...tool.inputSchema.properties,
+            ...Object.fromEntries(Object.entries(tool.inputSchema.properties).filter(([key]) => key !== "backend" || !Object.hasOwn(SINGLE_BACKEND_TOOL_DEFAULTS, tool.name))),
             detail: { type: "boolean", description: "Include full diagnostic output. Defaults to false." },
         },
     },
 }));
-
-const LEGACY_TOOL_NAMES = new Set(["mobile_install_app", "mobile_launch_app", "mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right", "mobile_run_flow"]);
-// These operations have no backend choice. Keep explicit legacy selectors in
-// accepted schemas; dispatch supplies the same value when callers omit it.
-export const SINGLE_BACKEND_TOOL_DEFAULTS = Object.freeze({
-    device_image_list: "linux-vm",
-    device_image_import: "linux-vm",
-    device_target_list: "linux-vm",
-    device_readiness_probe: "linux-vm",
-    device_session_open: "linux-vm",
-    device_workspace_sync: "linux-vm",
-    device_artifacts_export: "linux-vm",
-    device_guest_agent_status: "linux-vm",
-    device_guest_agent_provision: "linux-vm",
-    device_base_image_create: "macos-vm",
-    device_base_image_clone: "macos-vm",
-});
-
-export const TOOLS = ALL_TOOLS.filter((tool) => !LEGACY_TOOL_NAMES.has(tool.name)).map((tool) => {
-    if (tool.name === "device_run_flow") return {
-        ...tool,
-        inputSchema: {
-            ...RUN_FLOW_INPUT_SCHEMA,
-            properties: { ...RUN_FLOW_INPUT_SCHEMA.properties, detail: tool.inputSchema.properties.detail },
-        },
-    };
-    const hidden = Object.hasOwn(SINGLE_BACKEND_TOOL_DEFAULTS, tool.name) ? "backend"
-        : tool.name === "device_create" ? "options" : null;
-    if (!hidden) return tool;
-    return {
-        ...tool,
-        inputSchema: {
-            ...tool.inputSchema,
-            properties: Object.fromEntries(Object.entries(tool.inputSchema.properties).filter(([key]) => key !== hidden)),
-            required: (tool.inputSchema.required || []).filter((key) => key !== hidden),
-        },
-    };
-});

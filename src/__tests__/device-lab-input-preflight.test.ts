@@ -19,8 +19,8 @@ const invalid: Array<[string, Record<string, unknown>, RegExp]> = [
     ["mobile_wait_for_text", { text: "" }, /mobile_wait_for_text requires text/],
     ["mobile_wait_for_text", { text: 7 }, /mobile_wait_for_text requires text/],
     ["mobile_wait_for_text", { text: [] }, /mobile_wait_for_text requires text/],
-    ["mobile_key", { options: { key: "" } }, /mobile_key requires key or keyCode/],
-    ["mobile_wait_for_text", { options: { text: "" } }, /mobile_wait_for_text requires text/],
+    ["mobile_key", { options: { key: "" } }, /Use flat tool arguments/],
+    ["mobile_wait_for_text", { options: { text: "" } }, /Use flat tool arguments/],
 ];
 
 describe("mobile input preflight over public MCP", () => {
@@ -42,7 +42,7 @@ require('module').syncBuiltinESMExports();`);
             const routing = { backend: "android-emulator", deviceId: "android-preflight", autolaunch: false,
                 hostCandidates: ["127.0.0.1"], timeoutMs: 1,
                 ...(route === "direct" ? { implicitBroker: false } : route === "explicit" ? { broker: true } : { implicitBroker: true }) };
-            for (const flow of [null, "mobile_run_flow", "device_run_flow"]) {
+            for (const flow of [null, "device_run_flow"]) {
                 for (const [tool, args, diagnostic] of invalid) {
                     writeFileSync(log, "");
                     const action = { ...routing, ...args };
@@ -84,7 +84,7 @@ require('module').syncBuiltinESMExports();`);
         } finally { await cleanupDeviceLabMcpTestContext(context); }
     });
 
-    it("preserves zero, legacy options, whitespace and Android mixed-field precedence", { timeout: 30000 }, async () => {
+    it("preserves zero, whitespace and Android mixed-field precedence", { timeout: 30000 }, async () => {
         const context = await createFakeAndroidMcpContext();
         try {
             const created = await context.client.callTool({ name: "device_create", arguments: {
@@ -96,15 +96,13 @@ require('module').syncBuiltinESMExports();`);
                 [{ keyCode: 0 }, 0], [{ key: "KEYCODE_ENTER" }, "KEYCODE_ENTER"],
                 [{ key: "KEYCODE_ENTER", keyCode: 4 }, 4],
                 [{ key: "", keyCode: 0 }, 0],
-                [{ options: { keyCode: 0 } }, 0],
-                [{ options: { keyCode: 4 }, keyCode: 0 }, 0],
             ] as const) {
                 const result = await context.client.callTool({ name: "mobile_key", arguments: { deviceId, ...args } });
                 expect(result.isError, text(result)).not.toBe(true);
                 expect(json(result)).toMatchObject({ key: expected, provider: "adb" });
             }
             const wait = await context.client.callTool({ name: "mobile_wait_for_text", arguments: {
-                deviceId, options: { text: " " }, timeoutMs: 1000, intervalMs: 50,
+                deviceId, text: " ", timeoutMs: 1000, intervalMs: 50,
             } });
             expect(wait.isError, text(wait)).not.toBe(true);
             expect(json(wait)).toMatchObject({ text: " ", provider: "adb-uiautomator" });

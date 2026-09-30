@@ -1,6 +1,6 @@
-import { ALL_TOOLS } from "./tools.mjs";
+import { TOOLS } from "./tools.mjs";
 
-const TOOL_NAMES = new Set(ALL_TOOLS.map((tool) => tool.name));
+const TOOL_NAMES = new Set(TOOLS.map((tool) => tool.name));
 
 // Presentation only: provider contracts and opaque user payloads stay untouched.
 function object(value) {
@@ -298,7 +298,7 @@ function operationResult(name, value) {
 
 export function compactToolValue(name, value) {
     if (!object(value) || !TOOL_NAMES.has(name) || name === "device_exec") return value;
-    if (name === "device_run_flow" || name === "mobile_run_flow") {
+    if (name === "device_run_flow") {
         if (!Array.isArray(value.results)) return value;
         return { ...value, results: value.results.map((step) => {
             if (!object(step) || !Array.isArray(step.content)) return step;

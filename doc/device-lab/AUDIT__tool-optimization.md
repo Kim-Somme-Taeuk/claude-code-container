@@ -1,5 +1,23 @@
 # Device Lab MCP tool and function optimization audit
 
+## Current canonical contract (2026-09-30)
+
+Discovery and public dispatch now share one 87-tool catalog. The historical
+compatibility observations below are superseded: six mobile aliases and hidden
+broker/image operations are no longer public MCP calls. Creation arguments are
+flat, single-backend tools reject redundant selectors, and flow steps require
+`tool` rather than accepting `name`. Rejected legacy input performs no provider
+work. Internal broker APIs are tested directly, without restoring public aliases.
+
+The normal journey is device list, choose an ID, screenshot, interaction, then
+observe. A flow can share the target once and return its final screenshot in the
+same response. A new call is needed when the next action depends on seeing that
+screen; flows do not make conditional decisions or interpolate prior results.
+
+Known ceiling: Internal transport controls remain available to existing route/test
+machinery. Their distinct host-routing contracts are outside this public alias
+removal; this change does not claim all internal transport options were removed.
+
 Baseline: `997a7f63`. Reviewed 2026-09-29. Scope: all 93 advertised Device Lab tools and 1,393 JavaScript function-like nodes with bodies (including nested callbacks), plus five Windows helper PowerShell functions. [Exact per-function dispositions](AUDIT__function-optimization.json) refer to baseline line positions; changed-module named functions have a separate final review list. Counts measure source coverage, not real-device coverage.
 
 ## Implemented

@@ -290,7 +290,7 @@ export async function withDeviceLabMcp(callback, options: any = {}) {
                 record.outcome = result?.isError === true ? "error-result" : "ok";
                 record.isError = result?.isError === true;
                 Object.assign(record, summarizeToolResultForProof(result));
-                if ((name === "device_run_flow" || name === "mobile_run_flow") && result?.isError !== true) {
+                if (name === "device_run_flow" && result?.isError !== true) {
                     try {
                         const payload = jsonContentPayload(resultContent(result)) || {};
                         if (Array.isArray(payload?.results)) {

@@ -215,7 +215,7 @@ describe("minimal public Device Lab output", () => {
     });
 
     it("compacts flow results without losing step failure or returned clipboard data", () => {
-        const { value, text } = projected("mobile_run_flow", {
+        const { value, text } = projected("device_run_flow", {
             ok: false, stoppedAt: 1, results: [
                 { index: 0, label: "Read", tool: "mobile_get_clipboard", isError: false, content: [{ type: "json", value: { text: "flow-clipboard", provider: "broker-appium", broker: { ok: true, selected: { host: "internal-host" } } } }] },
                 { index: 1, label: "Stop", tool: "device_stop", isError: true, content: [{ type: "json", value: { ok: false, error: "stop-unconfirmed", remedy: "Retry stop" } }] },
@@ -258,7 +258,7 @@ describe("minimal public Device Lab output", () => {
         try {
             const created = await call("device_create", {
                 backend: "android-emulator", name: "Minimal output fixture",
-                options: { avdName: "Minimal_Fixture", port: 5580 },
+                avdName: "Minimal_Fixture", port: 5580,
             });
             const id = created.value.device.id;
             expect(id).toEqual(expect.any(String));

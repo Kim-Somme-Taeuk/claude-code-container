@@ -14,9 +14,9 @@ const requiredProviderSources = ["dist"];
 
 export const PROVIDER_RESULT_SPECS = [
     { id: "android-emulator", files: ["level2-android-emulator-e2e.ts", "level3-real-destructive.ts"], tools: androidBackend().capabilities },
-    { id: "android-device", files: ["level2-android-device-e2e.ts"], tools: ["device_attach", "device_status", "mobile_tap", "mobile_screenshot", "device_detach"] },
-    { id: "ios-simulator", files: ["level2-ios-e2e.ts"], tools: ["device_create", "device_start", "mobile_tap", "mobile_screenshot", "device_delete"] },
-    { id: "ios-device", files: ["level2-ios-e2e.ts"], tools: ["device_attach", "device_status", "mobile_tap", "mobile_screenshot", "device_detach"] },
+    { id: "android-device", files: ["level2-android-device-e2e.ts"], tools: ["device_attach", "device_status", "mobile_tap", "device_screenshot", "device_detach"] },
+    { id: "ios-simulator", files: ["level2-ios-e2e.ts"], tools: ["device_create", "device_start", "mobile_tap", "device_screenshot", "device_delete"] },
+    { id: "ios-device", files: ["level2-ios-e2e.ts"], tools: ["device_attach", "device_status", "mobile_tap", "device_screenshot", "device_detach"] },
     { id: "windows-sandbox", files: ["level2-windows-sandbox.ts"], tools: windowsBackend().capabilities },
     { id: "windows-vm", files: ["hyper-v-windows-vm-e2e.ts"], tools: windowsVmBackend().capabilities },
     { id: "linux-vm-hyper-v", backend: "linux-vm", files: ["hyper-v-linux-vm-e2e.ts"], tools: windowsVmBackend().capabilities },

@@ -1,20 +1,24 @@
 # Device Lab MCP computer use
 
+Choose a device from `device_list`, then include its `deviceId` in each operation.
+There is no remembered device selection shared between agents. To perform several
+known actions, put `deviceId` once on `device_run_flow` and finish with a screenshot;
+start a new call when you need to inspect the result before deciding what to do.
+
 ## Choose inputs for the target platform
 
 Container-QEMU image, target, readiness, session, workspace, artifact and guest-agent
 tools select their backend automatically. For example, `device_target_list({})`
 lists container-QEMU targets and `device_readiness_probe({deviceId:"my-vm"})`
 checks one. They do not inspect Hyper-V guests. macOS base-image create/clone
-also omit the redundant backend selector. Existing explicit selectors still work;
-a contradictory selector is rejected before provider execution.
+also omit the redundant backend selector. Do not pass backend to these tools;
+explicit selectors are rejected before provider execution.
 
 Creation uses typed top-level fields. Android AVD provisioning uses `createAvd`
 and `systemImage`; iOS provisioning uses `createSimulator`, `deviceType` and
 `runtime`. Without the provisioning flag, these backends record a definition.
 Hyper-V uses image/profile fields, macOS uses `image` and `ssh*`, and container QEMU uses
-`baseImageId` or `sourceImage` with `guest*` controls. Legacy `options` wrappers
-remain callable, but new calls should use the named fields directly. macOS
+`baseImageId` or `sourceImage` with `guest*` controls. Use the named fields directly; `options` wrappers are rejected. macOS
 `device_create` uses `image` for image-specific SSH defaults; its separate
 base-image create/clone tools use `sourceImage`.
 
@@ -95,8 +99,8 @@ destructive step requires its own `confirmDestructive:true`; routing controls
 and confirmations are never inherited from the flow.
 
 Use `device_install_app`, `device_launch_app`, `device_screenshot` and
-`mobile_set_orientation` in new calls. Old mobile aliases and `mobile_run_flow`
-remain callable for existing workflows but are absent from tool discovery.
+`mobile_set_orientation` for all calls. Old mobile aliases and `mobile_run_flow`
+are removed; use `device_run_flow` for ordered actions.
 
 ## Waiting for a mobile condition
 

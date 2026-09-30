@@ -185,7 +185,7 @@ export async function runIosSimulatorE2E(options: any = {}) {
             const session = parseContractToolPayload("mobile_session_status", await callTool("mobile_session_status", { ...direct, deviceId }));
             assert.strictEqual(session.deviceId, deviceId, JSON.stringify(session));
 
-            const mobileScreenshot = await callTool("mobile_screenshot", { ...direct, deviceId });
+            const mobileScreenshot = await callTool("device_screenshot", { ...direct, deviceId });
             assert.strictEqual(mobileScreenshot?.content?.[0]?.type, "image");
             assert.ok(String(mobileScreenshot.content[0].data || "").length > 64);
 
@@ -284,7 +284,7 @@ export async function runIosSimulatorE2E(options: any = {}) {
                 assert.strictEqual(clearAppData.provider, "simctl-app-container");
                 assert.deepStrictEqual(clearAppData.reset, { bundleId: appBundleId, containerType: "data" });
 
-                const mobileLaunch = parsePayload(await callTool("mobile_launch_app", {
+                const mobileLaunch = parsePayload(await callTool("device_launch_app", {
                     ...direct,
                     deviceId,
                     bundleId: appBundleId,
@@ -300,7 +300,7 @@ export async function runIosSimulatorE2E(options: any = {}) {
                 assertSimulatorMobileProvider(mobileUninstall, "mobile_uninstall_app");
                 assert.strictEqual(mobileUninstall.uninstalled, appBundleId);
 
-                const mobileInstall = parsePayload(await callTool("mobile_install_app", {
+                const mobileInstall = parsePayload(await callTool("device_install_app", {
                     ...direct,
                     deviceId,
                     path: appPath,
@@ -414,11 +414,11 @@ export async function runIosSimulatorE2E(options: any = {}) {
                 assert.strictEqual(unlock.provider, "appium-xcuitest");
                 assert.strictEqual(unlock.unlocked, true);
 
-                const rotateLeft = parsePayload(await callTool("mobile_rotate_left", { ...direct, deviceId }));
+                const rotateLeft = parsePayload(await callTool("mobile_set_orientation", { orientation: "landscape", ...direct, deviceId }));
                 assert.strictEqual(rotateLeft.provider, "appium-xcuitest");
                 assert.strictEqual(rotateLeft.orientation, "LANDSCAPE");
 
-                const rotateRight = parsePayload(await callTool("mobile_rotate_right", { ...direct, deviceId }));
+                const rotateRight = parsePayload(await callTool("mobile_set_orientation", { orientation: "portrait", ...direct, deviceId }));
                 assert.strictEqual(rotateRight.provider, "appium-xcuitest");
                 assert.strictEqual(rotateRight.orientation, "PORTRAIT");
 
@@ -536,7 +536,7 @@ export async function runIosRealDeviceE2E(options: any = {}) {
                 assert.strictEqual(dumpUi.physical, true);
                 assert.ok(typeof dumpUi.source === "string");
 
-                const mobileScreenshot = await callTool("mobile_screenshot", { ...direct, deviceId });
+                const mobileScreenshot = await callTool("device_screenshot", { ...direct, deviceId });
                 assert.strictEqual(mobileScreenshot?.content?.[0]?.type, "image");
                 assert.strictEqual(mobileScreenshot.content[0].mimeType, "image/png");
                 assert.ok(String(mobileScreenshot.content[0].data || "").length > 64);
@@ -591,12 +591,12 @@ export async function runIosRealDeviceE2E(options: any = {}) {
                 assert.strictEqual(unlock.physical, true);
                 assert.strictEqual(unlock.unlocked, true);
 
-                const rotateLeft = parsePayload(await callTool("mobile_rotate_left", { ...direct, deviceId }));
+                const rotateLeft = parsePayload(await callTool("mobile_set_orientation", { orientation: "landscape", ...direct, deviceId }));
                 assert.strictEqual(rotateLeft.provider, "appium-xcuitest");
                 assert.strictEqual(rotateLeft.physical, true);
                 assert.strictEqual(rotateLeft.orientation, "LANDSCAPE");
 
-                const rotateRight = parsePayload(await callTool("mobile_rotate_right", { ...direct, deviceId }));
+                const rotateRight = parsePayload(await callTool("mobile_set_orientation", { orientation: "portrait", ...direct, deviceId }));
                 assert.strictEqual(rotateRight.provider, "appium-xcuitest");
                 assert.strictEqual(rotateRight.physical, true);
                 assert.strictEqual(rotateRight.orientation, "PORTRAIT");
@@ -626,12 +626,12 @@ export async function runIosRealDeviceE2E(options: any = {}) {
 
                 if (appBundleId) {
                     if (appArtifactReady) {
-                        const install = parsePayload(await callTool("mobile_install_app", { ...direct, deviceId, path: appPath }));
+                        const install = parsePayload(await callTool("device_install_app", { ...direct, deviceId, path: appPath }));
                         assert.strictEqual(install.provider, "xcrun-devicectl");
                         assert.strictEqual(install.installed, appPath);
                     }
 
-                    const launch = parsePayload(await callTool("mobile_launch_app", { ...direct, deviceId, bundleId: appBundleId }));
+                    const launch = parsePayload(await callTool("device_launch_app", { ...direct, deviceId, bundleId: appBundleId }));
                     assert.strictEqual(launch.provider, "xcrun-devicectl");
                     assert.strictEqual(launch.launched, appBundleId);
 

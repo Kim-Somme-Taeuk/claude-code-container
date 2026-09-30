@@ -195,8 +195,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             ["mobile_lock", { deviceId: "android-pixel-owned" }, { provider: "adb", locked: true }],
             ["mobile_unlock", { deviceId: "android-pixel-owned" }, { provider: "adb", unlocked: true }],
             ["mobile_set_orientation", { deviceId: "android-pixel-owned", orientation: "landscape" }, { provider: "adb", orientation: "landscape", rotation: "1" }],
-            ["mobile_rotate_left", { deviceId: "android-pixel-owned" }, { provider: "adb", orientation: "landscape", rotation: "1" }],
-            ["mobile_rotate_right", { deviceId: "android-pixel-owned" }, { provider: "adb", orientation: "reverse-landscape", rotation: "3" }],
+            ["mobile_set_orientation", { orientation: "reverse-landscape", deviceId: "android-pixel-owned" }, { provider: "adb", orientation: "reverse-landscape", rotation: "3" }],
             ["mobile_open_url", { deviceId: "android-pixel-owned", url: "https://example.test/path" }, { provider: "adb", openedUrl: "https://example.test/path" }],
             ["mobile_grant_permission", { deviceId: "android-pixel-owned", packageName: "com.example.mobile", permission: "android.permission.CAMERA" }, { provider: "adb", permission: { packageName: "com.example.mobile", permission: "android.permission.CAMERA", action: "grant" } }],
             ["mobile_revoke_permission", { deviceId: "android-pixel-owned", packageName: "com.example.mobile", permission: "android.permission.CAMERA" }, { provider: "adb", permission: { packageName: "com.example.mobile", permission: "android.permission.CAMERA", action: "revoke" } }],
@@ -235,12 +234,12 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         expect(waitAppPayload).toEqual(expect.objectContaining({ running: true, provider: "adb" }));
 
         const flow = await client.callTool({
-            name: "mobile_run_flow",
+            name: "device_run_flow",
             arguments: {
                 steps: [
                     { label: "tap primary", tool: "mobile_tap", arguments: { deviceId: "android-pixel-owned", x: 15, y: 25, implicitBroker: false } },
                     { label: "wait title", tool: "mobile_wait_for_text", arguments: { deviceId: "android-pixel-owned", text: "Hello", timeoutMs: 1000, intervalMs: 50, implicitBroker: false } },
-                    { label: "capture", tool: "mobile_screenshot", arguments: { deviceId: "android-pixel-owned", implicitBroker: false } },
+                    { label: "capture", tool: "device_screenshot", arguments: { deviceId: "android-pixel-owned", implicitBroker: false } },
                 ],
             },
         });
@@ -258,7 +257,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         expect(Buffer.from(captured.data!, "base64").subarray(1, 4).toString()).toBe("PNG");
 
         const disallowedFlow = await client.callTool({
-            name: "mobile_run_flow",
+            name: "device_run_flow",
             arguments: {
                 steps: [
                     { tool: "device_start", arguments: { deviceId: "android-pixel-owned" } },
@@ -282,7 +281,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
                 steps: [
                     { label: "status", tool: "device_status", arguments: { deviceId: "android-pixel-owned", implicitBroker: false } },
                     { label: "wait title", tool: "mobile_wait_for_text", arguments: { deviceId: "android-pixel-owned", text: "Hello", timeoutMs: 1000, intervalMs: 50, implicitBroker: false } },
-                    { label: "capture", tool: "mobile_screenshot", arguments: { deviceId: "android-pixel-owned", implicitBroker: false } },
+                    { label: "capture", tool: "device_screenshot", arguments: { deviceId: "android-pixel-owned", implicitBroker: false } },
                 ],
             },
         });
@@ -302,7 +301,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             name: "device_run_flow",
             arguments: {
                 steps: [
-                    { tool: "mobile_install_app", arguments: { deviceId: "android-pixel-owned", path: "/tmp/app.apk" } },
+                    { tool: "device_delete", arguments: { deviceId: "android-pixel-owned", confirmDestructive: true } },
                     { tool: "mobile_back", arguments: { deviceId: "android-pixel-owned" } },
                 ],
             },
@@ -315,10 +314,10 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         };
         expect(unsafeDeviceFlowPayload.ok).toBe(false);
         expect(unsafeDeviceFlowPayload.stoppedAt).toBe(0);
-        expect(unsafeDeviceFlowPayload.results[0].error).toContain("device_run_flow does not allow step tool: mobile_install_app");
+        expect(unsafeDeviceFlowPayload.results[0].error).toContain("device_run_flow does not allow step tool: device_delete");
 
         const screenshot = await client.callTool({
-            name: "mobile_screenshot",
+            name: "device_screenshot",
             arguments: { deviceId: "android-pixel-owned" },
         });
         expect(screenshot.isError).not.toBe(true);
@@ -570,8 +569,8 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             ["device_launch_app", { deviceId: "android-pixel-owned", packageName: "com.example.test" }, { provider: "adb", launched: "com.example.test" }],
             ["device_launch_app", { deviceId: "android-pixel-owned", component: "com.example.test/.MainActivity" }, { provider: "adb", launched: "com.example.test/.MainActivity" }],
             ["device_reset", { deviceId: "android-pixel-owned", packageName: "com.example.test", confirmDestructive: true }, { provider: "adb", reset: { packageName: "com.example.test" } }],
-            ["mobile_install_app", { deviceId: "android-pixel-owned", path: "/tmp/Mobile.apk" }, { provider: "adb", installed: "/tmp/Mobile.apk" }],
-            ["mobile_launch_app", { deviceId: "android-pixel-owned", packageName: "com.example.mobile" }, { provider: "adb", launched: "com.example.mobile" }],
+            ["device_install_app", { deviceId: "android-pixel-owned", path: "/tmp/Mobile.apk" }, { provider: "adb", installed: "/tmp/Mobile.apk" }],
+            ["device_launch_app", { deviceId: "android-pixel-owned", packageName: "com.example.mobile" }, { provider: "adb", launched: "com.example.mobile" }],
             ["mobile_uninstall_app", { deviceId: "android-pixel-owned", packageName: "com.example.mobile", confirmDestructive: true }, { provider: "adb", uninstalled: "com.example.mobile" }],
             ["mobile_stop_app", { deviceId: "android-pixel-owned", packageName: "com.example.mobile" }, { provider: "adb", stopped: "com.example.mobile" }],
             ["mobile_clear_app_data", { deviceId: "android-pixel-owned", packageName: "com.example.mobile", confirmDestructive: true }, { provider: "adb", reset: { packageName: "com.example.mobile" } }],

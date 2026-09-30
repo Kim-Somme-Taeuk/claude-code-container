@@ -9,7 +9,7 @@ import { handleMacosTool, listMacosDevices, macosBackend } from "./backends/maco
 import { handleLinuxVmManagementTool, handleLinuxVmTool, linuxVmBackend, listLinuxVmDevices } from "./backends/linux-vm.mjs";
 import { handleWindowsTool, listWindowsDevices, windowsBackend } from "./backends/windows-sandbox.mjs";
 import { listWindowsVmDevices, windowsVmBackend } from "./backends/windows-vm.mjs";
-import { brokerApple, brokerAppium, brokerCommand, brokerDeviceTool, brokerLease, brokerPhysical, brokerRpc, brokerShutdown, brokerStatus, implicitBrokerProbeOptions, withBrokerOperation } from "./broker.mjs";
+import { brokerAppium, brokerCommand, brokerDeviceTool, brokerPhysical, brokerRpc, brokerStatus, implicitBrokerProbeOptions, withBrokerOperation } from "./broker.mjs";
 import { ownerId } from "./context.mjs";
 import { currentDisplayTarget, handleDisplayTool } from "./display/x11.mjs";
 import { evaluateDestructivePolicy } from "./policy/destructive.mjs";
@@ -17,18 +17,15 @@ import { flowJsonResult, jsonResult, textResult } from "./responses.mjs";
 import { compactToolResult, compactToolValue } from "./public-output.mjs";
 import { OWNER_DEVICE_ID_PATTERN } from "./state/owner-device-state.mjs";
 import { readOwnerDevices } from "./state/device-store.mjs";
-import { ALL_TOOLS, DEVICE_FLOW_TOOL_NAMES, SINGLE_BACKEND_TOOL_DEFAULTS, TOOLS } from "./tools.mjs";
-import { flowStepArguments, normalizeToolArgs } from "./tool-arguments.mjs";
+import { DEVICE_FLOW_TOOL_NAMES, TOOLS } from "./tools.mjs";
+import { flowStepArguments, normalizeToolArgs, toolInputError } from "./tool-arguments.mjs";
 import { createWaitBudget } from "./wait-budget.mjs";
 
 const FLOW_MAX_STEPS = 50;
-const DEVICE_REQUIRED_TOOLS = new Set(ALL_TOOLS
+const DEVICE_REQUIRED_TOOLS = new Set(TOOLS
     .filter((tool) => tool.inputSchema?.required?.includes("deviceId"))
     .map((tool) => tool.name));
-const FLOW_BLOCKED_TOOLS = new Set(["mobile_run_flow", "device_run_flow"]);
-const MOBILE_FLOW_ALLOWED_DEVICE_TOOLS = new Set(["device_status", "device_screenshot", "device_install_app", "device_launch_app"]);
 const DEVICE_FLOW_ALLOWED_TOOLS = new Set(DEVICE_FLOW_TOOL_NAMES);
-const LEGACY_DEVICE_FLOW_TOOLS = new Set(["mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right"]);
 const BROKER_LIFECYCLE_COMMANDS = new Set(["device_create", "device_status", "device_start", "device_stop", "device_reboot", "device_delete"]);
 const HYPER_V_LIFECYCLE_BACKENDS = new Set(["windows-vm", "linux-vm"]);
 const BROKER_READONLY_DEVICE_TOOLS = new Set([
@@ -178,23 +175,6 @@ const BROKER_BACKEND_MOBILE_TOOLS = new Set([
 ]);
 const BROKER_APPIUM_ROUTED_MOBILE_TOOLS = new Set(["mobile_session_status", "mobile_set_clipboard", "mobile_get_clipboard"]);
 const DEFAULT_BROKER_APPIUM_RPC_TIMEOUT_MS = 315000;
-
-function flowStepTool(step) {
-    const tool = step?.tool || step?.name || "";
-    return typeof tool === "string" ? tool : "";
-}
-
-function mobileFlowToolAllowed(name) {
-    if (FLOW_BLOCKED_TOOLS.has(name)) return false;
-    if (name.startsWith("mobile_")) return true;
-    return MOBILE_FLOW_ALLOWED_DEVICE_TOOLS.has(name);
-}
-
-function deviceFlowToolAllowed(name) {
-    if (FLOW_BLOCKED_TOOLS.has(name)) return false;
-    if (LEGACY_DEVICE_FLOW_TOOLS.has(name)) return true;
-    return DEVICE_FLOW_ALLOWED_TOOLS.has(name);
-}
 
 function summarizeContentItem(item) {
     const text = item.text || "";
@@ -1445,15 +1425,6 @@ function unhandledDeviceToolResult(name, args) {
 
 async function dispatchTool(name, rawArgs) {
     const args = normalizeToolArgs(rawArgs, name);
-    if (Object.hasOwn(SINGLE_BACKEND_TOOL_DEFAULTS, name)
-        && args.backend !== SINGLE_BACKEND_TOOL_DEFAULTS[name]) {
-        return textResult(false, JSON.stringify({
-            ok: false,
-            error: "device-backend-unsupported",
-            tool: name,
-            backend: SINGLE_BACKEND_TOOL_DEFAULTS[name],
-        }));
-    }
     if (name === "mobile_key"
         && !(typeof args.key === "string" && args.key.length > 0)
         && !(typeof args.keyCode === "number" && Number.isFinite(args.keyCode))) {
@@ -1558,10 +1529,10 @@ async function handleRunFlow(args, { toolName, toolAllowed, detail }) {
     const results = [];
     for (let index = 0; index < steps.length; index += 1) {
         const step = steps[index] || {};
-        const tool = flowStepTool(step);
+        const tool = typeof step.tool === "string" ? step.tool : "";
         const label = (typeof step.label === "string" && step.label) || tool || `step-${index + 1}`;
-        if (!tool) {
-            const summary = { index, label, isError: true, error: "Flow step requires tool or name" };
+        if (!tool || Object.hasOwn(step, "name")) {
+            const summary = { index, label, isError: true, error: "Flow step requires tool; name is not supported" };
             results.push(summary);
             if (stopOnError) return finish({ ok: false, stoppedAt: index, results });
             continue;
@@ -1575,6 +1546,12 @@ async function handleRunFlow(args, { toolName, toolAllowed, detail }) {
 
         if (step.arguments !== undefined && (!step.arguments || typeof step.arguments !== "object" || Array.isArray(step.arguments))) {
             results.push({ index, label, tool, isError: true, error: "Flow step arguments must be an object" });
+            if (stopOnError) return finish({ ok: false, stoppedAt: index, results });
+            continue;
+        }
+        const inputError = toolInputError(tool, step.arguments);
+        if (inputError) {
+            results.push({ index, label, tool, isError: true, error: inputError });
             if (stopOnError) return finish({ ok: false, stoppedAt: index, results });
             continue;
         }
@@ -1593,12 +1570,8 @@ async function handleRunFlow(args, { toolName, toolAllowed, detail }) {
     return finish({ ok: results.every((result) => !result.isError), results });
 }
 
-async function handleMobileRunFlow(args, options) {
-    return handleRunFlow(args, { toolName: "mobile_run_flow", toolAllowed: mobileFlowToolAllowed, ...options });
-}
-
 async function handleDeviceRunFlow(args, options) {
-    return handleRunFlow(args, { toolName: "device_run_flow", toolAllowed: deviceFlowToolAllowed, ...options });
+    return handleRunFlow(args, { toolName: "device_run_flow", toolAllowed: (name) => DEVICE_FLOW_ALLOWED_TOOLS.has(name), ...options });
 }
 
 export async function startServer() {
@@ -1611,6 +1584,8 @@ export async function startServer() {
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { name, arguments: rawArgs = {} } = request.params;
+        const inputError = toolInputError(name, rawArgs);
+        if (inputError) return textResult(false, inputError);
         const args = normalizeToolArgs(rawArgs, name);
         const result = await withBrokerOperation(async () => {
             try {
@@ -1624,32 +1599,8 @@ export async function startServer() {
                     case "device_broker_status":
                         return jsonResult(await brokerStatus(args));
 
-                    case "device_broker_shutdown":
-                        return jsonResult(await brokerShutdown(args));
-
-                    case "device_broker_rpc":
-                        return jsonResult(await brokerRpc(args));
-
-                    case "device_broker_lease":
-                        return jsonResult(await brokerLease(args));
-
-                    case "device_broker_attach":
-                        return jsonResult(await brokerPhysical(args));
-
-                    case "device_broker_apple":
-                        return jsonResult(await brokerApple(args));
-
-                    case "device_broker_command":
-                        return jsonResult(await brokerCommand(args));
-
-                    case "device_broker_appium":
-                        return jsonResult(await brokerAppium(args));
-
                     case "device_list":
                         return handleDeviceList(args);
-
-                    case "mobile_run_flow":
-                        return handleMobileRunFlow(args, { detail: rawArgs?.detail === true });
 
                     case "device_run_flow":
                         return handleDeviceRunFlow(args, { detail: rawArgs?.detail === true });
@@ -1662,7 +1613,7 @@ export async function startServer() {
                 return textResult(false, `Unexpected error: ${err.message}`);
             }
         });
-        return rawArgs?.detail === true || name === "mobile_run_flow" || name === "device_run_flow"
+        return rawArgs?.detail === true || name === "device_run_flow"
             ? result : compactToolResult(name, result);
     });
 

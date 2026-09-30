@@ -38,7 +38,7 @@ async function flow(name: string, tool: string, detail: boolean, stopOnError?: b
 beforeAll(async () => { await startServer(); });
 beforeEach(() => { fixture.observations.clear(); fixture.calls.length = 0; });
 
-describe.each(["mobile_run_flow", "device_run_flow"])("%s wait conditions", (name) => {
+describe.each(["device_run_flow"])("%s wait conditions", (name) => {
     it.each([
         ["mobile_wait_for_text", { found: false }],
         ["mobile_wait_for_app", { found: false }],

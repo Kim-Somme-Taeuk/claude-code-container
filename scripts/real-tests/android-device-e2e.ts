@@ -235,11 +235,11 @@ export async function run(options: any = {}) {
             assert.strictEqual(portrait.provider, "adb");
             assert.strictEqual(portrait.orientation, "portrait");
 
-            const rotateLeft = parsePayload(await callTool("mobile_rotate_left", { ...direct, deviceId }));
+            const rotateLeft = parsePayload(await callTool("mobile_set_orientation", { orientation: "landscape", ...direct, deviceId }));
             assert.strictEqual(rotateLeft.provider, "adb");
             assert.strictEqual(rotateLeft.orientation, "landscape");
 
-            const rotateRight = parsePayload(await callTool("mobile_rotate_right", { ...direct, deviceId }));
+            const rotateRight = parsePayload(await callTool("mobile_set_orientation", { orientation: "reverse-landscape", ...direct, deviceId }));
             assert.strictEqual(rotateRight.provider, "adb");
             assert.strictEqual(rotateRight.orientation, "reverse-landscape");
 
@@ -256,7 +256,7 @@ export async function run(options: any = {}) {
             assert.ok(getClipboard.requests >= 1);
             assert.strictEqual(getClipboard.text, "ccc-android-device-clipboard");
 
-            const mobileScreenshot = await callTool("mobile_screenshot", { ...direct, deviceId });
+            const mobileScreenshot = await callTool("device_screenshot", { ...direct, deviceId });
             assert.strictEqual(mobileScreenshot?.content?.[0]?.type, "image");
             assert.strictEqual(mobileScreenshot.content[0].mimeType, "image/png");
             assert.ok(String(mobileScreenshot.content[0].data || "").length > 64);
@@ -320,7 +320,7 @@ export async function run(options: any = {}) {
                 assert.strictEqual(deviceLaunch.provider, "adb");
                 assert.strictEqual(deviceLaunch.launched, appPackage);
 
-                const install = parsePayload(await callTool("mobile_install_app", {
+                const install = parsePayload(await callTool("device_install_app", {
                     ...direct,
                     deviceId,
                     path: appApk,
@@ -329,7 +329,7 @@ export async function run(options: any = {}) {
                 assert.strictEqual(install.provider, "adb");
                 assert.strictEqual(androidDeviceReportedPathMatches(install.installed, appApk), true);
 
-                const launch = parsePayload(await callTool("mobile_launch_app", { ...direct, deviceId, packageName: appPackage }));
+                const launch = parsePayload(await callTool("device_launch_app", { ...direct, deviceId, packageName: appPackage }));
                 assert.strictEqual(launch.provider, "adb");
                 assert.strictEqual(launch.launched, appPackage);
 

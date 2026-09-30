@@ -1,3 +1,4 @@
+import { callInternalBroker } from "./helpers/device-lab-mcp-fixture.js";
 import { spawn } from "child_process";
 import { createHash, createHmac } from "crypto";
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
@@ -1632,8 +1633,7 @@ describe("device-lab MCP", () => {
         installFakeCccBroker(pathDir, logPath);
         let launchedPid: number | null = null;
         try {
-            const result = await client.callTool({
-                name: "device_broker_rpc",
+            const result = await callInternalBroker(client, { operation: "brokerRpc",
                 arguments: {
                     method: "broker.echo",
                     params: { linkedRuntime: true },
@@ -1679,8 +1679,7 @@ describe("device-lab MCP", () => {
         installFakeCccBroker(pathDir, launchLog);
 
         try {
-            const result = await client.callTool({
-                name: "device_broker_rpc",
+            const result = await callInternalBroker(client, { operation: "brokerRpc",
                 arguments: {
                     method: "broker.echo",
                     params: { linkedLogs: true },
@@ -1739,8 +1738,7 @@ describe("device-lab MCP", () => {
         const logPath = join(homeDir, "fake-ccc-broker.log");
         installFakeCccBroker(pathDir, logPath);
 
-        const first = await client.callTool({
-            name: "device_broker_rpc",
+        const first = await callInternalBroker(client, { operation: "brokerRpc",
             arguments: {
                 method: "broker.echo",
                 params: { hello: "broker" },
@@ -1785,8 +1783,7 @@ describe("device-lab MCP", () => {
         }));
         expect(existsSync(statusPayload.state.runtimeFile)).toBe(true);
 
-        const second = await client.callTool({
-            name: "device_broker_rpc",
+        const second = await callInternalBroker(client, { operation: "brokerRpc",
             arguments: {
                 method: "broker.echo",
                 params: { reuse: true },
@@ -1807,8 +1804,7 @@ describe("device-lab MCP", () => {
         expect(brokerLog.trim().split("\n").filter((line) => line.startsWith("[\"devices\",\"broker\",\"serve\""))).toHaveLength(1);
         expect(brokerLog).toContain(`auth-ok ${firstPayload.launch.runtime.ownerId}`);
 
-        const lease = await client.callTool({
-            name: "device_broker_lease",
+        const lease = await callInternalBroker(client, { operation: "brokerLease",
             arguments: { action: "list", backend: "android-device", autolaunch: true, hostCandidates: ["127.0.0.1"], port, timeoutMs: 300 },
         });
         expect(JSON.parse(((lease.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -1816,8 +1812,7 @@ describe("device-lab MCP", () => {
             result: expect.objectContaining({ backend: "android-device", leases: [] }),
         }));
 
-        const attach = await client.callTool({
-            name: "device_broker_attach",
+        const attach = await callInternalBroker(client, { operation: "brokerPhysical",
             arguments: {
                 action: "attach",
                 backend: "android-device",
@@ -1837,8 +1832,7 @@ describe("device-lab MCP", () => {
             }),
         }));
 
-        const attachList = await client.callTool({
-            name: "device_broker_attach",
+        const attachList = await callInternalBroker(client, { operation: "brokerPhysical",
             arguments: { action: "list", backend: "android-device", autolaunch: true, hostCandidates: ["127.0.0.1"], port, timeoutMs: 300 },
         });
         expect(JSON.parse(((attachList.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -1846,8 +1840,7 @@ describe("device-lab MCP", () => {
             result: expect.objectContaining({ backend: "android-device", devices: [], leases: [] }),
         }));
 
-        const detach = await client.callTool({
-            name: "device_broker_attach",
+        const detach = await callInternalBroker(client, { operation: "brokerPhysical",
             arguments: { action: "detach", backend: "android-device", deviceId: "android-broker-real", autolaunch: true, hostCandidates: ["127.0.0.1"], port, timeoutMs: 300 },
         });
         expect(JSON.parse(((detach.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -1855,8 +1848,7 @@ describe("device-lab MCP", () => {
             result: expect.objectContaining({ detached: "android-broker-real", physicalDevicePoweredOff: false }),
         }));
 
-        const command = await client.callTool({
-            name: "device_broker_command",
+        const command = await callInternalBroker(client, { operation: "brokerCommand",
             arguments: {
                 action: "plan",
                 backend: "windows-sandbox",
@@ -1925,7 +1917,7 @@ describe("device-lab MCP", () => {
             }),
         }));
 
-        const shutdown = await client.callTool({ name: "device_broker_shutdown", arguments: { confirmDestructive: true } });
+        const shutdown = await callInternalBroker(client, { operation: "brokerShutdown", arguments: { confirmDestructive: true } });
         expect(JSON.parse(((shutdown.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: true,
             stopped: true,
@@ -1947,8 +1939,7 @@ describe("device-lab MCP", () => {
         const port = await freePort();
         const logPath = join(homeDir, "fake-ccc-broker-ignore.log");
         installIgnoringCccBroker(pathDir, logPath);
-        const launched = await client.callTool({
-            name: "device_broker_rpc",
+        const launched = await callInternalBroker(client, { operation: "brokerRpc",
             arguments: {
                 method: "broker.echo",
                 autolaunch: true,
@@ -1969,7 +1960,7 @@ describe("device-lab MCP", () => {
         });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as { state: { runtimeFile: string } };
 
-        const shutdown = await client.callTool({ name: "device_broker_shutdown", arguments: { confirmDestructive: true } });
+        const shutdown = await callInternalBroker(client, { operation: "brokerShutdown", arguments: { confirmDestructive: true } });
         expect(JSON.parse(((shutdown.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: false,
             error: "broker-shutdown-timeout",
@@ -1985,8 +1976,7 @@ describe("device-lab MCP", () => {
         const port = await freePort();
         const logPath = join(homeDir, "fake-ccc-broker-cleanup-fail.log");
         installFakeCccBroker(pathDir, logPath, { cleanupOk: false });
-        const launched = await client.callTool({
-            name: "device_broker_rpc",
+        const launched = await callInternalBroker(client, { operation: "brokerRpc",
             arguments: {
                 method: "broker.echo",
                 autolaunch: true,
@@ -2007,7 +1997,7 @@ describe("device-lab MCP", () => {
         });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as { state: { runtimeFile: string } };
 
-        const shutdown = await client.callTool({ name: "device_broker_shutdown", arguments: { confirmDestructive: true } });
+        const shutdown = await callInternalBroker(client, { operation: "brokerShutdown", arguments: { confirmDestructive: true } });
         expect(JSON.parse(((shutdown.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: false,
             error: "broker-owner-cleanup-failed",
@@ -2027,8 +2017,7 @@ describe("device-lab MCP", () => {
         const port = await freePort();
         const logPath = join(homeDir, "fake-ccc-broker-cleanup-timeout.log");
         installFakeCccBroker(pathDir, logPath, { cleanupMode: "hang" });
-        const launched = await client.callTool({
-            name: "device_broker_rpc",
+        const launched = await callInternalBroker(client, { operation: "brokerRpc",
             arguments: {
                 method: "broker.echo",
                 autolaunch: true,
@@ -2049,7 +2038,7 @@ describe("device-lab MCP", () => {
         });
         const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as { state: { runtimeFile: string } };
 
-        const shutdown = await client.callTool({ name: "device_broker_shutdown", arguments: { cleanupTimeoutMs: 200, confirmDestructive: true } });
+        const shutdown = await callInternalBroker(client, { operation: "brokerShutdown", arguments: { cleanupTimeoutMs: 200, confirmDestructive: true } });
         expect(JSON.parse(((shutdown.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: false,
             error: "broker-owner-cleanup-failed",
@@ -2164,8 +2153,7 @@ setInterval(() => {}, 1000);
             managedBy: "device-lab-mcp",
         }));
         rmSync(join(pathDir, "ccc"), { force: true });
-        const result = await client.callTool({
-            name: "device_broker_rpc",
+        const result = await callInternalBroker(client, { operation: "brokerRpc",
             arguments: {
                 method: "broker.echo",
                 autolaunch: true,
@@ -2209,8 +2197,7 @@ setInterval(() => {}, 1000);
         }));
 
         try {
-            const result = await client.callTool({
-                name: "device_broker_rpc",
+            const result = await callInternalBroker(client, { operation: "brokerRpc",
                 arguments: {
                     method: "broker.echo",
                     params: { revived: true },
@@ -2240,7 +2227,7 @@ setInterval(() => {}, 1000);
             ]));
             expect(readFileSync(logPath, "utf8")).toContain(`["devices","broker","serve","--host","127.0.0.1","--port","${port}"]`);
         } finally {
-            await client.callTool({ name: "device_broker_shutdown", arguments: { force: true, cleanupTimeoutMs: 300, confirmDestructive: true } });
+            await callInternalBroker(client, { operation: "brokerShutdown", arguments: { force: true, cleanupTimeoutMs: 300, confirmDestructive: true } });
             rmSync(statusPayload.state.runtimeFile, { force: true });
         }
     });
@@ -2259,8 +2246,7 @@ setInterval(() => {}, 1000);
             managedBy: "device-lab-mcp",
         };
         writeFileSync(statusPayload.state.runtimeFile, JSON.stringify(foreignRuntime));
-        const result = await client.callTool({
-            name: "device_broker_rpc",
+        const result = await callInternalBroker(client, { operation: "brokerRpc",
             arguments: {
                 method: "broker.echo",
                 autolaunch: true,
@@ -2305,8 +2291,7 @@ setInterval(() => {}, 1000);
         writeFileSync(statusPayload.state.runtimeFile, JSON.stringify(foreignRuntime));
 
         try {
-            const result = await client.callTool({
-                name: "device_broker_rpc",
+            const result = await callInternalBroker(client, { operation: "brokerRpc",
                 arguments: {
                     method: "broker.echo",
                     params: { isolatedPort: true },
@@ -2331,7 +2316,7 @@ setInterval(() => {}, 1000);
                 expect.objectContaining({ reason: "runtime-ignored-for-different-owner-and-port", requestedPort }),
             ]));
         } finally {
-            await client.callTool({ name: "device_broker_shutdown", arguments: { force: true, cleanupTimeoutMs: 300, confirmDestructive: true } });
+            await callInternalBroker(client, { operation: "brokerShutdown", arguments: { force: true, cleanupTimeoutMs: 300, confirmDestructive: true } });
             rmSync(statusPayload.state.runtimeFile, { force: true });
         }
     });
@@ -2351,7 +2336,7 @@ setInterval(() => {}, 1000);
             managedBy: "external-service-manager",
         };
         writeFileSync(statusPayload.state.runtimeFile, JSON.stringify(unmanagedRuntime));
-        const shutdown = await client.callTool({ name: "device_broker_shutdown", arguments: { confirmDestructive: true } });
+        const shutdown = await callInternalBroker(client, { operation: "brokerShutdown", arguments: { confirmDestructive: true } });
         expect(JSON.parse(((shutdown.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
             ok: false,
             error: "runtime-not-managed-by-device-lab-mcp",
@@ -2486,8 +2471,7 @@ setInterval(() => {}, 1000);
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
         try {
-            const result = await client.callTool({
-                name: "device_broker_rpc",
+            const result = await callInternalBroker(client, { operation: "brokerRpc",
                 arguments: {
                     method: "broker.echo",
                     hostCandidates: ["127.0.0.1"],
@@ -2539,8 +2523,7 @@ setInterval(() => {}, 1000);
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
         try {
-            const result = await client.callTool({
-                name: "device_broker_rpc",
+            const result = await callInternalBroker(client, { operation: "brokerRpc",
                 arguments: {
                     method: "broker.echo",
                     hostCandidates: ["127.0.0.1"],

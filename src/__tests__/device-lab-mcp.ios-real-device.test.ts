@@ -307,7 +307,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         });
 
         const realMobileScreenshot = await client.callTool({
-            name: "mobile_screenshot",
+            name: "device_screenshot",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(realMobileScreenshot.isError).not.toBe(true);
@@ -318,7 +318,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         });
 
         const realInstall = await client.callTool({
-            name: "mobile_install_app",
+            name: "device_install_app",
             arguments: { deviceId: "ios-device-real-iphone", path: "/tmp/Real.app" },
         });
         expect(realInstall.isError).not.toBe(true);
@@ -357,7 +357,7 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         expect((missingInstallPath.content as Array<{ text?: string }>)[0].text).toContain("requires path");
 
         const missingLaunchBundle = await client.callTool({
-            name: "mobile_launch_app",
+            name: "device_launch_app",
             arguments: { deviceId: "ios-device-real-iphone" },
         });
         expect(missingLaunchBundle.isError).toBe(true);
@@ -401,8 +401,8 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
             ["mobile_home", { deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, home: true }],
             ["mobile_lock", { deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, locked: true }],
             ["mobile_unlock", { deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, unlocked: true }],
-            ["mobile_rotate_left", { deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, orientation: "LANDSCAPE" }],
-            ["mobile_rotate_right", { deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, orientation: "PORTRAIT" }],
+            ["mobile_set_orientation", { orientation: "landscape", deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, orientation: "LANDSCAPE" }],
+            ["mobile_set_orientation", { orientation: "portrait", deviceId: "ios-device-real-iphone" }, { provider: "appium-xcuitest", physical: true, orientation: "PORTRAIT" }],
             ["mobile_set_orientation", { deviceId: "ios-device-real-iphone", orientation: "reverse-landscape" }, { provider: "appium-xcuitest", physical: true, orientation: "LANDSCAPE" }],
             ["mobile_wait_for_text", { deviceId: "ios-device-real-iphone", text: "Test", timeoutMs: 1000, intervalMs: 50 }, { provider: "appium-xcuitest", physical: true, found: true, text: "Test" }],
             ["mobile_wait_for_app", { deviceId: "ios-device-real-iphone", bundleId: "com.example.Real", timeoutMs: 1000, intervalMs: 50 }, { provider: "appium-xcuitest", physical: true, found: true, bundleId: "com.example.Real", activeApp: { bundleId: "com.example.Real", name: "Real" } }],

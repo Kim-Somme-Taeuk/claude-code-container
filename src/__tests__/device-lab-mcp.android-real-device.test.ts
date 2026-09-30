@@ -342,7 +342,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         writeFileSync(flakyScreencapMarker, "1");
         try {
             const flakyScreenshot = await client.callTool({
-                name: "mobile_screenshot",
+                name: "device_screenshot",
                 arguments: { deviceId: "android-device-real-pixel" },
             });
             expect(flakyScreenshot.isError).not.toBe(true);
@@ -819,7 +819,7 @@ exec "${delegatedAdbPath}" "$@"
 
             const startedAt = Date.now();
             const timedOutInstall = await client.callTool({
-                name: "mobile_install_app",
+                name: "device_install_app",
                 arguments: { deviceId, path: "/tmp/slow-real-install.apk", helperTimeoutMs: 25 },
             });
             expect(timedOutInstall.isError).toBe(true);

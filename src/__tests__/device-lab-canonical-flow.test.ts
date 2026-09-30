@@ -33,7 +33,7 @@ vi.mock("../../device-lab-mcp/src/backends/linux-vm.mjs", async (importOriginal)
     handleLinuxVmManagementTool: async () => null, handleLinuxVmTool: async () => null,
 }));
 import { startServer } from "../../device-lab-mcp/src/server.mjs";
-import { ALL_TOOLS, TOOLS, DEVICE_FLOW_TOOL_NAMES } from "../../device-lab-mcp/src/tools.mjs";
+import { TOOLS, DEVICE_FLOW_TOOL_NAMES } from "../../device-lab-mcp/src/tools.mjs";
 
 const hidden = ["mobile_install_app", "mobile_launch_app", "mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right", "mobile_run_flow"];
 const shared = { deviceId: "target-a", backend: "android-emulator", incarnationId: "a".repeat(32) };
@@ -45,13 +45,11 @@ const flow = (steps: unknown[], args: Record<string, unknown> = {}) => call("dev
 beforeAll(async () => { await startServer(); });
 beforeEach(() => { fixture.calls.length = 0; fixture.scope = 0; fixture.nextScope = 0; });
 
-describe("canonical catalog and compatible dispatch", () => {
-    it("advertises exactly 87 tools while retaining all 93 accepted identities", async () => {
+describe("canonical public contract", () => {
+    it("advertises exactly the 87 callable tools", async () => {
         const catalog = await fixture.handlers[0]({});
         expect(catalog.tools).toEqual(TOOLS);
         expect(TOOLS).toHaveLength(87);
-        expect(ALL_TOOLS).toHaveLength(93);
-        expect(ALL_TOOLS.filter((entry: any) => !TOOLS.some((tool: any) => tool.name === entry.name)).map((entry: any) => entry.name).sort()).toEqual([...hidden].sort());
         expect(Buffer.byteLength(JSON.stringify(catalog.tools))).toBeLessThan(57211);
     });
     it("publishes a finite canonical flow enum, required tool and optional target defaults", () => {
@@ -71,25 +69,25 @@ describe("canonical catalog and compatible dispatch", () => {
         expect([...DEVICE_FLOW_TOOL_NAMES].sort()).toEqual([...priorDeviceAndDisplay, ...visibleMobile, "device_install_app", "device_launch_app"].sort());
         for (const name of [...hidden, "device_start", "device_exec", "device_run_flow", "device_broker_status"]) expect(DEVICE_FLOW_TOOL_NAMES).not.toContain(name);
     });
-    it.each(hidden.filter(name => name !== "mobile_run_flow"))("keeps standalone %s dispatch and compact output", async (name) => {
-        const result = await call(name, { ...shared, ...direct, path: "/fixture/app.apk", packageName: "example.app" });
-        expect(result.isError).toBe(false);
-        expect(fixture.calls[0].name).toBe(name);
-        expect(parse(result)).toEqual({ ok: true, provider: "fixture" });
-        const detailed = await call(name, { ...shared, ...direct, detail: true });
-        expect(parse(detailed)).toMatchObject({ status: 0, stdout: "", stderr: "" });
+    it.each([...hidden, "device_broker_shutdown", "device_broker_rpc", "device_broker_lease", "device_broker_attach", "device_broker_apple", "device_broker_command", "device_broker_appium", "device_image_create", "device_image_clone"])("rejects removed public tool %s before any broker scope or provider", async (name) => {
+        const result = await call(name, { ...shared, ...direct, confirmDestructive: true });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain(`Unknown tool: ${name}`);
+        expect(fixture.calls).toEqual([]);
+        expect(fixture.nextScope).toBe(0);
     });
-    it.each(["device_install_app", "device_launch_app"])("accepts canonical %s in either flow without renaming dispatch", async (tool) => {
-        for (const name of ["device_run_flow", "mobile_run_flow"]) {
-            const result = parse(await call(name, { ...shared, steps: [step({ path: "/fixture/app.apk", packageName: "example.app" }, tool)] }));
-            expect(result.ok).toBe(true);
-            expect(fixture.calls.at(-1)?.name).toBe(tool);
-        }
+    it.each(["device_install_app", "device_launch_app"])("accepts canonical %s standalone and in flows", async (tool) => {
+        const args = { ...shared, ...direct, path: "/fixture/app.apk", packageName: "example.app" };
+        expect((await call(tool, args)).isError).toBe(false);
+        expect(parse(await flow([step(args, tool)])).ok).toBe(true);
+        expect(fixture.calls.map(entry => entry.name)).toEqual([tool, tool]);
     });
-    it.each(["mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right"])("retains legacy flow step.name for %s", async (name) => {
-        const result = parse(await flow([{ name, arguments: direct }]));
-        expect(result.ok).toBe(true);
-        expect(fixture.calls[0].name).toBe(name);
+    it.each([{ name: "mobile_tap" }, { name: "mobile_tap", tool: "mobile_tap" }])("rejects legacy step name %j without dispatch", async (item) => {
+        const result = parse(await flow([{ ...item, arguments: direct }, step()], { stopOnError: false }));
+        expect(result.ok).toBe(false);
+        expect(result.results[0].error).toContain("name is not supported");
+        expect(result.results[1].isError).toBe(false);
+        expect(fixture.calls).toHaveLength(1);
     });
     it.each(DEVICE_FLOW_TOOL_NAMES)("dispatches advertised flow choice %s through the existing handler", async (tool) => {
         const arguments_ = { ...direct, key: "HOME", text: "needle", packageName: "example.app", path: "/fixture/app.apk", confirmDestructive: true };
@@ -127,12 +125,11 @@ describe("shared target selection", () => {
         expect(parse(await flow([step(override)])).ok).toBe(true);
         expect(fixture.calls[0].args).toEqual({ ...direct, x: 1, y: 2, ...override });
     });
-    it("normalizes nested options before target comparison and honors top-level precedence", async () => {
-        expect(parse(await flow([step({ options: { deviceId: "target-b", backend: "ios-simulator", incarnationId: "nested" } })])).ok).toBe(true);
-        expect(fixture.calls[0].args).toEqual({ ...direct, x: 1, y: 2, deviceId: "target-b", backend: "ios-simulator", incarnationId: "nested" });
-        fixture.calls.length = 0;
-        expect(parse(await flow([step({ options: { deviceId: "target-b", incarnationId: "nested" }, deviceId: shared.deviceId })])).ok).toBe(true);
-        expect(fixture.calls[0].args).toEqual({ ...shared, ...direct, x: 1, y: 2, incarnationId: "nested" });
+    it.each([{}, null, { deviceId: "target-b", backend: "ios-simulator" }])("rejects nested options %j without forwarding or mutating", async (options) => {
+        const result = parse(await flow([step({ options })]));
+        expect(result.ok).toBe(false);
+        expect(JSON.stringify(result)).toContain("Use flat tool arguments");
+        expect(fixture.calls).toEqual([]);
     });
     it.each([null, "../outside", 42, ""])("preserves invalid explicit deviceId %j for validation", async (deviceId) => {
         const result = parse(await flow([step({ deviceId })]));
@@ -169,7 +166,7 @@ describe("flow policy and bounds", () => {
         expect(allowed.ok).toBe(true);
         expect(fixture.calls).toHaveLength(1);
     });
-    it.each(["device_run_flow", "mobile_run_flow"])("%s rejects empty and oversized flows before dispatch", async (name) => {
+    it.each(["device_run_flow"])("%s rejects empty and oversized flows before dispatch", async (name) => {
         for (const steps of [[], Array.from({ length: 51 }, () => step())]) {
             const result = await call(name, { ...shared, steps });
             expect(result.isError).toBe(true);

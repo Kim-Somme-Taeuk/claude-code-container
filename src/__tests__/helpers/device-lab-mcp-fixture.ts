@@ -4,6 +4,17 @@ import { createHash } from "crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { basename, join, resolve } from "path";
+import { createBrokerApiClient } from "../../../scripts/real-tests/broker-api-client.ts";
+
+const clientEnvironments = new WeakMap<Client, NodeJS.ProcessEnv>();
+const internalClients = new WeakMap<Client, ReturnType<typeof createBrokerApiClient>>();
+export function callInternalBroker(client: Client, request: { operation: string; arguments?: Record<string, unknown> }) {
+    const env = clientEnvironments.get(client);
+    if (!env) throw new Error("Internal broker fixture requires an isolated client environment");
+    let internal = internalClients.get(client);
+    if (!internal) { internal = createBrokerApiClient(env); internalClients.set(client, internal); }
+    return internal.call(request.operation, request.arguments || {});
+}
 
 export const repoRoot = join(__dirname, "../../..");
 export const TIMEOUT = 30000;
@@ -79,6 +90,11 @@ export async function createDeviceLabMcpTestContext(options: DeviceLabMcpTestCon
     );
 
     await client.connect(transport);
+    clientEnvironments.set(client, {
+        HOME: homeDir, PATH: pathDir, NODE_ENV: "test",
+        NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
+        CCC_DEVICE_LAB_TEST_ALLOW_UNVERIFIED_BROKER: "1", ...options.env,
+    });
     const defaultImplicitBroker = options.defaultImplicitBroker ?? false;
     if (typeof defaultImplicitBroker === "boolean") installDefaultImplicitBroker(client, defaultImplicitBroker);
     return { client, homeDir, pathDir, originalHome };
@@ -86,6 +102,7 @@ export async function createDeviceLabMcpTestContext(options: DeviceLabMcpTestCon
 
 export async function cleanupDeviceLabMcpTestContext(context: DeviceLabMcpTestContext | undefined) {
     if (!context) return;
+    await internalClients.get(context.client)?.close();
     await context?.client.close();
     rmSync(context.homeDir, { recursive: true, force: true });
     if (context.originalHome === undefined) delete process.env.HOME;

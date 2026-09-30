@@ -91,7 +91,7 @@ describe("producer-shaped image and inventory presentation", () => {
         }
     });
 
-    it.each(["mobile_run_flow", "device_run_flow"])("projects nested known results in %s", (name) => {
+    it.each(["device_run_flow"])("projects nested known results in %s", (name) => {
         const input = { ok: true, results: [
             { index: 0, tool: "device_image_list", isError: false, content: [{ type: "json", value: { ...envelope, images: [image] } }] },
             { index: 1, tool: "device_inventory", isError: false, content: [{ type: "json", value: { devices: [device] } }] },
@@ -114,7 +114,7 @@ describe("producer-shaped image and inventory presentation", () => {
         } });
         try {
             const call = async (name: string, args: Record<string, unknown>) => {
-                const result = await context.client.callTool({ name, arguments: { backend: "linux-vm", ...args } });
+                const result = await context.client.callTool({ name, arguments: args });
                 expect(result.isError).not.toBe(true);
                 return payload(result);
             };

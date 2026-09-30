@@ -1,3 +1,4 @@
+import { createBrokerApiClient } from "./broker-api-client.ts";
 import assert from "assert";
 import { spawnSync } from "child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from "fs";
@@ -43,9 +44,9 @@ const scriptedArgumentFacets = [
     "mobile_grant_permission:packageName=com.example.missing",
     "mobile_grant_permission:permission=android.permission.CAMERA",
     "mobile_grant_permission:service=camera",
-    "mobile_launch_app:bundleId=com.example.missing",
-    "mobile_launch_app:component=com.example.missing/.MainActivity",
-    "mobile_launch_app:packageName=com.example.missing",
+    "device_launch_app:bundleId=com.example.missing",
+    "device_launch_app:component=com.example.missing/.MainActivity",
+    "device_launch_app:packageName=com.example.missing",
     "mobile_set_orientation:orientation=landscape",
     "mobile_set_orientation:orientation=portrait",
     "mobile_set_orientation:orientation=reverse-landscape",
@@ -293,9 +294,11 @@ export async function runBrokerE2E(options: any = {}) {
     let localBrokerPid = null;
     let preserveTestHome = false;
     const leaseHardwareId = `ccc-real-broker-e2e-${Date.now()}`;
+    const internalBroker = createBrokerApiClient({ ...process.env, ...ccc.env });
 
     try {
         await withDeviceLabMcp(async ({ callTool }) => {
+            const callInternal = (operation: string, args: Record<string, unknown>) => internalBroker.call(operation, args);
             let brokerReady = false;
             try {
                 const status = parseToolPayload(await callTool("device_broker_status", { ...route, probe: true }));
@@ -317,7 +320,7 @@ export async function runBrokerE2E(options: any = {}) {
             if (!brokerReady) return;
 
             try {
-                const echo = parseToolPayload(await callTool("device_broker_rpc", {
+                const echo = parseToolPayload(await callInternal("brokerRpc", {
                     ...route,
                     method: "broker.echo",
                     params: { source: "level2-broker-e2e" },
@@ -331,7 +334,7 @@ export async function runBrokerE2E(options: any = {}) {
             }
 
             try {
-                const rpcStatus = parseToolPayload(await callTool("device_broker_rpc", {
+                const rpcStatus = parseToolPayload(await callInternal("brokerRpc", {
                     ...route,
                     method: "broker.status",
                 }));
@@ -344,7 +347,7 @@ export async function runBrokerE2E(options: any = {}) {
             }
 
             try {
-                const rpcInventory = parseToolPayload(await callTool("device_broker_rpc", {
+                const rpcInventory = parseToolPayload(await callInternal("brokerRpc", {
                     ...route,
                     method: "broker.inventory",
                 }));
@@ -357,7 +360,7 @@ export async function runBrokerE2E(options: any = {}) {
             }
 
             try {
-                const leases = parseToolPayload(await callTool("device_broker_lease", {
+                const leases = parseToolPayload(await callInternal("brokerLease", {
                     ...route,
                     action: "list",
                     backend: "android-device",
@@ -371,7 +374,7 @@ export async function runBrokerE2E(options: any = {}) {
             try {
                 let leaseClaimed = false;
                 try {
-                    const claim = parseToolPayload(await callTool("device_broker_lease", {
+                    const claim = parseToolPayload(await callInternal("brokerLease", {
                         ...route,
                         action: "claim",
                         backend: "android-device",
@@ -385,7 +388,7 @@ export async function runBrokerE2E(options: any = {}) {
                     assert.strictEqual(claim.result?.lease?.hardwareId, leaseHardwareId, JSON.stringify(claim.result));
                     leaseClaimed = true;
 
-                    const heartbeat = parseToolPayload(await callTool("device_broker_lease", {
+                    const heartbeat = parseToolPayload(await callInternal("brokerLease", {
                         ...route,
                         action: "heartbeat",
                         backend: "android-device",
@@ -396,7 +399,7 @@ export async function runBrokerE2E(options: any = {}) {
                     assert.strictEqual(heartbeat.ok, true, JSON.stringify(heartbeat));
                     assert.strictEqual(heartbeat.result?.heartbeat, true, JSON.stringify(heartbeat.result));
 
-                    const listAfterClaim = parseToolPayload(await callTool("device_broker_lease", {
+                    const listAfterClaim = parseToolPayload(await callInternal("brokerLease", {
                         ...route,
                         action: "list",
                         backend: "android-device",
@@ -404,7 +407,7 @@ export async function runBrokerE2E(options: any = {}) {
                     assert.strictEqual(listAfterClaim.ok, true, JSON.stringify(listAfterClaim));
                     assert.ok((listAfterClaim.result?.leases || []).some((lease) => lease.hardwareId === leaseHardwareId), JSON.stringify(listAfterClaim.result));
 
-                    const prune = parseToolPayload(await callTool("device_broker_lease", {
+                    const prune = parseToolPayload(await callInternal("brokerLease", {
                         ...route,
                         action: "prune",
                         backend: "android-device",
@@ -412,7 +415,7 @@ export async function runBrokerE2E(options: any = {}) {
                     assert.strictEqual(prune.ok, true, JSON.stringify(prune));
                     assert.ok(Array.isArray(prune.result?.pruned), JSON.stringify(prune.result));
 
-                    const release = parseToolPayload(await callTool("device_broker_lease", {
+                    const release = parseToolPayload(await callInternal("brokerLease", {
                         ...route,
                         action: "release",
                         backend: "android-device",
@@ -425,7 +428,7 @@ export async function runBrokerE2E(options: any = {}) {
                 } finally {
                     if (leaseClaimed) {
                         try {
-                            await callTool("device_broker_lease", {
+                            await callInternal("brokerLease", {
                                 ...route,
                                 action: "release",
                                 backend: "android-device",
@@ -441,7 +444,7 @@ export async function runBrokerE2E(options: any = {}) {
             }
 
             try {
-                const attached = parseToolPayload(await callTool("device_broker_attach", {
+                const attached = parseToolPayload(await callInternal("brokerPhysical", {
                     ...route,
                     action: "list",
                     backend: "android-device",
@@ -453,7 +456,7 @@ export async function runBrokerE2E(options: any = {}) {
             }
 
             try {
-            const attachDiagnostic = parseToolPayload(await callTool("device_broker_attach", {
+            const attachDiagnostic = parseToolPayload(await callInternal("brokerPhysical", {
                 ...route,
                 action: "attach",
                 backend: "android-device",
@@ -475,7 +478,7 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const detachDiagnostic = parseToolPayload(await callTool("device_broker_attach", {
+            const detachDiagnostic = parseToolPayload(await callInternal("brokerPhysical", {
                 ...route,
                 action: "detach",
                 backend: "android-device",
@@ -489,7 +492,7 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const apple = parseToolPayload(await callTool("device_broker_apple", {
+            const apple = parseToolPayload(await callInternal("brokerApple", {
                 ...route,
                 action: "status",
                 backend: "ios-device",
@@ -501,7 +504,7 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const applePair = parseToolPayload(await callTool("device_broker_apple", {
+            const applePair = parseToolPayload(await callInternal("brokerApple", {
                 ...route,
                 action: "pair",
                 backend: "ios-device",
@@ -515,7 +518,7 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const appleConnect = parseToolPayload(await callTool("device_broker_apple", {
+            const appleConnect = parseToolPayload(await callInternal("brokerApple", {
                 ...route,
                 action: "connect",
                 backend: "ios-device",
@@ -529,7 +532,7 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const appium = parseToolPayload(await callTool("device_broker_appium", {
+            const appium = parseToolPayload(await callInternal("brokerAppium", {
                 ...route,
                 action: "status",
                 backend: "android-emulator",
@@ -542,7 +545,7 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const appiumList = parseToolPayload(await callTool("device_broker_appium", {
+            const appiumList = parseToolPayload(await callInternal("brokerAppium", {
                 ...route,
                 action: "list",
                 backend: "android-emulator",
@@ -556,7 +559,7 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const appiumRecord = parseToolPayload(await callTool("device_broker_appium", {
+            const appiumRecord = parseToolPayload(await callInternal("brokerAppium", {
                 ...route,
                 action: "record",
                 backend: "android-emulator",
@@ -575,7 +578,7 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const appiumClear = parseToolPayload(await callTool("device_broker_appium", {
+            const appiumClear = parseToolPayload(await callInternal("brokerAppium", {
                 ...route,
                 action: "clear",
                 backend: "android-emulator",
@@ -590,7 +593,7 @@ export async function runBrokerE2E(options: any = {}) {
 
             try {
             for (const action of ["start", "stop", "ensure-session", "delete-session"]) {
-                const appiumDiagnostic = parseToolPayload(await callTool("device_broker_appium", {
+                const appiumDiagnostic = parseToolPayload(await callInternal("brokerAppium", {
                     ...route,
                     action,
                     backend: "android-emulator",
@@ -606,7 +609,7 @@ export async function runBrokerE2E(options: any = {}) {
 
             try {
             for (const method of ["GET", "POST"]) {
-                const appiumRequest = parseToolPayload(await callTool("device_broker_appium", {
+                const appiumRequest = parseToolPayload(await callInternal("brokerAppium", {
                     ...route,
                     action: "request",
                     backend: "android-emulator",
@@ -624,7 +627,7 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const plannedCommand = parseToolPayload(await callTool("device_broker_command", {
+            const plannedCommand = parseToolPayload(await callInternal("brokerCommand", {
                 ...route,
                 action: "plan",
                 backend: "android-emulator",
@@ -640,7 +643,7 @@ export async function runBrokerE2E(options: any = {}) {
 
             try {
             for (const command of ["device_create", "device_status", "device_start", "device_stop", "device_delete"]) {
-                const planned = parseToolPayload(await callTool("device_broker_command", {
+                const planned = parseToolPayload(await callInternal("brokerCommand", {
                     ...route,
                     action: "plan",
                     backend: "android-emulator",
@@ -664,18 +667,16 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const plannedCreateOptions = parseToolPayload(await callTool("device_broker_command", {
+            const plannedCreateOptions = parseToolPayload(await callInternal("brokerCommand", {
                 ...route,
                 action: "plan",
                 backend: "android-emulator",
                 command: "device_create",
                 name: "level2-broker-e2e-command-options",
-                options: {
-                    systemImage: "system-images;android-35;google_apis;x86_64",
+                systemImage: "system-images;android-35;google_apis;x86_64",
                     deviceProfile: "pixel_7",
                     createAvd: true,
-                    devicePort: 5598,
-                },
+                devicePort: 5598,
             }));
             assert.strictEqual(plannedCreateOptions.ok, true, JSON.stringify(plannedCreateOptions));
             assert.strictEqual(plannedCreateOptions.method, "broker.command.plan", JSON.stringify(plannedCreateOptions));
@@ -684,13 +685,13 @@ export async function runBrokerE2E(options: any = {}) {
             assert.strictEqual(plannedCreateOptions.result?.create?.createAvd, true, JSON.stringify(plannedCreateOptions.result));
             assert.strictEqual(plannedCreateOptions.result?.create?.port, 5598, JSON.stringify(plannedCreateOptions.result));
             assert.strictEqual(plannedCreateOptions.result?.execution?.mutatesHost, false, JSON.stringify(plannedCreateOptions.result));
-            steps.push({ name: "broker lifecycle command options flattening", status: "PASS" });
+            steps.push({ name: "broker lifecycle command flat arguments", status: "PASS" });
         } catch (error) {
-            steps.push(failStep("broker lifecycle command options flattening", error));
+            steps.push(failStep("broker lifecycle command flat arguments", error));
         }
 
             try {
-            const invokedCommand = parseToolPayload(await callTool("device_broker_command", {
+            const invokedCommand = parseToolPayload(await callInternal("brokerCommand", {
                 ...route,
                 action: "invoke",
                 backend: "android-emulator",
@@ -706,7 +707,7 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const backends = parseToolPayload(await callTool("device_broker_rpc", {
+            const backends = parseToolPayload(await callInternal("brokerRpc", {
                 ...route,
                 method: "broker.backends",
             }));
@@ -808,17 +809,17 @@ export async function runBrokerE2E(options: any = {}) {
                 ["mobile_power", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
                 ["mobile_lock", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
                 ["mobile_unlock", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
-                ["mobile_rotate_left", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
-                ["mobile_rotate_right", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
+                ["mobile_set_orientation", { orientation: "landscape", ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
+                ["mobile_set_orientation", { orientation: "reverse-landscape", ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
                 ["mobile_set_orientation", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, orientation: "landscape" }],
                 ["mobile_set_orientation", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, orientation: "portrait" }],
                 ["mobile_set_orientation", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, orientation: "reverse-landscape" }],
                 ["mobile_set_orientation", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, orientation: "reverse-portrait" }],
                 ["mobile_open_url", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, url: "https://example.invalid/" }],
-                ["mobile_install_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, path: "/tmp/ccc-missing-public.apk" }],
-                ["mobile_launch_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, packageName: "com.example.missing" }],
-                ["mobile_launch_app", { ...publicRoute, backend: "ios-simulator", deviceId: fakeMobile, bundleId: "com.example.missing" }],
-                ["mobile_launch_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, component: "com.example.missing/.MainActivity" }],
+                ["device_install_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, path: "/tmp/ccc-missing-public.apk" }],
+                ["device_launch_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, packageName: "com.example.missing" }],
+                ["device_launch_app", { ...publicRoute, backend: "ios-simulator", deviceId: fakeMobile, bundleId: "com.example.missing" }],
+                ["device_launch_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, component: "com.example.missing/.MainActivity" }],
                 ["mobile_uninstall_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, packageName: "com.example.missing", confirmDestructive: true }],
                 ["mobile_uninstall_app", { ...publicRoute, backend: "ios-simulator", deviceId: fakeMobile, bundleId: "com.example.missing", confirmDestructive: true }],
                 ["mobile_stop_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, packageName: "com.example.missing" }],
@@ -841,13 +842,13 @@ export async function runBrokerE2E(options: any = {}) {
                 ["mobile_wait_for_text", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, text: "missing", timeoutMs: 1, intervalMs: 50 }],
                 ["mobile_wait_for_app", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile, packageName: "com.example.missing", timeoutMs: 1, intervalMs: 50 }],
                 ["mobile_wait_for_app", { ...publicRoute, backend: "ios-simulator", deviceId: fakeMobile, bundleId: "com.example.missing", timeoutMs: 1, intervalMs: 50 }],
-                ["mobile_screenshot", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
+                ["device_screenshot", { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile }],
             ]);
             for (const [tool, args] of publicMobileDiagnostics) {
                 const diagnostic = parseToolPayload(await callTool(tool, args));
                 assertFailureDiagnostic(tool, diagnostic, expectedPublicMobileRoutedBy(tool));
             }
-            const flow = parseToolPayload(markExpectedFlowStepErrors(await callTool("mobile_run_flow", {
+            const flow = parseToolPayload(markExpectedFlowStepErrors(await callTool("device_run_flow", {
                 stopOnError: false,
                 steps: [
                     { tool: "mobile_session_status", arguments: { ...publicRoute, backend: "android-emulator", deviceId: fakeMobile } },
@@ -932,6 +933,7 @@ export async function runBrokerE2E(options: any = {}) {
     } catch (error) {
         steps.push(failStep("broker MCP session", error));
     } finally {
+        await internalBroker.close();
         if (process.platform === "win32" && mcpOwnedBrokerLaunched && Number.isInteger(localBrokerPid)) {
             try {
                 const cleanup = await stopWindowsTestBroker(localBrokerPid, port, testHome);
