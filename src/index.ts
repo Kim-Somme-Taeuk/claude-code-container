@@ -275,10 +275,15 @@ export async function maybeAttachCodexClipboardImageForCommand(
 }
 
 // Check if mise.toml exists and offer to create if not
-async function ensureMiseConfig(projectPath: string): Promise<void> {
+export async function ensureMiseConfig(projectPath: string): Promise<void> {
     const miseConfigPath = join(projectPath, "mise.toml");
 
     if (existsSync(miseConfigPath) || existsSync(join(projectPath, ".mise.toml"))) {
+        return;
+    }
+
+    const skippedPath = join(DATA_DIR, "mise-prompt-skipped", getProjectId(projectPath));
+    if (existsSync(skippedPath)) {
         return;
     }
 
@@ -297,6 +302,15 @@ async function ensureMiseConfig(projectPath: string): Promise<void> {
         detectProjectToolsAndWriteMiseConfig(projectPath);
     } else {
         console.log("Skipping mise.toml creation.");
+        if (answer === "n" || answer === "no") {
+            try {
+                mkdirSync(dirname(skippedPath), {recursive: true});
+                writeFileSync(skippedPath, "");
+                console.log(`Remembered for this project. To ask again, delete: ${skippedPath}`);
+            } catch {
+                console.warn("Could not save mise prompt preference; you may be asked again next time.");
+            }
+        }
     }
 }
 
