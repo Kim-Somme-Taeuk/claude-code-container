@@ -14,8 +14,8 @@ import { HYPER_V_WINDOWS_LIBRARY_SCENARIO_STEP_COUNT } from "./hyper-v-windows-l
 const scriptsDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = join(scriptsDirectory, "..", "..");
 const configPath = join(repositoryRoot, "tsconfig.hyper-v-windows.json");
-const sourcePath = join(repositoryRoot, "src", "hyper-v-windows");
-const compiledPath = join(repositoryRoot, "dist", "hyper-v-windows", "index.js");
+const sourcePath = join(repositoryRoot, "packages", "hyper-v", "src");
+const compiledPath = join(repositoryRoot, "dist", "packages", "hyper-v", "dist", "index.js");
 const compiledLauncherPath = join(repositoryRoot, "dist", "real-tests", "hyper-v-windows-library.mjs");
 const privilegedEntryPath = join(scriptsDirectory, "hyper-v-windows-library-privileged.ts");
 const privilegedBundlePath = join(repositoryRoot, "dist", "real-tests", "hyper-v-windows-library-privileged.mjs");
@@ -43,6 +43,8 @@ function runNodeTool(toolPath, args, label) {
 function prepareSourceCheckout() {
     const compiled = runNodeTool(compilerPath, ["-p", configPath], "compile the Hyper-V Windows library");
     if (compiled !== 0) return compiled;
+    const assembled = runNodeTool(join(repositoryRoot, "scripts", "workspace-build.mjs"), ["assemble"], "assemble runtime packages");
+    if (assembled !== 0) return assembled;
     const parsed = runNodeTool(
         powerShellValidatorPath,
         process.platform === "win32"

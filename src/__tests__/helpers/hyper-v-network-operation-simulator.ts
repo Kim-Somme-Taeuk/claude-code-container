@@ -1,4 +1,4 @@
-import { HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP } from "../../hyper-v-windows/index.js";
+import { HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP } from "@ccc/hyper-v/index.js";
 import { existsSync, readFileSync, statSync } from "fs";
 import { dirname } from "path";
 

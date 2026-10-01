@@ -5,11 +5,11 @@ import {
     discoverHyperVBootstrapAddresses,
     planHyperVBootstrapTeardown,
     selectHyperVBootstrapAddresses,
-} from "../hyper-v-windows/lifecycle/vm-network-reconcile.js";
+} from "@ccc/hyper-v/lifecycle/vm-network-reconcile.js";
 import type {
     HyperVBootstrapAdapterExpectation,
     HyperVBootstrapHostObservation,
-} from "../hyper-v-windows/lifecycle/vm-network-contracts.js";
+} from "@ccc/hyper-v/lifecycle/vm-network-contracts.js";
 import {
     parseHyperVInterfaceIndex,
     parseHyperVMacAddress,
@@ -19,7 +19,7 @@ import {
     type HyperVNetIPAddress,
     type HyperVNetNeighbor,
     type HyperVVMNetworkAdapter,
-} from "../hyper-v-windows/low-level/index.js";
+} from "@ccc/hyper-v/low-level/index.js";
 
 const BOOTSTRAP_MAC = parseHyperVMacAddress("06:15:5d:01:1a:2c");
 const OTHER_MAC = parseHyperVMacAddress("06:15:5d:99:99:99");

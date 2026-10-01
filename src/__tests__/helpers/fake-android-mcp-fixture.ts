@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { installDefaultImplicitBroker, repoRoot, TIMEOUT } from "./device-lab-mcp-fixture.js";
@@ -22,6 +22,9 @@ export async function createFakeAndroidMcpContext(): Promise<FakeAndroidMcpConte
         homeDir = mkdtempSync(join(tmpdir(), "ccc-device-lab-android-home-"));
         binDir = mkdtempSync(join(tmpdir(), "ccc-device-lab-android-bin-"));
         logPath = join(homeDir, "fake-android.log");
+        const imageDir = join(homeDir, "Android", "Sdk", "system-images", "android-35", "google_apis", "x86_64");
+        mkdirSync(imageDir, { recursive: true });
+        writeFileSync(join(imageDir, "system.img"), "fixture image");
         for (const serial of ["R5CREAL123", "192.168.1.50:5555", "192.168.1.60:5555", "R5LEASED999"]) {
             writeFileSync(join(homeDir, `fake-adb-active-${serial}`), "1");
         }
@@ -200,6 +203,10 @@ exit 0
 `);
 writeScript("avdmanager", `
 echo "avdmanager $*" >> "$FAKE_ANDROID_LOG"
+if [ "$1" = "list" ] && [ "$2" = "device" ]; then
+  echo 'id: 0 or "pixel_6"'
+  exit 0
+fi
 if [ "$1" = "create" ] && [ "$2" = "avd" ] && [ "$3" = "--name" ] && [ -n "$4" ]; then
   /bin/mkdir -p "$HOME/.android/avd/$4.avd"
   printf 'path=%s\\n' "$HOME/.android/avd/$4.avd" > "$HOME/.android/avd/$4.ini"

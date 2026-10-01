@@ -1,9 +1,23 @@
 import { defineConfig } from 'vitest/config'
 import { availableParallelism } from 'os'
+import { fileURLToPath } from 'url'
 
 const maxWorkers = Math.max(1, Math.min(8, Math.floor(availableParallelism() / 2)))
 
 export default defineConfig({
+    // Workspace unit tests observe source edits, including in watch mode.
+    // Distribution tests separately exercise compiled package exports.
+    resolve: {
+        alias: [
+            { find: /^(?:@ccc\/device-lab|#device-lab)\/providers\/(.+)$/, replacement: fileURLToPath(new URL('./packages/device-lab/providers/', import.meta.url)) + '$1' },
+            { find: /^(?:@ccc\/device-lab|#device-lab)\/(.+)\.js(\?.*)?$/, replacement: fileURLToPath(new URL('./packages/device-lab/src/', import.meta.url)) + '$1.ts$2' },
+            { find: /^@ccc\/device-lab$/, replacement: fileURLToPath(new URL('./packages/device-lab/src/index.ts', import.meta.url)) },
+            { find: /^(?:@ccc\/hyper-v|#hyper-v)\/powershell\/(.+)$/, replacement: fileURLToPath(new URL('./packages/hyper-v/powershell/', import.meta.url)) + '$1' },
+            { find: /^(?:@ccc\/hyper-v|#hyper-v)\/(.+)\.js(\?.*)?$/, replacement: fileURLToPath(new URL('./packages/hyper-v/src/', import.meta.url)) + '$1.ts$2' },
+            { find: /^(?:@ccc\/hyper-v|#hyper-v)\/(low-level|lifecycle)$/, replacement: fileURLToPath(new URL('./packages/hyper-v/src/', import.meta.url)) + '$1/index.ts' },
+            { find: /^(?:@ccc\/hyper-v|#hyper-v)$/, replacement: fileURLToPath(new URL('./packages/hyper-v/src/index.ts', import.meta.url)) },
+        ],
+    },
     test: {
         // The repo's own tests, and only those. Without this vitest walks the whole working tree and
         // collects any *.test.ts it finds — including untracked scratch directories a developer

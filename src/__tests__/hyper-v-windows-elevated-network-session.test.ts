@@ -1,5 +1,4 @@
 import { readFileSync } from "fs";
-import { gunzipSync } from "zlib";
 import { EventEmitter } from "events";
 import { join } from "path";
 import { pathToFileURL } from "url";
@@ -8,8 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 const childProcessMocks = vi.hoisted(() => ({ spawn: vi.fn() }));
 
 vi.mock("child_process", () => ({ spawn: childProcessMocks.spawn }));
-vi.mock("../windows-system-powershell.js", async (importOriginal) => ({
-    ...await importOriginal<typeof import("../windows-system-powershell.js")>(),
+vi.mock("@ccc/device-lab/windows-system-powershell.js", async (importOriginal) => ({
+    ...await importOriginal<typeof import("@ccc/device-lab/windows-system-powershell.js")>(),
     canonicalWindowsPowerShellPath: () => "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
 }));
 
@@ -23,7 +22,7 @@ import {
     type HyperVWindowsExecutionResult,
     type HyperVWindowsExecutor,
     type HyperVWindowsSessionErrorCode,
-} from "../hyper-v-windows/index.js";
+} from "@ccc/hyper-v/index.js";
 import {
     HYPER_V_ELEVATED_NETWORK_SHUTDOWN_LADDER,
     HYPER_V_ELEVATED_NETWORK_ERROR_CODES,
@@ -41,7 +40,7 @@ import {
     type HyperVElevatedNetworkRelayProcess,
     type HyperVElevatedNetworkRelaySpawn,
     type HyperVElevatedNetworkTerminationStage,
-} from "../device-lab/broker/hyper-v/elevated-network-session.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/elevated-network-session.js";
 
 const executable = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
 const elevationClosePrefix = "CCC_HYPER_V_ELEVATED_NETWORK_CLOSE:";
@@ -1118,6 +1117,14 @@ describe("callback-scoped elevated Hyper-V network session", () => {
                         if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) {
                             throw new Error("invalid launch envelope");
                         }
+                        const childEncoded = Reflect.get(envelope, "childEncoded");
+                        expect(typeof childEncoded).toBe("string");
+                        expect(childEncoded.length).toBeLessThanOrEqual(8_000);
+                        const expectedChild = hyperVElevatedNetworkChildPrograms().child
+                            .replace(`$P='ccc-hyper-v-network-${"0".repeat(32)}'`, `$P='${Reflect.get(envelope, "pipeName")}'`)
+                            .replace(`$N='${"0".repeat(64)}'`, `$N='${Reflect.get(envelope, "nonce")}'`)
+                            .replace("$D=[long]2000000000000", `$D=[long]${Reflect.get(envelope, "deadlineUnixMilliseconds")}`);
+                        expect(Buffer.from(childEncoded, "base64").toString("utf16le")).toBe(expectedChild);
                         const observedToken = Reflect.get(envelope, "terminalToken");
                         if (typeof observedToken !== "string") throw new Error("missing terminal token");
                         terminalToken = observedToken;
@@ -2179,35 +2186,69 @@ describe("callback-scoped elevated Hyper-V network session", () => {
         expect(relayCatch).not.toContain("$_.Exception-is [ComponentModel.Win32Exception]");
     });
 
-    it("hands the elevated child loader its byte array directly and exposes both programs for parsing", () => {
+    it("encodes the elevated child directly within the launch limit and exposes it for parsing", () => {
         const { loader, child } = hyperVElevatedNetworkChildPrograms();
 
-        // `::new(,$bytes)` is the New-Object idiom; on a method call it wraps the array and binding
-        // fails, which is how the elevated child died before reaching the pipe on every real run.
-        expect(loader).not.toContain("::new(,");
-        expect(loader).toContain("$M=[IO.MemoryStream]::new([Convert]::FromBase64String($B),$false)");
-        expect(loader).toContain("[IO.Compression.GzipStream]::new($M,[IO.Compression.CompressionMode]::Decompress)");
-        expect(loader).toContain("& ([ScriptBlock]::Create($R.ReadToEnd()))");
-        expect(loader).not.toContain("\n");
-
-        // The loader carries exactly the child, gzip-compressed, and the child is what connects.
-        const compressed = /\$B='([A-Za-z0-9+/=]+)'/.exec(loader)?.[1];
-        expect(compressed).toBeTruthy();
-        expect(gunzipSync(Buffer.from(compressed!, "base64")).toString("utf8")).toBe(child);
+        expect(loader).toBe(child);
+        expect(child).not.toContain("GzipStream");
+        expect(child).not.toContain("ReadToEnd()");
+        const encoded = Buffer.from(child, "utf16le").toString("base64");
+        expect(Buffer.from(encoded, "base64").toString("utf16le")).toBe(child);
+        // Full-length pipe/nonce values and the 13-digit deadline are represented in this source.
+        expect(encoded.length).toBeLessThanOrEqual(8_000);
         expect(child).toContain("[IO.Pipes.NamedPipeClientStream]::new('.',$P,[IO.Pipes.PipeDirection]::InOut)");
         expect(child).toContain("$Q.Connect(");
         expect(child).not.toContain("::new(,");
         expect(child).not.toContain("terminalToken");
         // Console.SetOut wraps the writer, so AutoFlush must be set on the StreamWriter beforehand;
         // `[Console]::Out.AutoFlush` throws in the elevated child after a successful handshake.
-        expect(child).toContain("$O.AutoFlush=$true;[Console]::SetOut($O)");
+        expect(child).toContain("$W.AutoFlush=$true;[Console]::SetIn($R);[Console]::SetOut($W)");
         expect(child).not.toContain("[Console]::Out.AutoFlush");
+    });
+
+    it.for([32, 8192])("preserves %i buffered asset bytes during the generated child handoff", async (assetSize, context) => {
+        const { spawnSync } = await vi.importActual<typeof import("child_process")>("child_process");
+        const { child } = hyperVElevatedNetworkChildPrograms();
+        const handoffStart = child.indexOf("$L=$R.ReadLine()");
+        const handoffEnd = child.indexOf(";}finally", handoffStart);
+        expect(handoffStart).toBeGreaterThan(0);
+        expect(handoffEnd).toBeGreaterThan(handoffStart);
+        const handoff = child.slice(handoffStart, handoffEnd);
+        const bootstrap = [
+            "$global:ObservedAsset=[Console]::In.ReadLine()",
+            "$global:ObservedRequest=[Console]::In.ReadLine()",
+            "[Console]::Out.WriteLine('handoff-ok')",
+        ].join(";");
+        const asset = "A".repeat(assetSize);
+        const input = `${Buffer.from(bootstrap).toString("base64")}\n${asset}\nrequest-after-asset\n`;
+        const script = [
+            "$ErrorActionPreference='Stop'",
+            `$Bytes=[Convert]::FromBase64String('${Buffer.from(input).toString("base64")}')`,
+            "$Q=[IO.MemoryStream]::new()",
+            "$Q.Write($Bytes,0,$Bytes.Length);$Q.Position=0",
+            "$R=[IO.StreamReader]::new($Q,[Text.UTF8Encoding]::new($false),$false,4096,$true)",
+            "$W=[IO.StreamWriter]::new($Q,[Text.UTF8Encoding]::new($false),4096,$true)",
+            "$OriginalIn=[Console]::In;$OriginalOut=[Console]::Out",
+            `try{${handoff}}finally{[Console]::SetIn($OriginalIn);[Console]::SetOut($OriginalOut)}`,
+            "[ordered]@{asset=$global:ObservedAsset;request=$global:ObservedRequest;flushed=([Text.Encoding]::UTF8.GetString($Q.ToArray()).Contains('handoff-ok'))}|ConvertTo-Json -Compress",
+        ].join(";");
+        const result = spawnSync(process.platform === "win32" ? "powershell.exe" : "pwsh", [
+            "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script,
+        ], { encoding: "utf8", windowsHide: true, timeout: 15_000 });
+        if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
+            context.skip();
+            return;
+        }
+        expect(result.status, result.stderr || String(result.error || "")).toBe(0);
+        expect(JSON.parse(result.stdout)).toEqual({ asset, request: "request-after-asset", flushed: true });
     });
 
     it("materializes the generated relay without native TypeScript stripping", async () => {
         const { spawnSync } = await vi.importActual<typeof import("child_process")>("child_process");
         const module = pathToFileURL(join(
             process.cwd(),
+            "packages",
+            "device-lab",
             "src",
             "device-lab",
             "broker",
@@ -2235,6 +2276,8 @@ describe("callback-scoped elevated Hyper-V network session", () => {
         const { spawnSync } = await vi.importActual<typeof import("child_process")>("child_process");
         const module = pathToFileURL(join(
             process.cwd(),
+            "packages",
+            "device-lab",
             "src",
             "device-lab",
             "broker",
@@ -2311,6 +2354,8 @@ try {
     it("keeps the terminal token out of the elevated child and accepts it only during close", () => {
         const source = readFileSync(join(
             process.cwd(),
+            "packages",
+            "device-lab",
             "src",
             "device-lab",
             "broker",
@@ -2337,6 +2382,8 @@ try {
     it("ends relay stdin only after the graceful close frame write completes", () => {
         const source = readFileSync(join(
             process.cwd(),
+            "packages",
+            "device-lab",
             "src",
             "device-lab",
             "broker",

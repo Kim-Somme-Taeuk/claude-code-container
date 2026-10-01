@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { provisionDeviceLabHyperVWindowsGuest } from "../device-lab/broker/hyper-v/windows-guest-provisioning.js";
-import type { DeviceLabHyperVCommandRunner } from "../device-lab/broker/hyper-v/lifecycle-adapter.js";
-import type { HyperVWindowsExecutionRequest } from "../hyper-v-windows/index.js";
+import { provisionDeviceLabHyperVWindowsGuest } from "@ccc/device-lab/device-lab/broker/hyper-v/windows-guest-provisioning.js";
+import type { DeviceLabHyperVCommandRunner } from "@ccc/device-lab/device-lab/broker/hyper-v/lifecycle-adapter.js";
+import type { HyperVWindowsExecutionRequest } from "@ccc/hyper-v/index.js";
 import { hyperVGuestProvisionCommand, hyperVGuestProvisionMediaCommand, hyperVVmName,
-    type HyperVProviderCommand } from "../host-control/hyper-v/index.js";
+    type HyperVProviderCommand } from "@ccc/device-lab/host-control/hyper-v/index.js";
 
 const id = "12345678-1234-1234-1234-123456789abc";
 const vmName = "owned-vm";

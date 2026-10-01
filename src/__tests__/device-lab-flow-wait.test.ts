@@ -9,14 +9,14 @@ vi.mock("@modelcontextprotocol/sdk/server/index.js", () => ({ Server: class {
     async connect() {}
 } }));
 vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({ StdioServerTransport: class {} }));
-vi.mock("../../device-lab-mcp/src/backends/android.mjs", async (importOriginal) => ({
+vi.mock("@ccc/device-lab/providers/backends/android.mjs", async (importOriginal) => ({
     ...await importOriginal<Record<string, unknown>>(),
     handleAndroidTool: async (name: string) => {
         fixture.calls.push(publicToolName(name));
         return fixture.observations.get(publicToolName(name)) || { content: [{ type: "text", text: '{"ok":true}' }], isError: false };
     },
 }));
-vi.mock("../../device-lab-mcp/src/backends/linux-vm.mjs", async (importOriginal) => ({
+vi.mock("@ccc/device-lab/providers/backends/linux-vm.mjs", async (importOriginal) => ({
     ...await importOriginal<Record<string, unknown>>(),
     handleLinuxVmManagementTool: async () => null,
     handleLinuxVmTool: async () => null,
@@ -25,7 +25,8 @@ import { publicToolName } from "../../device-lab-mcp/src/tools.mjs";
 import { startServer } from "../../device-lab-mcp/src/server.mjs";
 
 const wrap = (data: unknown, isError = false) => ({ content: [{ type: "text", text: JSON.stringify(data) }], isError });
-const args = { deviceId: "flow-wait-fixture", implicitBroker: false, text: "needle", packageName: "example.app" };
+const args = { deviceId: "flow-wait-fixture", implicitBroker: false, text: "needle" };
+const waitArgs = (tool: string) => tool === "wait_for_app" ? { ...args, appId: "example.app" } : args;
 const action = { tool: "click", arguments: { ...args, x: 1, y: 2 } };
 const parse = (result: any) => JSON.parse(result.content[0].text);
 async function call(name: string, arguments_: Record<string, unknown>) {
@@ -33,7 +34,7 @@ async function call(name: string, arguments_: Record<string, unknown>) {
 }
 async function flow(name: string, tool: string, detail: boolean, stopOnError?: boolean) {
     return call(name, { detail, ...(stopOnError === undefined ? {} : { stopOnError }),
-        steps: [{ tool, label: "condition", arguments: args }, action] });
+        steps: [{ tool, label: "condition", arguments: waitArgs(tool) }, action] });
 }
 
 beforeAll(async () => { await startServer(); });
@@ -50,13 +51,13 @@ describe.each(["run_flow"])("%s wait conditions", (name) => {
             fixture.calls.length = 0;
             const result = parse(await flow(name, tool, detail));
             expect(result).toMatchObject({ ok: false, stoppedAt: 0, results: [{ tool, isError: true,
-                error: "wait-condition-not-met", content: [{ type: "json", value: observation }] }] });
+                error: "wait-condition-not-met", content: [{ type: "json", value: detail ? observation : { matched: false, reason: "wait-condition-not-met" } }] }] });
             expect(result.results).toHaveLength(1);
             expect(fixture.calls).toEqual([tool]);
         }
-        const standalone = await call(tool, { ...args, detail: false });
+        const standalone = await call(tool, { ...waitArgs(tool), detail: false });
         expect(standalone.isError).toBe(false);
-        expect(parse(standalone)).toEqual(observation);
+        expect(parse(standalone)).toEqual({ matched: false, reason: "wait-condition-not-met" });
     });
 
     it("continues only when requested, retains all failed observations and overall failure", async () => {
@@ -64,7 +65,7 @@ describe.each(["run_flow"])("%s wait conditions", (name) => {
         fixture.observations.set("wait_for_app", wrap({ running: false }));
         const result = parse(await call(name, { detail: false, stopOnError: false, steps: [
             { tool: "wait_for_text", arguments: args }, action,
-            { tool: "wait_for_app", arguments: args },
+            { tool: "wait_for_app", arguments: waitArgs("wait_for_app") },
         ] }));
         expect(result.ok).toBe(false);
         expect(result.stoppedAt).toBeUndefined();

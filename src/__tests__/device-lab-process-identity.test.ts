@@ -8,7 +8,7 @@ import {
     terminateOwnedRuntimeProcess,
     terminateOwnedRuntimeProcessTree,
     waitForProcessIdentity,
-} from "../../device-lab-mcp/src/state/process-identity.mjs";
+} from "@ccc/device-lab/providers/state/process-identity.mjs";
 
 describe("device runtime process identity", () => {
     it("reads the current process with a stable start token and hashed command", () => {

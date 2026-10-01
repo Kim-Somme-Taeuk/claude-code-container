@@ -7,7 +7,7 @@ import { tmpdir } from "os";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { createServer } from "net";
-import { hiddenWindowsPowerShellArgs } from "../../device-lab-mcp/src/state/windows-system-powershell.mjs";
+import { hiddenWindowsPowerShellArgs } from "#device-lab/providers/state/windows-system-powershell.mjs";
 import {
     describeProcessIdentities,
     identityForPid,

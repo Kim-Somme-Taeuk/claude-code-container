@@ -3,7 +3,7 @@ import {
     WINDOWS_SANDBOX_HELPER_MAX_TIMEOUT_MS,
     WINDOWS_SANDBOX_HELPER_TIMEOUT_MS,
     windowsSandboxHelperTimeoutMs,
-} from "../../device-lab-mcp/src/backends/windows-sandbox.mjs";
+} from "@ccc/device-lab/providers/backends/windows-sandbox.mjs";
 import {
     MAX_DEVICE_HELPER_TIMEOUT_MS,
     MAX_DEVICE_OPERATION_TIMEOUT_MS,
@@ -32,7 +32,7 @@ import {
     DEVICE_BROKER_HYPER_V_IMAGE_LOCK_WAIT_MS,
     DEVICE_BROKER_HYPER_V_MAX_BOOT_TIMEOUT_MS,
     deviceBrokerBackendToolTimeoutMs,
-} from "../device-lab-broker.js";
+} from "@ccc/device-lab/device-lab-broker.js";
 
 function toolProperty(toolName: string, property: string): Record<string, unknown> {
     const tool = TOOLS.find((candidate) => candidate.name === toolName);
@@ -42,10 +42,8 @@ function toolProperty(toolName: string, property: string): Record<string, unknow
 describe("device-lab public timeout bounds", () => {
     it("advertises finite helper and wait limits on every affected public tool", () => {
         const helperTools = [
-            "exec",
             "screenshot",
             "click",
-            "double_click",
             "key",
             "type",
             "scroll",
@@ -53,12 +51,13 @@ describe("device-lab public timeout bounds", () => {
             "window_list",
             "ui",
             "record_video",
-            "record_video",
             "upload",
             "download",
+            "install_app",
+            "move",
         ];
         for (const tool of helperTools) {
-            expect(toolProperty(tool, "helperTimeoutMs"), tool).toEqual(expect.objectContaining({
+            expect(toolProperty(tool, "timeoutMs"), tool).toEqual(expect.objectContaining({
                 minimum: 1,
                 maximum: MAX_DEVICE_HELPER_TIMEOUT_MS,
                 type: "number",
@@ -73,6 +72,12 @@ describe("device-lab public timeout bounds", () => {
             minimum: 1,
             maximum: HYPER_V_MAX_BOOT_TIMEOUT_MS,
         }));
+        expect(toolProperty("exec", "timeoutMs")).toEqual(expect.objectContaining({
+            type: "number",
+            minimum: 1,
+            maximum: MAX_DEVICE_OPERATION_TIMEOUT_MS,
+        }));
+        expect(TOOLS.every(tool => !("helperTimeoutMs" in tool.inputSchema.properties))).toBe(true);
         for (const tool of ["wait_for_text", "wait_for_app"]) {
             expect(toolProperty(tool, "timeoutMs"), tool).toEqual(expect.objectContaining({
                 minimum: 1,

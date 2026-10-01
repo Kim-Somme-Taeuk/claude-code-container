@@ -8,7 +8,7 @@ import {
     materializeAndroidWindowsHiddenLauncher,
     removeAndroidWindowsHiddenLauncher,
     scheduleAndroidWindowsHiddenLauncherCleanup,
-} from "../../device-lab-mcp/src/backends/android.mjs";
+} from "@ccc/device-lab/providers/backends/android.mjs";
 
 describe("device-lab MCP direct Android Windows launcher", () => {
     let home: string;

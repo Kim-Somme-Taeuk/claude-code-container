@@ -21,7 +21,7 @@ vi.mock("../../device-lab-mcp/src/broker.mjs", async (importOriginal) => {
     }, brokerAppium: async () => { throw new Error("unexpected inherited broker route"); },
     brokerDeviceTool: async () => { throw new Error("unexpected inherited device broker route"); } };
 });
-vi.mock("../../device-lab-mcp/src/backends/android.mjs", async (importOriginal) => ({
+vi.mock("@ccc/device-lab/providers/backends/android.mjs", async (importOriginal) => ({
     ...await importOriginal<Record<string, unknown>>(),
     listAndroidDevices: () => [{ id: "target-a" }],
     handleAndroidTool: async (name: string, args: Record<string, any>) => {
@@ -29,7 +29,7 @@ vi.mock("../../device-lab-mcp/src/backends/android.mjs", async (importOriginal) 
         return { content: [{ type: "text", text: JSON.stringify({ ok: true, status: 0, stdout: name === "device_exec" && args.command?.includes("CCC-LIST-V1") ? "CCC-LIST-V1\0END\u00000\0" : "", stderr: "", provider: "fixture" }) }], isError: false };
     },
 }));
-vi.mock("../../device-lab-mcp/src/backends/linux-vm.mjs", async (importOriginal) => ({
+vi.mock("@ccc/device-lab/providers/backends/linux-vm.mjs", async (importOriginal) => ({
     ...await importOriginal<Record<string, unknown>>(),
     handleLinuxVmManagementTool: async () => null, handleLinuxVmTool: async () => null,
 }));
@@ -39,7 +39,8 @@ import { TOOLS, DEVICE_FLOW_TOOL_NAMES, publicToolName } from "../../device-lab-
 const hidden = ["mobile_install_app", "mobile_launch_app", "mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right", "mobile_run_flow"];
 const shared = { deviceId: "target-a", incarnationId: "a".repeat(32) };
 const direct = { implicitBroker: false };
-const step = (args: Record<string, unknown> = {}, tool = "click") => ({ tool, arguments: { ...direct, x: 1, y: 2, ...args } });
+const step = (args: Record<string, unknown> = {}, tool = "click") => ({ tool, arguments: { ...direct,
+    ...(["devices", "set_network"].includes(tool) ? {} : { x: 1, y: 2 }), ...args } });
 const call = (name: string, args: Record<string, unknown>) => fixture.handlers[1]({ params: { name, arguments: args } });
 const parse = (result: any) => JSON.parse(result.content[0].text);
 const flow = (steps: unknown[], args: Record<string, unknown> = {}) => call("run_flow", { deviceId: shared.deviceId, incarnationId: shared.incarnationId, ...args, steps });
@@ -74,7 +75,7 @@ describe("canonical public contract", () => {
         expect(fixture.nextScope).toBe(0);
     });
     it.each(["install_app", "launch_app"])("accepts canonical %s standalone and in flows", async (tool) => {
-        const args = { ...shared, ...direct, path: "/fixture/app.apk", packageName: "example.app" };
+        const args = { ...shared, ...direct, ...(tool === "launch_app" ? { appId: "example.app" } : { path: "/fixture/app.apk" }) };
         expect((await call(tool, args)).isError).toBe(false);
         expect(parse(await flow([step(args, tool)])).ok).toBe(true);
         expect(fixture.calls.map(entry => publicToolName(entry.name))).toEqual([tool, tool]);
@@ -87,7 +88,11 @@ describe("canonical public contract", () => {
         expect(fixture.calls).toHaveLength(1);
     });
     it.each(DEVICE_FLOW_TOOL_NAMES.filter(name => name !== "move"))("dispatches advertised flow choice %s through the existing handler", async (tool) => {
-        const arguments_ = { ...(tool === "record_video" ? { action: "status" } : tool === "permission" ? { action: "grant", permission: "android.permission.CAMERA" } : {}), ...direct, key: "HOME", text: "needle", packageName: "example.app", path: "/fixture/app.apk", confirmDestructive: true };
+        const sample = { ...(tool === "record_video" ? { action: "status" } : tool === "permission" ? { action: "grant", permission: "android.permission.CAMERA" } : {}),
+            level: 50, key: "HOME", text: "needle", appId: "example.app", path: "/fixture/app.apk", confirmDestructive: true,
+            view: "available", backend: "android-emulator", wifi: false };
+        const properties = TOOLS.find(entry => entry.name === tool)!.inputSchema.properties;
+        const arguments_ = { ...direct, ...Object.fromEntries(Object.entries(sample).filter(([key]) => Object.hasOwn(properties, key))) };
         const result = parse(await flow([{ tool, arguments: arguments_ }]));
         expect(result.ok, JSON.stringify(result)).toBe(true);
         expect(fixture.calls.map(call => publicToolName(call.name))).toEqual([tool === "list_files" ? "exec" : tool]);
@@ -143,9 +148,9 @@ describe("shared target selection", () => {
         expect(JSON.stringify(rejected)).toContain("omit backend");
         expect(fixture.calls).toEqual([]);
     });
-    it.each(["inventory"])("does not add target fields to target-neutral %s", async (tool) => {
-        expect(parse(await flow([step({}, tool)])).ok).toBe(true);
-        expect(fixture.calls[0].args).toEqual({ ...direct, x: 1, y: 2 });
+    it.each(["devices"])("does not add target fields to target-neutral %s", async (tool) => {
+        expect(parse(await flow([step({ view: "available", backend: "android-emulator" }, tool)])).ok).toBe(true);
+        expect(fixture.calls[0].args).toEqual({ ...direct, backend: "android-emulator" });
     });
     it.each([null, [], "bad", 7, false])("rejects explicitly malformed arguments %j before dispatch", async (arguments_) => {
         const result = parse(await flow([{ tool: "click", arguments: arguments_ }, step()], { stopOnError: false }));
@@ -157,8 +162,9 @@ describe("shared target selection", () => {
 });
 
 describe("flow policy and bounds", () => {
-    it.each(["uninstall_app", "clear_app_data", "set_battery", "set_network", "toggle_airplane_mode"])("does not inherit confirmation for %s", async (tool) => {
-        const args = { packageName: "example.app", level: 50, wifi: false, enabled: false };
+    it.each(["uninstall_app", "clear_app_data", "set_battery", "set_network"])("does not inherit confirmation for %s", async (tool) => {
+        const args = tool === "set_network" ? { wifi: false, airplaneMode: false }
+            : tool === "set_battery" ? { level: 50 } : { appId: "example.app" };
         const denied = parse(await flow([step(args, tool)], { confirmDestructive: true, force: true }));
         expect(denied).toMatchObject({ ok: false, stoppedAt: 0 });
         expect(JSON.stringify(denied)).toContain("destructive-action-confirmation-required");

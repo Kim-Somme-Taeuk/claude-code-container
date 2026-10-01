@@ -14,7 +14,7 @@ import {
     windowsSandboxSessionIdsFromListOutput,
     windowsSandboxE2ECapability,
 } from "../../scripts/real-tests/windows-sandbox-e2e.ts";
-import { windowsBackend } from "../../device-lab-mcp/src/backends/windows-sandbox.mjs";
+import { windowsBackend } from "@ccc/device-lab/providers/backends/windows-sandbox.mjs";
 
 const level = Number(process.env.CCC_TEST_LEVEL || "0");
 const enabled = level >= 2;

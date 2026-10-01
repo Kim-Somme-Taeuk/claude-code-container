@@ -10,12 +10,12 @@ import type {
     HyperVNatIdentity,
     HyperVVirtualSwitchIdentity,
     HyperVWindowsNetworkClient,
-} from "../../src/hyper-v-windows/index.js";
+} from "#hyper-v/index.js";
 
 const MAX_RECONCILIATION_STEPS = 12;
 const TOKEN_PATTERN = /^[0-9a-f]{16}$/;
 
-export type HyperVWindowsNetworkLibraryModule = typeof import("../../src/hyper-v-windows/index.js");
+export type HyperVWindowsNetworkLibraryModule = typeof import("#hyper-v/index.js");
 
 export type HyperVWindowsNetworkAdministratorScope = <T>(
     attempt: "cold" | "warm",

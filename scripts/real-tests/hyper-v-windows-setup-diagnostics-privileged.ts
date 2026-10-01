@@ -26,7 +26,7 @@
 //     written by the unelevated PARENT; this side does not write to the filesystem at all.
 import { fileURLToPath, pathToFileURL } from "url";
 import { realpathSync } from "fs";
-import { hyperVVmName } from "../../src/host-control/hyper-v/index.ts";
+import { hyperVVmName } from "#device-lab/host-control/hyper-v/index.js";
 import { resolveTrustedWindowsPowerShell } from "./hyper-v-windows-library-elevation.mjs";
 import { collectHyperVWindowsSetupDiagnostics } from "./hyper-v-windows-setup-diagnostics.ts";
 

@@ -28,8 +28,8 @@ export async function run() {
     let startedPid = null;
     await withDeviceLabMcp(async ({ callTool }) => {
         try {
-            const created = parseToolPayload(await callTool("create", { detail: true,
-                backend: "linux-vm",
+            const created = parseToolPayload(await callTool("create_linux_vm", { detail: true,
+
                 name: `Real Linux VM Test ${basename(cap.imagePath)}`,
                 deviceId: labId,
                 sourceImage: cap.sourceImage,
@@ -39,8 +39,8 @@ export async function run() {
             assert.strictEqual(created.ok, true, JSON.stringify(created));
             assert.strictEqual(lifecycleDevice(created, "create").id, labId);
 
-            await callTool("image_list", { detail: true,});
-            markExpectedToolError(await callTool("image_import", { detail: true,
+            await callTool("list_images", { detail: true,});
+            markExpectedToolError(await callTool("import_image", { detail: true,
                 name: "Missing Linux VM smoke image",
                 sourcePath: "images/__missing-linux-vm-smoke__.qcow2",
             }));

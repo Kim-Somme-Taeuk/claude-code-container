@@ -5,7 +5,7 @@ import {
     jsonResult,
     textResult,
     truncateDiagnosticText,
-} from "../../device-lab-mcp/src/responses.mjs";
+} from "@ccc/device-lab/providers/responses.mjs";
 
 function resultText(result: { content: Array<{ text?: string }> }): string {
     return result.content[0]?.text || "";
@@ -49,7 +49,7 @@ describe("device-lab MCP diagnostic response bounds", () => {
             maxBytes: MCP_ERROR_TEXT_LIMIT_BYTES,
         }));
         expect(parsed.originalBytes).toEqual(expect.any(Number));
-        expect(parsed).not.toHaveProperty("detail");
+        expect(parsed.detail).toEqual(expect.stringContaining("diagnostic truncated"));
     });
 
     it("marks only explicit outer failure without interpreting opaque payload fields", () => {

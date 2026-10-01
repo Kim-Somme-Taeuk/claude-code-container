@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { executeDeviceLabHyperVPower, hyperVStartCapacityRefusal } from "../device-lab/broker/hyper-v/power.js";
-import type { DeviceLabHyperVCommandRunner } from "../device-lab/broker/hyper-v/lifecycle-adapter.js";
-import type { HyperVWindowsExecutionRequest } from "../hyper-v-windows/index.js";
+import { executeDeviceLabHyperVPower, hyperVStartCapacityRefusal } from "@ccc/device-lab/device-lab/broker/hyper-v/power.js";
+import type { DeviceLabHyperVCommandRunner } from "@ccc/device-lab/device-lab/broker/hyper-v/lifecycle-adapter.js";
+import type { HyperVWindowsExecutionRequest } from "@ccc/hyper-v/index.js";
 
 const vmId = "12345678-1234-1234-1234-123456789abc";
 const vmName = "ccc-owned-vm";
@@ -54,6 +54,17 @@ describe("Device Lab typed Hyper-V power", () => {
         expect(hyperVStartCapacityRefusal(1024, 17, host)).toBe("hyper-v-host-cpu-capacity-exceeded");
         expect(hyperVStartCapacityRefusal(1024, 1, { ...host, freeMemoryBytes: -1 }))
             .toBe("hyper-v-host-capacity-inspection-failed");
+    });
+
+    it("reports the same sampled memory shortfall without attempting Start-VM", async () => {
+        const off = harness("Off");
+        let samples = 0;
+        const result = await executeDeviceLabHyperVPower({ ...off.options, operation: "start", memoryMb: 6145,
+            readHostCapacity: () => { samples++; return host; } });
+        expect(result).toEqual({ ok: false, code: "hyper-v-host-memory-capacity-exceeded",
+            capacity: { requestedMb: 6145, availableMb: 8192, reserveMb: 2048, shortfallMb: 1 } });
+        expect(samples).toBe(1);
+        expect(off.requests.map((request) => request.operation)).toEqual(["Get-VM"]);
     });
 
     it("starts an owned Off VM once and skips capacity and mutation for Running", async () => {

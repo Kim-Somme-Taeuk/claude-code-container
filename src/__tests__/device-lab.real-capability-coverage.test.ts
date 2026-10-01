@@ -4,9 +4,9 @@ import { mkdtempSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { androidBackend } from "../../device-lab-mcp/src/backends/android.mjs";
-import { androidRealBackend } from "../../device-lab-mcp/src/backends/android-device.mjs";
-import { windowsBackend } from "../../device-lab-mcp/src/backends/windows-sandbox.mjs";
+import { androidBackend } from "@ccc/device-lab/providers/backends/android.mjs";
+import { androidRealBackend } from "@ccc/device-lab/providers/backends/android-device.mjs";
+import { windowsBackend } from "@ccc/device-lab/providers/backends/windows-sandbox.mjs";
 import { androidDeviceE2ECapability, androidDevicePayload, androidDeviceReportedPathMatches, androidDeviceStartSucceeded, androidDeviceStatusCommand, androidDeviceStopPreservedPhysicalDevice } from "../../scripts/real-tests/android-device-e2e.ts";
 import {
     ANDROID_APP_FIXTURE_PACKAGE,

@@ -16,7 +16,7 @@ function hiddenChildProcessEnv() {
 }
 
 function buildBeforeRun(env) {
-    if (!vitestArgs.includes("run") || process.env.CCC_E2E_SKIP_BUILD === "1") return env;
+    if (process.env.CCC_E2E_SKIP_BUILD === "1") return env;
     const npmCli = process.env.npm_execpath;
     if (process.platform === "win32" && !npmCli) {
         console.error("Unable to build test artifacts: npm_execpath is unavailable on Windows");

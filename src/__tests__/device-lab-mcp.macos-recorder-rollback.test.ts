@@ -27,7 +27,7 @@ vi.mock("fs", async (importOriginal) => {
     };
 });
 
-import { handleMacosTool } from "../../device-lab-mcp/src/backends/macos-vm.mjs";
+import { handleMacosTool } from "@ccc/device-lab/providers/backends/macos-vm.mjs";
 
 async function waitForPidExit(pid: number, timeoutMs = 2500) {
     const deadline = Date.now() + timeoutMs;

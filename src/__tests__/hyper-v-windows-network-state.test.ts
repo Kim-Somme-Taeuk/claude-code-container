@@ -8,7 +8,7 @@ import {
     hyperVDeterministicMacAddress,
     hyperVNetworkIntentProvenance,
     hyperVNetworkManagementProvenance,
-} from "../device-lab/broker/hyper-v/network-state.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/network-state.js";
 
 const TOKEN = "0123456789abcdef01234567";
 const SWITCH_ID = "11111111-2222-3333-4444-555555555555";

@@ -11,6 +11,7 @@
   "include": [
     "scripts/real-tests/**/*.ts",
     "scripts/real-tests/**/*.d.mts",
-    "device-lab-mcp/src/contracts/**/*.d.mts"
+    "device-lab-mcp/src/contracts/**/*.d.mts",
+    "packages/device-lab/providers/**/*.d.mts"
   ]
 }

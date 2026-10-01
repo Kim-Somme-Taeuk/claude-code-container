@@ -6,12 +6,12 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, wr
 import { homedir, tmpdir } from "os";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
-import { androidDiscovery, handleAndroidTool } from "../../device-lab-mcp/src/backends/android.mjs";
-import { handleAndroidRealTool } from "../../device-lab-mcp/src/backends/android-device.mjs";
-import { ownerId as currentOwnerId } from "../../device-lab-mcp/src/context.mjs";
-import { listOwnedAndroidAvdArtifacts, ownedAndroidAvdName, removeOwnedAndroidAvdArtifacts } from "../../device-lab-mcp/src/state/android-avd-storage.mjs";
-import { hiddenWindowsPowerShellArgs } from "../../device-lab-mcp/src/state/windows-system-powershell.mjs";
-import { readPhysicalLeases, releaseOwnedPhysicalLeaseResidue } from "../../device-lab-mcp/src/state/physical-lease-store.mjs";
+import { androidDiscovery, handleAndroidTool } from "#device-lab/providers/backends/android.mjs";
+import { handleAndroidRealTool } from "#device-lab/providers/backends/android-device.mjs";
+import { ownerId as currentOwnerId } from "#device-lab/providers/context.mjs";
+import { listOwnedAndroidAvdArtifacts, ownedAndroidAvdName, removeOwnedAndroidAvdArtifacts } from "#device-lab/providers/state/android-avd-storage.mjs";
+import { hiddenWindowsPowerShellArgs } from "#device-lab/providers/state/windows-system-powershell.mjs";
+import { readPhysicalLeases, releaseOwnedPhysicalLeaseResidue } from "#device-lab/providers/state/physical-lease-store.mjs";
 import { listRunningWindowsSandboxSessions } from "../real-tests/windows-sandbox-e2e.ts";
 import { withExclusiveRealProviderRun } from "../real-tests/exclusive-real-provider-run.ts";
 import {

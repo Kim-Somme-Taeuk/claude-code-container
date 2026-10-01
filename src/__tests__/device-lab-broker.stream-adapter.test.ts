@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { PassThrough } from "node:stream";
 import type { IncomingMessage } from "node:http";
-import { incomingMessageBody } from "../device-lab-broker.js";
+import { incomingMessageBody } from "@ccc/device-lab/device-lab-broker.js";
 
 const asResponse = (source: PassThrough) => source as unknown as IncomingMessage;
 const tick = () => new Promise((resolve) => setImmediate(resolve));

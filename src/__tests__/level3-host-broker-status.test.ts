@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { HYPER_V_ELEVATED_NETWORK_ERROR_CODES } from "../device-lab/broker/hyper-v/elevated-network-session.js";
-import { deviceBrokerStatus } from "../device-lab-broker.js";
-import { probeHostBrokerCapabilities } from "../../scripts/real-tests/support/level3-host.js";
+import { HYPER_V_ELEVATED_NETWORK_ERROR_CODES } from "@ccc/device-lab/device-lab/broker/hyper-v/elevated-network-session.js";
+import { deviceBrokerStatus } from "@ccc/device-lab/device-lab-broker.js";
+import { probeHostBrokerProtocol } from "../../scripts/real-tests/support/level3-host.js";
 
 // Here rather than beside the other Level 3 launcher tests in scripts/real-tests: this one loads the
 // broker, and tsconfig.real-tests.json typechecks that directory without strict null checks, which
 // the broker's narrowing does not survive.
 describe("Level 3 host broker status contract", () => {
-    const status = (broker: unknown) => probeHostBrokerCapabilities(17373, {
+    const status = (broker: unknown) => probeHostBrokerProtocol(17373, {
         fetchImpl: async () => new Response(JSON.stringify({ ok: true, broker }), { status: 200 }),
     });
 

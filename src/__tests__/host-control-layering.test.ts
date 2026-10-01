@@ -3,7 +3,7 @@ import { join } from "path";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = join(import.meta.dirname, "..", "..");
-const hostControlRoot = join(repoRoot, "src", "host-control");
+const hostControlRoot = join(repoRoot, "packages", "device-lab", "src", "host-control");
 
 function sourceFiles(root: string): string[] {
     if (!existsSync(root)) {
@@ -25,6 +25,8 @@ describe("host-control dependency boundary", () => {
         const legacyPath = ["device-lab", "providers", "hyper-v"].join("/");
         const legacyImports = [
             join(repoRoot, "src"),
+            join(repoRoot, "packages", "device-lab", "src"),
+            join(repoRoot, "packages", "hyper-v", "src"),
             join(repoRoot, "scripts"),
             join(repoRoot, "device-lab-mcp"),
         ].flatMap(sourceFiles)
@@ -42,6 +44,7 @@ describe("host-control dependency boundary", () => {
             /owner-auth/,
             /device-lab-state/,
         ];
+        expect(sourceFiles(hostControlRoot).length).toBeGreaterThan(0);
         const violations = sourceFiles(hostControlRoot).flatMap((file) => {
             const imports = Array.from(readFileSync(file, "utf8").matchAll(/from\s+["']([^"']+)["']/g), (match) => match[1]);
             return imports.filter((specifier) => forbidden.some((pattern) => pattern.test(specifier)))

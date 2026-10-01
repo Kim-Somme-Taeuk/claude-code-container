@@ -6,7 +6,7 @@ import {
     type HyperVConfigureVMGuestBootRequest,
     type HyperVWindowsExecutionContext,
     type HyperVWindowsExecutionRequest,
-} from "../hyper-v-windows/low-level/index.js";
+} from "@ccc/hyper-v/low-level/index.js";
 
 const vmId = "11111111-2222-3333-4444-555555555555";
 const request: HyperVConfigureVMGuestBootRequest = {
@@ -130,7 +130,7 @@ describe("typed Hyper-V guest boot configuration", () => {
     });
 
     it("fences every mutation behind preflight and reads back postconditions", () => {
-        const source = readFileSync(new URL("../../scripts/host-control/hyper-v/Invoke-HyperVWindowsOperation.ps1", import.meta.url), "utf8");
+        const source = readFileSync(new URL("../../packages/hyper-v/powershell/Invoke-HyperVWindowsOperation.ps1", import.meta.url), "utf8");
         const branch = source.split('        "Configure-VMGuestBoot" {')[1]?.split('        "Get-VMHardDiskDrive" {')[0] ?? "";
         expect(branch).toContain("hyper-v-guest-provision-vm-identity-mismatch");
         expect(branch).toContain("hyper-v-guest-provision-requires-stopped-vm");
@@ -155,7 +155,7 @@ describe("typed Hyper-V guest boot configuration", () => {
     });
 
     it("rechecks Linux identity and host-wide bootstrap MAC before attach, then preserves integration state", () => {
-        const source = readFileSync(new URL("../../scripts/host-control/hyper-v/Invoke-HyperVWindowsOperation.ps1", import.meta.url), "utf8");
+        const source = readFileSync(new URL("../../packages/hyper-v/powershell/Invoke-HyperVWindowsOperation.ps1", import.meta.url), "utf8");
         const branch = source.split('        "Configure-VMGuestBoot" {')[1]?.split('        "Get-VMHardDiskDrive" {')[0] ?? "";
         const preAttach = branch.split("$GuestBootStage = \"media-attach\"")[0] ?? "";
         expect(preAttach).toContain("$CurrentVirtualMachines = @(Get-HyperVWindowsVirtualMachines $Request.selector)");

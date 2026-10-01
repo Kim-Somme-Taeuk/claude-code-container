@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createWaitBudget } from "../../device-lab-mcp/src/wait-budget.mjs";
+import { createWaitBudget } from "@ccc/device-lab/providers/wait-budget.mjs";
 
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 describe("shared monotonic observation budget", () => {

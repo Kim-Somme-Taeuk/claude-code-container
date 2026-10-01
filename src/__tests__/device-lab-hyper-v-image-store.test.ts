@@ -15,9 +15,9 @@ import {
     type HyperVImageCommandResult,
     type HyperVImageStoreRuntime,
     type HyperVUbuntuImageCacheInspection,
-} from "../device-lab/broker/hyper-v/image-store.js";
-import { HYPER_V_IMAGE_CATALOG } from "../device-lab/hyper-v-images.js";
-import { HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP, type HyperVWindowsExecutionRequest } from "../hyper-v-windows/index.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/image-store.js";
+import { HYPER_V_IMAGE_CATALOG } from "@ccc/device-lab/device-lab/hyper-v-images.js";
+import { HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP, type HyperVWindowsExecutionRequest } from "@ccc/hyper-v/index.js";
 
 // Pass-through record of every hash the image store starts, so the readiness cache inspection
 // can prove it never hashes the multi-gigabyte base image.
@@ -131,7 +131,7 @@ describe("Hyper-V image store module", () => {
 
     it("does not import the broker facade", () => {
         const source = readFileSync(
-            new URL("../device-lab/broker/hyper-v/image-store.ts", import.meta.url),
+            new URL("../../packages/device-lab/src/device-lab/broker/hyper-v/image-store.ts", import.meta.url),
             "utf8",
         );
 

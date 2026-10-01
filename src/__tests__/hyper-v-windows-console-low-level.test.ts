@@ -4,7 +4,7 @@ import {
     createHyperVWindowsClient,
     type HyperVWindowsExecutionRequest,
     type HyperVWindowsExecutionContext,
-} from "../hyper-v-windows/low-level/index.js";
+} from "@ccc/hyper-v/low-level/index.js";
 
 const identity = {
     selector: { kind: "id" as const, id: "12345678-1234-1234-1234-123456789ABC" },

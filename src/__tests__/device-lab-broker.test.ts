@@ -1,3 +1,4 @@
+import { DEVICE_BROKER_PROTOCOL_VERSION } from "@ccc/device-lab/providers/contracts/broker-protocol.mjs";
 import { createHash, createHmac } from "crypto";
 import { spawn } from "child_process";
 import { EventEmitter } from "events";
@@ -7,14 +8,10 @@ import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { pathToFileURL } from "url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES } from "../../scripts/real-tests/support/level3-host.js";
 import {
     boundedBrokerErrorPayload,
     boundedProviderCommandRunnerScript,
-    compareBrokerVersionsForTest,
     createDeviceBrokerServer,
-    DEVICE_BROKER_IMPLEMENTED_CAPABILITIES,
-    DEVICE_BROKER_REQUIRED_CAPABILITIES,
     DEVICE_BROKER_CONTROL_RESPONSE_LIMIT_BYTES,
     DEVICE_BROKER_ERROR_RESPONSE_LIMIT,
     DEVICE_BROKER_INVENTORY_DEVICE_LIMIT,
@@ -34,14 +31,13 @@ import {
     retainRecentBrokerAttemptForTest,
     verifySpawnedHostBrokerListenerForTest,
     verifiedHostBrokerIdentityForTest,
-} from "../device-lab-broker.js";
-import { deviceLabOwnerFromProjectMountPath, deviceLabOwnerId, deviceLabProjectMountPath } from "../device-lab-owner.js";
-import { HYPER_V_IMAGE_CATALOG } from "../device-lab/hyper-v-images.js";
-import { readDeviceRuntimeProcessStartToken } from "../device-lab-process-identity.js";
-import { CLI_VERSION } from "../utils.js";
+} from "@ccc/device-lab/device-lab-broker.js";
+import { deviceLabOwnerFromProjectMountPath, deviceLabOwnerId, deviceLabProjectMountPath } from "@ccc/device-lab/device-lab-owner.js";
+import { HYPER_V_IMAGE_CATALOG } from "@ccc/device-lab/device-lab/hyper-v-images.js";
+import { readDeviceRuntimeProcessStartToken } from "@ccc/device-lab/device-lab-process-identity.js";
+import { DEVICE_LAB_VERSION } from "@ccc/device-lab/version.js";
 import { cleanupOwner, close, listen, ownerRpcHeaders, writeBrokerDevices } from "./helpers/host-broker-test-fixture.js";
 import { TOOLS as DEVICE_LAB_MCP_TOOLS } from "../../device-lab-mcp/src/operation-tools.mjs";
-import { REQUIRED_CCC_HOST_BROKER_CAPABILITIES } from "../../device-lab-mcp/src/broker.mjs";
 
 function fakeBrokerPortProcess(pid: number, commandLine: string | null) {
     const processStartToken = pid === process.pid
@@ -62,79 +58,11 @@ function fakeBrokerPortProcess(pid: number, commandLine: string | null) {
 describe("device-lab host broker daemon", () => {
     let originalHome: string | undefined;
 
-    // Bumping a capability on one side only is what this guards. The broker keeps answering and
-    // attestation keeps passing, so the mismatch surfaces much later as an unrelated-looking
-    // provider failure — a stale broker cost a real Windows host run exactly that way, reporting a
-    // sub-second transport error instead of saying it was out of date.
-    //
-    // Four lists have to agree, not two: what the broker advertises, and the three that require
-    // things of it — the CLI's, the level-3 attestation's, and the MCP server's. Bumping two and
-    // missing the MCP one broke twelve routing tests while this guard was being written.
-    //
-    // The comparison is against what the broker ADVERTISES. Checking against
-    // DEVICE_BROKER_REQUIRED_CAPABILITIES instead would pass green while every attestation failed,
-    // because that list is what the CLI demands of a remote broker, not what this one answers with.
-    it("advertises every capability its consumers require", () => {
-        const advertised = new Set<string>(DEVICE_BROKER_IMPLEMENTED_CAPABILITIES);
-        expect(advertised.has("android-avd-console-identity-v1")).toBe(true);
-        expect(advertised.has("android-emulator-stop-completion-v1")).toBe(true);
-        expect(DEVICE_BROKER_REQUIRED_CAPABILITIES).toContain("android-emulator-stop-completion-v1");
-        expect(REQUIRED_CCC_HOST_BROKER_CAPABILITIES).toContain("android-emulator-stop-completion-v1");
-        expect(DEVICE_BROKER_REQUIRED_CAPABILITIES).toContain("android-avd-console-identity-v1");
-        expect(REQUIRED_CCC_HOST_BROKER_CAPABILITIES).toContain("android-avd-console-identity-v1");
-        expect(DEVICE_BROKER_REQUIRED_CAPABILITIES.filter((capability) => !advertised.has(capability)))
-            .toEqual([]);
-        expect(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES.filter((capability) => !advertised.has(capability)))
-            .toEqual([]);
-        expect(REQUIRED_CCC_HOST_BROKER_CAPABILITIES.filter((capability: string) => !advertised.has(capability)))
-            .toEqual([]);
-    });
-
-    it("keeps the MCP attestation gate at least as strict as the CLI's, except where divergence is a recorded decision", () => {
-        // The subset assertion above only checks each consumer list against what the broker
-        // advertises, which a SHORTER list always satisfies. That is how the Hyper-V Windows library
-        // capability came to be required by the CLI and level-3 gates but not by the MCP's, leaving
-        // the MCP admitting a broker that re-issued a privileged mutation on a false never-ran. Three
-        // capabilities arrived together in a commit that did not touch device-lab-mcp at all, and
-        // nothing was watching the gap.
-        //
-        // So: every capability the CLI requires must also be required by the MCP, unless it is named
-        // here. The allowlist is the point — a deliberate divergence is a decision someone wrote
-        // down, and anything else is drift that fails this test the moment it appears.
-        // This list is a RATCHET, not an endorsement. It freezes the divergence that already existed
-        // when the invariant was added, so the gate catches the NEXT omission rather than demanding
-        // ten unrelated decisions first. Shrinking it is always safe; growing it needs a reason
-        // written next to the entry.
-        //
-        // The review that prompted this named two entries. The measured answer was ten — worth
-        // recording, because the two-entry figure is what made the gap look small enough to defer.
-        const DELIBERATE_MCP_DIVERGENCES = new Set([
-            // The seven http-* capabilities describe the broker's HTTP surface, which the MCP client
-            // reaches through its own transport checks rather than through capability attestation.
-            "http-host-backend-readiness-api",
-            "http-lifecycle-device-create-command",
-            "http-desktop-device-tool-proxy",
-            "http-desktop-device-tool-timeouts",
-            "http-windows-sandbox-helper-config",
-            "http-android-device-tool-proxy",
-            "http-broker-version-reporting",
-            // These arrived in the same commit as the library capability, which did not touch
-            // device-lab-mcp at all. Unlike the library capability they gate no known
-            // correctness-affecting divergence, so they are left as recorded decisions rather than
-            // swept in alongside a security fix.
-            "hyper-v-windows-unattend-oobe-schema-v3",
-            "hyper-v-powershell-direct-bounded-probe-v1",
-            // Predate the MCP list's Hyper-V entries.
-            "windows-sandbox-best-effort-minimize-v1",
-            "windows-sandbox-runtime-snapshot-ownership-v1",
-            "appium3-scoped-security-npm-cwd-v1",
-            "appium-port-process-identity-fencing-v1",
-        ]);
-        const mcpRequired = new Set<string>(REQUIRED_CCC_HOST_BROKER_CAPABILITIES);
-        const missing = DEVICE_BROKER_REQUIRED_CAPABILITIES
-            .filter((capability) => !mcpRequired.has(capability))
-            .filter((capability) => !DELIBERATE_MCP_DIVERGENCES.has(capability));
-        expect(missing).toEqual([]);
+    it("advertises one shared protocol without feature version lists", () => {
+        const status = deviceBrokerStatus({ ownerId: "1111111111111111" });
+        expect(status.protocolVersion).toBe(DEVICE_BROKER_PROTOCOL_VERSION);
+        expect(status).not.toHaveProperty("implemented");
+        expect(status).not.toHaveProperty("deferred");
     });
 
     it("forces hidden windows for provider and broker-inspection PowerShell children", () => {
@@ -279,17 +207,6 @@ describe("device-lab host broker daemon", () => {
         expect(deviceBrokerHostProjectMountPath("relative/project")).toBeNull();
     });
 
-    it("never treats a newer broker version as replaceable by an older CLI", () => {
-        expect(compareBrokerVersionsForTest("1.2.0", "1.1.75")).toBe(1);
-        expect(compareBrokerVersionsForTest("2.0.0-beta.1", "1.99.99")).toBe(1);
-        expect(compareBrokerVersionsForTest("1.1.74", "1.1.75")).toBe(-1);
-        expect(compareBrokerVersionsForTest("1.1.75", "1.1.75")).toBe(0);
-        expect(compareBrokerVersionsForTest("1.1.75-beta.1", "1.1.75")).toBe(-1);
-        expect(compareBrokerVersionsForTest("1.1.75", "1.1.75-beta.1")).toBe(1);
-        expect(compareBrokerVersionsForTest("1.1.75-beta.2", "1.1.75-beta.10")).toBe(-1);
-        expect(compareBrokerVersionsForTest("1.1.75-beta.9007199254740993", "1.1.75-beta.9007199254740992")).toBe(1);
-        expect(compareBrokerVersionsForTest("1.1.75+host.2", "1.1.75+cli.1")).toBe(0);
-    });
 
     it("preserves a registered host path when the same owner registers from its container mount", () => {
         const hostProjectPath = "C:\\Users\\Example\\Project\\ccc";
@@ -426,54 +343,14 @@ describe("device-lab host broker daemon", () => {
 
         expect(status).toEqual(expect.objectContaining({
             name: "ccc-device-broker",
-            version: CLI_VERSION,
+            version: DEVICE_LAB_VERSION,
             host: "127.0.0.1",
             port: 17373,
             url: "http://127.0.0.1:17373",
             mode: "host-broker-daemon",
             lazy: true,
             startupPolicy: expect.stringContaining("host ccc auto-starts"),
-            implemented: expect.arrayContaining([
-                "http-health",
-                "http-status",
-                "owner-state-path-reporting",
-                "secret-backed-owner-token-auth",
-                "http-appium-process-api",
-                "http-appium-webdriver-session-api",
-                "bounded-appium-webdriver-request-proxy",
-                "high-level-mobile-broker-routing-compatible",
-                "http-lifecycle-device-create-command",
-                "http-readonly-device-tool-routing",
-                "http-recording-device-tool-routing",
-                "http-desktop-device-tool-proxy",
-                "http-desktop-device-tool-timeouts",
-                "http-windows-sandbox-helper-config",
-                "http-android-device-tool-proxy",
-                "http-broker-version-reporting",
-                "windows-hidden-provider-children-v7",
-                "hyper-v-windows-unattend-oobe-schema-v3",
-                "hyper-v-powershell-direct-bounded-probe-v1",
-                "hyper-v-windows-library-v17",
-                "windows-sandbox-window-minimize-v4", "windows-sandbox-runtime-snapshot-ownership-v1",
-                "appium3-scoped-security-npm-cwd-v1",
-                "constant-time-existing-owner-auth-v1",
-                "atomic-owner-secret-provisioning-v1",
-                "owner-mutation-serialization-v1",
-                "atomic-owner-device-state-v1",
-                "cross-process-owner-state-serialization-v1",
-                "owner-device-identity-fencing-v1",
-                "rpc-fault-containment-v1",
-                "cross-owner-physical-lease-serialization-v1", "physical-lease-operation-fencing-v1", "physical-lifecycle-lease-fencing-v1", "physical-attach-detach-operation-serialization-v1",
-                "physical-detach-runtime-cleanup-v1",
-                "physical-runtime-cleanup-lease-fencing-v1",
-                "physical-lease-state-write-rollback-v1",
-                "runtime-cleanup-failure-preservation-v1",
-                "appium-runtime-generation-fencing-v1",
-                "windows-sandbox-singleton-fencing-v1", "cross-process-device-operation-serialization-v1", "cross-process-device-runtime-serialization-v1", "direct-recording-generation-fencing-v1", "direct-appium-generation-fencing-v1", "finite-device-operation-serialization-v1", "direct-runtime-process-identity-v1", "host-recording-process-identity-v1", "runtime-process-observation-v1", "host-appium-process-identity-v1", "appium-port-process-identity-fencing-v1", "broker-owned-owner-secret-provisioning-v1", "host-broker-port-process-identity-v1", "host-broker-process-start-token-v1", "owner-generation-hmac-auth-v1", "direct-appium-process-identity-v1","owner-device-state-validation-v1","shared-device-ownership-state-validation-v1","android-emulator-port-allocation-fencing-v1", "bounded-error-responses-v1", "physical-lease-directory-fencing-v1","owner-auth-directory-fencing-v1", "appium-runtime-installation-fencing-v1", "bounded-no-redirect-appium-http-transport-v1", "windows-provider-launcher-path-fencing-v1", "canonical-owner-device-ids-v1","ios-simulator-owner-identity-fencing-v1", "ios-simulator-provider-create-v1", "physical-appium-lease-fencing-v1", "physical-device-tool-lease-fencing-v1", "physical-lifecycle-use-lease-refresh-v1", "appium-live-runtime-metadata-fencing-v1", "direct-android-lifecycle-generation-fencing-v1", "direct-ios-lifecycle-generation-fencing-v1", "direct-windows-lifecycle-generation-fencing-v1", "direct-macos-lifecycle-generation-fencing-v1", "direct-macos-snapshot-clone-generation-fencing-v1", "physical-direct-state-transition-fencing-v1", "multi-project-owner-resolve-v1", "stopped-android-status-observation-v1", "stopped-android-boot-metadata-v1", "guest-helper-recording-proxy-v1", "physical-unattached-wireless-routing-v1", "android-recording-signal-fallback-v1", "hyper-v-vm-managed-auto-images-v20", "hyper-v-setup-network-v11", "hyper-v-guest-readiness-diagnostics-v24", "hyper-v-azure-bootstrap-dhcp-v1", "hyper-v-bootstrap-nic-cleanup-v1", "hyper-v-bootstrap-ssh-finalize-v2", "hyper-v-windows-specialize-seed-v1", "hyper-v-windows-specialize-account-v1", "hyper-v-windows-boot-contract-v1", "hyper-v-windows-unattend-oobe-schema-v3", "hyper-v-powershell-direct-bounded-probe-v1", "hyper-v-boot-disk-generation-v1", "hyper-v-linux-create-response-v1", "hyper-v-image-acquisition-stage-cache-v1", "hyper-v-powershell-stage-propagation-v1", "hyper-v-provider-image-finalization-v40", "hyper-v-network-failure-diagnostics-v11", "windows-sandbox-best-effort-minimize-v1",
-                "host-service-manager-diagnostics",
-                "host-ccc-auto-start-compatible",
-            ]),
-            deferred: expect.not.arrayContaining(["mutating-non-lifecycle-device-tool-routing"]),
+            protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION,
         }));
         expect(status.serviceManager).toEqual(expect.objectContaining({
             actions: ["status"],
@@ -523,31 +400,6 @@ describe("device-lab host broker daemon", () => {
                 staleMetadataPolicy: expect.stringContaining("without deleting shared toolchain caches"),
             }),
         }));
-        expect(status.deferred).not.toContain("full-provider-routing-parity");
-        expect(status.deferred).not.toContain("strong-authentication-token-handshake");
-        expect(status.deferred).not.toContain("permanent-service-manager-supervision");
-        expect(status.implemented).toContain("host-ccc-auto-start-compatible");
-        expect(status.implemented).toContain("broker-owned-owner-secret-provisioning-v1");
-        expect(status.implemented).toContain("host-broker-port-process-identity-v1");
-        expect(status.implemented).toContain("host-broker-process-start-token-v1");
-        expect(status.implemented).toContain("direct-appium-process-identity-v1");
-        expect(status.implemented).toContain("owner-device-state-validation-v1");
-        expect(status.implemented).toContain("shared-device-ownership-state-validation-v1");
-        expect(status.implemented).toContain("android-emulator-port-allocation-fencing-v1");
-        expect(status.implemented).toContain("bounded-error-responses-v1");
-        expect(status.implemented).toContain("physical-lease-directory-fencing-v1");
-        expect(status.implemented).toContain("owner-auth-directory-fencing-v1");
-        expect(status.implemented).toContain("appium-runtime-installation-fencing-v1");
-        expect(status.implemented).toContain("bounded-no-redirect-appium-http-transport-v1");
-        expect(status.implemented).toContain("windows-provider-launcher-path-fencing-v1");
-        expect(status.implemented).toContain("stopped-android-status-observation-v1");
-        expect(status.implemented).toContain("stopped-android-boot-metadata-v1");
-        expect(status.implemented).toContain("windows-sandbox-best-effort-minimize-v1");
-        expect(status.implemented).toContain("physical-lifecycle-lease-fencing-v1");
-        expect(status.implemented).toContain("physical-attach-detach-operation-serialization-v1");
-        expect(status.implemented).toContain("physical-detach-runtime-cleanup-v1");
-        expect(status.implemented).toContain("physical-runtime-cleanup-lease-fencing-v1");
-        expect(status.implemented).toContain("physical-lease-state-write-rollback-v1");
         expect(status.ownerId).toMatch(/^[a-f0-9]{16}$/);
         expect(status.state.ownerRoot).toContain(status.ownerId);
         expect(status.state.locksRoot).toContain(".ccc/devices/broker/locks");
@@ -1093,7 +945,9 @@ describe("device-lab host broker daemon", () => {
     it("keeps advertised broker backend capabilities aligned with device tool proxy support", () => {
         const contract = deviceBrokerToolContractForTest();
         for (const backend of contract.backends) {
-            expect(backend.supportedTools.filter((tool) => !backend.capabilities.includes(tool))).toEqual([]);
+            // Android reset remains a private app-data delegate behind public clear_app_data.
+            const privateTools = ["android-emulator", "android-device"].includes(backend.backend) ? ["device_reset"] : [];
+            expect(backend.supportedTools.filter((tool) => !backend.capabilities.includes(tool))).toEqual(privateTools);
         }
         const androidDevice = contract.backends.find((backend) => backend.backend === "android-device");
         expect(androidDevice?.capabilities).toEqual(expect.arrayContaining([
@@ -1140,35 +994,11 @@ describe("device-lab host broker daemon", () => {
 
             const status = await fetch(`${baseUrl}/status`);
             expect(status.status).toBe(200);
-            const statusPayload = await status.json() as { ok: boolean; broker: { ownerId: string; version: string; process: { pid: number }; implemented: string[]; deferred: string[] } };
+            const statusPayload = await status.json() as { ok: boolean; broker: { ownerId: string; version: string; process: { pid: number }; protocolVersion: number } };
             expect(statusPayload.ok).toBe(true);
             expect(statusPayload.broker.ownerId).toMatch(/^[a-f0-9]{16}$/);
-            expect(statusPayload.broker.version).toBe(CLI_VERSION);
+            expect(statusPayload.broker.version).toBe(DEVICE_LAB_VERSION);
             expect(statusPayload.broker.process.pid).toBe(process.pid);
-            expect(statusPayload.broker.implemented).toContain("http-appium-webdriver-session-api");
-            expect(statusPayload.broker.implemented).toContain("http-lifecycle-device-create-command");
-            expect(statusPayload.broker.implemented).toContain("http-readonly-device-tool-routing");
-            expect(statusPayload.broker.implemented).toContain("http-recording-device-tool-routing");
-            expect(statusPayload.broker.implemented).toContain("http-desktop-device-tool-proxy");
-            expect(statusPayload.broker.implemented).toContain("http-desktop-device-tool-timeouts");
-            expect(statusPayload.broker.implemented).toContain("http-windows-sandbox-helper-config");
-            expect(statusPayload.broker.implemented).toContain("http-android-device-tool-proxy");
-            expect(statusPayload.broker.implemented).toContain("http-broker-version-reporting");
-            expect(statusPayload.broker.implemented).toContain("windows-hidden-provider-children-v7");
-            expect(statusPayload.broker.implemented).toContain("windows-sandbox-window-minimize-v4");
-            expect(statusPayload.broker.implemented).toContain("appium3-scoped-security-npm-cwd-v1");
-            expect(statusPayload.broker.implemented).toContain("constant-time-existing-owner-auth-v1");
-            expect(statusPayload.broker.implemented).toContain("atomic-owner-secret-provisioning-v1");
-            expect(statusPayload.broker.implemented).toContain("owner-mutation-serialization-v1");
-            expect(statusPayload.broker.implemented).toContain("atomic-owner-device-state-v1");
-            expect(statusPayload.broker.implemented).toContain("cross-process-owner-state-serialization-v1");
-            expect(statusPayload.broker.implemented).toContain("canonical-owner-device-ids-v1");
-            expect(statusPayload.broker.implemented).toContain("stopped-android-status-observation-v1");
-            expect(statusPayload.broker.implemented).toContain("stopped-android-boot-metadata-v1");
-            expect(statusPayload.broker.implemented).toContain("windows-sandbox-best-effort-minimize-v1");
-            expect(statusPayload.broker.implemented).toContain("rpc-fault-containment-v1");
-            expect(statusPayload.broker.deferred).not.toContain("mutating-non-lifecycle-device-tool-routing");
-            expect(statusPayload.broker.deferred).not.toContain("full-provider-routing-parity");
 
             const post = await fetch(`${baseUrl}/status`, { method: "POST" });
             expect(post.status).toBe(405);
@@ -1523,27 +1353,12 @@ describe("device-lab host broker daemon", () => {
         }
     });
 
-    it.each([
-        ["image acquisition", "hyper-v-image-acquisition-stage-cache-v1", null],
-        ["PowerShell stage propagation", "hyper-v-powershell-stage-propagation-v1", null],
-        ["provider-bound automatic image finalization", "hyper-v-provider-image-finalization-v40", null],
-        ["Windows unattend oobe schema", "hyper-v-windows-unattend-oobe-schema-v3", "hyper-v-windows-unattend-oobe-schema-v2"],
-        ["bounded PowerShell Direct probe", "hyper-v-powershell-direct-bounded-probe-v1", null],
-        ["internal Hyper-V Windows library", "hyper-v-windows-library-v17", "hyper-v-windows-library-v16"],
-        ["redacted Hyper-V network stage diagnostics", "hyper-v-network-failure-diagnostics-v11", "hyper-v-network-failure-diagnostics-v10"],
-        ["persisted Hyper-V network identity repair", "hyper-v-setup-network-v11", "hyper-v-setup-network-v10"],
-        ["hidden elevated PowerShell children", "windows-hidden-provider-children-v7", "windows-hidden-provider-children-v6"],
-        ["Android console AVD identity", "android-avd-console-identity-v1", null],
-        ["Android emulator stop completion", "android-emulator-stop-completion-v1", null],
-    ])("replaces a same-version broker missing the %s contract", async (_label, missingCapability, previousCapability) => {
+    it.each([undefined, 0, 1])("replaces an identity-verified broker with stale protocol %s", async (staleProtocol) => {
         const ownerId = "2222222222222222";
-        const currentCapabilities = deviceBrokerStatus({ ownerId }).implemented;
+        const currentProtocol = DEVICE_BROKER_PROTOCOL_VERSION;
         const stalePid = 43210;
         const staleProcess = fakeBrokerPortProcess(stalePid, `node /opt/ccc/dist/index.js devices broker serve --host 127.0.0.1`);
         const staleStartedAt = "2026-07-27T00:00:00.000Z";
-        const staleHyperVCapabilities = currentCapabilities.filter((capability) =>
-            capability !== missingCapability);
-        if (previousCapability) staleHyperVCapabilities.push(previousCapability);
         const incompatible = createServer((req, res) => {
             if (req.url === "/health") {
                 res.writeHead(200, { "content-type": "application/json" });
@@ -1556,10 +1371,10 @@ describe("device-lab host broker daemon", () => {
                     ok: true,
                     broker: {
                         ownerId,
-                        version: CLI_VERSION,
+                        version: DEVICE_LAB_VERSION,
                         process: { pid: stalePid, startToken: staleProcess.processStartToken },
                         startedAt: staleStartedAt,
-                        implemented: staleHyperVCapabilities,
+                        protocolVersion: staleProtocol,
                     },
                 }));
                 return;
@@ -1586,10 +1401,10 @@ describe("device-lab host broker daemon", () => {
                     ok: true,
                     broker: {
                         ownerId,
-                        version: CLI_VERSION,
+                        version: DEVICE_LAB_VERSION,
                         process: { pid: 54321, startToken: "test:54321" },
                         startedAt: "2026-07-28T00:00:00.000Z",
-                        implemented: currentCapabilities,
+                        protocolVersion: currentProtocol,
                     },
                 }));
                 return;
@@ -1676,12 +1491,12 @@ describe("device-lab host broker daemon", () => {
             const incompatibleStatus = result.attempts?.find((attempt) =>
                 "compatible" in attempt
                 && attempt.compatible === false
-                && "missingCapabilities" in attempt
+                && "protocolVersion" in attempt
             );
             expect(attempts).toContain("runtime-incompatible-contract");
-            expect(attempts).toContain('"versionCompatible":true');
+            expect(attempts).toContain('"versionCompatible":false');
             expect(incompatibleStatus).toEqual(expect.objectContaining({
-                missingCapabilities: [missingCapability],
+                protocolVersion: staleProtocol ?? null,
                 ownerResolve: expect.objectContaining({ compatible: true, ownerCompatible: true }),
             }));
         } finally {
@@ -1696,35 +1511,7 @@ describe("device-lab host broker daemon", () => {
         const stalePid = 24680;
         const staleStartedAt = "2026-07-27T00:00:00.000Z";
         const staleProcess = fakeBrokerPortProcess(stalePid, "node /opt/ccc/dist/index.js devices broker serve");
-        const implemented = [
-            "hyper-v-windows-library-v17",
-            "android-avd-console-identity-v1",
-            "android-emulator-stop-completion-v1",
-            "http-host-backend-readiness-api",
-            "http-lifecycle-device-create-command",
-            "http-desktop-device-tool-proxy",
-            "http-desktop-device-tool-timeouts",
-            "http-windows-sandbox-helper-config",
-            "http-android-device-tool-proxy",
-            "http-broker-version-reporting",
-            "windows-hidden-provider-children-v7",
-            "windows-sandbox-window-minimize-v4", "windows-sandbox-runtime-snapshot-ownership-v1",
-            "appium3-scoped-security-npm-cwd-v1",
-            "constant-time-existing-owner-auth-v1",
-            "atomic-owner-secret-provisioning-v1",
-            "owner-mutation-serialization-v1",
-            "atomic-owner-device-state-v1",
-            "cross-process-owner-state-serialization-v1",
-            "owner-device-identity-fencing-v1",
-            "rpc-fault-containment-v1",
-            "cross-owner-physical-lease-serialization-v1", "physical-lease-operation-fencing-v1", "physical-lifecycle-lease-fencing-v1", "physical-attach-detach-operation-serialization-v1",
-            "physical-detach-runtime-cleanup-v1",
-            "physical-runtime-cleanup-lease-fencing-v1",
-            "physical-lease-state-write-rollback-v1",
-            "runtime-cleanup-failure-preservation-v1",
-            "appium-runtime-generation-fencing-v1",
-            "windows-sandbox-singleton-fencing-v1", "cross-process-device-operation-serialization-v1", "cross-process-device-runtime-serialization-v1", "direct-recording-generation-fencing-v1", "direct-appium-generation-fencing-v1", "finite-device-operation-serialization-v1", "direct-runtime-process-identity-v1", "host-recording-process-identity-v1", "runtime-process-observation-v1", "host-appium-process-identity-v1", "appium-port-process-identity-fencing-v1", "broker-owned-owner-secret-provisioning-v1", "host-broker-port-process-identity-v1", "host-broker-process-start-token-v1", "owner-generation-hmac-auth-v1", "direct-appium-process-identity-v1","owner-device-state-validation-v1","shared-device-ownership-state-validation-v1","android-emulator-port-allocation-fencing-v1", "bounded-error-responses-v1", "physical-lease-directory-fencing-v1","owner-auth-directory-fencing-v1", "appium-runtime-installation-fencing-v1", "bounded-no-redirect-appium-http-transport-v1", "windows-provider-launcher-path-fencing-v1", "canonical-owner-device-ids-v1","ios-simulator-owner-identity-fencing-v1", "ios-simulator-provider-create-v1", "physical-appium-lease-fencing-v1", "physical-device-tool-lease-fencing-v1", "physical-lifecycle-use-lease-refresh-v1", "appium-live-runtime-metadata-fencing-v1", "direct-android-lifecycle-generation-fencing-v1", "direct-ios-lifecycle-generation-fencing-v1", "direct-windows-lifecycle-generation-fencing-v1", "direct-macos-lifecycle-generation-fencing-v1", "direct-macos-snapshot-clone-generation-fencing-v1", "physical-direct-state-transition-fencing-v1", "multi-project-owner-resolve-v1", "stopped-android-status-observation-v1", "stopped-android-boot-metadata-v1", "guest-helper-recording-proxy-v1", "physical-unattached-wireless-routing-v1", "android-recording-signal-fallback-v1", "hyper-v-vm-managed-auto-images-v20", "hyper-v-setup-network-v11", "hyper-v-guest-readiness-diagnostics-v24", "hyper-v-azure-bootstrap-dhcp-v1", "hyper-v-bootstrap-nic-cleanup-v1", "hyper-v-bootstrap-ssh-finalize-v2", "hyper-v-windows-specialize-seed-v1", "hyper-v-windows-specialize-account-v1", "hyper-v-windows-boot-contract-v1", "hyper-v-windows-unattend-oobe-schema-v3", "hyper-v-powershell-direct-bounded-probe-v1", "hyper-v-boot-disk-generation-v1", "hyper-v-linux-create-response-v1", "hyper-v-image-acquisition-stage-cache-v1", "hyper-v-powershell-stage-propagation-v1", "hyper-v-provider-image-finalization-v40", "hyper-v-network-failure-diagnostics-v11", "hyper-v-linux-x11-type-v2",
-        ];
+        const protocolVersion = DEVICE_BROKER_PROTOCOL_VERSION;
         const incompatible = createServer((req, res) => {
             if (req.url === "/health") {
                 res.writeHead(200, { "content-type": "application/json" });
@@ -1737,10 +1524,10 @@ describe("device-lab host broker daemon", () => {
                     ok: true,
                     broker: {
                         ownerId,
-                        version: CLI_VERSION,
+                        version: DEVICE_LAB_VERSION,
                         process: { pid: stalePid, startToken: staleProcess.processStartToken },
                         startedAt: staleStartedAt,
-                        implemented,
+                        protocolVersion,
                     },
                 }));
                 return;
@@ -1767,10 +1554,10 @@ describe("device-lab host broker daemon", () => {
                     ok: true,
                     broker: {
                         ownerId,
-                        version: CLI_VERSION,
+                        version: DEVICE_LAB_VERSION,
                         process: { pid: 13579, startToken: "test:13579" },
                         startedAt: "2026-07-28T00:00:00.000Z",
-                        implemented,
+                        protocolVersion,
                     },
                 }));
                 return;
@@ -1868,35 +1655,7 @@ describe("device-lab host broker daemon", () => {
         const stalePid = 97531;
         const staleStartedAt = "2026-07-27T00:00:00.000Z";
         const staleProcess = fakeBrokerPortProcess(stalePid, "node /opt/ccc/dist/index.js devices broker serve");
-        const implemented = [
-            "hyper-v-windows-library-v17",
-            "android-avd-console-identity-v1",
-            "android-emulator-stop-completion-v1",
-            "http-host-backend-readiness-api",
-            "http-lifecycle-device-create-command",
-            "http-desktop-device-tool-proxy",
-            "http-desktop-device-tool-timeouts",
-            "http-windows-sandbox-helper-config",
-            "http-android-device-tool-proxy",
-            "http-broker-version-reporting",
-            "windows-hidden-provider-children-v7",
-            "windows-sandbox-window-minimize-v4", "windows-sandbox-runtime-snapshot-ownership-v1",
-            "appium3-scoped-security-npm-cwd-v1",
-            "constant-time-existing-owner-auth-v1",
-            "atomic-owner-secret-provisioning-v1",
-            "owner-mutation-serialization-v1",
-            "atomic-owner-device-state-v1",
-            "cross-process-owner-state-serialization-v1",
-            "owner-device-identity-fencing-v1",
-            "rpc-fault-containment-v1",
-            "cross-owner-physical-lease-serialization-v1", "physical-lease-operation-fencing-v1", "physical-lifecycle-lease-fencing-v1", "physical-attach-detach-operation-serialization-v1",
-            "physical-detach-runtime-cleanup-v1",
-            "physical-runtime-cleanup-lease-fencing-v1",
-            "physical-lease-state-write-rollback-v1",
-            "runtime-cleanup-failure-preservation-v1",
-            "appium-runtime-generation-fencing-v1",
-            "windows-sandbox-singleton-fencing-v1", "cross-process-device-operation-serialization-v1", "cross-process-device-runtime-serialization-v1", "direct-recording-generation-fencing-v1", "direct-appium-generation-fencing-v1", "finite-device-operation-serialization-v1", "direct-runtime-process-identity-v1", "host-recording-process-identity-v1", "runtime-process-observation-v1", "host-appium-process-identity-v1", "appium-port-process-identity-fencing-v1", "broker-owned-owner-secret-provisioning-v1", "host-broker-port-process-identity-v1", "host-broker-process-start-token-v1", "owner-generation-hmac-auth-v1", "direct-appium-process-identity-v1","owner-device-state-validation-v1","shared-device-ownership-state-validation-v1","android-emulator-port-allocation-fencing-v1", "bounded-error-responses-v1", "physical-lease-directory-fencing-v1","owner-auth-directory-fencing-v1", "appium-runtime-installation-fencing-v1", "bounded-no-redirect-appium-http-transport-v1", "windows-provider-launcher-path-fencing-v1", "canonical-owner-device-ids-v1","ios-simulator-owner-identity-fencing-v1", "ios-simulator-provider-create-v1", "physical-appium-lease-fencing-v1", "physical-device-tool-lease-fencing-v1", "physical-lifecycle-use-lease-refresh-v1", "appium-live-runtime-metadata-fencing-v1", "direct-android-lifecycle-generation-fencing-v1", "direct-ios-lifecycle-generation-fencing-v1", "direct-windows-lifecycle-generation-fencing-v1", "direct-macos-lifecycle-generation-fencing-v1", "direct-macos-snapshot-clone-generation-fencing-v1", "physical-direct-state-transition-fencing-v1", "multi-project-owner-resolve-v1", "stopped-android-status-observation-v1", "stopped-android-boot-metadata-v1", "guest-helper-recording-proxy-v1", "physical-unattached-wireless-routing-v1", "android-recording-signal-fallback-v1", "hyper-v-vm-managed-auto-images-v20", "hyper-v-setup-network-v11", "hyper-v-guest-readiness-diagnostics-v24", "hyper-v-azure-bootstrap-dhcp-v1", "hyper-v-bootstrap-nic-cleanup-v1", "hyper-v-bootstrap-ssh-finalize-v2", "hyper-v-windows-specialize-seed-v1", "hyper-v-windows-specialize-account-v1", "hyper-v-windows-boot-contract-v1", "hyper-v-windows-unattend-oobe-schema-v3", "hyper-v-powershell-direct-bounded-probe-v1", "hyper-v-boot-disk-generation-v1", "hyper-v-linux-create-response-v1", "hyper-v-image-acquisition-stage-cache-v1", "hyper-v-powershell-stage-propagation-v1", "hyper-v-provider-image-finalization-v40", "hyper-v-network-failure-diagnostics-v11", "hyper-v-linux-x11-type-v2",
-        ];
+        const protocolVersion = DEVICE_BROKER_PROTOCOL_VERSION;
         const incompatible = createServer((req, res) => {
             if (req.url === "/health") {
                 res.writeHead(200, { "content-type": "application/json" });
@@ -1909,10 +1668,10 @@ describe("device-lab host broker daemon", () => {
                     ok: true,
                     broker: {
                         ownerId,
-                        version: CLI_VERSION,
+                        version: DEVICE_LAB_VERSION,
                         process: { pid: stalePid, startToken: staleProcess.processStartToken },
                         startedAt: staleStartedAt,
-                        implemented,
+                        protocolVersion,
                     },
                 }));
                 return;
@@ -1939,10 +1698,10 @@ describe("device-lab host broker daemon", () => {
                     ok: true,
                     broker: {
                         ownerId,
-                        version: CLI_VERSION,
+                        version: DEVICE_LAB_VERSION,
                         process: { pid: 86420, startToken: "test:86420" },
                         startedAt: "2026-07-28T00:00:00.000Z",
-                        implemented,
+                        protocolVersion,
                     },
                 }));
                 return;
@@ -2035,32 +1794,7 @@ describe("device-lab host broker daemon", () => {
 
     it("diagnoses an unmanaged incompatible broker that cannot be restarted", async () => {
         const ownerId = "cccccccccccccccc";
-        const implemented = [
-            "http-host-backend-readiness-api",
-            "http-lifecycle-device-create-command",
-            "http-desktop-device-tool-proxy",
-            "http-desktop-device-tool-timeouts",
-            "http-windows-sandbox-helper-config",
-            "http-android-device-tool-proxy",
-            "http-broker-version-reporting",
-            "windows-hidden-provider-children-v7",
-            "windows-sandbox-window-minimize-v4", "windows-sandbox-runtime-snapshot-ownership-v1",
-            "appium3-scoped-security-npm-cwd-v1",
-            "constant-time-existing-owner-auth-v1",
-            "atomic-owner-secret-provisioning-v1",
-            "owner-mutation-serialization-v1",
-            "atomic-owner-device-state-v1",
-            "cross-process-owner-state-serialization-v1",
-            "owner-device-identity-fencing-v1",
-            "rpc-fault-containment-v1",
-            "cross-owner-physical-lease-serialization-v1", "physical-lease-operation-fencing-v1", "physical-lifecycle-lease-fencing-v1", "physical-attach-detach-operation-serialization-v1",
-            "physical-detach-runtime-cleanup-v1",
-            "physical-runtime-cleanup-lease-fencing-v1",
-            "physical-lease-state-write-rollback-v1",
-            "runtime-cleanup-failure-preservation-v1",
-            "appium-runtime-generation-fencing-v1",
-            "windows-sandbox-singleton-fencing-v1", "cross-process-device-operation-serialization-v1", "cross-process-device-runtime-serialization-v1", "direct-recording-generation-fencing-v1", "direct-appium-generation-fencing-v1", "finite-device-operation-serialization-v1", "direct-runtime-process-identity-v1", "host-recording-process-identity-v1", "runtime-process-observation-v1", "host-appium-process-identity-v1", "appium-port-process-identity-fencing-v1", "broker-owned-owner-secret-provisioning-v1", "host-broker-port-process-identity-v1", "host-broker-process-start-token-v1", "owner-generation-hmac-auth-v1", "direct-appium-process-identity-v1","owner-device-state-validation-v1","shared-device-ownership-state-validation-v1","android-emulator-port-allocation-fencing-v1", "bounded-error-responses-v1", "physical-lease-directory-fencing-v1","owner-auth-directory-fencing-v1", "appium-runtime-installation-fencing-v1", "bounded-no-redirect-appium-http-transport-v1", "windows-provider-launcher-path-fencing-v1", "canonical-owner-device-ids-v1","ios-simulator-owner-identity-fencing-v1", "ios-simulator-provider-create-v1", "physical-appium-lease-fencing-v1", "physical-device-tool-lease-fencing-v1", "physical-lifecycle-use-lease-refresh-v1", "appium-live-runtime-metadata-fencing-v1", "direct-android-lifecycle-generation-fencing-v1", "direct-ios-lifecycle-generation-fencing-v1", "direct-windows-lifecycle-generation-fencing-v1", "direct-macos-lifecycle-generation-fencing-v1", "direct-macos-snapshot-clone-generation-fencing-v1", "physical-direct-state-transition-fencing-v1", "multi-project-owner-resolve-v1", "stopped-android-status-observation-v1", "stopped-android-boot-metadata-v1", "guest-helper-recording-proxy-v1", "physical-unattached-wireless-routing-v1", "android-recording-signal-fallback-v1", "hyper-v-vm-managed-auto-images-v20", "hyper-v-setup-network-v11", "hyper-v-guest-readiness-diagnostics-v24", "hyper-v-azure-bootstrap-dhcp-v1", "hyper-v-bootstrap-nic-cleanup-v1", "hyper-v-bootstrap-ssh-finalize-v2", "hyper-v-windows-specialize-seed-v1", "hyper-v-windows-specialize-account-v1", "hyper-v-windows-boot-contract-v1", "hyper-v-windows-unattend-oobe-schema-v3", "hyper-v-powershell-direct-bounded-probe-v1", "hyper-v-boot-disk-generation-v1", "hyper-v-linux-create-response-v1", "hyper-v-image-acquisition-stage-cache-v1", "hyper-v-powershell-stage-propagation-v1", "hyper-v-provider-image-finalization-v40", "hyper-v-network-failure-diagnostics-v11",
-        ];
+        const protocolVersion = DEVICE_BROKER_PROTOCOL_VERSION;
         const incompatible = createServer((req, res) => {
             if (req.url === "/health") {
                 res.writeHead(200, { "content-type": "application/json" });
@@ -2069,7 +1803,7 @@ describe("device-lab host broker daemon", () => {
             }
             if (req.url === "/status") {
                 res.writeHead(200, { "content-type": "application/json" });
-                res.end(JSON.stringify({ ok: true, broker: { ownerId, version: "1.1.61", implemented } }));
+                res.end(JSON.stringify({ ok: true, broker: { ownerId, version: "1.1.61", protocolVersion: 0 } }));
                 return;
             }
             if (req.url === "/v1/owner/resolve") {
@@ -2102,7 +1836,7 @@ describe("device-lab host broker daemon", () => {
                 reused: false,
                 error: "host-broker-incompatible",
                 diagnostics: expect.arrayContaining([
-                    `existing broker version 1.1.61 does not match CLI version ${CLI_VERSION}`,
+                    `existing broker protocol 0 does not match required protocol ${DEVICE_BROKER_PROTOCOL_VERSION}`,
                     "existing broker does not support the current owner-resolve POST contract",
                     "existing broker port owner could not be verified as the current CCC broker process",
                 ]),
@@ -2113,38 +1847,13 @@ describe("device-lab host broker daemon", () => {
         }
     });
 
-    it("repairs a runtime-less stale broker when the listening port belongs to ccc broker serve", async () => {
+    it.each([
+        ["trusted legacy entry", "/opt/ccc/dist/index.js", true],
+        ["foreign legacy-looking entry", "/foreign/ccc/dist/index.js", false],
+    ] as const)("migrates protocol 1 only from an exact allowed path: %s", async (_label, legacyEntry, allowed) => {
         const ownerId = "eeeeeeeeeeeeeeee";
         const stalePid = 22334;
-        const implemented = [
-            "hyper-v-windows-library-v17",
-            "android-avd-console-identity-v1",
-            "android-emulator-stop-completion-v1",
-            "http-host-backend-readiness-api",
-            "http-lifecycle-device-create-command",
-            "http-desktop-device-tool-proxy",
-            "http-desktop-device-tool-timeouts",
-            "http-windows-sandbox-helper-config",
-            "http-android-device-tool-proxy",
-            "http-broker-version-reporting",
-            "windows-hidden-provider-children-v7",
-            "windows-sandbox-window-minimize-v4", "windows-sandbox-runtime-snapshot-ownership-v1",
-            "appium3-scoped-security-npm-cwd-v1",
-            "constant-time-existing-owner-auth-v1",
-            "atomic-owner-secret-provisioning-v1",
-            "owner-mutation-serialization-v1",
-            "atomic-owner-device-state-v1",
-            "cross-process-owner-state-serialization-v1",
-            "owner-device-identity-fencing-v1",
-            "rpc-fault-containment-v1",
-            "cross-owner-physical-lease-serialization-v1", "physical-lease-operation-fencing-v1", "physical-lifecycle-lease-fencing-v1", "physical-attach-detach-operation-serialization-v1",
-            "physical-detach-runtime-cleanup-v1",
-            "physical-runtime-cleanup-lease-fencing-v1",
-            "physical-lease-state-write-rollback-v1",
-            "runtime-cleanup-failure-preservation-v1",
-            "appium-runtime-generation-fencing-v1",
-            "windows-sandbox-singleton-fencing-v1", "cross-process-device-operation-serialization-v1", "cross-process-device-runtime-serialization-v1", "direct-recording-generation-fencing-v1", "direct-appium-generation-fencing-v1", "finite-device-operation-serialization-v1", "direct-runtime-process-identity-v1", "host-recording-process-identity-v1", "runtime-process-observation-v1", "host-appium-process-identity-v1", "appium-port-process-identity-fencing-v1", "broker-owned-owner-secret-provisioning-v1", "host-broker-port-process-identity-v1", "host-broker-process-start-token-v1", "owner-generation-hmac-auth-v1", "direct-appium-process-identity-v1","owner-device-state-validation-v1","shared-device-ownership-state-validation-v1","android-emulator-port-allocation-fencing-v1", "bounded-error-responses-v1", "physical-lease-directory-fencing-v1","owner-auth-directory-fencing-v1", "appium-runtime-installation-fencing-v1", "bounded-no-redirect-appium-http-transport-v1", "windows-provider-launcher-path-fencing-v1", "canonical-owner-device-ids-v1","ios-simulator-owner-identity-fencing-v1", "ios-simulator-provider-create-v1", "physical-appium-lease-fencing-v1", "physical-device-tool-lease-fencing-v1", "physical-lifecycle-use-lease-refresh-v1", "appium-live-runtime-metadata-fencing-v1", "direct-android-lifecycle-generation-fencing-v1", "direct-ios-lifecycle-generation-fencing-v1", "direct-windows-lifecycle-generation-fencing-v1", "direct-macos-lifecycle-generation-fencing-v1", "direct-macos-snapshot-clone-generation-fencing-v1", "physical-direct-state-transition-fencing-v1", "multi-project-owner-resolve-v1", "stopped-android-status-observation-v1", "stopped-android-boot-metadata-v1", "guest-helper-recording-proxy-v1", "physical-unattached-wireless-routing-v1", "android-recording-signal-fallback-v1", "hyper-v-vm-managed-auto-images-v20", "hyper-v-setup-network-v11", "hyper-v-guest-readiness-diagnostics-v24", "hyper-v-azure-bootstrap-dhcp-v1", "hyper-v-bootstrap-nic-cleanup-v1", "hyper-v-bootstrap-ssh-finalize-v2", "hyper-v-windows-specialize-seed-v1", "hyper-v-windows-specialize-account-v1", "hyper-v-windows-boot-contract-v1", "hyper-v-windows-unattend-oobe-schema-v3", "hyper-v-powershell-direct-bounded-probe-v1", "hyper-v-boot-disk-generation-v1", "hyper-v-linux-create-response-v1", "hyper-v-image-acquisition-stage-cache-v1", "hyper-v-powershell-stage-propagation-v1", "hyper-v-provider-image-finalization-v40", "hyper-v-network-failure-diagnostics-v11", "hyper-v-linux-x11-type-v2",
-        ];
+        const protocolVersion = DEVICE_BROKER_PROTOCOL_VERSION;
         const incompatible = createServer((req, res) => {
             if (req.url === "/health") {
                 res.writeHead(200, { "content-type": "application/json" });
@@ -2160,7 +1869,7 @@ describe("device-lab host broker daemon", () => {
                         mode: "host-broker-daemon",
                         ownerId: "oldoldoldoldold1",
                         version: "1.1.61",
-                        implemented,
+                        protocolVersion: 1,
                     },
                 }));
                 return;
@@ -2192,8 +1901,8 @@ describe("device-lab host broker daemon", () => {
                         port,
                         process: { pid: 44556, startToken: "test:44556" },
                         startedAt: "2026-07-28T00:00:00.000Z",
-                        version: CLI_VERSION,
-                        implemented,
+                        version: DEVICE_LAB_VERSION,
+                        protocolVersion,
                     },
                 }));
                 return;
@@ -2227,10 +1936,10 @@ describe("device-lab host broker daemon", () => {
         child.pid = 44556;
         child.unref = vi.fn();
         const spawnImpl = vi.fn(() => child);
-        const spawnedProcess = fakeBrokerPortProcess(child.pid, `node /opt/ccc/dist/index.js devices broker serve --host 0.0.0.0 --port ${port}`);
+        const spawnedProcess = fakeBrokerPortProcess(child.pid, `node /opt/ccc/dist/packages/device-lab/dist/broker-entry.js devices broker serve --host 0.0.0.0 --port ${port}`);
         const portProcessResolver = vi.fn(() => stopped ? spawnedProcess : fakeBrokerPortProcess(
             stalePid,
-            `node /opt/ccc/dist/index.js devices broker serve --host 127.0.0.1 --port ${port}`,
+            `node ${legacyEntry} devices broker serve --host 127.0.0.1 --port ${port}`,
         ));
         try {
             const result = await ensureHostDeviceBroker({
@@ -2239,7 +1948,8 @@ describe("device-lab host broker daemon", () => {
                 bindHost: "0.0.0.0",
                 probeHost: "127.0.0.1",
                 port,
-                cliPath: "/opt/ccc/dist/index.js",
+                cliPath: "/opt/ccc/dist/packages/device-lab/dist/broker-entry.js",
+                trustedCliPaths: ["/opt/ccc/dist/index.js"],
                 timeoutMs: 500,
                 startupTimeoutMs: 3000,
                 spawnImpl: spawnImpl as any,
@@ -2248,6 +1958,12 @@ describe("device-lab host broker daemon", () => {
                 processStartTokenReader: (pid) => pid === child.pid ? spawnedProcess.processStartToken : null,
             });
 
+            if (!allowed) {
+                expect(result).toEqual(expect.objectContaining({ ok: false, launched: false, error: "host-broker-incompatible" }));
+                expect(killSpy.mock.calls.some(([, signal]) => signal === "SIGTERM" || signal === "SIGKILL")).toBe(false);
+                expect(spawnImpl).not.toHaveBeenCalled();
+                return;
+            }
             expect(result).toEqual(expect.objectContaining({
                 ok: true,
                 launched: true,
@@ -2271,8 +1987,7 @@ describe("device-lab host broker daemon", () => {
         const stalePid = 22335;
         const staleStartedAt = "2026-07-27T00:00:00.000Z";
         const staleProcessStartToken = `test:${stalePid}`;
-        const implemented = deviceBrokerStatus({ ownerId }).implemented
-            .filter((capability) => capability !== "stopped-android-boot-metadata-v1");
+        const protocolVersion = 0;
         let port = 0;
         const incompatible = createServer((req, res) => {
             res.writeHead(200, { "content-type": "application/json" });
@@ -2288,8 +2003,8 @@ describe("device-lab host broker daemon", () => {
                         port,
                         process: { pid: stalePid, startToken: staleProcessStartToken },
                         startedAt: staleStartedAt,
-                        version: CLI_VERSION,
-                        implemented,
+                        version: DEVICE_LAB_VERSION,
+                        protocolVersion,
                     },
                 }));
             } else if (req.url === "/v1/owner/resolve") {
@@ -2310,10 +2025,10 @@ describe("device-lab host broker daemon", () => {
                 res.end(JSON.stringify({
                     ok: true,
                     broker: {
-                        version: CLI_VERSION,
+                        version: DEVICE_LAB_VERSION,
                         process: { pid: 44557, startToken: "test:44557" },
                         startedAt: "2026-07-28T00:00:00.000Z",
-                        implemented: deviceBrokerStatus({ ownerId }).implemented,
+                        protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION,
                     },
                 }));
             } else if (req.url === "/v1/owner/resolve") {
@@ -2392,32 +2107,7 @@ describe("device-lab host broker daemon", () => {
 
     it("does not trust status or persisted PIDs when the port process is unrelated", async () => {
         const ownerId = "ffffffffffffffff";
-        const implemented = [
-            "http-host-backend-readiness-api",
-            "http-lifecycle-device-create-command",
-            "http-desktop-device-tool-proxy",
-            "http-desktop-device-tool-timeouts",
-            "http-windows-sandbox-helper-config",
-            "http-android-device-tool-proxy",
-            "http-broker-version-reporting",
-            "windows-hidden-provider-children-v7",
-            "windows-sandbox-window-minimize-v4", "windows-sandbox-runtime-snapshot-ownership-v1",
-            "appium3-scoped-security-npm-cwd-v1",
-            "constant-time-existing-owner-auth-v1",
-            "atomic-owner-secret-provisioning-v1",
-            "owner-mutation-serialization-v1",
-            "atomic-owner-device-state-v1",
-            "cross-process-owner-state-serialization-v1",
-            "owner-device-identity-fencing-v1",
-            "rpc-fault-containment-v1",
-            "cross-owner-physical-lease-serialization-v1", "physical-lease-operation-fencing-v1", "physical-lifecycle-lease-fencing-v1", "physical-attach-detach-operation-serialization-v1",
-            "physical-detach-runtime-cleanup-v1",
-            "physical-runtime-cleanup-lease-fencing-v1",
-            "physical-lease-state-write-rollback-v1",
-            "runtime-cleanup-failure-preservation-v1",
-            "appium-runtime-generation-fencing-v1",
-            "windows-sandbox-singleton-fencing-v1", "cross-process-device-operation-serialization-v1", "cross-process-device-runtime-serialization-v1", "direct-recording-generation-fencing-v1", "direct-appium-generation-fencing-v1", "finite-device-operation-serialization-v1", "direct-runtime-process-identity-v1", "host-recording-process-identity-v1", "runtime-process-observation-v1", "host-appium-process-identity-v1", "appium-port-process-identity-fencing-v1", "broker-owned-owner-secret-provisioning-v1", "host-broker-port-process-identity-v1", "host-broker-process-start-token-v1", "owner-generation-hmac-auth-v1", "direct-appium-process-identity-v1","owner-device-state-validation-v1","shared-device-ownership-state-validation-v1","android-emulator-port-allocation-fencing-v1", "bounded-error-responses-v1", "physical-lease-directory-fencing-v1","owner-auth-directory-fencing-v1", "appium-runtime-installation-fencing-v1", "bounded-no-redirect-appium-http-transport-v1", "windows-provider-launcher-path-fencing-v1", "canonical-owner-device-ids-v1","ios-simulator-owner-identity-fencing-v1", "ios-simulator-provider-create-v1", "physical-appium-lease-fencing-v1", "physical-device-tool-lease-fencing-v1", "physical-lifecycle-use-lease-refresh-v1", "appium-live-runtime-metadata-fencing-v1", "direct-android-lifecycle-generation-fencing-v1", "direct-ios-lifecycle-generation-fencing-v1", "direct-windows-lifecycle-generation-fencing-v1", "direct-macos-lifecycle-generation-fencing-v1", "direct-macos-snapshot-clone-generation-fencing-v1", "physical-direct-state-transition-fencing-v1", "multi-project-owner-resolve-v1", "stopped-android-status-observation-v1", "stopped-android-boot-metadata-v1", "guest-helper-recording-proxy-v1", "physical-unattached-wireless-routing-v1", "android-recording-signal-fallback-v1", "hyper-v-vm-managed-auto-images-v20", "hyper-v-setup-network-v11", "hyper-v-guest-readiness-diagnostics-v24", "hyper-v-azure-bootstrap-dhcp-v1", "hyper-v-bootstrap-nic-cleanup-v1", "hyper-v-bootstrap-ssh-finalize-v2", "hyper-v-windows-specialize-seed-v1", "hyper-v-windows-specialize-account-v1", "hyper-v-windows-boot-contract-v1", "hyper-v-windows-unattend-oobe-schema-v3", "hyper-v-powershell-direct-bounded-probe-v1", "hyper-v-boot-disk-generation-v1", "hyper-v-linux-create-response-v1", "hyper-v-image-acquisition-stage-cache-v1", "hyper-v-powershell-stage-propagation-v1", "hyper-v-provider-image-finalization-v40", "hyper-v-network-failure-diagnostics-v11",
-        ];
+        const protocolVersion = DEVICE_BROKER_PROTOCOL_VERSION;
         const incompatible = createServer((req, res) => {
             if (req.url === "/health") {
                 res.writeHead(200, { "content-type": "application/json" });
@@ -2427,7 +2117,7 @@ describe("device-lab host broker daemon", () => {
             if (req.url === "/status") {
                 const port = (incompatible.address() as { port: number }).port;
                 res.writeHead(200, { "content-type": "application/json" });
-                res.end(JSON.stringify({ ok: true, broker: { name: "ccc-device-broker", mode: "host-broker-daemon", ownerId, port, process: { pid: 77889, startToken: "test:77889" }, version: "1.1.61", implemented } }));
+                res.end(JSON.stringify({ ok: true, broker: { name: "ccc-device-broker", mode: "host-broker-daemon", ownerId, port, process: { pid: 77889, startToken: "test:77889" }, version: "1.1.61", protocolVersion: 0 } }));
                 return;
             }
             if (req.url === "/v1/owner/resolve") {
@@ -2479,35 +2169,7 @@ describe("device-lab host broker daemon", () => {
     it("repairs a ccc-host broker using status pid when runtime metadata is missing", async () => {
         const ownerId = "dddddddddddddddd";
         const stalePid = 11223;
-        const implemented = [
-            "hyper-v-windows-library-v17",
-            "android-avd-console-identity-v1",
-            "android-emulator-stop-completion-v1",
-            "http-host-backend-readiness-api",
-            "http-lifecycle-device-create-command",
-            "http-desktop-device-tool-proxy",
-            "http-desktop-device-tool-timeouts",
-            "http-windows-sandbox-helper-config",
-            "http-android-device-tool-proxy",
-            "http-broker-version-reporting",
-            "windows-hidden-provider-children-v7",
-            "windows-sandbox-window-minimize-v4", "windows-sandbox-runtime-snapshot-ownership-v1",
-            "appium3-scoped-security-npm-cwd-v1",
-            "constant-time-existing-owner-auth-v1",
-            "atomic-owner-secret-provisioning-v1",
-            "owner-mutation-serialization-v1",
-            "atomic-owner-device-state-v1",
-            "cross-process-owner-state-serialization-v1",
-            "owner-device-identity-fencing-v1",
-            "rpc-fault-containment-v1",
-            "cross-owner-physical-lease-serialization-v1", "physical-lease-operation-fencing-v1", "physical-lifecycle-lease-fencing-v1", "physical-attach-detach-operation-serialization-v1",
-            "physical-detach-runtime-cleanup-v1",
-            "physical-runtime-cleanup-lease-fencing-v1",
-            "physical-lease-state-write-rollback-v1",
-            "runtime-cleanup-failure-preservation-v1",
-            "appium-runtime-generation-fencing-v1",
-            "windows-sandbox-singleton-fencing-v1", "cross-process-device-operation-serialization-v1", "cross-process-device-runtime-serialization-v1", "direct-recording-generation-fencing-v1", "direct-appium-generation-fencing-v1", "finite-device-operation-serialization-v1", "direct-runtime-process-identity-v1", "host-recording-process-identity-v1", "runtime-process-observation-v1", "host-appium-process-identity-v1", "appium-port-process-identity-fencing-v1", "broker-owned-owner-secret-provisioning-v1", "host-broker-port-process-identity-v1", "host-broker-process-start-token-v1", "owner-generation-hmac-auth-v1", "direct-appium-process-identity-v1","owner-device-state-validation-v1","shared-device-ownership-state-validation-v1","android-emulator-port-allocation-fencing-v1", "bounded-error-responses-v1", "physical-lease-directory-fencing-v1","owner-auth-directory-fencing-v1", "appium-runtime-installation-fencing-v1", "bounded-no-redirect-appium-http-transport-v1", "windows-provider-launcher-path-fencing-v1", "canonical-owner-device-ids-v1","ios-simulator-owner-identity-fencing-v1", "ios-simulator-provider-create-v1", "physical-appium-lease-fencing-v1", "physical-device-tool-lease-fencing-v1", "physical-lifecycle-use-lease-refresh-v1", "appium-live-runtime-metadata-fencing-v1", "direct-android-lifecycle-generation-fencing-v1", "direct-ios-lifecycle-generation-fencing-v1", "direct-windows-lifecycle-generation-fencing-v1", "direct-macos-lifecycle-generation-fencing-v1", "direct-macos-snapshot-clone-generation-fencing-v1", "physical-direct-state-transition-fencing-v1", "multi-project-owner-resolve-v1", "stopped-android-status-observation-v1", "stopped-android-boot-metadata-v1", "guest-helper-recording-proxy-v1", "physical-unattached-wireless-routing-v1", "android-recording-signal-fallback-v1", "hyper-v-vm-managed-auto-images-v20", "hyper-v-setup-network-v11", "hyper-v-guest-readiness-diagnostics-v24", "hyper-v-azure-bootstrap-dhcp-v1", "hyper-v-bootstrap-nic-cleanup-v1", "hyper-v-bootstrap-ssh-finalize-v2", "hyper-v-windows-specialize-seed-v1", "hyper-v-windows-specialize-account-v1", "hyper-v-windows-boot-contract-v1", "hyper-v-windows-unattend-oobe-schema-v3", "hyper-v-powershell-direct-bounded-probe-v1", "hyper-v-boot-disk-generation-v1", "hyper-v-linux-create-response-v1", "hyper-v-image-acquisition-stage-cache-v1", "hyper-v-powershell-stage-propagation-v1", "hyper-v-provider-image-finalization-v40", "hyper-v-network-failure-diagnostics-v11", "hyper-v-linux-x11-type-v2",
-        ];
+        const protocolVersion = DEVICE_BROKER_PROTOCOL_VERSION;
         const incompatible = createServer((req, res) => {
             if (req.url === "/health") {
                 res.writeHead(200, { "content-type": "application/json" });
@@ -2527,7 +2189,7 @@ describe("device-lab host broker daemon", () => {
                         port,
                         process: { pid: stalePid },
                         version: "1.1.61",
-                        implemented,
+                        protocolVersion: 0,
                     },
                 }));
                 return;
@@ -2560,8 +2222,8 @@ describe("device-lab host broker daemon", () => {
                         port,
                         process: { pid: 55667, startToken: "test:55667" },
                         startedAt: "2026-07-28T00:00:00.000Z",
-                        version: CLI_VERSION,
-                        implemented,
+                        version: DEVICE_LAB_VERSION,
+                        protocolVersion,
                     },
                 }));
                 return;
@@ -2929,27 +2591,10 @@ describe("device-lab host broker daemon", () => {
                 body: JSON.stringify({ method: "broker.status" }),
             });
             expect(status.status).toBe(200);
-            const statusBody = await status.json() as { ok: boolean; result: { ownerId: string; state: { ownerRoot: string }; implemented: string[]; deferred: string[] } };
+            const statusBody = await status.json() as { ok: boolean; result: { ownerId: string; state: { ownerRoot: string }; protocolVersion: number } };
             expect(statusBody.ok).toBe(true);
             expect(statusBody.result.ownerId).toBe(ownerId);
             expect(statusBody.result.state.ownerRoot).toContain(ownerId);
-            expect(statusBody.result.implemented).toContain("http-owner-rpc");
-            expect(statusBody.result.implemented).toContain("bounded-appium-webdriver-request-proxy");
-            expect(statusBody.result.implemented).toContain("http-readonly-device-tool-routing");
-            expect(statusBody.result.implemented).toContain("http-recording-device-tool-routing");
-            expect(statusBody.result.implemented).toContain("http-desktop-device-tool-proxy");
-            expect(statusBody.result.implemented).toContain("http-desktop-device-tool-timeouts");
-            expect(statusBody.result.implemented).toContain("http-windows-sandbox-helper-config");
-            expect(statusBody.result.implemented).toContain("http-android-device-tool-proxy");
-            expect(statusBody.result.implemented).toContain("appium3-scoped-security-npm-cwd-v1");
-            expect(statusBody.result.implemented).toContain("constant-time-existing-owner-auth-v1");
-            expect(statusBody.result.implemented).toContain("atomic-owner-secret-provisioning-v1");
-            expect(statusBody.result.implemented).toContain("owner-mutation-serialization-v1");
-            expect(statusBody.result.implemented).toContain("atomic-owner-device-state-v1");
-            expect(statusBody.result.implemented).toContain("cross-process-owner-state-serialization-v1");
-            expect(statusBody.result.implemented).toContain("rpc-fault-containment-v1");
-            expect(statusBody.result.deferred).not.toContain("mutating-non-lifecycle-device-tool-routing");
-            expect(statusBody.result.deferred).not.toContain("full-provider-routing-parity");
         } finally {
             await close(server);
         }

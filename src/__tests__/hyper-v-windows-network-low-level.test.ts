@@ -25,7 +25,7 @@ import {
     type HyperVWindowsExecutionResult,
     type HyperVWindowsExecutor,
     type HyperVWindowsOperation,
-} from "../hyper-v-windows/low-level/index.js";
+} from "@ccc/hyper-v/low-level/index.js";
 
 const switchId = parseHyperVVirtualSwitchId("12345678-1234-1234-1234-123456789ABC");
 const switchName = parseHyperVVirtualSwitchName("ccc-internal");
@@ -531,9 +531,9 @@ describe("Hyper-V Windows network PowerShell asset", () => {
     it("loads networking modules only from protected System32 roots and qualifies every network cmdlet", () => {
         const source = readFileSync(join(
             process.cwd(),
-            "scripts",
-            "host-control",
+            "packages",
             "hyper-v",
+            "powershell",
             "Invoke-HyperVWindowsOperation.ps1",
         ), "utf8");
 

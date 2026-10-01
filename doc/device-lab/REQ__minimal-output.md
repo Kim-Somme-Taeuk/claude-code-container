@@ -9,7 +9,7 @@ Resolve the exact operation before policy, routing and output handling. Flow
 permissions remain per operation; grouping must not broaden them. Removed tool
 names are rejected, not retained as hidden aliases.
 
-Status incorporates automation and QEMU readiness information; backends includes
+Status incorporates automation and QEMU readiness information; devices with view:backends includes
 broker diagnostics. Status must not start Appium or provision a guest. Running
 QEMU readiness refreshes use the existing owner operation lock; stopped devices
 are reported without probing their guests.
@@ -25,7 +25,7 @@ Metadata-only session opening is not a public prerequisite for commands or files
 ## Action-first public interface
 
 Public names have no device/mobile/display prefix. Common actions are
-`screenshot`, `click`, `double_click`, `type`, `key`, `scroll`, `move` and
+`screenshot`, `click` (including count:2), `type`, `key`, `scroll`, `move` and
 `cursor_position`. Mobile taps use `click`; the current X11 display is another
 explicit deviceId. The owner-scoped device determines the implementation.
 There is no remembered selection. Unsupported gestures, buttons and cursor
@@ -83,8 +83,8 @@ The real-provider test runner validates the same effective arguments as the serv
 Default MCP responses contain actionable state and operation results, without
 repeated transport traces, owner storage paths, protocol capability versions or
 duplicate status representations. Discovery returns one authoritative backend
-list. Capability arrays are available through detailed output; normal discovery
-shows availability and missing prerequisites. Device identities, incarnation IDs, unknown/unavailable state, lease
+list. Normal discovery retains public capabilities and action-specific supportedActions,
+along with backend/provider, availability and missing prerequisites. Device identities, incarnation IDs, unknown/unavailable state, lease
 problems, operation outcomes and returned artifact paths remain usable.
 
 Projection happens only at the public MCP response boundary. Internal provider
@@ -112,7 +112,7 @@ history from default output. Current readiness, target/session identity, usable
 artifact paths and unique failure or recovery evidence remain. Sandbox and
 macOS inventory retain prerequisites, provider identities and singleton/lock
 evidence while removing executable wiring and exact discovery duplicates.
-Detailed output retains the provider payload; presentation never changes state.
+Detailed output retains provider diagnostics; public identities and condition outcomes are normalized in both modes. Presentation never changes state.
 
 Flows return requested images and other native content after their leading JSON
 summary, in step order, with a zero-based `contentIndex` and `contentCount` range into the outer content
@@ -152,7 +152,7 @@ and VM management tools. Known successful helper envelopes must not repeat UI
 hierarchies, input text, parsed response JSON or empty command diagnostics.
 Opaque command output, image data, semantic UI content, current incarnation IDs,
 artifact paths and unique failure/containment evidence remain available.
-`detail: true` preserves the original diagnostic payload.
+`detail: true` preserves diagnostics while retaining canonical public identities and condition outcomes.
 
 Advertised inputs describe the requested action and target. Internal mobile
 connection settings are retained for internal routing and test machinery rather
@@ -210,8 +210,8 @@ change standalone opaque command/UI results or other diagnostic size limits.
 
 ## Intuitive tool selection and verification flows
 
-Tool descriptions distinguish owned-device listing, backend prerequisites, and
-single-backend inventory; recorded status does not promise universal live
+The devices tool distinguishes owned-device listing, backend prerequisites, and
+single-backend inventory through its view selector; recorded status does not promise universal live
 readiness. Creation, startup and physical attachment remain separate actions.
 Boot-wait guidance must match boolean polarity and platform-dependent defaults.
 Flow arguments remain fixed, with no previous-result interpolation. Requested
@@ -243,7 +243,7 @@ ownership checks, and clean-absence response shape remain unchanged.
 When no provider handles a registered tool requiring deviceId, the terminal
 diagnostic distinguishes omitted IDs (missing-device-id), absent owner-local
 devices (device-not-found), and unsupported operations on known targets
-(device-tool-unsupported). Missing/absent targets give a short list_devices hint.
+(device-tool-unsupported). Missing/absent targets give a short devices hint.
 Truly unknown tool names retain Unknown tool. Invalid IDs, provider/broker
 errors, backend mismatch, policy refusals and successful results keep precedence.
 Diagnostic lookup must not query providers or other owners, mutate state, mask
@@ -266,8 +266,8 @@ and dry-run plans stay reviewable. Detailed responses remain original.
 Advertise unprefixed install_app/launch_app/screenshot, set_orientation,
 and one run_flow. All old device_, mobile_ and display_ prefixed names are
 not callable. Discovery and
-public dispatch use the same catalog; detailed internal capabilities may include
-provider operation names, which are not additional public tools.
+public dispatch use the same catalog; internal provider contracts may use private operation names. Both public
+verbosity modes expose canonical tool names and supportedActions.
 The canonical catalog must shrink from its 57,211-byte starting size.
 
 The canonical flow schema enumerates supported visible step tools, including
@@ -277,13 +277,13 @@ commands, broker management and nested flows remain disallowed. Every destructiv
 step requires its own confirmation. Empty flows and malformed step arguments fail.
 Flow steps require tool; name is rejected even when tool is also present.
 
-Optional flow-level deviceId/backend/incarnationId apply only to device-targeted
+Optional flow-level deviceId/incarnationId apply only to device-targeted
 steps. Step arguments are flat. If an explicit step deviceId
-or backend differs from a provided default, inherit none of the target group.
+differs from a provided default, inherit none of the target group.
 Otherwise fill only omitted target fields supported by that step tool (mobile
 actions do not receive an inherited incarnationId). Explicit invalid values still fail
 validation. Never inherit confirmation, credentials, force or routing controls.
-Target-neutral display/inventory steps receive no defaults. Each step retains
+Target-neutral devices steps receive no defaults. Each step retains
 fresh broker/ownership checks, stopping semantics and compact/detail output.
 
 ## Mobile observation deadlines
@@ -305,3 +305,36 @@ scheduling can add overhead. Matching client and host broker builds are required
 for the underlying host request cancellation guarantee; older hosts retain their
 previous internal request limits. Ordinary non-wait Appium requests retain their
 existing timeout defaults.
+
+## AX contract consistency
+
+The 58 public tool identities remain stable during this repair. Advertised input
+requirements must match runtime preflight, including destructive confirmation,
+exclusive selectors, integer inputs and provider/action-specific requirements.
+The runtime destructive policy remains authoritative.
+
+Default discovery retains backend/provider identity and concise supported public
+operations, including supported actions for grouped tools. Suggested next calls
+must name advertised tools and use their canonical arguments. Physical start/stop
+must not imply that MCP powers a physical handset on or off.
+
+Public waits expose a consistent condition outcome and canonical appId where
+applicable. An unmet condition is distinct from an observation/transport failure;
+flows stop at unmet conditions by default. Diagnostic verbosity must not change
+failure classification. Oversized errors retain bounded cause, recovery and
+cleanup/containment evidence while remaining valid JSON within the response cap.
+Opaque exec output, UI content, images and caller data are never interpreted as
+provider metadata. Response tests validate usable identities, outcomes and typed
+observations rather than accepting an arbitrary object.
+
+### Follow-up contract requirements
+
+A completed app observation that finds no app returns `matched:false` without an MCP error. Native command failures still return errors; compact waits use only `matched` for the condition while detail may retain provider booleans and native exit diagnostics. Android console ports accept only even integers from 5554 through 5682. Attach requires the backend-specific physical identifier or Wi-Fi endpoint before dispatch. Explicit recording duration must be an integer from 1 to 1800 seconds; Android further limits it to 180 seconds. iOS Simulator ignores the duration and requires stop; macOS and Windows Sandbox use the supplied limit. Battery level is an integer percentage from 0 to 100 and status is an integer from 1 to 5. Android available inventory exposes installed image and device-profile IDs suitable for creation, with explicit unavailable, incomplete or truncated discovery diagnostics; discovery never downloads SDK content.
+
+## Stable public execution contracts
+
+Public boolean options reject nonboolean values before dispatch, including destructive flags; the string `"false"` never enables an action. Public numeric timing arguments obey their advertised bounds, and `exec` passes its accepted timeout through without silently reducing it.
+
+`create_macos_vm` with an image provisions a managed Tart VM before returning a device. A source device selects the existing owned clone path. Missing source information and unsupported image providers fail before saving a device definition. Failed provisioning retains the existing rollback and ownership guarantees.
+
+Compact simple-action failures retain nonempty command stdout diagnostics, including failures signalled by the MCP error flag. Battery-setting command warnings remain visible instead of becoming plain `ok`. Diagnostics remain bounded; arbitrary exec and UI payloads are not interpreted as operation diagnostics. Tool names and per-operation device selection remain unchanged.

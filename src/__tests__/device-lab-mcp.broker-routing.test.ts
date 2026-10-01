@@ -7,9 +7,9 @@ import { AddressInfo } from "net";
 import { homedir } from "os";
 import { join } from "path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { REQUIRED_CCC_HOST_BROKER_CAPABILITIES } from "../../device-lab-mcp/src/broker.mjs";
-import { createDeviceBrokerServer } from "../device-lab-broker.js";
-import { deviceLabOwnerId } from "../device-lab-owner.js";
+import { DEVICE_BROKER_PROTOCOL_VERSION } from "@ccc/device-lab/providers/contracts/broker-protocol.mjs";
+import { createDeviceBrokerServer } from "@ccc/device-lab/device-lab-broker.js";
+import { deviceLabOwnerId } from "@ccc/device-lab/device-lab-owner.js";
 import { cleanupOwner, writeBrokerDevices } from "./helpers/host-broker-test-fixture.js";
 import {
     cleanupDeviceLabMcpTestContext,
@@ -99,7 +99,7 @@ describe("device-lab MCP broker routing", () => {
                     ok: true,
                     name: "ccc-device-broker",
                     mode: "host-broker-daemon",
-                    broker: { implemented: REQUIRED_CCC_HOST_BROKER_CAPABILITIES },
+                    broker: { protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION },
                 }));
                 return;
             }
@@ -132,9 +132,9 @@ describe("device-lab MCP broker routing", () => {
         const address = server.address() as AddressInfo;
         try {
             const result = await client.callTool({
-                name: "create",
+                name: "create_windows_vm",
                 arguments: {
-                    backend: "windows-vm",
+
                     deviceId: "hyper-v-create-routing",
                     name: "Hyper-V create routing",
                     profile: "windows-11",
@@ -219,7 +219,7 @@ describe("device-lab MCP broker routing", () => {
             const guiCases = [
                 ["screenshot", {}],
                 ["click", { x: 0, y: 0 }],
-                ["double_click", { x: 0, y: 0, button: "right" }],
+                ["click", { count: 2, x: 0, y: 0, button: "right" }],
                 ["key", { key: "Ctrl+C" }],
                 ["type", { text: "hello" }],
                 ["scroll", { x: 0, y: 0, direction: "down" }],
@@ -242,7 +242,7 @@ describe("device-lab MCP broker routing", () => {
                     });
                     expect(guiResult.isError, `${backend} ${name}: ${JSON.stringify(guiResult.content)}`).not.toBe(true);
                     expect(receivedParams).toEqual(expect.objectContaining({
-                        backend, tool: toolOperation(name, extra), deviceId: "hyper-v-create-routing", incarnationId: "4".repeat(32), ...extra,
+                        backend, tool: toolOperation(name, extra), deviceId: "hyper-v-create-routing", incarnationId: "4".repeat(32), ...Object.fromEntries(Object.entries(extra).filter(([key]) => key !== "count")),
                     }));
                     if (name === "screenshot") {
                         expect(guiResult.content).toEqual(expect.arrayContaining([
@@ -308,7 +308,7 @@ describe("device-lab MCP broker routing", () => {
                     ok: true,
                     name: "ccc-device-broker",
                     mode: "host-broker-daemon",
-                    broker: { implemented: REQUIRED_CCC_HOST_BROKER_CAPABILITIES },
+                    broker: { protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION },
                 }));
                 return;
             }
@@ -351,9 +351,9 @@ describe("device-lab MCP broker routing", () => {
         const address = server.address() as AddressInfo;
         try {
             const result = await client.callTool({
-                name: "create",
+                name: "create_linux_vm",
                 arguments: {
-                    backend: "linux-vm",
+
                     deviceId: device.id,
                     name: "Hyper-V Linux create response",
                     viaBroker: true,
@@ -369,9 +369,9 @@ describe("device-lab MCP broker routing", () => {
                 result: { device },
             }));
             const failed = await client.callTool({
-                name: "create",
+                name: "create_linux_vm",
                 arguments: {
-                    backend: "linux-vm",
+
                     deviceId: "hyper-v-network-diagnostic-failure",
                     name: "Hyper-V Linux diagnostic failure",
                     viaBroker: true,
@@ -470,9 +470,9 @@ describe("device-lab MCP broker routing", () => {
         const address = server.address() as AddressInfo;
         try {
             const created = await client.callTool({
-                name: "create",
+                name: "create_windows_sandbox",
                 arguments: {
-                    backend: "windows-sandbox",
+
                     deviceId: "hyper-v-diagnostic-routing",
                     name: "Hyper-V diagnostic routing",
                     viaBroker: true,
@@ -515,7 +515,7 @@ describe("device-lab MCP broker routing", () => {
         const address = server.address() as AddressInfo;
         try {
             const result = await client.callTool({
-                name: "list_devices",
+                name: "devices",
                 arguments: { hostCandidates: ["127.0.0.1"], port: address.port },
             });
             expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
@@ -978,7 +978,7 @@ describe("device-lab MCP broker routing", () => {
             ["exec", { command: "Write-Output ok" }],
             ["screenshot", {}],
             ["click", { x: 10, y: 11 }],
-            ["double_click", { x: 12, y: 13 }],
+            ["click", { count: 2, x: 12, y: 13 }],
             ["key", { key: "Escape" }],
             ["type", { text: "hello" }],
             ["scroll", { direction: "down", amount: 2 }],
@@ -989,15 +989,15 @@ describe("device-lab MCP broker routing", () => {
             ["download", { remotePath: "C:\\ccc\\download.txt", localPath: projectTestPath("download.txt") }],
         ] as const;
         const androidCases = [
-            ["clear_app_data", { packageName: "com.example.route", confirmDestructive: true }],
+            ["clear_app_data", { appId: "com.example.route", confirmDestructive: true }],
             ["install_app", { path: projectTestPath("Test.apk"), replace: true }],
-            ["launch_app", { packageName: "com.example.route" }],
-            ["clear_app_data", { packageName: "com.example.route", confirmDestructive: true }],
+            ["launch_app", { appId: "com.example.route" }],
+            ["clear_app_data", { appId: "com.example.route", confirmDestructive: true }],
         ] as const;
         const iosSimulatorCases = [
             ["screenshot", {}],
             ["exec", { command: "xcrun simctl getenv booted SIMULATOR_UDID" }],
-            ["clear_app_data", { bundleId: "com.example.route", containerType: "data", confirmDestructive: true }],
+            ["clear_app_data", { appId: "com.example.route", containerType: "data", confirmDestructive: true }],
         ] as const;
         const iosRealCases = [
             ["screenshot", {}],
@@ -1152,8 +1152,8 @@ describe("device-lab MCP broker routing", () => {
                 ["wait_for_text", { text: "Ready", timeoutMs: 100, intervalMs: 50 }],
                 ["open_url", { url: "https://example.test/route" }],
                 ["install_app", { path: projectTestPath("Route.apk") }],
-                ["launch_app", { packageName: "com.example.route" }],
-                ["stop_app", { packageName: "com.example.route" }],
+                ["launch_app", { appId: "com.example.route" }],
+                ["stop_app", { appId: "com.example.route" }],
             ] as const;
 
             for (const [name, extra] of implicitMobileCases) {
@@ -1170,11 +1170,11 @@ describe("device-lab MCP broker routing", () => {
 
                 expect(result.isError).not.toBe(true);
                 expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual({
-                    tool: ({ click: "mobile_tap", double_click: "mobile_double_tap", type: "mobile_type_text", key: "mobile_key", ui: "mobile_dump_ui" } as Record<string, string>)[name] || toolOperation(name, extra),
+                    tool: ({ click: "mobile_tap", type: "mobile_type_text", key: "mobile_key", ui: "mobile_dump_ui" } as Record<string, string>)[name] || toolOperation(name, extra),
                     params: expect.objectContaining({
                         backend: "android-device",
                         deviceId: "android-real-route",
-                        ...extra,
+                        ...("appId" in extra ? { packageName: extra.appId, bundleId: extra.appId } : extra),
                     }),
                 });
             }
@@ -1253,7 +1253,7 @@ describe("device-lab MCP broker routing", () => {
             });
             expect(result.isError).not.toBe(true);
             expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual({
-                found: false,
+                found: false, matched: false, reason: "wait-condition-not-met",
                 provider: "adb-uiautomator",
             });
             expect(requests).toEqual(["broker.inventory", "broker.device.tool.invoke"]);
@@ -1297,8 +1297,8 @@ describe("device-lab MCP broker routing", () => {
         const address = server.address() as AddressInfo;
         try {
             for (const [name, extra] of [
-                ["permission", { action: "grant", packageName: "com.example.mobile", permission: "android.permission.CAMERA" }],
-                ["permission", { action: "revoke", packageName: "com.example.mobile", permission: "android.permission.CAMERA" }],
+                ["permission", { action: "grant", appId: "com.example.mobile", permission: "android.permission.CAMERA" }],
+                ["permission", { action: "revoke", appId: "com.example.mobile", permission: "android.permission.CAMERA" }],
                 ["set_battery", { level: 42, charging: true, confirmDestructive: true }],
             ] as const) {
                 const result = await client.callTool({
@@ -1318,7 +1318,7 @@ describe("device-lab MCP broker routing", () => {
                     params: expect.objectContaining({
                         backend: "android-emulator",
                         deviceId: "android-explicit-mobile-route",
-                        ...Object.fromEntries(Object.entries(extra).filter(([key]) => key !== "action")),
+                        ...("appId" in extra ? { packageName: extra.appId, bundleId: extra.appId, permission: extra.permission, service: extra.permission } : extra),
                     }),
                 });
             }
@@ -1417,6 +1417,12 @@ describe("device-lab MCP broker routing", () => {
                 }));
                 return;
             }
+            if (body.method === "broker.device.tool.invoke") {
+                res.end(JSON.stringify({ ok: true, result: { mcpResult: {
+                    content: [{ type: "text", text: JSON.stringify({ provider: "native-network-fixture" }) }],
+                } } }));
+                return;
+            }
             if (body.method === "broker.appium.request") {
                 const responseBody = body.params?.path === "/appium/device/get_clipboard"
                     ? { value: Buffer.from("broker clip", "utf8").toString("base64") }
@@ -1463,22 +1469,6 @@ describe("device-lab MCP broker routing", () => {
                     ],
                     payload: expect.objectContaining({ text: "broker clip" }),
                 },
-                {
-                    name: "set_network",
-                    args: { wifi: true, data: false, confirmDestructive: true },
-                    requests: [
-                        { method: "POST", path: "/execute/sync", body: { script: "mobile: shell", args: [{ command: "svc", args: ["wifi", "enable"] }] } },
-                        { method: "POST", path: "/execute/sync", body: { script: "mobile: shell", args: [{ command: "svc", args: ["data", "disable"] }] } },
-                    ],
-                },
-                {
-                    name: "toggle_airplane_mode",
-                    args: { enabled: true, confirmDestructive: true },
-                    requests: [
-                        { method: "POST", path: "/execute/sync", body: { script: "mobile: shell", args: [{ command: "settings", args: ["put", "global", "airplane_mode_on", "1"] }] } },
-                        { method: "POST", path: "/execute/sync", body: { script: "mobile: shell", args: [{ command: "am", args: ["broadcast", "-a", "android.intent.action.AIRPLANE_MODE", "--ez", "state", "true"] }] } },
-                    ],
-                },
             ] as const;
 
             for (const item of cases) {
@@ -1513,6 +1503,26 @@ describe("device-lab MCP broker routing", () => {
                         ...request,
                     })),
                 );
+            }
+
+            for (const args of [
+                { wifi: true, data: false },
+                { airplaneMode: false },
+            ]) {
+                const offset = rpcCalls.length;
+                const result = await client.callTool({ name: "set_network", arguments: {
+                    broker: true, autolaunch: false, deviceId: route.deviceId,
+                    hostCandidates: route.hostCandidates, port: route.port, timeoutMs: route.timeoutMs,
+                    ...args, confirmDestructive: true,
+                } });
+                expect(result.isError, JSON.stringify(result)).not.toBe(true);
+                expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual({ provider: "native-network-fixture" });
+                const calls = rpcCalls.slice(offset);
+                expect(calls.map(call => call.method)).toEqual(["broker.inventory", "broker.device.tool.invoke"]);
+                expect(calls[1].params).toMatchObject({
+                    backend: "android-emulator", deviceId: route.deviceId, tool: "mobile_set_network",
+                    ...args, confirmDestructive: true,
+                });
             }
 
             appiumEnsureDelayMs = 100;
@@ -2361,9 +2371,9 @@ describe("device-lab MCP broker routing", () => {
         const address = server.address() as AddressInfo;
         try {
             const brokerCreate = await client.callTool({
-                name: "create",
+                name: "create_windows_sandbox",
                 arguments: {
-                    backend: "windows-sandbox",
+
                     name: "Broker Created",
                     viaBroker: true,
                     hostCandidates: ["127.0.0.1"],
@@ -2629,7 +2639,7 @@ describe("device-lab MCP broker routing", () => {
                 res.end(JSON.stringify({
                     ok: true,
                     broker: {
-                        implemented: REQUIRED_CCC_HOST_BROKER_CAPABILITIES,
+                        protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION,
                     },
                 }));
                 return;
@@ -2667,9 +2677,9 @@ describe("device-lab MCP broker routing", () => {
         }));
         try {
             const result = await client.callTool({
-                name: "create",
+                name: "create_android_emulator",
                 arguments: {
-                    backend: "android-emulator",
+
                     name: "Slow AVD",
                     deviceId: "android-slow-avd",
                     systemImage: "system-images;android-35;google_apis;x86_64",
@@ -2711,9 +2721,9 @@ describe("device-lab MCP broker routing", () => {
             }));
 
             const hyperVLinux = await client.callTool({
-                name: "create",
+                name: "create_linux_vm",
                 arguments: {
-                    backend: "linux-vm",
+
                     provider: "hyper-v",
                     deviceId: "hyper-v-linux-no-direct-fallback",
                     name: "Hyper-V Linux no direct fallback",
@@ -2750,7 +2760,7 @@ describe("device-lab MCP broker routing", () => {
                     ok: true,
                     name: "ccc-device-broker",
                     mode: "host-broker-daemon",
-                    broker: { implemented: REQUIRED_CCC_HOST_BROKER_CAPABILITIES },
+                    broker: { protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION },
                 }));
                 return;
             }
@@ -3018,8 +3028,8 @@ describe("device-lab MCP broker routing", () => {
         }));
         try {
             const inventory = await client.callTool({
-                name: "inventory",
-                arguments: {
+                name: "devices",
+                arguments: { view: "available",
                     backend: "windows-sandbox",
                     broker: true,
                     hostCandidates: ["127.0.0.1"],
@@ -3109,8 +3119,8 @@ describe("device-lab MCP broker routing", () => {
         }));
         try {
             for (const [name, extra] of [
-                ["permission", { action: "grant", packageName: "com.example.mobile", permission: "android.permission.CAMERA" }],
-                ["permission", { action: "revoke", packageName: "com.example.mobile", permission: "android.permission.CAMERA" }],
+                ["permission", { action: "grant", appId: "com.example.mobile", permission: "android.permission.CAMERA" }],
+                ["permission", { action: "revoke", appId: "com.example.mobile", permission: "android.permission.CAMERA" }],
                 ["set_battery", { level: 42, charging: true, confirmDestructive: true }],
             ] as const) {
                 const result = await client.callTool({

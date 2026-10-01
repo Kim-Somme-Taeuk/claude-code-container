@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { deleteDeviceLabHyperVVm } from "../device-lab/broker/hyper-v/delete.js";
-import type { HyperVWindowsClient } from "../hyper-v-windows/index.js";
+import { deleteDeviceLabHyperVVm } from "@ccc/device-lab/device-lab/broker/hyper-v/delete.js";
+import type { HyperVWindowsClient } from "@ccc/hyper-v/index.js";
 
 const vmId = "12345678-1234-1234-1234-123456789abc";
 const vmName = "ccc-aabbccddeeff0011-test-0123456789abcdef0123456789abcdef";

@@ -3,7 +3,7 @@ import type {
     HyperVElevatedNetworkRelayFailureEvent,
     HyperVElevatedNetworkRelayProcess,
     HyperVElevatedNetworkTerminationDiagnostic,
-} from "../device-lab/broker/hyper-v/elevated-network-session.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/elevated-network-session.js";
 
 declare const relayCompletion: Promise<HyperVElevatedNetworkRelayCompletion>;
 

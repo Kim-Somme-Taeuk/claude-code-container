@@ -4,13 +4,13 @@ import {
     effectKindOfStep,
     planHyperVVirtualMachineCreation,
     planHyperVVirtualMachineCreationCompensation,
-} from "../hyper-v-windows/lifecycle/vm-create-reconcile.js";
+} from "@ccc/hyper-v/lifecycle/vm-create-reconcile.js";
 import type {
     HyperVCreateEffect,
     HyperVCreateStep,
     HyperVCreateNetworkIntent,
     HyperVCreateVirtualMachineRequest,
-} from "../hyper-v-windows/lifecycle/vm-create-contracts.js";
+} from "@ccc/hyper-v/lifecycle/vm-create-contracts.js";
 
 const DEVICE_ROOT = "C:\\ccc\\devices\\device-1";
 const DISK_PATH = "C:\\ccc\\devices\\device-1\\disks\\root.vhdx";
@@ -45,6 +45,12 @@ function kindsOf(network: HyperVCreateNetworkIntent): readonly string[] {
 // instead of the device's own disk -- every device would have booted and written to the image
 // every later device is cloned from. Order was pinned; payload was not.
 describe("the whole plan, every field", () => {
+    it("exposes nested virtualization only on explicit creation, before boot", () => {
+        const steps = planHyperVVirtualMachineCreation(request({ nestedVirtualization: true }));
+        expect(steps.find(step => step.kind === "set-processor-count")).toMatchObject({ exposeVirtualizationExtensions: true });
+        expect(planHyperVVirtualMachineCreation(request()).find(step => step.kind === "set-processor-count")).not.toHaveProperty("exposeVirtualizationExtensions");
+        expect(() => planHyperVVirtualMachineCreation(request({ nestedVirtualization: "true" as unknown as boolean }))).toThrow();
+    });
     it("plans a VM with no network", () => {
         expect(planHyperVVirtualMachineCreation(request())).toEqual([
             { kind: "ensure-directory", path: DEVICE_ROOT },

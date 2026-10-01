@@ -2,7 +2,7 @@ import { AddressInfo } from "net";
 import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { createDeviceBrokerServer, deviceBrokerOwnerToken } from "../../device-lab-broker.js";
+import { createDeviceBrokerServer, deviceBrokerOwnerToken } from "@ccc/device-lab/device-lab-broker.js";
 
 export type DeviceBrokerTestServer = ReturnType<typeof createDeviceBrokerServer>;
 

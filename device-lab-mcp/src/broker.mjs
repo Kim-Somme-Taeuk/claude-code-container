@@ -1,4 +1,5 @@
-import { createWaitBudget } from "./wait-budget.mjs";
+import { fileURLToPath } from "url";
+import { createWaitBudget } from "@ccc/device-lab/providers/wait-budget.mjs";
 import { AsyncLocalStorage } from "async_hooks";
 import { createHash, createHmac, randomBytes } from "crypto";
 import { spawn, spawnSync } from "child_process";
@@ -6,11 +7,11 @@ import { accessSync, closeSync, constants as fsConstants, existsSync, fchmodSync
 import { request as httpRequest } from "http";
 import { homedir } from "os";
 import { delimiter, dirname, join, resolve } from "path";
-import { ownerBasis, ownerId, PACKAGE_ROOT, projectMountPath } from "./context.mjs";
-import { missingBrokerCapabilities } from "./contracts/broker-capabilities.mjs";
-import { writeJsonFileAtomically } from "./state/shared-mutation-lock.mjs";
-import { readDeviceLabStateFile } from "./state/state-file.mjs";
-import { canonicalWindowsPowerShellPath, canonicalWindowsSystemExecutablePath, hiddenWindowsPowerShellArgs, terminateWindowsProcessByStartToken } from "./state/windows-system-powershell.mjs";
+import { ownerBasis, ownerId, PACKAGE_ROOT, projectMountPath } from "@ccc/device-lab/providers/context.mjs";
+import { DEVICE_BROKER_PROTOCOL_VERSION, isCompatibleBrokerProtocol } from "@ccc/device-lab/providers/contracts/broker-protocol.mjs";
+import { writeJsonFileAtomically } from "@ccc/device-lab/providers/state/shared-mutation-lock.mjs";
+import { readDeviceLabStateFile } from "@ccc/device-lab/providers/state/state-file.mjs";
+import { canonicalWindowsPowerShellPath, canonicalWindowsSystemExecutablePath, hiddenWindowsPowerShellArgs, terminateWindowsProcessByStartToken } from "@ccc/device-lab/providers/state/windows-system-powershell.mjs";
 
 const brokerOperations = new AsyncLocalStorage();
 const brokerSetupEvidence = new WeakMap();
@@ -48,99 +49,6 @@ const MAX_PROBE_CANDIDATES = 8;
 const MAX_PROBE_TIMEOUT_MS = 2000;
 const TRUSTED_BROKER_HOSTS = new Set(HOST_CANDIDATES);
 const BROKER_BIND_ANY_HOSTS = new Set(["0.0.0.0", "::"]);
-export const REQUIRED_CCC_HOST_BROKER_CAPABILITIES = [
-    "windows-sandbox-window-minimize-v4",
-    "windows-hidden-provider-children-v7",
-    "constant-time-existing-owner-auth-v1",
-    "atomic-owner-secret-provisioning-v1",
-    "owner-mutation-serialization-v1",
-    "atomic-owner-device-state-v1",
-    "cross-process-owner-state-serialization-v1",
-    "owner-device-identity-fencing-v1",
-    "rpc-fault-containment-v1",
-    "cross-owner-physical-lease-serialization-v1",
-    "physical-lease-operation-fencing-v1",
-    "physical-lifecycle-lease-fencing-v1",
-    "physical-attach-detach-operation-serialization-v1",
-    "physical-detach-runtime-cleanup-v1",
-    "physical-runtime-cleanup-lease-fencing-v1",
-    "physical-lease-state-write-rollback-v1",
-    "runtime-cleanup-failure-preservation-v1",
-    "appium-runtime-generation-fencing-v1",
-    "windows-sandbox-singleton-fencing-v1",
-    "cross-process-device-operation-serialization-v1",
-    "cross-process-device-runtime-serialization-v1",
-    "direct-recording-generation-fencing-v1",
-    "direct-appium-generation-fencing-v1",
-    "finite-device-operation-serialization-v1",
-    "direct-runtime-process-identity-v1",
-    "host-recording-process-identity-v1",
-    "runtime-process-observation-v1",
-    "host-appium-process-identity-v1",
-    "broker-owned-owner-secret-provisioning-v1",
-    "host-broker-port-process-identity-v1",
-    "host-broker-process-start-token-v1",
-    "owner-generation-hmac-auth-v1",
-    "direct-appium-process-identity-v1", "owner-device-state-validation-v1", "shared-device-ownership-state-validation-v1",
-    "android-emulator-port-allocation-fencing-v1",
-    "android-avd-console-identity-v1",
-    "android-emulator-stop-completion-v1",
-    "bounded-error-responses-v1",
-    "physical-lease-directory-fencing-v1",
-    "owner-auth-directory-fencing-v1",
-    "appium-runtime-installation-fencing-v1",
-    "bounded-no-redirect-appium-http-transport-v1",
-    "windows-provider-launcher-path-fencing-v1",
-    "canonical-owner-device-ids-v1",
-    "ios-simulator-owner-identity-fencing-v1",
-    "ios-simulator-provider-create-v1",
-    "physical-appium-lease-fencing-v1",
-    "physical-device-tool-lease-fencing-v1",
-    "physical-lifecycle-use-lease-refresh-v1",
-    "appium-live-runtime-metadata-fencing-v1",
-    "direct-android-lifecycle-generation-fencing-v1",
-    "direct-ios-lifecycle-generation-fencing-v1",
-    "direct-windows-lifecycle-generation-fencing-v1",
-    "direct-macos-lifecycle-generation-fencing-v1",
-    "direct-macos-snapshot-clone-generation-fencing-v1",
-    "physical-direct-state-transition-fencing-v1",
-    "multi-project-owner-resolve-v1",
-    "stopped-android-status-observation-v1",
-    "stopped-android-boot-metadata-v1",
-    "guest-helper-recording-proxy-v1",
-    "physical-unattached-wireless-routing-v1",
-    "android-recording-signal-fallback-v1",
-    "hyper-v-vm-managed-auto-images-v20",
-    "hyper-v-setup-network-v11",
-    "hyper-v-guest-readiness-diagnostics-v24",
-    "hyper-v-azure-bootstrap-dhcp-v1",
-    "hyper-v-bootstrap-nic-cleanup-v1",
-    "hyper-v-bootstrap-ssh-finalize-v2",
-    "hyper-v-windows-specialize-seed-v1",
-    "hyper-v-windows-specialize-account-v1",
-    "hyper-v-windows-boot-contract-v1",
-    "hyper-v-windows-unattend-oobe-schema-v3",
-    "hyper-v-boot-disk-generation-v1",
-    "hyper-v-linux-create-response-v1",
-    "hyper-v-linux-x11-type-v2",
-    "hyper-v-image-acquisition-stage-cache-v1",
-    "hyper-v-powershell-stage-propagation-v1",
-    "hyper-v-provider-image-finalization-v40",
-    "hyper-v-network-failure-diagnostics-v11",
-    // Added late, and deliberately: this list had never carried the Hyper-V Windows library
-    // capability at any version, so the MCP gate admitted a broker whose session re-issued a
-    // privileged mutation on a false never-ran — a duplicate Remove-VMSnapshot, reachable from the
-    // device_snapshot_delete tool. The CLI and level-3 gates required it; this one did not.
-    //
-    // It was previously deferred as a fleet-compatibility call, on the reasoning that adding entries
-    // makes an updated MCP refuse older brokers. Two facts retired that. The cost argument was
-    // "degrades to slow rather than to wrong", which is false for an entry admitting a duplicated
-    // mutation. And the population this rejects is currently empty: `master` carries neither this
-    // capability string at any version nor the session pool at all, so no shipped broker advertises
-    // it. Adding it before the branch ships costs nothing; adding it after costs the fleet migration
-    // the old comment described.
-    "hyper-v-windows-library-v17",
-];
 const DEFAULT_LIFECYCLE_RPC_TIMEOUT_MS = 120000;
 const MAX_RPC_TIMEOUT_MS = 21615000;
 const MAX_RPC_BODY_BYTES = 64 * 1024;
@@ -354,12 +262,16 @@ function readBrokerRuntime() {
 
 export function implicitBrokerProbeOptions(options = {}, behavior = {}) {
     const allowDefault = behavior?.allowDefault !== false;
+    // Public operation args are later merged with this route. Keep their deadline intact.
+    const probeTimeout = Number.isFinite(options.brokerProbeTimeoutMs)
+        ? { brokerProbeTimeoutMs: normalizeProbeOptions(options).timeoutMs }
+        : { timeoutMs: Number.isFinite(options.timeoutMs) ? normalizeProbeOptions(options).timeoutMs : 1000 };
     const defaultProbe = (autolaunchDefault = true) => {
         const probe = normalizeProbeOptions({ ...options, probe: true });
         return {
             hostCandidates: probe.hostCandidates,
             port: probe.port,
-            timeoutMs: Number.isFinite(options.timeoutMs) ? probe.timeoutMs : 1000,
+            ...probeTimeout,
             autolaunch: options.autolaunch === true || (options.autolaunch !== false && autolaunchDefault),
         };
     };
@@ -373,7 +285,7 @@ export function implicitBrokerProbeOptions(options = {}, behavior = {}) {
     return {
         hostCandidates,
         port: runtime.port,
-        timeoutMs: Number.isFinite(options.timeoutMs) ? normalizeProbeOptions(options).timeoutMs : 1000,
+        ...probeTimeout,
         autolaunch: options.autolaunch === false ? false : true,
     };
 }
@@ -448,21 +360,10 @@ function executableExists(executable) {
     return false;
 }
 
-function packagedCccCliPath(packageRoot = PACKAGE_ROOT) {
-    const candidates = [
-        join(packageRoot, "index.js"),
-        join(packageRoot, "..", "dist", "index.js"),
-    ];
-    return candidates.find((candidate) => existsSync(candidate)) || null;
-}
-
 export function brokerLaunchInvocation(host, port, options = {}) {
-    const platform = options.platform || process.platform;
-    const cliPath = platform === "win32" ? packagedCccCliPath(options.packageRoot) : null;
+    const brokerEntry = fileURLToPath(import.meta.resolve("@ccc/device-lab/broker-entry.js"));
     const brokerArgs = ["devices", "broker", "serve", "--host", host, "--port", String(port)];
-    return cliPath
-        ? { command: options.execPath || process.execPath, args: [cliPath, ...brokerArgs] }
-        : { command: "ccc", args: brokerArgs };
+    return { command: options.execPath || process.execPath, args: [brokerEntry, ...brokerArgs] };
 }
 
 function normalizeLaunchOptions(options = {}) {
@@ -519,8 +420,9 @@ function normalizeProbeOptions(options = {}) {
         ? options.hostCandidates.map(String).slice(0, MAX_PROBE_CANDIDATES)
         : HOST_CANDIDATES;
     const port = Number.isInteger(options.port) ? Number(options.port) : 17373;
-    const timeoutMs = Number.isFinite(options.timeoutMs)
-        ? Math.min(MAX_PROBE_TIMEOUT_MS, Math.max(1, Number(options.timeoutMs)))
+    const probeTimeoutMs = Number.isFinite(options.brokerProbeTimeoutMs) ? options.brokerProbeTimeoutMs : options.timeoutMs;
+    const timeoutMs = Number.isFinite(probeTimeoutMs)
+        ? Math.min(MAX_PROBE_TIMEOUT_MS, Math.max(1, Number(probeTimeoutMs)))
         : 750;
     return { probe: options.probe === true, hostCandidates, port, timeoutMs };
 }
@@ -807,7 +709,7 @@ async function probeBrokerHealth({ hostCandidates, port, timeoutMs }) {
     return { requested: true, available: false, selected: null, attempts };
 }
 
-async function probeCccHostBrokerCapabilities(host, port, timeoutMs) {
+async function probeCccHostBrokerProtocol(host, port, timeoutMs) {
     const endpoint = `http://${host}:${port}/status`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -816,15 +718,14 @@ async function probeCccHostBrokerCapabilities(host, port, timeoutMs) {
         const response = await fetch(endpoint, { signal: controller.signal, redirect: "manual" });
         const parsed = await readBrokerHttpJson(response, BROKER_CONTROL_RESPONSE_LIMIT_BYTES);
         const body = parsed.body;
-        const implemented = Array.isArray(body?.broker?.implemented) ? body.broker.implemented.map(String) : [];
-        // Versioned families match forward: a newer host broker (-v10) satisfies this client's -v9.
-        const missingCapabilities = missingBrokerCapabilities(REQUIRED_CCC_HOST_BROKER_CAPABILITIES, implemented);
+        const protocolVersion = body?.broker?.protocolVersion ?? null;
         return {
-            ok: parsed.ok && response.ok && body?.ok === true && missingCapabilities.length === 0,
+            ok: parsed.ok && response.ok && body?.ok === true && isCompatibleBrokerProtocol(protocolVersion),
             endpoint,
             status: response.status,
             body,
-            missingCapabilities,
+            protocolVersion,
+            expectedProtocolVersion: DEVICE_BROKER_PROTOCOL_VERSION,
             durationMs: Date.now() - startedAt,
             ...(parsed.ok ? {} : { error: parsed.error, maxBytes: parsed.maxBytes }),
         };
@@ -834,7 +735,8 @@ async function probeCccHostBrokerCapabilities(host, port, timeoutMs) {
             endpoint,
             status: null,
             body: null,
-            missingCapabilities: REQUIRED_CCC_HOST_BROKER_CAPABILITIES,
+            protocolVersion: null,
+            expectedProtocolVersion: DEVICE_BROKER_PROTOCOL_VERSION,
             durationMs: Date.now() - startedAt,
             error: error?.name === "AbortError" ? "timeout" : error?.message || String(error),
         };
@@ -843,7 +745,7 @@ async function probeCccHostBrokerCapabilities(host, port, timeoutMs) {
     }
 }
 
-export const probeCccHostBrokerCapabilitiesForTest = probeCccHostBrokerCapabilities;
+export const probeCccHostBrokerProtocolForTest = probeCccHostBrokerProtocol;
 
 async function waitForBrokerHealth({ host, port, timeoutMs }) {
     const deadline = Date.now() + timeoutMs;
@@ -959,7 +861,8 @@ function isBrokerServeCommandLine(commandLine, port, expectedCliPath) {
         && /(?:^|\/)node(?:\.exe)?$/i.test(normalizedPath(commandTokens[0]))
         && normalizedPath(commandTokens[1]) === normalizedPath(expectedCliPath));
     return /\bdevices\s+broker\s+serve\b/i.test(normalized)
-        && (/\bccc(?:\.cmd|\.exe)?\b/i.test(normalized) || /\bnode(?:\.exe)?\b.*\bindex\.js\b/i.test(normalized))
+        && (/\bccc(?:\.cmd|\.exe)?\b/i.test(normalized) || /\bnode(?:\.exe)?\b.*\bindex\.js\b/i.test(normalized)
+            || Boolean(expectedCliPath && expectedPathVerified && /(?:^|\/)broker-entry\.js$/i.test(normalizedPath(commandTokens[1]))))
         && new RegExp(`(?:^|\\s)--port(?:=|\\s+)${port}(?:\\s|$)`).test(normalized)
         && expectedPathVerified;
 }
@@ -1541,6 +1444,7 @@ export async function waitForBrokerOwnerResolve(host, port, timeoutMs) {
 }
 
 async function replaceVerifiedOwnedLegacyBroker(runtime, port, statusBroker, options = {}) {
+    if (Number.isSafeInteger(statusBroker?.protocolVersion) && statusBroker.protocolVersion > DEVICE_BROKER_PROTOCOL_VERSION) return false;
     const verified = verifiedOwnedLegacyBrokerProcess(
         runtime,
         port,
@@ -1577,7 +1481,7 @@ async function ensureBrokerUncached(options = {}) {
     const before = await probeBrokerHealth(launch);
     if (before.available) {
         const existingRuntime = readBrokerRuntime();
-        const compatibility = await probeCccHostBrokerCapabilities(before.selected.host, before.selected.port, launch.timeoutMs);
+        const compatibility = await probeCccHostBrokerProtocol(before.selected.host, before.selected.port, launch.timeoutMs);
         if (!compatibility.ok) {
             if (existingRuntime?.ownerId === owner && await replaceVerifiedOwnedLegacyBroker(
                 existingRuntime,
@@ -1597,7 +1501,7 @@ async function ensureBrokerUncached(options = {}) {
                 host: before.selected.host,
                 port: before.selected.port,
                 compatibility,
-                attempts: [...before.attempts, { reason: "host-broker-missing-required-capabilities", compatibility }],
+                attempts: [...before.attempts, { reason: "host-broker-protocol-mismatch", compatibility }],
             };
         }
         const ownerResolve = await resolveBrokerOwner({
@@ -1717,7 +1621,7 @@ async function ensureBrokerUncached(options = {}) {
                 timeoutMs: launch.timeoutMs,
             });
             if (existingProbe.available) {
-                const compatibility = await probeCccHostBrokerCapabilities(existingProbe.selected.host, existingProbe.selected.port, launch.timeoutMs);
+                const compatibility = await probeCccHostBrokerProtocol(existingProbe.selected.host, existingProbe.selected.port, launch.timeoutMs);
                 if (!compatibility.ok) {
                     if (await replaceVerifiedOwnedLegacyBroker(
                         existing,
@@ -1737,7 +1641,7 @@ async function ensureBrokerUncached(options = {}) {
                         host: existingProbe.selected.host,
                         port: existingProbe.selected.port,
                         compatibility,
-                        attempts: [...before.attempts, ...existingProbe.attempts, { reason: "host-broker-missing-required-capabilities", compatibility }],
+                        attempts: [...before.attempts, ...existingProbe.attempts, { reason: "host-broker-protocol-mismatch", compatibility }],
                     };
                 }
                 const ownerResolve = await resolveBrokerOwner({
@@ -1815,7 +1719,7 @@ async function ensureBrokerUncached(options = {}) {
                     timeoutMs: launch.launchTimeoutMs,
                 });
                 if (recoveryProbe.available) {
-                    const compatibility = await probeCccHostBrokerCapabilities(recoveryProbe.selected.host, recoveryProbe.selected.port, launch.timeoutMs);
+                    const compatibility = await probeCccHostBrokerProtocol(recoveryProbe.selected.host, recoveryProbe.selected.port, launch.timeoutMs);
                     recoveryStatusBroker = compatibility.body?.broker || null;
                     if (!compatibility.ok) {
                         if (await replaceVerifiedOwnedLegacyBroker(
@@ -1836,7 +1740,7 @@ async function ensureBrokerUncached(options = {}) {
                             host: recoveryProbe.selected.host,
                             port: recoveryProbe.selected.port,
                             compatibility,
-                            attempts: [...before.attempts, ...existingProbe.attempts, ...recoveryProbe.attempts, { reason: "host-broker-missing-required-capabilities", compatibility }],
+                            attempts: [...before.attempts, ...existingProbe.attempts, ...recoveryProbe.attempts, { reason: "host-broker-protocol-mismatch", compatibility }],
                         };
                     }
                     const ownerResolve = await resolveBrokerOwner({
@@ -1978,7 +1882,7 @@ async function ensureBrokerUncached(options = {}) {
         if (ready.available) {
             const ownerResolve = await waitForBrokerOwnerResolve(launch.host, launch.port, launch.launchTimeoutMs);
             if (ownerResolve.ok) {
-                const compatibility = await probeCccHostBrokerCapabilities(launch.host, launch.port, launch.timeoutMs);
+                const compatibility = await probeCccHostBrokerProtocol(launch.host, launch.port, launch.timeoutMs);
                 if (!compatibility.ok) {
                     const launchCleanup = await cleanupLaunchedBrokerRuntime(runtime, child, 3000);
                     return {
@@ -2107,7 +2011,7 @@ export async function brokerShutdown(options = {}) {
     if (runtime.managedBy !== "device-lab-mcp") {
         return { ok: false, ownerId: owner, error: "runtime-not-managed-by-device-lab-mcp", runtime };
     }
-    const status = await probeCccHostBrokerCapabilities(
+    const status = await probeCccHostBrokerProtocol(
         runtime.host || "127.0.0.1",
         Number(runtime.port) || 17373,
         options.timeoutMs || 1500,
@@ -2366,10 +2270,11 @@ async function verifyAuthenticatedBrokerGeneration(host, port, launch, options, 
             || options.autolaunch === false)) {
         return { ...(launch?.runtime || readBrokerRuntime() || {}), testOnly: true };
     }
-    const attestationTimeoutMs = Number.isFinite(Number(options.timeoutMs))
-        ? Math.min(5000, Math.max(1, Number(options.timeoutMs)))
+    const probeTimeoutMs = options.brokerProbeTimeoutMs ?? options.timeoutMs;
+    const attestationTimeoutMs = Number.isFinite(Number(probeTimeoutMs))
+        ? Math.min(5000, Math.max(1, Number(probeTimeoutMs)))
         : 5000;
-    const attestation = await probeCccHostBrokerCapabilities(host, port, attestationTimeoutMs);
+    const attestation = await probeCccHostBrokerProtocol(host, port, attestationTimeoutMs);
     const broker = attestation?.body?.broker;
     const brokerPid = Number(broker?.process?.pid);
     const brokerStartToken = typeof broker?.process?.startToken === "string" ? broker.process.startToken : "";
@@ -2572,7 +2477,7 @@ async function brokerRpcRequestUncached(options = {}) {
         const endpoint = `http://${host}:${probeOptions.port}${rpcPath}`;
         const startedAt = Date.now();
         try {
-            const verifiedRuntime = await verifyAuthenticatedBrokerGeneration(host, probeOptions.port, launch, waitBudget ? { ...options, timeoutMs: waitBudget.requestTimeout(5000) } : options);
+            const verifiedRuntime = await verifyAuthenticatedBrokerGeneration(host, probeOptions.port, launch, waitBudget ? { ...options, brokerProbeTimeoutMs: waitBudget.requestTimeout(5000), timeoutMs: waitBudget.requestTimeout(5000) } : options);
             if (!verifiedRuntime) {
                 return {
                     ok: false,
@@ -2848,6 +2753,7 @@ export async function brokerCommand(options = {}) {
             secureBootTemplate: options.secureBootTemplate,
             baseImageId: options.baseImageId,
             cpus: options.cpus,
+            nestedVirtualization: options.nestedVirtualization,
             sshHost: options.sshHost,
             sshPort: options.sshPort,
             sshUser: options.sshUser,
@@ -2881,6 +2787,7 @@ export const BROKER_DEVICE_TOOL_PARAM_KEYS = [
     "host",
     "port",
     "pairHost",
+    "udid",
     "pairPort",
     "pairingCode",
     "connect",
@@ -2929,6 +2836,7 @@ export const BROKER_DEVICE_TOOL_PARAM_KEYS = [
     "charging",
     "status",
     "wifi",
+    "airplaneMode",
     "data",
     "enabled",
     "timeoutMs",
@@ -3049,7 +2957,7 @@ export async function brokerStatus(options = {}) {
         ? "host broker is reachable but does not satisfy the required owner-resolve contract; restart or upgrade the host broker so /v1/owner/resolve is available"
         : null;
     const ownerResolveRemedy = ownerResolveWarning
-        ? "Restart the host ccc device broker from the host using the same checkout/version as this container, then rerun device_broker_status."
+        ? "Update host CCC to a matching protocol and run ccc devices broker status on the physical host, then retry."
         : null;
     const runtime = readBrokerRuntime();
     const containerContract = brokerContainerContract();
@@ -3060,7 +2968,7 @@ export async function brokerStatus(options = {}) {
         ? "host broker is reachable but the resolved owner credential is unavailable"
         : null;
     const compatibilityWarning = launchIncompatible
-        ? `host broker is reachable but missing required capabilities: ${(launch.compatibility?.missingCapabilities || []).join(", ") || "unknown"}`
+        ? `host broker protocol mismatch; update host CCC and retry`
         : null;
     const warnings = [...containerContract.warnings, ...(ownerResolveWarning ? [ownerResolveWarning] : []), ...(compatibilityWarning ? [compatibilityWarning] : []), ...(ownerAuthWarning ? [ownerAuthWarning] : [])];
     const remedies = [...containerContract.remedies, ...(ownerResolveRemedy ? [ownerResolveRemedy] : []), ...(compatibilityWarning ? ["Restart or upgrade the host ccc device broker before using host-backed tools."] : []), ...(ownerAuthWarning ? ["Reopen CCC from the host to restore the isolated owner credential mount."] : [])];
@@ -3098,33 +3006,7 @@ export async function brokerStatus(options = {}) {
         warnings,
         remedies,
         persistence: brokerPersistence(owner),
-        implemented: [
-            "owner-scoped direct provider adapters",
-            "owner-scoped state layout",
-            "physical device lease files",
-            "explicit cross-project CLI cleanup commands",
-            "broker contract inspection",
-            "broker health probe",
-            "explicit broker RPC diagnostic transport",
-            "explicit broker physical lease diagnostics",
-            "explicit broker Apple trust and network-pairing diagnostics",
-            "explicit broker lifecycle command dry-run diagnostics",
-            "implicit broker lifecycle routing for reachable broker devices",
-            "broker read-only device inventory and recording status routing",
-            "explicit broker recording start/stop routing",
-            "broker desktop device tool result proxying",
-            "host broker service manager diagnostics",
-            "explicit broker Appium process/session/request routing",
-            "opt-in high-level mobile broker Appium routing",
-            "host ccc auto-started broker discovery",
-            "explicit MCP broker autolaunch compatibility",
-            "mcp-owned broker shutdown",
-            "broker runtime pid metadata",
-            "secret-backed broker owner token auth",
-            "cross-process device operation serialization",
-            "cross-process device runtime serialization",
-        ],
-        deferred: [],
+        protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION,
         note: "Device backends remain lazy. Host ccc starts only the broker process for containers; it does not start emulators, simulators, sandboxes, VMs, Appium, or provider tools.",
     };
 }

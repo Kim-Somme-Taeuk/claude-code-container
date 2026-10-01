@@ -60,7 +60,7 @@ vi.mock("../device-lab-admin.js", () => ({
     cleanupOwnerDevices: (...args: unknown[]) => mockCleanupOwnerDevices(...args),
 }));
 
-vi.mock("../windows-system-powershell.js", () => ({
+vi.mock("@ccc/device-lab/windows-system-powershell.js", () => ({
     canonicalWindowsPowerShellPath: () => "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
     canonicalWindowsTasklistPath: () => "C:\\Windows\\System32\\tasklist.exe",
     hiddenWindowsPowerShellArgs: (args: string[]) => args,
@@ -68,7 +68,7 @@ vi.mock("../windows-system-powershell.js", () => ({
 
 const mockWithSharedMutationLock = vi.fn((_file: string, operation: () => unknown) => operation());
 const mockWithSharedMutationLockAsync = vi.fn(async (_file: string, operation: () => unknown) => operation());
-vi.mock("../device-lab-shared-state.js", () => ({
+vi.mock("@ccc/device-lab/device-lab-shared-state.js", () => ({
     withSharedMutationLock: (...args: unknown[]) => mockWithSharedMutationLock(...args as [string, () => unknown]),
     withSharedMutationLockAsync: (...args: unknown[]) => mockWithSharedMutationLockAsync(...args as [string, () => unknown]),
 }));

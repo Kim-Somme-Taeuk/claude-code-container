@@ -4,7 +4,7 @@ import { join } from "path";
 import {
     withSharedMutationLock,
     withSharedMutationLockAsync,
-} from "../../device-lab-mcp/src/state/shared-mutation-lock.mjs";
+} from "#device-lab/providers/state/shared-mutation-lock.mjs";
 
 const DEFAULT_WAIT_MS = 100;
 // A live process on this host or boot owns the lock regardless of run length.

@@ -45,14 +45,17 @@ function canonicalToolSurface() {
 }
 const ARGUMENT_FACET_KEYS = [
     "action",
+    "view",
     "backend",
     "method",
     "direction",
     "button",
+    "count",
     "orientation",
     "provider",
     "physical",
     "packageName",
+    "appId",
     "bundleId",
     "component",
     "snapshotName",
@@ -68,6 +71,7 @@ const ARGUMENT_FACET_KEYS = [
     "status",
     "charging",
     "wifi",
+    "airplaneMode",
     "data",
     "enabled",
 ];
@@ -130,6 +134,8 @@ function schemaTypeMatches(type, value) {
 
 function validateSchemaValue(schema: any = {}, value: any, path = "arguments", options: any = {}) {
     const errors = [];
+    if (schema === false) return [`${path}:not-allowed`];
+    if (schema === true) return errors;
     if (schema.type && !schemaTypeMatches(schema.type, value)) {
         errors.push(`${path}:type=${schema.type}`);
         return errors;
@@ -147,6 +153,10 @@ function validateSchemaValue(schema: any = {}, value: any, path = "arguments", o
     }
     if (schema.not && validateSchemaValue(schema.not, value, path, options).length === 0) errors.push(`${path}:not`);
     if (Array.isArray(schema.allOf)) for (const branch of schema.allOf) errors.push(...validateSchemaValue(branch, value, path, options));
+    if (schema.if) {
+        const branch = validateSchemaValue(schema.if, value, path, options).length === 0 ? schema.then : schema.else;
+        if (branch !== undefined) errors.push(...validateSchemaValue(branch, value, path, options));
+    }
     if (Array.isArray(schema.enum) && !schema.enum.includes(value)) errors.push(`${path}:enum`);
     if (typeof schema.minimum === "number" && typeof value === "number" && value < schema.minimum) errors.push(`${path}:minimum=${schema.minimum}`);
     if (typeof schema.maximum === "number" && typeof value === "number" && value > schema.maximum) errors.push(`${path}:maximum=${schema.maximum}`);
@@ -337,8 +347,6 @@ function groupSkipsByCategory(items) {
 const providerGapSkipCategories = new Set(["provider-prerequisite", "host-platform", "host-permission", "host-virtualization"]);
 const macosProviderValues = new Set(["auto", "tart", "vz", "utmctl"]);
 const directOkExemptDiagnosticTools = new Set([
-    "base_image_clone",
-    "base_image_create",
     "snapshot",
     "snapshot",
     "snapshot",
@@ -568,6 +576,7 @@ function collectExecution(execution) {
                 outcome: call.outcome || "unknown",
                 ...(typeof call.isError === "boolean" ? { isError: call.isError } : {}),
                 ...(call.expectedError === true ? { expectedError: true } : {}),
+                ...(typeof call.expectedInputError === "string" ? { expectedInputError: call.expectedInputError } : {}),
                 ...(typeof call.errorPayloadText === "boolean" ? { errorPayloadText: call.errorPayloadText } : {}),
                 ...(typeof call.errorDispatchMismatch === "boolean" ? { errorDispatchMismatch: call.errorDispatchMismatch } : {}),
                 ...(typeof call.errorPayloadJson === "boolean" ? { errorPayloadJson: call.errorPayloadJson } : {}),
@@ -738,7 +747,12 @@ const uncalledScriptedTools = scriptedTools.filter((tool) => !calledTools.includ
 const uncalledScriptedArgumentFacets = scriptedArgumentFacets.filter((facet) => !calledArgumentFacets.includes(facet));
 const unadvertisedTools = calledTools.filter((tool) => !advertisedTools.includes(tool));
 const incompleteOutcomeRecords = toolCallRecords.filter((record) => ["pending", "unknown", "thrown"].includes(record.outcome || "unknown"));
-const argumentSchemaFailureRecords = toolCallRecords.filter((record) => record.schemaValid === false);
+const argumentSchemaFailureRecords = toolCallRecords.filter((record) => record.schemaValid === false && !(
+    record.outcome === "error-result" && record.isError === true && record.expectedError === true
+    && record.errorPayloadJson === true && typeof record.expectedInputError === "string"
+    && record.errorCode === record.expectedInputError
+    && record.schemaErrors?.length === 1 && record.schemaErrors[0] === record.expectedInputError
+));
 const flowStepArgumentSchemaFailureRecords = toolCallRecords.flatMap((record) => (Array.isArray(record.flowStepArgumentSchemaFailures) ? record.flowStepArgumentSchemaFailures : []).map((failure) => ({
     file: record.file,
     test: record.test,
@@ -768,7 +782,7 @@ const emptyOkPublicPayloadRecords = toolCallRecords.filter((record) => (
     && advertisedTools.includes(record.tool)
     && record.okPayloadJson === true
     && emptyPayloadShape(record.okPayloadShape)
-    && !(record.tool === "list_devices" && record.okPayloadShape?.kind === "array")
+    && !(record.tool === "devices" && record.okPayloadShape?.kind === "array")
 ));
 const flowStepRecords = toolCallRecords.flatMap((record) => (Array.isArray(record.flowSteps) ? record.flowSteps : []).map((step, index) => ({
     file: record.file,
@@ -810,7 +824,7 @@ const emptyOkPublicFlowStepPayloadRecords = flowStepRecords.filter((record) => (
     && advertisedTools.includes(record.tool)
     && record.okPayloadJson === true
     && emptyPayloadShape(record.okPayloadShape)
-    && !(record.tool === "list_devices" && record.okPayloadShape?.kind === "array")
+    && !(record.tool === "devices" && record.okPayloadShape?.kind === "array")
 ));
 const flowStepToolOutcomeSummary: Record<string, any> = Object.fromEntries(uniqueSorted(flowStepRecords.map((record) => record.tool)).map((tool) => {
     const toolRecords = flowStepRecords.filter((record) => record.tool === tool);

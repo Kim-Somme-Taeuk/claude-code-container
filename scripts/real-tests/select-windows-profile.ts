@@ -8,7 +8,7 @@
 import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { ownerId } from "../../device-lab-mcp/src/context.mjs";
+import { ownerId } from "#device-lab/providers/context.mjs";
 
 export function cachedImageManifests(options: any = {}) {
     const currentOwner = String(options.ownerId || ownerId());

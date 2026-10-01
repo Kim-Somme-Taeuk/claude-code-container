@@ -5,7 +5,7 @@ import { join, sep } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { describe, expect, it, vi } from "vitest";
 import { repoRoot } from "./helpers.ts";
-import { buildLevel3Artifacts, HYPER_V_LEVEL3_PROVIDER_CONTRACT } from "./support/level3-host.ts";
+import { buildLevel3Artifacts } from "./support/level3-host.ts";
 import { hyperVWindowsFailureReason } from "./hyper-v-windows-vm-e2e.ts";
 import {
     decodePrivilegedResultFrame,
@@ -500,23 +500,40 @@ describe("Windows Setup diagnostics elevation request", () => {
     // together — the same "invisible to tsc, surfaces first on Windows CI" shape this task already
     // records against the PowerShell parse gate.
     it("builds the privileged bundle where the requester will look for it", () => {
-        const spawns: Array<{ args: string[] }> = [];
-        buildLevel3Artifacts("/repo", {
+        const spawns: Array<{ command: string; args: string[]; options: any }> = [];
+        const env = { NODE_OPTIONS: "--require=hidden-child-processes.cjs" };
+        const windowsStatus = buildLevel3Artifacts("/repo", {
             platform: "win32",
-            spawn: (_command: string, args: string[]) => {
-                spawns.push({ args });
+            env,
+            spawn: (command: string, args: string[], options: any) => {
+                spawns.push({ command, args, options });
                 return { status: 0, stdout: "", stderr: "" };
             },
             readFile: (path: string) => (path.endsWith("contracts.js")
-                ? `export const c = "${HYPER_V_LEVEL3_PROVIDER_CONTRACT}";`
+                ? `export const c = "unused-provider-artifact";`
                 : '{"version":"1.0.0"}'),
             writeFile: () => undefined,
         });
+        expect(windowsStatus).toBe(0);
+        expect(spawns[0].args).toEqual([join("/repo", "scripts", "workspace-build.mjs"), "build"]);
+        expect(spawns.slice(1, 3).map(call => call.args)).toEqual([
+            [join("/repo", "node_modules", "typescript", "bin", "tsc")],
+            [join("/repo", "node_modules", "typescript", "bin", "tsc"), "-p", join("/repo", "tsconfig.real-tests.json")],
+        ]);
         const bundling = spawns.find((call) => call.args.some((arg) => arg.includes("hyper-v-windows-setup-diagnostics-privileged.ts")));
         expect(bundling, "the elevated child has to exist before a guest fails, not be built inside a failing diagnostic").toBeDefined();
         const outfile = (bundling?.args || []).find((arg) => arg.startsWith("--outfile="))?.slice("--outfile=".length);
         expect(outfile, "the builder's outfile and the requester's lookup path must be the same file")
             .toBe(PRIVILEGED_BUNDLE_RELATIVE_PATH.split(sep).join("/"));
+        expect(spawns[3].args).toContain("device-lab-mcp/server.mjs");
+        expect(spawns[4]).toBe(bundling);
+        expect(spawns.at(-1)?.args, "embedded runtime assembly follows both bundles on Windows")
+            .toEqual([join("/repo", "scripts", "workspace-build.mjs"), "assemble"]);
+        expect(spawns).toHaveLength(6);
+        for (const call of spawns) {
+            expect(call.command).toBe(process.execPath);
+            expect(call.options).toEqual({ cwd: "/repo", env, encoding: "utf-8", windowsHide: true });
+        }
 
         // The other direction, which was unpinned: this is a Windows-only program and
         // buildLevel3Artifacts is the SHARED entry, so an ungated build made every Linux Level 3 run
@@ -529,7 +546,7 @@ describe("Windows Setup diagnostics elevation request", () => {
                 return { status: 0, stdout: "", stderr: "" };
             },
             readFile: (path: string) => (path.endsWith("contracts.js")
-                ? `export const c = "${HYPER_V_LEVEL3_PROVIDER_CONTRACT}";`
+                ? `export const c = "unused-provider-artifact";`
                 : '{"version":"1.0.0"}'),
             writeFile: () => undefined,
         });
@@ -538,6 +555,8 @@ describe("Windows Setup diagnostics elevation request", () => {
             "a Linux run must not bundle the Windows-only elevated child").toBe(false);
         expect(linuxSpawns.some((call) => call.args.some((arg) => arg.includes("device-lab-mcp"))),
             "but everything before the gate must still be built").toBe(true);
+        expect(linuxSpawns.at(-1)?.args, "skipping the Windows-only bundle must still assemble embedded packages")
+            .toEqual([join("/repo", "scripts", "workspace-build.mjs"), "assemble"]);
     });
 
     it("bounds the bundle it is willing to digest, and the frame it is willing to decode", async () => {

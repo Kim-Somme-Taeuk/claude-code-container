@@ -6,7 +6,7 @@ import {
     readDeviceRuntimeProcessStartToken,
     signalDeviceRuntimeProcess,
     windowsProcessIdentityScriptForTest,
-} from "../device-lab-process-identity.js";
+} from "@ccc/device-lab/device-lab-process-identity.js";
 
 describe("broker device runtime process identity", () => {
     it("reads a stable hashed identity without exposing the command line", () => {

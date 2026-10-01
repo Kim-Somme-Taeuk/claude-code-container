@@ -1,15 +1,16 @@
+import { hyperVMemoryFailureReason } from "./hyper-v-memory-diagnostic.ts";
 import { TOOLS, publicToolName } from "../../device-lab-mcp/src/tools.mjs";
 import assert from "assert";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { basename, dirname, join, resolve } from "path";
-import { windowsVmBackend } from "../../device-lab-mcp/src/backends/windows-vm.mjs";
-import { ownerId } from "../../device-lab-mcp/src/context.mjs";
-import { assertDeviceLabPathWithinRoot } from "../../src/device-lab-state-file.ts";
-import { hyperVReadinessCommand, parseHyperVReadiness } from "../../src/host-control/hyper-v/index.ts";
-import { isHyperVWindowsEvaluationReceipt } from "../../src/device-lab/hyper-v-image-contracts.ts";
+import { windowsVmBackend } from "#device-lab/providers/backends/windows-vm.mjs";
+import { ownerId } from "#device-lab/providers/context.mjs";
+import { assertDeviceLabPathWithinRoot } from "#device-lab/device-lab-state-file.js";
+import { HYPER_V_NETWORK_PREFIX, HYPER_V_NETWORK_GATEWAY, hyperVReadinessCommand, parseHyperVReadiness } from "#device-lab/host-control/hyper-v/index.js";
+import { isHyperVWindowsEvaluationReceipt } from "#device-lab/device-lab/hyper-v-image-contracts.js";
 import { hiddenSpawnSync, repoRoot } from "./helpers.ts";
-import { brokerRollbackSummary, formatBrokerToolFailure, lifecycleDevice, parseToolPayload, withDeviceLabMcp } from "./device-lab-mcp-client.ts";
+import { brokerRollbackSummary, formatBrokerToolFailure, lifecycleDevice, markExpectedToolError, parseToolPayload, withDeviceLabMcp } from "./device-lab-mcp-client.ts";
 import { providerMcpSessionOptions } from "./provider-mcp-matrix.ts";
 import { cachedImageManifests, selectHyperVWindowsProfile } from "./select-windows-profile.ts";
 import { captureHyperVWindowsConsole, type HyperVWindowsConsoleCaptureResult } from "./hyper-v-windows-console-capture.ts";
@@ -114,6 +115,32 @@ export function hyperVWindowsToolPayload(result: any) {
 }
 const payload = hyperVWindowsToolPayload;
 
+export function assertHyperVWindowsNetwork(device: any, expected = {
+    prefix: HYPER_V_NETWORK_PREFIX, gateway: HYPER_V_NETWORK_GATEWAY,
+}): string {
+    assert.strictEqual(device.networkPrefix, expected.prefix);
+    assert.strictEqual(device.networkGateway, expected.gateway);
+    const subnet = expected.prefix.replace(/0\/24$/, "");
+    const address = String(device.networkAddress || "");
+    assert.ok(address.startsWith(subnet), "VM address must belong to the configured Hyper-V subnet");
+    const host = address.slice(subnet.length);
+    assert.match(host, /^(?:[1-9]\d?|1\d\d|2[0-4]\d|250)$/);
+    assert.notStrictEqual(address, expected.gateway, "VM address must not use the gateway");
+    return address;
+}
+
+export function assertHyperVWindowsDeleted(inventoryResponse: any, deleteResponse: any, deviceId: string): void {
+    const inventory = resultValue(payload(inventoryResponse));
+    assert.ok(Array.isArray(inventory?.devices), "post-delete inventory must contain devices");
+    assert.ok(!inventory.devices.some((device: any) => device?.id === deviceId), "deleted VM remains in inventory");
+    // This call deliberately exercises the public missing-device error contract.
+    const missing = parseToolPayload({ ...deleteResponse, isError: false });
+    assert.strictEqual(missing?.ok, false);
+    assert.strictEqual(missing?.error, "device-not-found");
+    assert.strictEqual(missing?.deviceId, deviceId);
+    markExpectedToolError(deleteResponse);
+}
+
 function resultValue(value: any) {
     return value?.result && typeof value.result === "object" ? value.result : value;
 }
@@ -137,6 +164,9 @@ export async function hyperVWindowsFailureReason(input: {
     allowSetupDiagnosticsElevation?: boolean;
 }): Promise<string> {
     const profileTag = `profile=${input.profile}${input.sourceImage ? " sourceImage=set" : ""}`;
+    const brokerPayload = (input.error as any)?.brokerPayload;
+    const memoryFailure = hyperVMemoryFailureReason(brokerPayload);
+    if (memoryFailure) return `${profileTag}; ${input.step}: ${memoryFailure}`;
     const message = `${input.step}: ${(input.error as any)?.message || String(input.error)}`;
     // A failed create never sets `created`, so every create failure returns just below. Its
     // rollback is what says whether the failure left a VM or an allocation behind. The broker
@@ -362,20 +392,28 @@ export function hyperVWindowsVmE2ECapability(options: any = {}) {
     return { available: true, powershell, sourceImage, profile };
 }
 
-async function cleanupPrevious(callTool: (tool: string, args: any) => Promise<any>) {
-    const inventory = resultValue(payload(await callTool("inventory", { detail: true, backend: "windows-vm" })));
-    const devices = Array.isArray(inventory?.devices) ? inventory.devices : [];
+export async function cleanupPrevious(callTool: (tool: string, args: any) => Promise<any>) {
+    const inventory = resultValue(payload(await callTool("devices", { view: "available", detail: true, backend: "windows-vm" })));
+    assert.ok(Array.isArray(inventory?.devices), "cleanup inventory must contain devices");
+    const devices = inventory.devices;
     for (const device of devices.filter((candidate: any) => String(candidate?.id || "").startsWith(DEVICE_PREFIX))) {
         try {
             await callTool("stop", { detail: true, deviceId: device.id, incarnationId: device.incarnationId, force: true });
         } catch {
             // Deletion is still attempted against the exact owner-scoped VM identity.
         }
-        payload(await callTool("delete", { detail: true,
+        const deleted = await callTool("delete", { detail: true,
             deviceId: device.id,
             incarnationId: device.incarnationId,
             ...HYPER_V_WINDOWS_E2E_DELETE_OPTIONS,
-        }));
+        });
+        const observed = parseToolPayload({ ...deleted, isError: false });
+        if (observed?.ok === false && observed.error === "device-not-found" && observed.deviceId === device.id) {
+            const freshInventory = await callTool("devices", { view: "available", detail: true, backend: "windows-vm" });
+            assertHyperVWindowsDeleted(freshInventory, deleted, device.id);
+        } else {
+            payload(deleted);
+        }
     }
 }
 
@@ -390,7 +428,7 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
     if (!capability.available) return { status: "SKIP", reason: "reason" in capability ? capability.reason : "Hyper-V Windows VM unavailable", capability };
 
     const deviceId = `${DEVICE_PREFIX}${Date.now()}`;
-    const advertisedCapabilities = [...new Set<string>(windowsVmBackend().capabilities.map(publicToolName))].filter(name => TOOLS.some(tool => tool.name === name));
+    const advertisedCapabilities = [...new Set<string>(windowsVmBackend().capabilities.map(name => publicToolName(name, "windows-vm")))].filter(name => TOOLS.some(tool => tool.name === name));
     const calledCapabilities = new Set<string>();
     const tempParent = join(repoRoot, "results");
     mkdirSync(tempParent, { recursive: true });
@@ -417,31 +455,28 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
 
             currentStep = "create VM";
             const createArgs = {
-                backend: "windows-vm",
                 ...direct,
                 name: "Real Hyper-V Windows VM Test",
                 profile: capability.profile,
                 memoryMb: 4096,
                 cpus: 2,
-                networking: true,
                 ...(capability.sourceImage ? { sourceImage: capability.sourceImage } : {}),
             };
-            const createdDevice = lifecycleDevice(payload(await callTool("create", { detail: true, ...createArgs })), "create");
+            const createdDevice = lifecycleDevice(payload(await callTool("create_windows_vm", { detail: true, ...createArgs })), "create");
             direct.incarnationId = createdDevice.incarnationId;
             createdVmId = String(createdDevice.vmId || "");
             created = true;
             assert.strictEqual(createdDevice.id, deviceId);
             assert.strictEqual(createdDevice.guestProvisioned, true);
             assert.strictEqual(createdDevice.switchName, "CCC Device Lab");
-            const networkAddress = String(createdDevice.networkAddress || "");
-            assert.match(networkAddress, /^172\.29\.0\.(?:[1-9]\d?|1\d\d|2[0-4]\d|250)$/);
-            const duplicateCreate = resultValue(payload(await callTool("create", { detail: true, ...createArgs })));
+            const networkAddress = assertHyperVWindowsNetwork(createdDevice);
+            const duplicateCreate = resultValue(payload(await callTool("create_windows_vm", { detail: true, ...createArgs })));
             assert.strictEqual(duplicateCreate.idempotent, true);
             assert.strictEqual(duplicateCreate.invoked, false);
             assert.strictEqual(duplicateCreate.device?.incarnationId, createdDevice.incarnationId);
 
             currentStep = "inventory VM";
-            const inventory = resultValue(payload(await callTool("inventory", { detail: true, backend: "windows-vm" })));
+            const inventory = resultValue(payload(await callTool("devices", { view: "available", detail: true, backend: "windows-vm" })));
             assert.ok(Array.isArray(inventory.devices) && inventory.devices.some((device: any) => device.id === deviceId));
 
             currentStep = "start and wait for PowerShell Direct";
@@ -576,12 +611,13 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
             currentStep = "delete VM";
             payload(await callTool("delete", { detail: true, ...direct, ...HYPER_V_WINDOWS_E2E_DELETE_OPTIONS }));
             created = false;
-            const duplicateDelete = resultValue(payload(await callTool("delete", { detail: true,
+            currentStep = "verify deleted VM is absent";
+            const deletedInventory = await callTool("devices", { view: "available", detail: true, backend: "windows-vm" });
+            const duplicateDelete = await callTool("delete", { detail: true,
                 ...direct,
                 ...HYPER_V_WINDOWS_E2E_DELETE_OPTIONS,
-            })));
-            assert.strictEqual(duplicateDelete.idempotent, true);
-            assert.strictEqual(duplicateDelete.alreadyMissing, true);
+            });
+            assertHyperVWindowsDeleted(deletedInventory, duplicateDelete, deviceId);
 
             currentStep = "verify advertised capability coverage";
             assert.deepStrictEqual(advertisedCapabilities.filter((tool) => !calledCapabilities.has(tool)), []);

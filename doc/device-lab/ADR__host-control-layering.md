@@ -31,7 +31,7 @@ CLI / MCP
             -> operating-system tools and runtime APIs
 ```
 
-Hyper-V is exposed through `src/host-control/hyper-v/index.ts`. The old
+Hyper-V is exposed through `packages/device-lab/src/host-control/hyper-v/index.ts`. The old
 `src/device-lab/providers/hyper-v.ts` path is removed rather than retained as a
 compatibility facade. Internal callers must import the new boundary directly,
 so obsolete dependency direction cannot survive unnoticed.

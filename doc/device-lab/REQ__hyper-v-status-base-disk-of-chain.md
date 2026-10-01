@@ -7,7 +7,7 @@ status: current
 # REQ — Status must report the base disk of the active differencing chain
 
 ## Requirement
-`hyperVStatusCommand` (src/host-control/hyper-v/lifecycle.ts) MUST report, as
+`hyperVStatusCommand` (packages/device-lab/src/host-control/hyper-v/lifecycle.ts) MUST report, as
 `diskPath`, the BASE disk of the VM's active differencing chain — not the active
 disk itself. It resolves the active `Get-VMHardDiskDrive` path by walking
 `Get-VHD ... ParentPath` to the root before reporting:

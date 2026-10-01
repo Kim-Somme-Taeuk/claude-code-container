@@ -17,7 +17,7 @@ describe("literal action success proof", () => {
             const file = join(dir, "fixture.mjs"), summary = join(dir, "summary.json");
             const calls = [
                 { name: "click", arguments: { deviceId: "x11-current-display", x: 1, y: 1 }, ...proof("ok") },
-                { name: "list_devices", arguments: {}, ...proof("[]") },
+                { name: "devices", arguments: {}, ...proof("[]") },
                 { name: "status", arguments: { deviceId: "x11-current-display" }, ...proof("ok") },
                 { name: "type", arguments: { deviceId: "x11-current-display", text: "hello" }, ...proof("completed") },
                 { name: "run_flow", arguments: { steps: [{ tool: "click", arguments: { deviceId: "x11-current-display", x: 1, y: 1 } }] },
@@ -45,12 +45,12 @@ describe("provider proof from owned device identity", () => {
         const evidence = createTargetBackendEvidence();
         const args = { deviceId: "owned-vm" };
         expect(evidence.observe("click", args, result("ok"))).toBeUndefined();
-        evidence.observe("inventory", { backend: "windows-vm" }, result({ devices: [{ id: "owned-vm" }] }));
+        evidence.observe("devices", { view: "available", backend: "windows-vm" }, result({ devices: [{ id: "owned-vm" }] }));
         expect(evidence.observe("click", args, result("ok"))).toBe("windows-vm");
         expect(evidence.observe("click", { deviceId: "other" }, result("ok"))).toBeUndefined();
-        evidence.observe("inventory", {}, result({ result: { backends: [{ stateKey: "linux-vm", devices: [{ id: "host-owned" }] }] } }));
+        evidence.observe("devices", {}, result({ result: { backends: [{ stateKey: "linux-vm", devices: [{ id: "host-owned" }] }] } }));
         expect(evidence.lookup("host-owned")).toBe("linux-vm");
-        evidence.observe("inventory", {}, result({ result: { backends: [{ stateKey: "android", devices: [{ id: "pixel" }] }, { stateKey: "ios-device", devices: [{ id: "owned-iphone" }] }, { stateKey: "ios-device", error: "failed", devices: [{ id: "iphone" }] }] } }));
+        evidence.observe("devices", {}, result({ result: { backends: [{ stateKey: "android", devices: [{ id: "pixel" }] }, { stateKey: "ios-device", devices: [{ id: "owned-iphone" }] }, { stateKey: "ios-device", error: "failed", devices: [{ id: "iphone" }] }] } }));
         expect(evidence.lookup("pixel")).toBe("android-emulator");
         expect(evidence.lookup("owned-iphone")).toBe("ios-device");
         expect(evidence.lookup("iphone")).toBeUndefined();
@@ -58,7 +58,7 @@ describe("provider proof from owned device identity", () => {
     });
     it("rejects failed inventories, arbitrary backend arguments and conflicting identities", () => {
         const evidence = createTargetBackendEvidence();
-        evidence.observe("inventory", { backend: "windows-vm" }, result({ devices: [{ id: "owned" }] }, true));
+        evidence.observe("devices", { view: "available", backend: "windows-vm" }, result({ devices: [{ id: "owned" }] }, true));
         expect(evidence.lookup("owned")).toBeUndefined();
         evidence.observe("exec", { deviceId: "owned" }, result({ result: { id: "owned", backend: "windows-vm" } }));
         expect(evidence.lookup("owned")).toBeUndefined();

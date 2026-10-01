@@ -108,7 +108,7 @@ function qemuOperation(value) {
 function target(value, options = {}) {
     if (!object(value) || failed(value)) return value;
     value = qemuTarget(value);
-    const result = omit(value, ["ownerId", "stateRoot", "ownerRoot", "stateDir", "metadataPath", "runtimeFile", "avdRoot", "createdAt", "updatedAt", "pid", "appiumPort", "capabilities"]);
+    const result = omit(value, ["ownerId", "stateRoot", "ownerRoot", "stateDir", "metadataPath", "runtimeFile", "avdRoot", "createdAt", "updatedAt", "pid", "appiumPort"]);
     // Remove only values also represented at the target's top level.
     if (object(value.targetStatus)) {
         const remaining = Object.fromEntries(Object.entries(value.targetStatus).filter(([key, item]) => JSON.stringify(item) !== JSON.stringify(value[key])));
@@ -141,7 +141,7 @@ function target(value, options = {}) {
 
 function backend(value) {
     if (!object(value)) return value;
-    const result = omit(value, ["lazy", "ownerId", "stateRoot", "ownerRoot", "capabilities"]);
+    const result = omit(value, ["lazy", "ownerId", "stateRoot", "ownerRoot"]);
     if (object(result.tools)) delete result.tools;
     if (Array.isArray(result.missing) && !result.missing.length) delete result.missing;
     if (result.available === true && result.status === "available") delete result.status;

@@ -26,7 +26,12 @@ vi.mock("../session-lock-liveness.js", async (importOriginal) => {
 
 vi.mock("fs", async () => {
     const actual = await vi.importActual<typeof import("fs")>("fs");
-    return { ...actual, existsSync: vi.fn(), readdirSync: vi.fn(), readFileSync: vi.fn(), unlinkSync: vi.fn() };
+    return { ...actual, existsSync: vi.fn(), readdirSync: vi.fn(), readFileSync: vi.fn((...args: Parameters<typeof actual.readFileSync>) => {
+            // Package metadata is real; each test still controls its simulated filesystem.
+            const [file] = args;
+            return file instanceof URL && file.href === new URL('../../packages/device-lab/package.json', import.meta.url).href
+                ? actual.readFileSync(...args) : undefined;
+        }), unlinkSync: vi.fn() };
 });
 
 const { existsSync, readdirSync, readFileSync } = await import("fs");

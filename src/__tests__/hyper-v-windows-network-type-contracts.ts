@@ -12,7 +12,7 @@ import {
     type HyperVHostNetworkCleanupProvenance,
     type HyperVHostNetworkReconciliationOutcome,
     type HyperVWindowsNetworkClient,
-} from "../hyper-v-windows/index.js";
+} from "@ccc/hyper-v/index.js";
 
 const switchName = parseHyperVVirtualSwitchName("CCC Device Lab");
 const switchId = parseHyperVVirtualSwitchId("11111111-2222-3333-4444-555555555555");

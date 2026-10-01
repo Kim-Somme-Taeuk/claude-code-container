@@ -12,7 +12,7 @@ import {
     cloneHyperVBaseImage,
     hyperVHostCapacityRefusal,
     hyperVSourceIdentityRefusal,
-} from "../device-lab/broker/hyper-v/vm-create-preflight.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/vm-create-preflight.js";
 
 // The clone and its rollback have only ever been provable on Windows: the one test that
 // executes them is skipIf(platform !== "win32") and has never run in this repo's CI or on a
@@ -23,6 +23,7 @@ let root = "";
 
 beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "ccc-hyperv-create-"));
+    vi.spyOn(fsPromises, "statfs").mockResolvedValue({ bavail: 40 * 1024 ** 3, bsize: 1 } as Awaited<ReturnType<typeof fsPromises.statfs>>);
 });
 
 afterEach(() => {
@@ -81,21 +82,28 @@ describe("Hyper-V host capacity", () => {
 });
 
 describe("Hyper-V disk capacity", () => {
-    it("refuses a disk the volume cannot hold with 10 GB to spare", async () => {
+    it("uses copy bytes and keeps exactly 10 GiB of reserve", async () => {
         const { diskPath } = devicePaths();
-        await expect(assertHyperVDiskCapacity(diskPath, 1)).resolves.toBeUndefined();
-        await expect(assertHyperVDiskCapacity(diskPath, Number.MAX_SAFE_INTEGER))
-            .rejects.toThrow(/hyper-v-host-disk-capacity-exceeded/);
+        await expect(assertHyperVDiskCapacity(diskPath, 30 * 1024 ** 3)).resolves.toBeUndefined();
+        await expect(assertHyperVDiskCapacity(diskPath, 30 * 1024 ** 3 + 1))
+            .rejects.toThrow("hyper-v-host-disk-capacity-exceeded");
     });
 
-    // It has to answer before the directories exist, because its answer decides whether to
-    // make them. The nearest existing ancestor is on the same volume, which is the only thing
-    // the answer depends on.
-    it("answers for a path whose directories are not there yet", async () => {
+    it.each([0, -1, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1])("rejects invalid copy size %s", async (size) => {
+        await expect(assertHyperVDiskCapacity(join(root, "disk.vhdx"), size))
+            .rejects.toThrow("hyper-v-host-disk-capacity-invalid");
+    });
+
+    it.each([-1, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])("rejects invalid available space %s", async (free) => {
+        vi.mocked(fsPromises.statfs).mockResolvedValue({ bavail: free, bsize: 1 } as Awaited<ReturnType<typeof fsPromises.statfs>>);
+        await expect(assertHyperVDiskCapacity(join(root, "disk.vhdx"), 1))
+            .rejects.toThrow("hyper-v-host-disk-capacity-invalid");
+    });
+
+    it("queries the existing ancestor of a destination not yet created", async () => {
         const unborn = join(root, "not", "yet", "made", "root.vhdx");
         await expect(assertHyperVDiskCapacity(unborn, 1)).resolves.toBeUndefined();
-        await expect(assertHyperVDiskCapacity(unborn, Number.MAX_SAFE_INTEGER))
-            .rejects.toThrow(/hyper-v-host-disk-capacity-exceeded/);
+        expect(fsPromises.statfs).toHaveBeenCalledWith(root);
     });
 });
 
@@ -115,6 +123,20 @@ describe("cloning the base image", () => {
         })).resolves.toEqual({ bytes: bytes.length });
 
         expect(readFileSync(diskPath).equals(bytes)).toBe(true);
+    });
+
+    it("refuses insufficient copy space before creating any destination", async () => {
+        const bytes = Buffer.alloc(4096, 1);
+        const { imageRoot, imagePath, sha256 } = writeBaseImage(bytes);
+        const { deviceRoot, diskPath } = devicePaths();
+        const created = vi.fn();
+        vi.mocked(fsPromises.statfs).mockResolvedValue({ bavail: 10 * 1024 ** 3 + bytes.length - 1, bsize: 1 } as Awaited<ReturnType<typeof fsPromises.statfs>>);
+        await expect(cloneHyperVBaseImage({
+            baseImageRoot: imageRoot, baseImagePath: imagePath, expectedSha256: sha256,
+            deviceRoot, diskPath, onDestinationCreated: created,
+        })).rejects.toThrow("hyper-v-host-disk-capacity-exceeded");
+        expect(created).not.toHaveBeenCalled();
+        expect(() => statSync(diskPath)).toThrow();
     });
 
     it("refuses a base image whose bytes do not match the manifest", async () => {
@@ -226,13 +248,30 @@ describe("cloning the base image", () => {
         const { imageRoot, imagePath, sha256 } = writeBaseImage(bytes);
         const { deviceRoot, diskPath } = devicePaths();
 
+        // Expire after the first source read, independent of scheduling or disk speed.
+        let now = 1000;
+        vi.spyOn(Date, "now").mockImplementation(() => now);
+        const realOpen = fsPromises.open.bind(fsPromises);
+        vi.spyOn(fsPromises, "open").mockImplementation(async (...args) => {
+            const handle = await realOpen(...args);
+            if (args[0] === imagePath) {
+                const read = handle.read.bind(handle);
+                vi.spyOn(handle, "read").mockImplementation(async (...readArgs: Parameters<typeof handle.read>) => {
+                    const result = await read(...readArgs);
+                    now = 1002;
+                    return result;
+                });
+            }
+            return handle;
+        });
+
         await expect(cloneHyperVBaseImage({
             baseImageRoot: imageRoot,
             baseImagePath: imagePath,
             expectedSha256: sha256,
             deviceRoot,
             diskPath,
-            deadlineAt: Date.now() + 2,
+            deadlineAt: 1001,
         })).rejects.toThrow(/hyper-v-operation-deadline-exceeded/);
 
         expect(statSync(diskPath).size).toBeLessThan(bytes.length);

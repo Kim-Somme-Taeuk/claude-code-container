@@ -51,7 +51,7 @@ import {
     getRuntimeInfo,
 } from "./container-runtime.js";
 import { cleanupOwnerDevices } from "./device-lab-admin.js";
-import { deviceLabContainerName, deviceLabOwnerId } from "./device-lab-owner.js";
+import { deviceLabContainerName, deviceLabOwnerId } from "@ccc/device-lab/device-lab-owner.js";
 import { getAllCredentialMounts } from "./tool-registry.js";
 import type { CredentialMount } from "./tool-registry.js";
 import {
@@ -69,7 +69,7 @@ import {
     type RequiredMountContract,
 } from "./bind-mount-verification.js";
 
-const MANAGED_MCP_BUNDLES = ["x11-mcp", "device-lab-mcp"] as const;
+const MANAGED_MCP_BUNDLES = ["device-lab-mcp"] as const;
 const MANAGED_MCP_BUNDLE_MAX_BYTES = 32 * 1024 * 1024;
 const DIST_DIR = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const DEVICE_BROKER_AUTH_CONTAINER_FILE = "/run/ccc-device-broker-auth/owner.json";

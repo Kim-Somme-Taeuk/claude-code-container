@@ -1,6 +1,6 @@
-import { toolOperation, isSimpleAction } from "../../device-lab-mcp/src/tools.mjs";
-import { createHash } from "crypto";
-import { readFileSync, statSync } from "fs";
+import { TOOLS, toolOperation, isSimpleAction, CREATE_TOOL_BACKENDS } from "../../device-lab-mcp/src/tools.mjs";
+import { createHash, randomUUID } from "crypto";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { join } from "path";
@@ -24,7 +24,7 @@ const HYPER_V_LINUX_GUI_TIMEOUT_MS = 17 * 60 * 1000;
 const HYPER_V_CLEANUP_RESERVE_MS = 5 * 60 * 1000;
 const REAL_MCP_CLIENT_RPC_BUFFER_MS = 30000;
 const HYPER_V_LIFECYCLE_TOOLS = new Set([
-    "create",
+    ...Object.keys(CREATE_TOOL_BACKENDS),
     "status",
     "start",
     "stop",
@@ -39,8 +39,9 @@ function boundedBrokerDiagnosticCode(value: unknown): string | undefined {
 }
 
 export function realMcpToolRequestTimeoutMs(name: string, args: Record<string, any> = {}) {
-    const hyperVBackend = args?.backend === "windows-vm" || args?.backend === "linux-vm";
-    if (hyperVBackend && name === "create") {
+    const creationBackend = CREATE_TOOL_BACKENDS[name];
+    const hyperVBackend = creationBackend === "windows-vm" || creationBackend === "linux-vm" || args?.backend === "windows-vm" || args?.backend === "linux-vm";
+    if (hyperVBackend && creationBackend) {
         return HYPER_V_MAX_SERVER_RPC_TIMEOUT_MS + REAL_MCP_CLIENT_RPC_BUFFER_MS;
     }
     if (hyperVBackend && (name === "start" || name === "reboot")) {
@@ -71,7 +72,7 @@ export function realMcpToolRequestTimeoutMs(name: string, args: Record<string, a
     if (Number.isFinite(timeoutMs)) {
         return Math.min(MAX_REAL_MCP_TOOL_TIMEOUT_MS, Math.max(DEFAULT_REAL_MCP_TOOL_TIMEOUT_MS, timeoutMs + 30000));
     }
-    if (name === "create" && args?.backend === "android-emulator" && Boolean(args?.systemImage)) return LONG_REAL_MCP_TOOL_TIMEOUT_MS;
+    if (name === "create_android_emulator" && Boolean(args?.systemImage)) return LONG_REAL_MCP_TOOL_TIMEOUT_MS;
     if (name === "start" && args?.waitForBoot === true) {
         const bootTimeoutMs = Number(args?.bootTimeoutMs);
         return Number.isFinite(bootTimeoutMs)
@@ -82,7 +83,7 @@ export function realMcpToolRequestTimeoutMs(name: string, args: Record<string, a
     if (name === "device_broker_appium" || name === "clipboard") {
         return LONG_REAL_MCP_TOOL_TIMEOUT_MS;
     }
-    if (typeof args?.backend === "string" && args.backend.startsWith("ios") && (toolOperation(name, args)?.startsWith("mobile_") || ["click", "double_click", "key", "type"].includes(name))) {
+    if (typeof args?.backend === "string" && args.backend.startsWith("ios") && (toolOperation(name, args)?.startsWith("mobile_") || ["click", "key", "type"].includes(name))) {
         return LONG_REAL_MCP_TOOL_TIMEOUT_MS;
     }
     return DEFAULT_REAL_MCP_TOOL_TIMEOUT_MS;
@@ -241,10 +242,10 @@ export function createTargetBackendEvidence() {
         lookup,
         observe(name: string, args: Record<string, any>, result: any) {
             if (result?.isError === true) return undefined;
-            if (!["create", "attach", "inventory", "list_devices", "status"].includes(name)) return lookup(args.deviceId);
+            if (![...Object.keys(CREATE_TOOL_BACKENDS), "attach", "devices", "status"].includes(name)) return lookup(args.deviceId);
             const payload: any = jsonContentPayload(resultContent(result));
             if (payload?.ok === false || payload?.error) return undefined;
-            const selector = ["create", "attach", "inventory"].includes(name) ? validBackend(args.backend) : undefined;
+            const selector = CREATE_TOOL_BACKENDS[name] || (["attach", "devices"].includes(name) ? validBackend(args.backend) : undefined);
             const observeEnvelope = (value: any, inherited?: string) => {
                 if (!value || typeof value !== "object" || value.ok === false || value.error) return;
                 const backend = validBackend(value.backend) || validBackend(stateBackends[value.stateKey]) || inherited;
@@ -303,6 +304,31 @@ function toolSurfaceFingerprint(tools = []) {
     };
 }
 
+// This check is independent of the raw fingerprints retained in coverage evidence.
+// Schema annotations may change without changing the invocation contract.
+function canonicalSchema(value: any, schema = true): any {
+    if (Array.isArray(value)) return value.map(item => canonicalSchema(item, schema));
+    if (!value || typeof value !== "object") return value;
+    const maps = new Set(["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"]);
+    const children = new Set(["items", "prefixItems", "additionalProperties", "unevaluatedProperties", "propertyNames", "contains", "allOf", "anyOf", "oneOf", "not", "if", "then", "else"]);
+    return Object.fromEntries(Object.keys(value).sort().filter(key => !schema || !["description", "title", "$comment", "examples"].includes(key)).map(key => {
+        const entry = value[key];
+        if (schema && maps.has(key) && entry && typeof entry === "object") {
+            return [key, Object.fromEntries(Object.keys(entry).sort().map(name => [name, canonicalSchema(entry[name])]))];
+        }
+        return [key, canonicalSchema(entry, schema && children.has(key))];
+    }));
+}
+
+export function mcpToolSurfaceMatches(tools: any): boolean {
+    if (!Array.isArray(tools) || tools.length !== TOOLS.length) return false;
+    const names = tools.map(tool => tool?.name);
+    if (new Set(names).size !== names.length) return false;
+    const expected = new Map(TOOLS.map(tool => [tool.name, JSON.stringify(canonicalSchema(tool.inputSchema))]));
+    return tools.every(tool => expected.has(tool?.name)
+        && expected.get(tool.name) === JSON.stringify(canonicalSchema(tool.inputSchema)));
+}
+
 export async function withDeviceLabMcp(callback, options: any = {}) {
     const serverPath = deviceLabMcpServerPath(options);
     const sessionId = `mcp-session-${++nextSessionId}`;
@@ -332,8 +358,14 @@ export async function withDeviceLabMcp(callback, options: any = {}) {
     try {
         const listed = await client.listTools();
         sessionRecord.advertisedToolSurface = toolSurfaceFingerprint(Array.isArray(listed?.tools) ? listed.tools : []);
+        if (listed.nextCursor || !mcpToolSurfaceMatches(listed.tools)) {
+            throw new Error("device-lab-mcp-contract-mismatch: rebuild with npm run build before running real-provider tests");
+        }
         const targetBackends = createTargetBackendEvidence();
         const callTool = async (name: string, args: Record<string, any> = {}) => {
+            // Record exactly what JSON-RPC sends, not mutable JS inputs containing
+            // undefined properties that disappear at the transport boundary.
+            args = JSON.parse(JSON.stringify(args));
             const record: Record<string, any> = { name, arguments: args, outcome: "pending", mcpSessionId: sessionId };
             toolCalls().push(record);
             try {
@@ -349,7 +381,7 @@ export async function withDeviceLabMcp(callback, options: any = {}) {
                 Object.assign(record, summarizeToolResultForProof(result));
                 const observedBackend = targetBackends.observe(name, args, result);
                 if (observedBackend) record.observedBackend = observedBackend;
-                if (name === "run_flow" && result?.isError !== true) {
+                if (name === "run_flow") {
                     try {
                         const payload = jsonContentPayload(resultContent(result)) || {};
                         if (Array.isArray(payload?.results)) {
@@ -392,7 +424,29 @@ export async function withDeviceLabMcp(callback, options: any = {}) {
 
 export function parseToolPayload(result) {
     const text = result?.content?.[0]?.text || "{}";
-    if (result?.isError) throw new Error(text);
+    if (result?.isError) {
+        const value = jsonContentPayload(resultContent(result));
+        const structured = value && typeof value === "object" && !Array.isArray(value) ? value : null;
+        let message = formatBrokerToolFailure(structured, "mcp-tool-failed");
+        if (structured?.error === "broker-runtime-process-unverified") {
+            message = "broker-runtime-process-unverified: Broker recovery could not verify the process; automatic restart was refused. Check `node dist/index.js devices broker status --verbose` before retrying.";
+        }
+        const relativePath = `results/device-lab-real/mcp-error-${randomUUID()}.json`;
+        try {
+            mkdirSync(join(repoRoot, "results", "device-lab-real"), { recursive: true });
+            writeFileSync(join(repoRoot, relativePath), JSON.stringify({
+                schemaVersion: 1,
+                failure: brokerToolFailureEvidence(structured),
+                privacy: "Host paths, credentials, endpoints and raw command output are omitted.",
+            }, null, 2) + "\n", { encoding: "utf8", flag: "wx", mode: 0o600 });
+            message += ` Diagnostics: ${relativePath}`;
+        } catch {
+            message += " Diagnostics could not be saved.";
+        }
+        const error = new Error(message);
+        if (structured) Object.defineProperty(error, "brokerPayload", { value: structured });
+        throw error;
+    }
     const payload = jsonContentPayload(resultContent(result));
     if (payload) return payload;
     return JSON.parse(text);
@@ -565,6 +619,15 @@ export function brokerToolFailureEvidence(value: any) {
             durationMs: safeNonNegativeInteger(lastAttempt.durationMs),
             timeoutMs: safeNonNegativeInteger(lastAttempt.timeoutMs),
         };
+        if (Array.isArray(lastAttempt.attempts)) {
+            const finalProbe = lastAttempt.attempts.at(-1);
+            evidence.recovery = {
+                reason: boundedBrokerDiagnosticCode(lastAttempt.reason),
+                probeCount: Math.min(lastAttempt.attempts.length, 10000),
+                lastProbeError: boundedBrokerDiagnosticCode(finalProbe?.error),
+                terminationReason: boundedBrokerDiagnosticCode(lastAttempt.termination?.reason),
+            };
+        }
     }
     if (value?.transportRecovery && typeof value.transportRecovery === "object") {
         evidence.transportRecovery = {
@@ -854,6 +917,17 @@ export function markExpectedToolError(result) {
     if (result?.isError === true && result.__cccToolCallRecord) {
         result.__cccToolCallRecord.expectedError = true;
     }
+    return result;
+}
+
+export function markExpectedInputError(result, expectedCode: string) {
+    const record = result?.__cccToolCallRecord;
+    const payload = jsonContentPayload(resultContent(result));
+    if (!record || result?.isError !== true || !expectedCode || payload?.error !== expectedCode) {
+        throw new Error("Expected the exact MCP input rejection");
+    }
+    record.expectedError = true;
+    record.expectedInputError = expectedCode;
     return result;
 }
 

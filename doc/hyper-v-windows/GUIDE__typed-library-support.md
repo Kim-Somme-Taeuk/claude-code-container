@@ -1,7 +1,7 @@
 # Typed Hyper-V library: routes and verification
 
 The typed Hyper-V library is part of the `ccc` package. Its implementation is
-under `src/hyper-v-windows/`; compiled entrypoints and the integrity-pinned
+under `packages/hyper-v/src/`; compiled entrypoints and the integrity-pinned
 PowerShell assets travel in the root package. The separate npm package and an
 external compatibility promise remain deferred in the source checkout's
 `doc/hyper-v-windows/ADR__library-boundary.md`. The package requires
@@ -17,7 +17,7 @@ unmigrated: several commands build media, inspect Storage, or manage host setup.
 
 | Route | Current owner | Next action |
 |---|---|---|
-| VM creation, status, power, deletion and orphan recovery | Typed `src/hyper-v-windows` operations composed by Device Lab | Keep typed identity and attachment fences. |
+| VM creation, status, power, deletion and orphan recovery | Typed `packages/hyper-v/src` operations composed by Device Lab | Keep typed identity and attachment fences. |
 | VM bootstrap network discovery and teardown | Typed route using the PowerShell executable already selected for the VM lifecycle command (`device-lab-broker.ts`, `hyperVBootstrapNetworkSeam`) | Keep exact owner, managed MAC, and post-removal containment checks; run disposable-host proof. |
 | Linux seed creation and VM seed-media attachment/boot setup | Device Lab builds cloud-init, keys and ISO; typed VM/network reads preflight identity, then `Configure-VMGuestBoot` with Linux policy attaches media and sets boot order | Run native PowerShell and disposable-host validation before claiming hardware proof. |
 | Snapshot journal repair | Typed `Repair-VMSnapshotState` transaction, then typed status confirmation | Keep the owner-scoped journal until repair and state persistence are confirmed; run disposable-host proof. The older repair asset remains packaged for compatibility but has no live broker caller. |

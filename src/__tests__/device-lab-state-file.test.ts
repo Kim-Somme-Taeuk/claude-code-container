@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readDeviceLabBinaryFileWithinRoot, writeDeviceLabBinaryFile } from "../device-lab-state-file.js";
+import { readDeviceLabBinaryFileWithinRoot, writeDeviceLabBinaryFile } from "@ccc/device-lab/device-lab-state-file.js";
 
 describe("device-lab fenced file writes", () => {
     const roots: string[] = [];

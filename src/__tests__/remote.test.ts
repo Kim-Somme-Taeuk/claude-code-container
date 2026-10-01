@@ -28,7 +28,12 @@ vi.mock('fs', async () => {
   return {
     ...actual,
     existsSync: vi.fn(),
-    readFileSync: vi.fn(),
+    readFileSync: vi.fn((...args: Parameters<typeof actual.readFileSync>) => {
+            // Package metadata is real; each test still controls its simulated filesystem.
+            const [file] = args;
+            return file instanceof URL && file.href === new URL('../../packages/device-lab/package.json', import.meta.url).href
+                ? actual.readFileSync(...args) : undefined;
+        }),
     writeFileSync: vi.fn(),
     mkdirSync: vi.fn(),
     renameSync: vi.fn()

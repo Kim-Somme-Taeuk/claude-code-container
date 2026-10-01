@@ -35,10 +35,10 @@ describe("action-first output", () => {
     });
     it("keeps false, zero, and opaque query payloads", () => {
         const raw = json({ found: false, count: 0, nested: { deviceId: "opaque", ok: true, source: "" } });
-        expect(parse(actionResult("wait_for_text", "mobile_wait_for_text", raw))).toEqual(JSON.parse(raw.content[0].text));
+        expect(parse(actionResult("wait_for_text", "mobile_wait_for_text", raw))).toEqual({ count: 0, nested: { deviceId: "opaque", ok: true, source: "" }, matched: false, reason: "wait-condition-not-met" });
     });
     it("returns minimal device rows and cursor coordinates", () => {
-        expect(parse(actionResult("list_devices", "device_list", json({ devices: [{ id: "d", name: "Pixel", runtimeState: "running", ownerId: "private" }], ownerId: "private" }))))
+        expect(parse(actionResult("devices", "device_list", json({ devices: [{ id: "d", name: "Pixel", runtimeState: "running", ownerId: "private" }], ownerId: "private" }))))
             .toEqual([{ id: "d", name: "Pixel", state: "running" }]);
         expect(parse(actionResult("cursor_position", "device_cursor_position", json({ x: 0, y: 2, provider: "xdotool", raw: "x:0" }))))
             .toEqual({ x: 0, y: 2 });
@@ -50,7 +50,7 @@ describe("action-first output", () => {
         expect(actionResult("click", "device_click", raw, { detail: true })).toBe(raw);
     });
     it("keeps diagnostic provider capabilities callable without rewriting opaque payloads", () => {
-        const result = parse(actionResult("backends", "device_backends", json({
+        const result = parse(actionResult("devices", "device_backends", json({
             localBackends: [{ capabilities: ["device_screenshot", "mobile_tap"] }],
             output: { capabilities: ["opaque_device_token"] },
         }), { detail: true }));
@@ -58,7 +58,7 @@ describe("action-first output", () => {
         expect(result.output.capabilities).toEqual(["opaque_device_token"]);
     });
     it("advertises cursor movement for the current-display backend", () => {
-        const result = parse(actionResult("backends", "device_backends", json({ backends: [
+        const result = parse(actionResult("devices", "device_backends", json({ backends: [
             { name: "x11-current-display", capabilities: ["device_cursor_position"] },
         ] }), { detail: true }));
         expect(result.backends[0].capabilities).toEqual(["cursor_position", "move"]);

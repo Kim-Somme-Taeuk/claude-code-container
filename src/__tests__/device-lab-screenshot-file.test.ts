@@ -2,7 +2,7 @@ import { linkSync, mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEVICE_SCREENSHOT_LIMIT_BYTES, screenshotFileResult } from "../../device-lab-mcp/src/screenshot-file.mjs";
+import { DEVICE_SCREENSHOT_LIMIT_BYTES, screenshotFileResult } from "@ccc/device-lab/providers/screenshot-file.mjs";
 
 describe("device-lab screenshot file boundaries", () => {
     let root: string | null = null;

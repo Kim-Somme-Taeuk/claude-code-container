@@ -21,9 +21,9 @@ describe("device-lab MCP backend definitions", () => {
 
     it("creates, lists, inspects, and deletes owner-scoped Android definitions", { timeout: TIMEOUT }, async () => {
         const create = await client.callTool({
-            name: "create",
+            name: "create_android_emulator",
             arguments: {
-                backend: "android-emulator",
+
                 name: "Pixel Test",
                 avdName: "Pixel_Test_API_35",
                 port: 5580,
@@ -41,7 +41,7 @@ describe("device-lab MCP backend definitions", () => {
             status: "stopped",
         }));
 
-        const list = await client.callTool({ name: "list_devices", arguments: {} });
+        const list = await client.callTool({ name: "devices", arguments: {} });
         const listed = JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             devices: Array<{ id: string; backend?: string }>;
         };
@@ -127,7 +127,7 @@ describe("device-lab MCP backend definitions", () => {
         });
         expect(deleted.isError).not.toBe(true);
 
-        const afterDelete = await client.callTool({ name: "list_devices", arguments: {} });
+        const afterDelete = await client.callTool({ name: "devices", arguments: {} });
         const finalList = JSON.parse(((afterDelete.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             devices: Array<{ id: string }>;
         };
@@ -136,9 +136,9 @@ describe("device-lab MCP backend definitions", () => {
 
     it("creates, lists, inspects, starts with diagnostics, and deletes owner-scoped iOS definitions", { timeout: TIMEOUT }, async () => {
         const create = await client.callTool({
-            name: "create",
+            name: "create_ios_simulator",
             arguments: {
-                backend: "ios-simulator",
+
                 name: "iPhone Test",
                 simulatorName: "iPhone 15",
                 udid: "existing-ios-fixture",
@@ -156,7 +156,7 @@ describe("device-lab MCP backend definitions", () => {
             platform: "ios",
         }));
 
-        const list = await client.callTool({ name: "list_devices", arguments: {} });
+        const list = await client.callTool({ name: "devices", arguments: {} });
         const listed = JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             devices: Array<{ id: string; backend?: string }>;
         };
@@ -251,9 +251,9 @@ describe("device-lab MCP backend definitions", () => {
 
     it("creates, lists, inspects, starts with diagnostics, and deletes owner-scoped Windows Sandbox definitions", { timeout: TIMEOUT }, async () => {
         const create = await client.callTool({
-            name: "create",
+            name: "create_windows_sandbox",
             arguments: {
-                backend: "windows-sandbox",
+
                 name: "Win Test",
                 networking: false,
                 clipboard: false,
@@ -277,7 +277,7 @@ describe("device-lab MCP backend definitions", () => {
             guestScratchDir: "C:\\ccc\\scratch",
         }));
 
-        const list = await client.callTool({ name: "list_devices", arguments: {} });
+        const list = await client.callTool({ name: "devices", arguments: {} });
         const listed = JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             devices: Array<{ id: string; backend?: string }>;
         };
@@ -307,8 +307,8 @@ describe("device-lab MCP backend definitions", () => {
         expect(inspected.backend.missing).toEqual(["wsb"]);
 
         const inventory = await client.callTool({
-            name: "inventory",
-            arguments: { backend: "windows-sandbox" },
+            name: "devices",
+            arguments: { view: "available", backend: "windows-sandbox" },
         });
         expect(inventory.isError).not.toBe(true);
         const inventoryPayload = JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -359,123 +359,26 @@ describe("device-lab MCP backend definitions", () => {
         expect(deleted.isError).not.toBe(true);
     });
 
-    it("creates, lists, inspects, starts with diagnostics, and deletes owner-scoped macOS VM definitions", { timeout: TIMEOUT }, async () => {
-        const create = await client.callTool({
-            name: "create",
-            arguments: {
-                backend: "macos-vm",
-                name: "Mac Test",
-                provider: "auto",
-                image: "macos-restore-image",
-                memoryMb: 8192,
-                cpus: 4,
-            },
-        });
-        expect(create.isError).not.toBe(true);
+    it("rejects macOS provisioning without prerequisites and does not publish a device", { timeout: TIMEOUT }, async () => {
+        const create = await client.callTool({ name: "create_macos_vm", arguments: {
+            name: "Mac Test", provider: "auto", image: "macos-restore-image", memoryMb: 8192, cpus: 4,
+        } });
+        expect(create.isError).toBe(true);
+        expect((create.content as Array<{ text?: string }>)[0].text).toContain("macos-host");
 
-        const created = JSON.parse(((create.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: {
-                id: string;
-                status: string;
-                platform: string;
-                provider: string;
-                providerPlan: { requestedProvider: string; selectedProvider: string | null; missing: string[]; helper: { status: string } };
-            };
-        };
-        expect(created.device).toEqual(expect.objectContaining({
-            id: "macos-mac-test",
-            status: "stopped",
-            platform: "macos",
-            provider: "auto",
-        }));
-        expect(created.device.providerPlan).toEqual(expect.objectContaining({
-            requestedProvider: "auto",
-            selectedProvider: null,
-            missing: ["macos-host"],
-        }));
-        expect(created.device.providerPlan.helper.status).toBe("planned");
+        const list = await client.callTool({ name: "devices", arguments: {} });
+        const listed = JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}"));
+        expect(listed.devices.some((device: { id: string }) => device.id === "macos-mac-test")).toBe(false);
 
-        const list = await client.callTool({ name: "list_devices", arguments: {} });
-        const listed = JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            devices: Array<{ id: string; backend?: string }>;
-        };
-        expect(listed.devices).toEqual(expect.arrayContaining([
-            expect.objectContaining({ id: "macos-mac-test", backend: "macos-vm" }),
-        ]));
-
-        const status = await client.callTool({
-            name: "status",
-            arguments: { deviceId: "macos-mac-test" },
-        });
-        expect(status.isError).not.toBe(true);
-        const inspected = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; targetStatus: { targetKind: string; runtimeState: string } };
-            backend: { status: string; missing: string[] };
-        };
-        expect(inspected.device.id).toBe("macos-mac-test");
-        expect(inspected.device.targetStatus).toEqual(expect.objectContaining({
-            targetKind: "virtual-device",
-            creatable: true,
-            attachable: false,
-            runtimeState: "stopped",
-            readiness: { state: "stopped" },
-            leaseState: { state: "not-required" },
-        }));
-        expect(inspected.backend.status).toBe("missing-prerequisites");
-        expect(inspected.backend.missing).toEqual(["macos-host"]);
-
-        const inventory = await client.callTool({
-            name: "inventory",
-            arguments: { backend: "macos-vm" },
-        });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "macos-vm" } });
         expect(inventory.isError).not.toBe(true);
-        const inventoryPayload = JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            devices: Array<{ id: string; providerPlan: { missing: string[]; deferred: string[] }; targetStatus: { runtimeState: string } }>;
-            discovery: { available: boolean; missing: string[] };
-            hostVms: { lazy: boolean; missing: string[] };
-        };
-        expect(inventoryPayload.discovery).toEqual(expect.objectContaining({ available: false, missing: ["macos-host"] }));
-        expect(inventoryPayload.hostVms).toEqual(expect.objectContaining({ lazy: true, missing: ["macos-host"] }));
-        expect(inventoryPayload.devices).toEqual(expect.arrayContaining([
-            expect.objectContaining({
-                id: "macos-mac-test",
-                providerPlan: expect.objectContaining({
-                    missing: ["macos-host"],
-                    deferred: ["guest-helper-auto-provisioning-requires-ssh"],
-                }),
-                targetStatus: expect.objectContaining({
-                    targetKind: "virtual-device",
-                    runtimeState: "stopped",
-                    readiness: { state: "stopped" },
-                }),
-            }),
-        ]));
+        const available = JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}"));
+        expect(available.discovery).toMatchObject({ available: false, missing: ["macos-host"] });
+        expect(available.hostVms).toMatchObject({ lazy: true, missing: ["macos-host"] });
+        expect(available.devices).toEqual([]);
 
-        const start = await client.callTool({
-            name: "start",
-            arguments: { deviceId: "macos-mac-test" },
-        });
+        const start = await client.callTool({ name: "start", arguments: { deviceId: "macos-mac-test" } });
         expect(start.isError).toBe(true);
-        expect((start.content as Array<{ text?: string }>)[0].text).toContain("macOS VM backend missing prerequisites");
-
-        const exec = await client.callTool({
-            name: "exec",
-            arguments: { deviceId: "macos-mac-test", command: "whoami" },
-        });
-        expect(exec.isError).toBe(true);
-        expect((exec.content as Array<{ text?: string }>)[0].text).toContain("requires SSH bridge metadata");
-
-        const recordStatus = await client.callTool({
-            name: "record_video",
-            arguments: { action: "status", deviceId: "macos-mac-test" },
-        });
-        expect(recordStatus.isError).not.toBe(true);
-        expect(JSON.parse(((recordStatus.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toBeNull();
-
-        const deleted = await client.callTool({
-            name: "delete",
-            arguments: { deviceId: "macos-mac-test", confirmDestructive: true },
-        });
-        expect(deleted.isError).not.toBe(true);
+        expect((start.content as Array<{ text?: string }>)[0].text).toMatch(/not.found|Unknown device/i);
     });
 });

@@ -1,6 +1,6 @@
 import { spawnSync } from "child_process";
 import { readFileSync } from "fs";
-import { canonicalWindowsPowerShellPath, canonicalWindowsTasklistPath, hiddenWindowsPowerShellArgs } from "./windows-system-powershell.js";
+import { canonicalWindowsPowerShellPath, canonicalWindowsTasklistPath, hiddenWindowsPowerShellArgs } from "@ccc/device-lab/windows-system-powershell.js";
 
 export type SessionLockLiveness = "active" | "stale" | "unknown";
 

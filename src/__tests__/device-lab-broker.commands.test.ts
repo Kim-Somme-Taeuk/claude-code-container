@@ -1,3 +1,4 @@
+import { isolatedDeviceLabPackage } from "./helpers/isolated-device-lab-package.js";
 import { spawn } from "child_process";
 import { createHash } from "crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "fs";
@@ -6,13 +7,13 @@ import { hostname, tmpdir, uptime } from "os";
 import { dirname, join } from "path";
 import { runInNewContext } from "vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDeviceBrokerServer as createRawDeviceBrokerServer, hiddenChildProcessOptions, hiddenProviderCommandEnv, providerCommandSpawn, redactProviderCommandInput, registerDeviceBrokerOwner, waitForBrokerWindowsMinimizeConfirmation, windowsHiddenChildProcessPreloadScript, windowsHiddenVbsLauncherInvocation, windowsHiddenVbsLauncherScript, windowsProcessTreeOutcome, windowsSandboxMinimizeWatchdogArgs, windowsSandboxSessionIdsFromBrokerListOutput, windowsSandboxWindowHandleSnapshotArgs, windowsSandboxWindowHandlesFromOutput } from "../device-lab-broker.js";
-import { deviceLabOwnerId, deviceLabProjectMountPath } from "../device-lab-owner.js";
-import { readDeviceRuntimeProcessIdentity } from "../device-lab-process-identity.js";
-import { withSharedMutationLockAsync } from "../device-lab-shared-state.js";
-import { releaseHyperVNetworkAllocationAndCleanup } from "../device-lab/broker/hyper-v/network.js";
-import { hyperVVmName } from "../host-control/hyper-v/index.js";
-import { HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP } from "../hyper-v-windows/low-level/powershell-transport.js";
+import { createDeviceBrokerServer as createRawDeviceBrokerServer, hiddenChildProcessOptions, hiddenProviderCommandEnv, providerCommandSpawn, redactProviderCommandInput, registerDeviceBrokerOwner, waitForBrokerWindowsMinimizeConfirmation, windowsHiddenChildProcessPreloadScript, windowsHiddenVbsLauncherInvocation, windowsHiddenVbsLauncherScript, windowsProcessTreeOutcome, windowsSandboxMinimizeWatchdogArgs, windowsSandboxSessionIdsFromBrokerListOutput, windowsSandboxWindowHandleSnapshotArgs, windowsSandboxWindowHandlesFromOutput } from "@ccc/device-lab/device-lab-broker.js";
+import { deviceLabOwnerId, deviceLabProjectMountPath } from "@ccc/device-lab/device-lab-owner.js";
+import { readDeviceRuntimeProcessIdentity } from "@ccc/device-lab/device-lab-process-identity.js";
+import { withSharedMutationLockAsync } from "@ccc/device-lab/device-lab-shared-state.js";
+import { releaseHyperVNetworkAllocationAndCleanup } from "@ccc/device-lab/device-lab/broker/hyper-v/network.js";
+import { hyperVVmName } from "@ccc/device-lab/host-control/hyper-v/index.js";
+import { HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP } from "@ccc/hyper-v/low-level/powershell-transport.js";
 import { backendRoot, cleanupOwner, close, listen, ownerRoot, ownerRpcEndpoint, ownerRpcHeaders, writeBrokerDevices } from "./helpers/host-broker-test-fixture.js";
 import {
     configureTypedHyperVNetworkOperations,
@@ -22,8 +23,8 @@ import {
 // A pass-through, so a test can stand in one network release failure the host would report.
 // Create compensation keeps the shared fabric, so a rollback never reaches an elevated cleanup
 // that could fail on its own here.
-vi.mock("../device-lab/broker/hyper-v/network.js", async (importOriginal) => {
-    const actual = await importOriginal<typeof import("../device-lab/broker/hyper-v/network.js")>();
+vi.mock("@ccc/device-lab/device-lab/broker/hyper-v/network.js", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("@ccc/device-lab/device-lab/broker/hyper-v/network.js")>();
     return {
         ...actual,
         releaseHyperVNetworkAllocationAndCleanup: vi.fn(actual.releaseHyperVNetworkAllocationAndCleanup),
@@ -419,6 +420,56 @@ describe("device-lab host broker lifecycle commands", () => {
             expect(existsSync(join(process.env.HOME!, ".ccc", "devices", "host-locks", "hyper-v.mutation.lock"))).toBe(false);
             expect(existsSync(join(process.env.HOME!, ".ccc", "devices", "owners", ownerId, "windows-vm", "operations"))).toBe(false);
             expect(existsSync(join(process.env.HOME!, ".ccc", "devices", "owners", ownerId, "linux-vm", "operations"))).toBe(false);
+        } finally {
+            await close(server);
+            cleanupOwner(ownerId);
+        }
+    });
+
+    it.each([
+        { profile: "windows-server", input: {}, conflicts: [] },
+        { profile: "windows-server", input: { profile: "windows-server" }, conflicts: [] },
+        { profile: "windows-server", input: { profile: "windows-11" }, conflicts: ["profile"] },
+        { profile: "windows-11", input: {}, conflicts: ["profile"] },
+        { profile: "windows-11", input: { profile: "windows-11" }, conflicts: [] },
+        { profile: "windows-server", input: { baseImageSha256: "b".repeat(64) }, conflicts: ["baseImageSha256"] },
+        { profile: "windows-server", input: { sourceImage: "different.vhdx" }, conflicts: ["sourceImage"] },
+    ])("checks repeated Hyper-V create against automatic profile defaults: %j", async ({ profile, input, conflicts }) => {
+        const cwd = "/project/broker-hyper-v-default-profile-retry";
+        const ownerId = deviceLabOwnerId(cwd);
+        const deviceId = "nested-development-vm";
+        const incarnationId = "1".repeat(32);
+        const root = writeBrokerDevices(ownerId, "windows-vm", [{
+            id: deviceId, name: deviceId, ownerId, backend: "windows-vm", provider: "hyper-v",
+            incarnationId, profile, memoryMb: 4096, cpus: 2, networking: true,
+            diskMaxBytes: 64 * 1024 * 1024 * 1024,
+            nestedVirtualization: true, secureBootEnabled: true, secureBootTemplate: "MicrosoftWindows",
+            baseImageSha256: "a".repeat(64), sourceImage: "original.vhdx", status: "stopped",
+        }]);
+        const stateFile = join(root, "devices.json");
+        const originalState = readFileSync(stateFile, "utf8");
+        const commandRunner = vi.fn(() => ({ mode: "exec", provider: "hyper-v", status: 0, stdout: "{}", stderr: "" }));
+        const server = createDeviceBrokerServer({ cwd, host: "127.0.0.1", port: 0, platform: "win32", commandRunner });
+        const baseUrl = await listen(server);
+        try {
+            for (const method of ["broker.command.plan", "broker.command.invoke"]) {
+                const response = await fetch(ownerRpcEndpoint(baseUrl, ownerId), {
+                    method: "POST", headers: ownerRpcHeaders(ownerId),
+                    body: JSON.stringify({ method, params: {
+                        backend: "windows-vm", command: "device_create", deviceId, name: deviceId,
+                        nestedVirtualization: true, ...input,
+                    } }),
+                });
+                const payload = await response.json();
+                expect(response.status, JSON.stringify(payload)).toBe(conflicts.length ? 409 : 200);
+                if (conflicts.length) {
+                    expect(payload).toMatchObject({ ok: false, error: "hyper-v-create-configuration-conflict", conflicts });
+                } else {
+                    expect(payload).toMatchObject({ ok: true, result: { idempotent: true, device: { id: deviceId, profile, incarnationId } } });
+                }
+            }
+            expect(commandRunner).not.toHaveBeenCalled();
+            expect(readFileSync(stateFile, "utf8")).toBe(originalState);
         } finally {
             await close(server);
             cleanupOwner(ownerId);
@@ -3532,6 +3583,7 @@ describe("device-lab host broker lifecycle commands", () => {
                         deviceId: "macos-broker-mac",
                         provider: "tart",
                         image: "ccc-macos-base",
+                        headless: true,
                     },
                 }),
             });
@@ -3543,6 +3595,7 @@ describe("device-lab host broker lifecycle commands", () => {
                 providerInstance: `ccc-${ownerId}-macos-broker-mac`,
                 image: "ccc-macos-base",
                 status: "stopped",
+                headless: true,
                 authority: "host-broker",
             }));
             expect(body.result.device.ssh?.user).toBe("admin");
@@ -3570,7 +3623,7 @@ describe("device-lab host broker lifecycle commands", () => {
             expect(plan.result.providerCommand).toEqual(expect.objectContaining({
                 provider: "tart",
                 executable: "/fake/tart",
-                args: ["run", `ccc-${ownerId}-macos-broker-mac`],
+                args: ["run", "--no-graphics", `ccc-${ownerId}-macos-broker-mac`],
             }));
         } finally {
             await close(server);
@@ -3969,10 +4022,13 @@ describe("device-lab host broker lifecycle commands", () => {
     it("locks an inferred Hyper-V device before invoking a backend-less tool", async () => {
         const ownerId = deviceLabOwnerId("/project/broker-inferred-hyper-v-lock-test");
         const deviceId = "inferred-linux-vm";
+        const commandRunner = vi.fn(() => { throw new Error("incomplete VM metadata must prevent provider execution"); });
         const server = createDeviceBrokerServer({
             cwd: "/project/broker-inferred-hyper-v-lock-test",
             host: "127.0.0.1",
             port: 0,
+            providerPaths: { "powershell.exe": "/fixture/powershell.exe" },
+            commandRunner,
         });
         const baseUrl = await listen(server);
         const endpoint = ownerRpcEndpoint(baseUrl, ownerId);
@@ -3989,6 +4045,7 @@ describe("device-lab host broker lifecycle commands", () => {
             writeBrokerDevices(ownerId, "linux-vm", [{ id: deviceId, status: "running", backend: "linux-vm" }]);
             await vi.waitFor(() => expect(releaseLock).toBeTypeOf("function"));
             let requestSettled = false;
+            let settledResponse: Response | undefined;
             const request = fetch(endpoint, {
                 method: "POST",
                 headers: ownerRpcHeaders(ownerId),
@@ -3996,13 +4053,28 @@ describe("device-lab host broker lifecycle commands", () => {
                     method: "broker.device.tool.invoke",
                     params: { tool: "device_snapshot_list", deviceId },
                 }),
+            }).then((response) => {
+                settledResponse = response;
+                return response;
             }).finally(() => { requestSettled = true; });
             await new Promise((resolve) => setTimeout(resolve, 25));
-            expect(requestSettled).toBe(false);
+            const earlyResponse = settledResponse
+                ? `HTTP ${settledResponse.status}: ${await settledResponse.clone().text()}`
+                : "request must remain pending while its inferred device lock is held";
+            expect(requestSettled, earlyResponse).toBe(false);
 
             releaseLock();
             await held;
-            expect([400, 501]).toContain((await request).status);
+            const response = await request;
+            expect(response.status).toBe(409);
+            expect(await response.json()).toMatchObject({
+                ok: false,
+                error: "missing-provider-metadata",
+                missing: ["vmId", "vmName", "diskPath", "incarnationId"],
+                backend: "linux-vm",
+                deviceId,
+            });
+            expect(commandRunner).not.toHaveBeenCalled();
         } finally {
             if (releaseLock) releaseLock();
             await held;
@@ -5095,9 +5167,41 @@ describe("device-lab host broker lifecycle commands", () => {
         }
     });
 
+    it("preserves false network settings through the real broker child parameter boundary", async () => {
+        const fakeRoot = mkdtempSync(join(tmpdir(), "ccc-network-forwarding-"));
+        const backendDir = join(fakeRoot, "providers", "backends");
+        mkdirSync(backendDir, { recursive: true });
+        writeFileSync(join(backendDir, "android.mjs"), `export function handleAndroidTool(tool, args) {
+            return { content: [{type: 'text', text: JSON.stringify({ok: true, tool, args})}] };
+        }`);
+        const ownerId = deviceLabOwnerId(fakeRoot);
+        writeBrokerDevices(ownerId, "android", [{ id: "network-phone", backend: "android-emulator", status: "running", port: 5580 }]);
+        const { createDeviceBrokerServer: createIsolatedBrokerServer } = await isolatedDeviceLabPackage(fakeRoot);
+        const server = createIsolatedBrokerServer({ cwd: fakeRoot, host: "127.0.0.1", port: 0 });
+        const baseUrl = await listen(server);
+        try {
+            const response = await fetch(ownerRpcEndpoint(baseUrl, ownerId), {
+                method: "POST", headers: ownerRpcHeaders(ownerId),
+                body: JSON.stringify({ method: "broker.device.tool.invoke", params: {
+                    tool: "mobile_set_network", backend: "android-emulator", deviceId: "network-phone",
+                    airplaneMode: false, wifi: false, data: true, confirmDestructive: true,
+                } }),
+            });
+            const body = await response.json();
+            expect(response.status, JSON.stringify(body)).toBe(200);
+            expect(JSON.parse(body.result.mcpResult.content[0].text)).toMatchObject({
+                tool: "mobile_set_network", args: { deviceId: "network-phone", airplaneMode: false, wifi: false, data: true, confirmDestructive: true },
+            });
+        } finally {
+            await close(server);
+            cleanupOwner(ownerId);
+            rmSync(fakeRoot, { recursive: true, force: true });
+        }
+    });
+
     it("keeps broker desktop device tool child execution independent from short provider command timeouts", async () => {
         const fakeRoot = mkdtempSync(join(tmpdir(), "ccc-device-tool-runner-"));
-        const backendDir = join(fakeRoot, "device-lab-mcp", "src", "backends");
+        const backendDir = join(fakeRoot, "providers", "backends");
         mkdirSync(backendDir, { recursive: true });
         mkdirSync(join(fakeRoot, "dist"), { recursive: true });
         writeFileSync(join(backendDir, "windows-sandbox.mjs"), [
@@ -5113,7 +5217,8 @@ describe("device-lab host broker lifecycle commands", () => {
             status: "running",
             sandboxId: "11111111-1111-4111-8111-111111111111",
         }]);
-        const server = createDeviceBrokerServer({
+        const { createDeviceBrokerServer: createIsolatedBrokerServer } = await isolatedDeviceLabPackage(fakeRoot);
+        const server = createIsolatedBrokerServer({
             cwd: fakeRoot,
             cliPath: join(fakeRoot, "dist", "index.js"),
             host: "127.0.0.1",
@@ -5148,7 +5253,7 @@ describe("device-lab host broker lifecycle commands", () => {
 
     it("routes Windows broker desktop device tools through the Windows backend child handler", async () => {
         const fakeRoot = mkdtempSync(join(tmpdir(), "ccc-windows-device-tool-runner-"));
-        const backendDir = join(fakeRoot, "device-lab-mcp", "src", "backends");
+        const backendDir = join(fakeRoot, "providers", "backends");
         mkdirSync(backendDir, { recursive: true });
         mkdirSync(join(fakeRoot, "dist"), { recursive: true });
         writeFileSync(join(backendDir, "windows-sandbox.mjs"), [
@@ -5163,7 +5268,8 @@ describe("device-lab host broker lifecycle commands", () => {
             status: "running",
             sandboxId: "22222222-2222-4222-8222-222222222222",
         }]);
-        const server = createDeviceBrokerServer({
+        const { createDeviceBrokerServer: createIsolatedBrokerServer } = await isolatedDeviceLabPackage(fakeRoot);
+        const server = createIsolatedBrokerServer({
             cwd: fakeRoot,
             cliPath: join(fakeRoot, "dist", "index.js"),
             host: "127.0.0.1",
@@ -5226,7 +5332,7 @@ describe("device-lab host broker lifecycle commands", () => {
 
     it("routes macOS VM broker device tools through the macOS backend child handler", async () => {
         const fakeRoot = mkdtempSync(join(tmpdir(), "ccc-macos-device-tool-runner-"));
-        const backendDir = join(fakeRoot, "device-lab-mcp", "src", "backends");
+        const backendDir = join(fakeRoot, "providers", "backends");
         mkdirSync(backendDir, { recursive: true });
         mkdirSync(join(fakeRoot, "dist"), { recursive: true });
         writeFileSync(join(backendDir, "macos-vm.mjs"), [
@@ -5242,7 +5348,8 @@ describe("device-lab host broker lifecycle commands", () => {
             provider: "tart",
             providerInstance: "ccc-macos-child",
         }]);
-        const server = createDeviceBrokerServer({
+        const { createDeviceBrokerServer: createIsolatedBrokerServer } = await isolatedDeviceLabPackage(fakeRoot);
+        const server = createIsolatedBrokerServer({
             cwd: fakeRoot,
             cliPath: join(fakeRoot, "dist", "index.js"),
             host: "127.0.0.1",
@@ -5294,7 +5401,7 @@ describe("device-lab host broker lifecycle commands", () => {
 
     it("routes Android broker device tools through Android backend child handlers", async () => {
         const fakeRoot = mkdtempSync(join(tmpdir(), "ccc-android-device-tool-runner-"));
-        const backendDir = join(fakeRoot, "device-lab-mcp", "src", "backends");
+        const backendDir = join(fakeRoot, "providers", "backends");
         mkdirSync(backendDir, { recursive: true });
         mkdirSync(join(fakeRoot, "dist"), { recursive: true });
         writeFileSync(join(backendDir, "android.mjs"), [
@@ -5335,7 +5442,8 @@ describe("device-lab host broker lifecycle commands", () => {
         }));
         const containerApkPath = `${deviceLabProjectMountPath(fakeRoot)}/build/Test.apk`;
         const hostApkPath = join(fakeRoot, "build", "Test.apk");
-        const server = createDeviceBrokerServer({
+        const { createDeviceBrokerServer: createIsolatedBrokerServer } = await isolatedDeviceLabPackage(fakeRoot);
+        const server = createIsolatedBrokerServer({
             cwd: fakeRoot,
             cliPath: join(fakeRoot, "dist", "index.js"),
             host: "127.0.0.1",
@@ -5432,7 +5540,7 @@ describe("device-lab host broker lifecycle commands", () => {
 
     it("routes iOS broker device tools through iOS backend child handlers", async () => {
         const fakeRoot = mkdtempSync(join(tmpdir(), "ccc-ios-device-tool-runner-"));
-        const backendDir = join(fakeRoot, "device-lab-mcp", "src", "backends");
+        const backendDir = join(fakeRoot, "providers", "backends");
         mkdirSync(backendDir, { recursive: true });
         mkdirSync(join(fakeRoot, "dist"), { recursive: true });
         writeFileSync(join(backendDir, "ios-simulator.mjs"), [
@@ -5471,7 +5579,8 @@ describe("device-lab host broker lifecycle commands", () => {
             claimNonce: "ios-real-child-nonce",
             expiresAt: new Date(Date.now() + 60_000).toISOString(),
         }));
-        const server = createDeviceBrokerServer({
+        const { createDeviceBrokerServer: createIsolatedBrokerServer } = await isolatedDeviceLabPackage(fakeRoot);
+        const server = createIsolatedBrokerServer({
             cwd: fakeRoot,
             cliPath: join(fakeRoot, "dist", "index.js"),
             host: "127.0.0.1",

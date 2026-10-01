@@ -10,7 +10,7 @@ import {
     type HyperVWindowsExecutionRequest,
     type HyperVWindowsSessionProcess,
     type HyperVWindowsSessionErrorCode,
-} from "../hyper-v-windows/index.js";
+} from "@ccc/hyper-v/index.js";
 
 // Every other session test was written after the defect it names, so the suite documents fixes
 // rather than checking an invariant. This one is the opposite: it asserts the properties the
@@ -25,7 +25,7 @@ import {
 const ASSET = {
     scriptPath: "embedded:Invoke-HyperVWindowsOperation.ps1",
     scriptSource: readFileSync(
-        join(process.cwd(), "scripts", "host-control", "hyper-v", HYPER_V_WINDOWS_POWERSHELL_ASSET.name),
+        join(process.cwd(), "packages", "hyper-v", "powershell", HYPER_V_WINDOWS_POWERSHELL_ASSET.name),
         "utf8",
     ),
 };

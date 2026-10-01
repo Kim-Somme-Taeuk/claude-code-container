@@ -27,7 +27,7 @@ const compactLab = {
     paths: { workspaceDir: lab.paths.workspaceDir, artifactsDir: lab.paths.artifactsDir, exportsDir: lab.paths.exportsDir },
     runtime: { startedAt: "started" }, readiness: { latest }, snapshots: [], custom: lab.custom,
 };
-const compactDevice = { ...compactLab, deviceId: lab.id, backend: "linux-vm" };
+const compactDevice = { ...compactLab, deviceId: lab.id, backend: "linux-vm", capabilities: ["device_status"] };
 const target = { id: "lab:vm", labId: "lab", name: "Lab", targetKind: "lab-vm", provider,
     runtimeState: "running", readiness: "process-running", sessionState: "attachable", attachable: true,
     creatable: false, runtime: lab.runtime, readinessProbe: latest,
@@ -153,7 +153,7 @@ describe("known VM provider output", () => {
             return JSON.parse((result.content as Array<{ text: string }>)[0].text);
         };
         try {
-            const created = await call("create", { backend: "linux-vm", deviceId: "compact-lab", name: "Compact lab", sourceImage: "incoming/base.qcow2", detail: true });
+            const created = await call("create_linux_vm", {  deviceId: "compact-lab", name: "Compact lab", sourceImage: "incoming/base.qcow2", detail: true });
             const detailed = await call("status", { deviceId: created.device.id, detail: true });
             const compact = await call("status", { deviceId: created.device.id, detail: false });
             const { ok: _statusOk, ...expectedStatus } = compactToolValue("device_status", detailed);
@@ -161,8 +161,8 @@ describe("known VM provider output", () => {
             expect(compact.device.paths).not.toHaveProperty("labDir");
             expect(compact.device.paths.artifactsDir).toBe(detailed.device.paths.artifactsDir);
             expect(await call("status", { deviceId: created.device.id, detail: true })).toEqual(detailed);
-            const rawInventory = await call("inventory", { backend: "linux-vm", detail: true });
-            const inventory = await call("inventory", { backend: "linux-vm", detail: false });
+            const rawInventory = await call("devices", { view: "available", backend: "linux-vm", detail: true });
+            const inventory = await call("devices", { view: "available", backend: "linux-vm", detail: false });
             const { ok: _inventoryOk, ...expectedInventory } = compactToolValue("device_inventory", rawInventory);
             expect(inventory).toEqual(expectedInventory);
             expect(inventory.discovery).not.toHaveProperty("qemu");

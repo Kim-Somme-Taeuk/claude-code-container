@@ -7,8 +7,8 @@ import { spawnSync } from "child_process";
 import {
     HYPER_V_UBUNTU_IMAGE_SHA256,
     HYPER_V_UBUNTU_IMAGE_URL,
-} from "../src/host-control/hyper-v/ubuntu-image.js";
-import { canonicalWindowsPowerShellPath, hiddenWindowsPowerShellArgs } from "../src/windows-system-powershell.js";
+} from "#device-lab/host-control/hyper-v/ubuntu-image.js";
+import { canonicalWindowsPowerShellPath, hiddenWindowsPowerShellArgs } from "#device-lab/windows-system-powershell.js";
 
 const EFI_SYSTEM_PARTITION_GUID = Buffer.from("28732ac11ff8d211ba4b00a0c93ec93b", "hex");
 const REQUIRED_EFI_FILES = ["EFI/BOOT/BOOTX64.EFI", "EFI/ubuntu/shimx64.efi"] as const;

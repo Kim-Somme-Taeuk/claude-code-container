@@ -3,13 +3,10 @@ import { createServer } from "http";
 import { AddressInfo } from "net";
 import { join } from "path";
 
-import { REQUIRED_CCC_HOST_BROKER_CAPABILITIES } from "../../../device-lab-mcp/src/broker.mjs";
+import { DEVICE_BROKER_PROTOCOL_VERSION } from "@ccc/device-lab/providers/contracts/broker-protocol.mjs";
 
-// Derived, not copied. This was a hand-maintained duplicate of the MCP's required-capability list,
-// so every addition to that list silently turned this fixture into a broker that fails attestation —
-// which is what happened when hyper-v-windows-library-v6 was added: 13 tests failed with "missing
-// required capabilities" for a fixture whose whole job is to be a broker that satisfies them.
-const FAKE_BROKER_CAPABILITIES = REQUIRED_CCC_HOST_BROKER_CAPABILITIES;
+// Fixtures share the wire protocol with the real broker.
+const FAKE_BROKER_PROTOCOL_VERSION = DEVICE_BROKER_PROTOCOL_VERSION;
 
 export async function freePort(): Promise<number> {
     const server = createServer();
@@ -110,7 +107,7 @@ function expectedOwnerToken(ownerId) {
 }
 const server = http.createServer((req, res) => {
   if (req.url === "/health") return send(res, 200, { ok: true, name: "ccc-device-broker", mode: "host-broker-daemon" });
-  if (req.url === "/status") return send(res, 200, { ok: true, broker: { name: "ccc-device-broker", mode: "host-broker-daemon", host, port, process: { pid: process.pid, startToken: processStartToken() }, startedAt, implemented: ${JSON.stringify(FAKE_BROKER_CAPABILITIES)} } });
+  if (req.url === "/status") return send(res, 200, { ok: true, broker: { name: "ccc-device-broker", mode: "host-broker-daemon", host, port, process: { pid: process.pid, startToken: processStartToken() }, startedAt, protocolVersion: ${JSON.stringify(FAKE_BROKER_PROTOCOL_VERSION)} } });
   if (req.url === "/v1/owner/resolve" && req.method === "POST") {
     let raw = "";
     req.on("data", (chunk) => { raw += chunk; });
@@ -209,7 +206,7 @@ function ownerIdForRequestBody(body) {
 }
 const server = http.createServer((req, res) => {
   if (req.url === "/health") return send(res, 200, { ok: true, name: "ccc-device-broker" });
-  if (req.url === "/status") return send(res, 200, { ok: true, broker: { name: "ccc-device-broker", mode: "host-broker-daemon", host, port, process: { pid: process.pid, startToken: processStartToken() }, startedAt, implemented: ${JSON.stringify(FAKE_BROKER_CAPABILITIES)} } });
+  if (req.url === "/status") return send(res, 200, { ok: true, broker: { name: "ccc-device-broker", mode: "host-broker-daemon", host, port, process: { pid: process.pid, startToken: processStartToken() }, startedAt, protocolVersion: ${JSON.stringify(FAKE_BROKER_PROTOCOL_VERSION)} } });
   if (req.url === "/v1/owner/resolve" && req.method === "POST") {
     let raw = "";
     req.on("data", (chunk) => { raw += chunk; });

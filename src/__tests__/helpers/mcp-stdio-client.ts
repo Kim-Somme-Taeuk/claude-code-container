@@ -63,11 +63,9 @@ export async function createMcpClient(): Promise<McpClientHandle> {
             await client.close();
         } catch { /* ignore */ }
 
-        // Kill any remaining chromium processes spawned by the test
-        try {
-            execSync("pkill -f 'chrome-devtools-mcp' 2>/dev/null || true", { stdio: "ignore" });
-            execSync("pkill -f chromium 2>/dev/null || true", { stdio: "ignore" });
-        } catch { /* ignore */ }
+        // Closing this transport ends the owned server's stdin; its shutdown handler
+        // closes its browser. Never kill unrelated MCP or Chromium processes by name.
+        await transport.close();
     };
 
     return { client, cleanup };

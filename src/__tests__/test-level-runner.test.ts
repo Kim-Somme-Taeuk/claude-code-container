@@ -1,3 +1,6 @@
+import Ajv from "ajv";
+import { toolInputError } from "../../device-lab-mcp/src/tool-arguments.mjs";
+import { missingWindowsImageProbe } from "../../scripts/real-tests/level2-broker-e2e.ts";
 import { spawn, spawnSync } from "child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -7,8 +10,8 @@ import { parse } from "acorn";
 import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import { describe, expect, it } from "vitest";
 import { DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES, evaluateDestructivePolicy } from "../../device-lab-mcp/src/policy/destructive.mjs";
-import { DEVICE_FLOW_TOOL_NAMES, TOOLS, publicToolName, toolOperation, GROUP_OPERATIONS } from "../../device-lab-mcp/src/tools.mjs";
-import { LINUX_VM_CAPABILITIES } from "../../device-lab-mcp/src/backends/linux-vm.mjs";
+import { DEVICE_FLOW_TOOL_NAMES, TOOLS, publicToolName, toolOperation, GROUP_OPERATIONS, CREATE_TOOL_BACKENDS } from "../../device-lab-mcp/src/tools.mjs";
+import { LINUX_VM_CAPABILITIES } from "@ccc/device-lab/providers/backends/linux-vm.mjs";
 import { androidDeviceE2EPrerequisites, prepareAndroidDeviceApp } from "../../scripts/real-tests/android-device-e2e.ts";
 import { androidEmulatorAppSelection, androidEmulatorCreateRequest, deviceFromPayload } from "../../scripts/real-tests/android-emulator-e2e.ts";
 import { currentDisplayPrerequisiteResult } from "../../scripts/real-tests/level1-display-e2e.ts";
@@ -281,7 +284,6 @@ const ALWAYS_DESTRUCTIVE_REAL_E2E_TOOLS = new Set([
     "clear_app_data",
     "set_battery",
     "set_network",
-    "toggle_airplane_mode",
 ]);
 
 function realTestDestructiveCallsMissingConfirmation() {
@@ -329,9 +331,10 @@ function filesUnder(dir: string, suffixes: string[]): string[] {
 function productionDeviceLabText() {
     const files = [
         ...filesUnder(join(repoRoot, "device-lab-mcp"), [".mjs"]),
+        ...filesUnder(join(repoRoot, "packages", "device-lab", "providers"), [".mjs"]),
         ...filesUnder(join(repoRoot, "scripts", "real-tests"), [".ts"]),
-        join(repoRoot, "src", "device-lab-owner.ts"),
-        join(repoRoot, "src", "device-lab-broker.ts"),
+        join(repoRoot, "packages", "device-lab", "src", "device-lab-owner.ts"),
+        join(repoRoot, "packages", "device-lab", "src", "device-lab-broker.ts"),
         join(repoRoot, "src", "device-lab-admin.ts"),
         join(repoRoot, "src", "docker.ts"),
     ];
@@ -370,13 +373,13 @@ function deviceLabServerLiteralSets(publicNames = true) {
         const values = literalStringArrayValues(arrayArg);
         if (values.length > 0) sets.push({ name: String(id.name), values });
     });
-    return publicNames ? sets.map(entry => ({ ...entry, values: entry.values.map(publicToolName) })) : sets;
+    return publicNames ? sets.map(entry => ({ ...entry, values: entry.values.flatMap(name => name === "device_create" ? Object.keys(CREATE_TOOL_BACKENDS) : [publicToolName(name)]) })) : sets;
 }
 
 function deviceLabBackendCapabilityTools() {
     const roots = [
-        join(repoRoot, "device-lab-mcp", "src", "backends"),
-        join(repoRoot, "device-lab-mcp", "src", "display"),
+        join(repoRoot, "packages", "device-lab", "providers", "backends"),
+        join(repoRoot, "packages", "device-lab", "providers", "display"),
     ];
     const files = roots.flatMap((root) => filesUnder(root, [".mjs"]));
     const capabilities: Array<{ file: string; values: string[] }> = [];
@@ -447,7 +450,7 @@ function brokerAppiumForwardedInputKeys() {
 }
 
 function hostBrokerAppiumAllowedRequests() {
-    const text = readFileSync(join(repoRoot, "src", "device-lab-broker.ts"), "utf-8");
+    const text = readFileSync(join(repoRoot, "packages", "device-lab", "src", "device-lab-broker.ts"), "utf-8");
     const match = /const DEVICE_BROKER_APPIUM_REQUEST_ALLOWLIST = new Map<string, ReadonlySet<DeviceBrokerAppiumRequestMethod>>\(\[([\s\S]*?)\n\]\);/.exec(text);
     expect(match).not.toBeNull();
     const body = match?.[1] || "";
@@ -485,7 +488,7 @@ function brokerWrapperForwardedInputKeys(functionName: string) {
 }
 
 function brokerAppleTrustActionKeys() {
-    const text = readFileSync(join(repoRoot, "src", "device-lab-broker.ts"), "utf-8");
+    const text = readFileSync(join(repoRoot, "packages", "device-lab", "src", "device-lab-broker.ts"), "utf-8");
     const match = /const DEVICE_BROKER_APPLE_TRUST_ACTIONS = new Set\(\[([^\]]*)\]\);/.exec(text);
     expect(match).not.toBeNull();
     return [...(match?.[1] || "").matchAll(/["']([a-z][a-z0-9-]*)["']/g)]
@@ -529,14 +532,14 @@ function deviceLabToolBackendEnums() {
 
 function deviceLabMcpBackendCapabilities() {
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", [
-        "import { androidBackend } from './device-lab-mcp/src/backends/android.mjs';",
-        "import { androidRealBackend } from './device-lab-mcp/src/backends/android-device.mjs';",
-        "import { iosBackend } from './device-lab-mcp/src/backends/ios-simulator.mjs';",
-        "import { iosRealBackend } from './device-lab-mcp/src/backends/ios-device.mjs';",
-        "import { windowsBackend } from './device-lab-mcp/src/backends/windows-sandbox.mjs';",
-        "import { windowsVmBackend } from './device-lab-mcp/src/backends/windows-vm.mjs';",
-        "import { macosBackend } from './device-lab-mcp/src/backends/macos-vm.mjs';",
-        "import { linuxVmBackend } from './device-lab-mcp/src/backends/linux-vm.mjs';",
+        "import { androidBackend } from '@ccc/device-lab/providers/backends/android.mjs';",
+        "import { androidRealBackend } from '@ccc/device-lab/providers/backends/android-device.mjs';",
+        "import { iosBackend } from '@ccc/device-lab/providers/backends/ios-simulator.mjs';",
+        "import { iosRealBackend } from '@ccc/device-lab/providers/backends/ios-device.mjs';",
+        "import { windowsBackend } from '@ccc/device-lab/providers/backends/windows-sandbox.mjs';",
+        "import { windowsVmBackend } from '@ccc/device-lab/providers/backends/windows-vm.mjs';",
+        "import { macosBackend } from '@ccc/device-lab/providers/backends/macos-vm.mjs';",
+        "import { linuxVmBackend } from '@ccc/device-lab/providers/backends/linux-vm.mjs';",
         "const backends = [androidBackend(), androidRealBackend(), iosBackend(), iosRealBackend(), windowsBackend(), windowsVmBackend(), macosBackend(), linuxVmBackend()];",
         "console.log(JSON.stringify(backends.map(({ name, capabilities }) => [name, [...capabilities].sort()])));",
     ].join("")], {
@@ -567,14 +570,14 @@ function functionSwitchCaseLabels(file: string, functionName: string) {
 }
 
 function deviceLabBackendHandlerCases() {
-    const backendRoot = join(repoRoot, "device-lab-mcp", "src", "backends");
+    const backendRoot = join(repoRoot, "packages", "device-lab", "providers", "backends");
     const handlers = new Map([
         ["android-emulator", functionSwitchCaseLabels(join(backendRoot, "android.mjs"), "handleAndroidToolUnlocked")],
         ["android-device", functionSwitchCaseLabels(join(backendRoot, "android-device.mjs"), "handleAndroidRealToolUnlocked")],
         ["ios-simulator", functionSwitchCaseLabels(join(backendRoot, "ios-simulator.mjs"), "handleIosToolUnlocked")],
         ["ios-device", functionSwitchCaseLabels(join(backendRoot, "ios-device.mjs"), "handleIosRealToolUnlocked")],
         ["windows-sandbox", functionSwitchCaseLabels(join(backendRoot, "windows-sandbox.mjs"), "handleWindowsToolUnlocked")],
-        ["windows-vm", [...quotedArrayConstant(readFileSync(join(repoRoot, "src", "device-lab-broker.ts"), "utf-8"), "HYPER_V_VM_CAPABILITIES")].sort()],
+        ["windows-vm", [...quotedArrayConstant(readFileSync(join(repoRoot, "packages", "device-lab", "src", "device-lab-broker.ts"), "utf-8"), "HYPER_V_VM_CAPABILITIES")].sort()],
         ["macos-vm", functionSwitchCaseLabels(join(backendRoot, "macos-vm.mjs"), "handleMacosToolUnlocked")],
         ["linux-vm", [...LINUX_VM_CAPABILITIES].map(publicToolName).sort()],
     ]);
@@ -615,13 +618,13 @@ function hyperVLinuxVmCapabilities(brokerText: string) {
 }
 
 function backendAdvertisedSupportDrift() {
-    const brokerText = readFileSync(join(repoRoot, "src", "device-lab-broker.ts"), "utf-8");
+    const brokerText = readFileSync(join(repoRoot, "packages", "device-lab", "src", "device-lab-broker.ts"), "utf-8");
     const desktopCapabilities = quotedArrayConstant(brokerText, "DESKTOP_DEVICE_CAPABILITIES");
     const currentDisplayCapabilities = new Set([
+        "devices",
         "status",
         "screenshot",
         "click",
-        "double_click",
         "key",
         "type",
         "scroll",
@@ -659,7 +662,7 @@ function backendAdvertisedSupportDrift() {
 }
 
 function hostBrokerBackendCapabilities() {
-    const brokerText = readFileSync(join(repoRoot, "src", "device-lab-broker.ts"), "utf-8");
+    const brokerText = readFileSync(join(repoRoot, "packages", "device-lab", "src", "device-lab-broker.ts"), "utf-8");
     const desktopCapabilities = quotedArrayConstant(brokerText, "DESKTOP_DEVICE_CAPABILITIES");
     return new Map([
         ["android-emulator", [...quotedArrayConstant(brokerText, "ANDROID_EMULATOR_CAPABILITIES")].sort()],
@@ -720,16 +723,17 @@ describe("test level runner", () => {
             if (args[0] === "stop") stopped.push(args[2]);
             return { status: 0, stdout: "", stderr: "" };
         };
-        const callTool = async (tool: string) => {
+        const callTool = vi.fn(async (tool: string) => {
             if (tool === "start") return mcpTextResult("CO_E_APPSINGLEUSE", true);
             return mcpTextResult({ device: { id: "windows-real-sandbox-test", status: "stopped" } });
-        };
+        });
 
         await expect(startWindowsSandboxE2EDevice(callTool, "windows-real-sandbox-test", {
             wsb: "wsb",
             runner,
             retryDelayMs: 0,
-        })).rejects.toThrow(/CO_E_APPSINGLEUSE/);
+        })).rejects.toThrow(/^mcp-tool-failed/);
+        expect(callTool.mock.calls.filter(([tool]) => tool === "start")).toHaveLength(1);
         expect(stopped).toEqual([]);
     });
 
@@ -1301,7 +1305,7 @@ describe("test level runner", () => {
     });
 
     it("keeps user-facing remediation on public device-lab tool names", () => {
-        const brokerText = readFileSync(join(repoRoot, "src", "device-lab-broker.ts"), "utf-8");
+        const brokerText = readFileSync(join(repoRoot, "packages", "device-lab", "src", "device-lab-broker.ts"), "utf-8");
         const mcpBrokerText = readFileSync(join(repoRoot, "device-lab-mcp", "src", "broker.mjs"), "utf-8");
         for (const hiddenName of [
             "device_broker_attach",
@@ -1328,9 +1332,7 @@ describe("test level runner", () => {
         const advertised = advertisedDeviceLabTools();
         const sets = new Map(deviceLabServerLiteralSets().map(({ name, values }) => [name, values]));
         const directlyHandled = [
-            "backends",
-            "backends",
-            "list_devices",
+            "devices",
             "run_flow",
             "status",
         ];
@@ -1395,8 +1397,8 @@ describe("test level runner", () => {
         const expectedMissing = new Map<string, string[]>([
             ["android-emulator", []],
             ["android-device", []],
-            ["ios-simulator", ["inventory"]],
-            ["ios-device", ["inventory", "wireless"]],
+            ["ios-simulator", []],
+            ["ios-device", ["wireless"]],
         ]);
         const drift = [...scripts.entries()].flatMap(([backend, file]) => {
             const calls = realTestCallToolNamesForFile(file);
@@ -1422,7 +1424,6 @@ describe("test level runner", () => {
                 "set_battery",
                 "set_location",
                 "set_network",
-                "toggle_airplane_mode",
             ]],
             ["ios-simulator", [
                 "back",
@@ -1431,7 +1432,6 @@ describe("test level runner", () => {
                 "recents",
                 "set_battery",
                 "set_network",
-                "toggle_airplane_mode",
             ]],
             ["ios-device", [
                 "exec",
@@ -1445,7 +1445,6 @@ describe("test level runner", () => {
                 "set_battery",
                 "set_location",
                 "set_network",
-                "toggle_airplane_mode",
                 "uninstall_app",
             ]],
         ]);
@@ -1487,6 +1486,9 @@ describe("test level runner", () => {
         const forwarded = new Set(brokerDeviceToolForwardedInputKeys());
         const routeOnlyKeys = new Set([
             "detail", // Public response formatting, never a provider argument.
+            "view", // Selects the private discovery operation before dispatch.
+            "count", // Selects the private single/double click operation before dispatch.
+            "appId", // Translated to provider-specific packageName or bundleId.
             "broker",
             "viaBroker",
             "implicitBroker",
@@ -1512,12 +1514,16 @@ describe("test level runner", () => {
         expect(missing).toEqual([]);
 
         const routedSchemaKeys = new Set([...routedTools].flatMap((tool) => schemas.get(tool) || []));
-        const translatedInputs = new Set(["eraseSimulator", "helperTimeoutMs"]);
+        const translatedInputs = new Set(["eraseSimulator", "helperTimeoutMs", "packageName", "bundleId", "service"]);
+        const privateOnlyInputs = new Set(["enabled"]); // Retained private mobile_toggle_airplane_mode delegate.
         const normalization = readFileSync(join(repoRoot, "device-lab-mcp/src/tool-arguments.mjs"), "utf8");
         expect(normalization).toContain('if (name === "reset") normalized.eraseSimulator = true');
         expect(normalization).toContain("normalized.helperTimeoutMs");
+        expect(normalization).toContain("normalized.packageName = args.appId");
+        expect(normalization).toContain("normalized.bundleId = args.appId");
+        expect(normalization).toContain("normalized.service = normalized.permission");
         const hidden = [...forwarded]
-            .filter((key) => !routeOnlyKeys.has(key) && !translatedInputs.has(key) && !routedSchemaKeys.has(key))
+            .filter((key) => !routeOnlyKeys.has(key) && !translatedInputs.has(key) && !privateOnlyInputs.has(key) && !routedSchemaKeys.has(key))
             .map((key) => ({ hidden: key }));
         expect(hidden).toEqual([]);
     });
@@ -1597,11 +1603,18 @@ describe("test level runner", () => {
     it("keeps newly admitted destructive flow actions guarded by per-step confirmation", () => {
         const actions = DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES.filter(({ name }) => DEVICE_FLOW_TOOL_NAMES.includes(publicToolName(name)));
         expect(actions.map(({ name }) => publicToolName(name))).toEqual([
-            "uninstall_app", "clear_app_data", "set_battery", "set_network", "toggle_airplane_mode",
+            "uninstall_app", "clear_app_data", "set_battery", "set_network",
         ]);
         for (const { name, args } of actions) {
             expect(evaluateDestructivePolicy(name, args).ok).toBe(false);
             expect(evaluateDestructivePolicy(name, { ...args, confirmDestructive: true }).ok).toBe(true);
+        }
+    });
+
+    it("retains explicit double-click evidence after merging click tools", () => {
+        const calls = realTestCallToolLiteralValues();
+        for (const file of ["android-emulator-e2e.ts", "android-device-e2e.ts", "ios-e2e.ts", "level1-display-e2e.ts", "windows-sandbox-e2e.ts", "macos-vm-e2e.ts"]) {
+            expect(calls.some(call => call.file === file && call.tool === "click" && call.values.count === 2), file).toBe(true);
         }
     });
 
@@ -1614,7 +1627,6 @@ describe("test level runner", () => {
             "ui",
             "home",
             "click",
-            "double_click",
             "long_press",
             "swipe",
             "drag",
@@ -1658,10 +1670,11 @@ describe("test level runner", () => {
         for (const tool of [
             "power",
             "set_network",
-            "toggle_airplane_mode",
         ]) {
             expect(androidText).toContain(`callTool("${tool}"`);
         }
+        expect(realTestCallToolLiteralValues().some(call => call.file === "android-emulator-e2e.ts"
+            && call.tool === "set_network" && call.values.airplaneMode === false)).toBe(true);
     });
 
     it("covers Android app install, launch, app clearing, and uninstall with a deterministic fixture or configured APK", () => {
@@ -1703,7 +1716,6 @@ describe("test level runner", () => {
             "ui",
             "wait_for_text",
             "click",
-            "double_click",
             "long_press",
             "swipe",
             "drag",
@@ -1871,7 +1883,6 @@ describe("test level runner", () => {
             systemImage: "system-images;android-35;google_apis;x86_64",
         });
         expect(request).toEqual({
-            backend: "android-emulator",
             name: "Port Allocated Pixel",
             deviceId: "android-port-allocated",
             systemImage: "system-images;android-35;google_apis;x86_64",
@@ -1885,7 +1896,6 @@ describe("test level runner", () => {
             "status",
             "ui",
             "click",
-            "double_click",
             "long_press",
             "swipe",
             "drag",
@@ -1925,7 +1935,6 @@ describe("test level runner", () => {
             "ui",
             "screenshot",
             "click",
-            "double_click",
             "long_press",
             "swipe",
             "drag",
@@ -1966,16 +1975,14 @@ describe("test level runner", () => {
             "status",
             "screenshot",
             "click",
-            "double_click",
             "key",
             "type",
             "scroll",
             "cursor_position",
-            "list_devices",
+            "devices",
             "status",
             "screenshot",
             "click",
-            "double_click",
             "key",
             "type",
             "scroll",
@@ -1987,7 +1994,7 @@ describe("test level runner", () => {
         expect(text).toContain("withDeviceLabMcp");
         expect(text).toContain("\"left\", \"right\"");
         expect(text).toContain("\"up\", \"down\", \"left\", \"right\"");
-        expect(text).toContain("list_devices includes current display");
+        expect(text).toContain("devices includes current display");
         expect(text).toContain("status current display alias");
         expect(text).toContain("cursor_position current display alias");
         expect(text).toContain("click buttons");
@@ -2015,7 +2022,6 @@ describe("test level runner", () => {
             const text = readFileSync(join(repoRoot, "scripts", "real-tests", file), "utf-8");
             for (const tool of [
                 "click",
-                "double_click",
                 "key",
                 "type",
                 "scroll",
@@ -2043,22 +2049,39 @@ describe("test level runner", () => {
         const text = readFileSync(join(repoRoot, "scripts", "real-tests", "level1-real-provider-readiness.ts"), "utf-8");
         expect(text).toContain("wireless");
         expect(text).toContain("action: \"status\"");
-        expect(text).toContain("\"usb-tcpip\", \"pair\", \"connect\"");
+        expect(text).toContain("markExpectedInputError");
         expect(text).toContain("android-wireless-missing-adb");
-        expect(text).toContain("android-wireless-usb-tcpip-requires-serial");
-        expect(text).toContain("android-wireless-pair-requires-host-port-code");
-        expect(text).toContain("android-wireless-connect-requires-host");
-        expect(text).toContain("ios-wireless-missing-xcrun");
-        expect(text).toContain("ios-wireless-pairing-requires-xcode-trust");
+        expect(text).toContain("wireless usb-tcpip requires serial");
+        expect(text).toContain("wireless pair requires pairHost, pairPort and pairingCode");
+        expect(text).toContain("wireless connect requires host or serial");
+        expect(text).toContain("iOS wireless supports only action:status");
         expect(text).toContain("Android physical wireless action diagnostics MCP");
         expect(text).toContain("iOS physical wireless action diagnostics MCP");
+    });
+
+    it("sends a valid missing-image create probe without confusing broker and device ports", () => {
+        const request = missingWindowsImageProbe({
+            detail: true, autolaunch: true, port: 17373, brokerPort: 17373,
+            hostCandidates: ["127.0.0.1"], timeoutMs: 1000,
+            rpcTimeoutMs: 10000, launchTimeoutMs: 5000,
+        }, "level2-broker-e2e-public-windows");
+        expect(request).not.toHaveProperty("port");
+        expect(request).toHaveProperty("dryRun", true);
+        expect(request).toMatchObject({ brokerPort: 17373, image: "ccc-level2-missing-image" });
+        expect(toolInputError("create_windows_vm", request)).toBeNull();
+        const publicArgs = Object.fromEntries(Object.entries(request)
+            .filter(([key]) => !HIDDEN_LEGACY_TRANSPORT_KEYS.has(key)));
+        const schema = TOOLS.find(tool => tool.name === "create_windows_vm")!.inputSchema;
+        expect(new Ajv({ strict: false }).compile(schema)(publicArgs)).toBe(true);
+        expect(toolInputError("create_windows_vm", { ...request, port: 17373 }))
+            .toBe("create windows-vm does not support port");
     });
 
     it("covers broker autolaunch and broker-backed provider discovery in the real MCP E2E", () => {
         const text = readFileSync(join(repoRoot, "scripts", "real-tests", "level2-broker-e2e.ts"), "utf-8");
         const distText = readFileSync(join(repoRoot, "scripts", "real-tests", "level2-dist-broker-e2e.ts"), "utf-8");
         const helperText = readFileSync(join(repoRoot, "scripts", "real-tests", "helpers.ts"), "utf-8");
-        expect(text).toContain("backends");
+        expect(text).toContain("devices");
         expect(text).toContain('callInternal("brokerRpc"');
         expect(text).not.toContain('callTool("device_broker_rpc"');
         expect(text).toContain("broker.echo");
@@ -2067,7 +2090,7 @@ describe("test level runner", () => {
         expect(text).toContain("broker.backends");
         expect(text).toContain("broker RPC status");
         expect(text).toContain("broker RPC inventory");
-        expect(text).toContain("backends");
+        expect(text).toContain("devices");
         expect(text).toContain("action: \"status\"");
         expect(text).toContain("action: \"claim\"");
         expect(text).toContain("action: \"heartbeat\"");
@@ -2275,7 +2298,7 @@ describe("test level runner", () => {
     });
 
     it("keeps destructive real E2E MCP calls explicitly confirmed", () => {
-        expect([...ALWAYS_DESTRUCTIVE_REAL_E2E_TOOLS].sort()).toEqual(expect.arrayContaining(alwaysDestructivePolicyTools()));
+        expect([...ALWAYS_DESTRUCTIVE_REAL_E2E_TOOLS].sort()).toEqual(expect.arrayContaining(alwaysDestructivePolicyTools().filter(tool => tool === "device_broker_shutdown" || TOOLS.some(entry => entry.name === tool))));
         expect(realTestDestructiveCallsMissingConfirmation()).toEqual([]);
     });
 
@@ -2457,9 +2480,9 @@ describe("test level runner", () => {
             writeFileSync(scriptedButUncalledFile, [
                 "export const name='scripted-gap';",
                 "export async function run(){",
-                "  const never = () => callTool(\"backends\", { backend: \"android-emulator\" });",
+                "  const never = () => callTool(\"devices\", { backend: \"android-emulator\" });",
                 "  void never;",
-                "  return { status: 'PASS', tools: ['backends'] };",
+                "  return { status: 'PASS', tools: ['devices'] };",
                 "}",
                 "",
             ].join("\n"));
@@ -2567,8 +2590,8 @@ describe("test level runner", () => {
             expect(summary.toolCoverage.uncalledAdvertisedArgumentEnumFacets).toContain("click:button=right");
             expect(summary.toolCoverage.uncalledAdvertisedArgumentEnumFacets).not.toContain("click:button=left");
             expect(summary.toolCoverage.uncalledProviderArgumentEnumFacets).toEqual(expect.arrayContaining([
-                "inventory:backend=android-emulator",
-                "create:provider=auto",
+                "devices:backend=android-emulator",
+                "create_linux_vm:provider=auto",
             ]));
             expect(summary.toolCoverage.uncalledNonProviderArgumentEnumFacets).toContain("click:button=right");
             expect(summary.toolCoverage.uncalledNonProviderArgumentEnumFacets).not.toContain("status:backend=android-emulator");
@@ -2586,8 +2609,8 @@ describe("test level runner", () => {
                 "export const name='declared-facets';",
                 "export async function run(){",
                 "  const key = Symbol.for('ccc.deviceLabRealTests.toolCalls');",
-                "  globalThis[key] = [{ name: 'toggle_airplane_mode', arguments: { backend: 'android-emulator', deviceId: 'facet-device', enabled: false, confirmDestructive: true }, outcome: 'ok', isError: false }];",
-                "  return { status: 'PASS', scriptedArgumentFacets: ['toggle_airplane_mode:enabled=false', 'toggle_airplane_mode:confirmDestructive=true'] };",
+                "  globalThis[key] = [{ name: 'set_network', arguments: { backend: 'android-emulator', deviceId: 'facet-device', airplaneMode: false, confirmDestructive: true }, outcome: 'ok', isError: false }];",
+                "  return { status: 'PASS', scriptedArgumentFacets: ['set_network:airplaneMode=false', 'set_network:confirmDestructive=true'] };",
                 "}",
                 "",
             ].join("\n"));
@@ -2606,15 +2629,15 @@ describe("test level runner", () => {
                 };
             };
             expect(summary.toolCoverage.scriptedArgumentFacets).toEqual(expect.arrayContaining([
-                "toggle_airplane_mode:enabled=false",
-                "toggle_airplane_mode:confirmDestructive=true",
+                "set_network:airplaneMode=false",
+                "set_network:confirmDestructive=true",
             ]));
             expect(summary.toolCoverage.invalidScriptedArgumentFacets).toEqual([]);
             expect(summary.toolCoverage.uncalledScriptedArgumentFacets).toEqual([]);
             expect(summary.toolCoverage.scripted).toEqual(expect.arrayContaining([
                 expect.objectContaining({
                     source: "declared-scripted-argument-facet",
-                    facets: ["toggle_airplane_mode:enabled=false"],
+                    facets: ["set_network:airplaneMode=false"],
                 }),
             ]));
         } finally {
@@ -2851,8 +2874,8 @@ describe("test level runner", () => {
             expect(summary.toolCoverage.unjustifiedMissingDirectOkTools).toEqual([]);
             expect(summary.toolCoverage.explainedProviderValues).toEqual([]);
             expect(summary.toolCoverage.unexplainedProviderArgumentEnumFacets).toEqual(expect.arrayContaining([
-                "create:backend=android-emulator",
-                "create:provider=tart",
+                "create_linux_vm:provider=container-qemu",
+                "create_macos_vm:provider=tart",
             ]));
             expect(summary.toolCoverage.publicToolsWithoutOkOrExpectedError).toEqual([]);
             expect(summary.toolCoverage.scriptedTools).toEqual(["device_broker_rpc", "run_flow", "status"]);
@@ -3056,7 +3079,7 @@ describe("test level runner", () => {
                 strictOutcomeFailures: 0,
                 toolCoverage: {
                     canonicalToolSurface,
-                    advertisedTools: ["backends", "status"],
+                    advertisedTools: ["devices", "status"],
                     calledTools: ["device_broker_rpc", "status"],
                     calledPublicTools: ["status"],
                     calledArgumentFacets: ["device_broker_rpc:method=broker.status"],
@@ -3067,22 +3090,22 @@ describe("test level runner", () => {
                     },
                     toolEvidenceSummary: {
                         status: { direct: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-ok", "flow-ok"] },
-                        backends: { direct: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: [] },
+                        devices: { direct: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: [] },
                     },
                     publicToolsWithoutOkOrExpectedError: [],
                     publicToolsWithoutEvidence: [],
-                    publicToolsWithoutDirectOk: ["backends"],
+                    publicToolsWithoutDirectOk: ["devices"],
                     publicToolsWithOnlyExpectedErrorEvidence: [],
                     unexplainedDiagnosticOnlyTools: [],
-                    unjustifiedMissingDirectOkTools: ["backends"],
+                    unjustifiedMissingDirectOkTools: ["devices"],
                     explainedProviderValues: ["backend=android-device", "backend=android-emulator"],
                     unexplainedProviderArgumentEnumFacets: [],
-                    scriptedTools: ["backends", "device_broker_rpc", "status"],
-                    scriptedPublicTools: ["backends", "status"],
+                    scriptedTools: ["devices", "device_broker_rpc", "status"],
+                    scriptedPublicTools: ["devices", "status"],
                     scriptedArgumentFacets: ["device_broker_rpc:method=broker.status"],
-                    uncalledAdvertisedTools: ["backends"],
+                    uncalledAdvertisedTools: ["devices"],
                     unscriptedAdvertisedTools: [],
-                    uncalledScriptedTools: ["backends"],
+                    uncalledScriptedTools: ["devices"],
                     uncalledScriptedArgumentFacets: [],
                     invalidScriptedArgumentFacets: [],
                     unadvertisedTools: [],
@@ -3118,7 +3141,7 @@ describe("test level runner", () => {
                     scripted: [
                         { test: "display", tool: "status", source: "callTool" },
                         { test: "broker", tool: "device_broker_rpc", source: "callTool" },
-                        { test: "backends", tool: "backends", source: "callTool" },
+                        { test: "devices", tool: "devices", source: "callTool" },
                     ],
                 },
                 mcpSessions: [
@@ -3178,23 +3201,23 @@ describe("test level runner", () => {
                     },
                     toolEvidenceSummary: {
                         status: { direct: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-ok", "flow-ok"] },
-                        backends: { direct: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: [] },
+                        devices: { direct: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: [] },
                     },
                     publicToolsWithoutOkOrExpectedError: [],
                     publicToolsWithoutEvidence: [],
-                    publicToolsWithoutDirectOk: ["backends"],
+                    publicToolsWithoutDirectOk: ["devices"],
                     publicToolsWithOnlyExpectedErrorEvidence: [],
                     unexplainedDiagnosticOnlyTools: [],
-                    unjustifiedMissingDirectOkTools: ["backends"],
+                    unjustifiedMissingDirectOkTools: ["devices"],
                     explainedProviderValues: ["backend=android-device", "backend=android-emulator"],
                     unexplainedProviderArgumentEnumFacets: [],
                     scripted: 3,
                     scriptedPublic: 2,
                     scriptedArgumentFacets: 1,
                     invalidScriptedArgumentFacets: [],
-                    uncalledAdvertisedTools: ["backends"],
+                    uncalledAdvertisedTools: ["devices"],
                     unscriptedAdvertisedTools: [],
-                    uncalledScriptedTools: ["backends"],
+                    uncalledScriptedTools: ["devices"],
                     uncalledScriptedArgumentFacets: [],
                     unadvertisedTools: [],
                     incompleteOutcomeRecords: [],
@@ -3370,10 +3393,10 @@ describe("test level runner", () => {
                 skipCategories: [{ category: "other", count: 1, records: [{ test: "mystery", reason: "ambiguous skip" }] }],
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
-                    unscriptedAdvertisedTools: ["backends"],
-                    uncalledScriptedTools: ["backends"],
-                    publicToolsWithoutOkOrExpectedError: ["backends"],
-                    publicToolsWithoutEvidence: ["backends"],
+                    unscriptedAdvertisedTools: ["devices"],
+                    uncalledScriptedTools: ["devices"],
+                    publicToolsWithoutOkOrExpectedError: ["devices"],
+                    publicToolsWithoutEvidence: ["devices"],
                     invalidScriptedArgumentFacets: ["click:bogus=left"],
                     uncalledAdvertisedArgumentEnumFacets: [
                         "status:backend=macos-vm",
@@ -3413,18 +3436,18 @@ describe("test level runner", () => {
                 ...baseSummary,
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
-                    advertisedTools: ["status", "backends"],
-                    calledPublicTools: ["status", "backends"],
-                    publicToolsWithOnlyExpectedErrorEvidence: ["backends"],
+                    advertisedTools: ["status", "devices"],
+                    calledPublicTools: ["status", "devices"],
+                    publicToolsWithOnlyExpectedErrorEvidence: ["devices"],
                     uncalledAdvertisedArgumentEnumFacets: [],
                     toolEvidenceSummary: {
                         ...baseSummary.toolCoverage.toolEvidenceSummary,
-                        backends: { direct: { total: 1, ok: 0, expectedError: 1, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-expected-error"] },
+                        devices: { direct: { total: 1, ok: 0, expectedError: 1, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-expected-error"] },
                     },
                     calls: [
                         ...baseSummary.toolCoverage.calls,
-                        { test: "display", tool: "backends", outcome: "expected-error", mcpSessionId: "source-session-1" },
-                        { test: "package", tool: "backends", outcome: "expected-error", mcpSessionId: "dist-session-1" },
+                        { test: "display", tool: "devices", outcome: "expected-error", mcpSessionId: "source-session-1" },
+                        { test: "package", tool: "devices", outcome: "expected-error", mcpSessionId: "dist-session-1" },
                     ],
                 },
             }));
@@ -3689,7 +3712,7 @@ describe("test level runner", () => {
             expect(JSON.parse(unexplainedDiagnosticOnly.stdout)).toEqual(expect.objectContaining({
                 ok: false,
                 failures: ["unexplainedDiagnosticOnlyTools=1"],
-                unexplainedDiagnosticOnlyTools: ["backends"],
+                unexplainedDiagnosticOnlyTools: ["devices"],
             }));
 
             const nonExemptDiagnosticOnly = spawnSync(process.execPath, [runner, "--assert-json", nonExemptDiagnosticOnlyFile], {
@@ -3722,7 +3745,7 @@ describe("test level runner", () => {
             expect(staleSurface.status).toBe(1);
             expect(JSON.parse(staleSurface.stdout)).toEqual(expect.objectContaining({
                 ok: false,
-                failures: ["canonicalToolSurfaceMismatch"],
+                failures: ["canonicalToolSurfaceMismatch(source-changed-since-run; saved results do not validate the current tool schema)"],
             }));
 
             const sourceOnlySession = spawnSync(process.execPath, [runner, "--assert-json", sourceOnlySessionFile], {
@@ -3823,18 +3846,18 @@ describe("canonical real-runner argument interpretation", () => {
             const fixture = join(dir, "calls.mjs");
             const summaryPath = join(dir, "summary.json");
             const targets: Array<[string, string, Record<string, unknown>]> = [
-                ["image_list", "linux-vm", {}],
-                ["image_import", "linux-vm", { name: "base", sourcePath: "incoming/base.qcow2" }],
-                ["base_image_create", "macos-vm", { name: "base", sourceImage: "registry/base" }],
-                ["base_image_clone", "macos-vm", { name: "clone", sourceDeviceId: "owned-target" }],
+                ["list_images", "linux-vm", {}],
+                ["import_image", "linux-vm", { name: "base", sourcePath: "incoming/base.qcow2" }],
+                ["create_macos_vm", "macos-vm", { name: "base", image: "registry/base" }],
+                ["create_macos_vm", "macos-vm", { name: "clone", sourceDeviceId: "owned-target" }],
             ];
             const valid: Array<{ name: string; arguments: Record<string, unknown> }> = targets.map(([name, _backend, args]) => ({ name, arguments: { ...args, detail: true } }));
-            valid.push({ name: "create", arguments: { backend: "linux-vm", name: "flat", cpus: 2, detail: true } });
+            valid.push({ name: "create_linux_vm", arguments: {  name: "flat", cpus: 2, detail: true } });
             valid.push(
-                { name: "create", arguments: { backend: "android-emulator", name: "new", systemImage: "system-images;android-35;google_apis;x86_64" } },
-                { name: "create", arguments: { backend: "android-emulator", name: "reuse", avdName: "owned-existing" } },
-                { name: "create", arguments: { backend: "ios-simulator", name: "new", deviceType: "iphone", runtime: "ios" } },
-                { name: "create", arguments: { backend: "ios-simulator", name: "reuse", udid: "owned-existing" } },
+                { name: "create_android_emulator", arguments: {  name: "new", systemImage: "system-images;android-35;google_apis;x86_64" } },
+                { name: "create_android_emulator", arguments: {  name: "reuse", avdName: "owned-existing" } },
+                { name: "create_ios_simulator", arguments: {  name: "new", deviceType: "iphone", runtime: "ios" } },
+                { name: "create_ios_simulator", arguments: {  name: "reuse", udid: "owned-existing" } },
             );
             const invalid = targets.flatMap(([name, backend, args]) => [backend, "", null, false, {}, "unsupported"].flatMap(selector => [
                 { name, arguments: { ...args, backend: selector } },
@@ -3843,9 +3866,9 @@ describe("canonical real-runner argument interpretation", () => {
             ]));
             invalid.push(...["workspace_sync", "artifacts_export"].map(name => ({ name, arguments: { deviceId: "owned-target" } })));
             invalid.push(
-                { name: "create", arguments: { backend: "android-emulator", name: "wrong-backend-field", avdName: "existing", guestSshHost: "localhost" } },
-                { name: "create", arguments: { backend: "ios-simulator", name: "conflicting-reuse", udid: "existing", runtime: "ios" } },
-                { name: "create", arguments: { backend: "android-emulator", name: "missing-image" } },
+                { name: "create_android_emulator", arguments: {  name: "wrong-backend-field", avdName: "existing", guestSshHost: "localhost" } },
+                { name: "create_ios_simulator", arguments: {  name: "conflicting-reuse", udid: "existing", runtime: "ios" } },
+                { name: "create_android_emulator", arguments: {  name: "missing-image" } },
             );
             writeFileSync(fixture, `export const name='input-clarity'; export async function run(){globalThis[Symbol.for('ccc.deviceLabRealTests.toolCalls')]=${JSON.stringify([...valid, ...invalid].map(call => ({ ...call, outcome: "ok", isError: false })))};return {status:'PASS'};}`);
             const result = spawnSync(process.execPath, [join(repoRoot, "scripts/real-tests/run.ts"), "--json-summary-file", summaryPath, fixture], { cwd: repoRoot, encoding: "utf8", timeout: 30000 });
@@ -3864,7 +3887,7 @@ describe("canonical real-runner argument interpretation", () => {
             const valid = [
                 { name: "run_flow", arguments: { deviceId: "android-test", incarnationId: "a".repeat(32), steps: [{ tool: "click", arguments: { x: 1, y: 2 } }] } },
                 { name: "install_app", arguments: { deviceId: "android-test", path: "/app.apk" } },
-                { name: "launch_app", arguments: { deviceId: "android-test", packageName: "com.example" } },
+                { name: "launch_app", arguments: { deviceId: "android-test", appId: "com.example" } },
                 { name: "screenshot", arguments: { deviceId: "android-test" } },
                 { name: "set_orientation", arguments: { deviceId: "android-test", orientation: "landscape" } },
                 { name: "run_flow", arguments: { deviceId: "vm-a", incarnationId: "a".repeat(32), steps: [

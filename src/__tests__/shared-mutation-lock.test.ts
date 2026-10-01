@@ -7,15 +7,15 @@ import {
     withSharedMutationLock as withNestedSharedMutationLock,
     withSharedMutationLockAsync,
     writeFileAtomically as writeNestedFileAtomically,
-} from "../../device-lab-mcp/src/state/shared-mutation-lock.mjs";
+} from "@ccc/device-lab/providers/state/shared-mutation-lock.mjs";
 import {
     copyFileAtomically as copyHostFileAtomically,
     withSharedMutationLock as withHostSharedMutationLock,
     withSharedMutationLockAsync as withHostSharedMutationLockAsync,
     writeFileAtomically as writeHostFileAtomically,
-} from "../device-lab-shared-state.js";
-import { readDeviceRuntimeProcessIdentity } from "../device-lab-process-identity.js";
-import { readProcessIdentity } from "../../device-lab-mcp/src/state/process-identity.mjs";
+} from "@ccc/device-lab/device-lab-shared-state.js";
+import { readDeviceRuntimeProcessIdentity } from "@ccc/device-lab/device-lab-process-identity.js";
+import { readProcessIdentity } from "@ccc/device-lab/providers/state/process-identity.mjs";
 
 const withSharedMutationLock = withNestedSharedMutationLock;
 let tokenCounter = 0;
@@ -217,8 +217,8 @@ describe("device-lab shared mutation lock", () => {
 
     it("keeps async lock identity lookup off the event loop", async () => {
         vi.resetModules();
-        vi.doMock("../../device-lab-mcp/src/state/process-identity.mjs", async (importOriginal) => {
-            const actual = await importOriginal<typeof import("../../device-lab-mcp/src/state/process-identity.mjs")>();
+        vi.doMock("@ccc/device-lab/providers/state/process-identity.mjs", async (importOriginal) => {
+            const actual = await importOriginal<typeof import("@ccc/device-lab/providers/state/process-identity.mjs")>();
             return {
                 ...actual,
                 readProcessIdentity() {
@@ -231,7 +231,7 @@ describe("device-lab shared mutation lock", () => {
             };
         });
         try {
-            const asyncModule = await import("../../device-lab-mcp/src/state/shared-mutation-lock.mjs?async-process-identity");
+            const asyncModule = await import("@ccc/device-lab/providers/state/shared-mutation-lock.mjs?async-process-identity");
             const file = lockPath();
             let timerFired = false;
             const timer = new Promise<void>((resolve) => setTimeout(() => {
@@ -241,7 +241,7 @@ describe("device-lab shared mutation lock", () => {
             await Promise.all([asyncModule.withSharedMutationLockAsync(file, () => undefined), timer]);
             expect(timerFired).toBe(true);
         } finally {
-            vi.doUnmock("../../device-lab-mcp/src/state/process-identity.mjs");
+            vi.doUnmock("@ccc/device-lab/providers/state/process-identity.mjs");
             vi.resetModules();
         }
     });
@@ -253,8 +253,8 @@ describe("device-lab shared mutation lock", () => {
         let activeReads = 0;
         let maxActiveReads = 0;
         vi.resetModules();
-        vi.doMock("../../device-lab-mcp/src/state/process-identity.mjs", async (importOriginal) => {
-            const actual = await importOriginal<typeof import("../../device-lab-mcp/src/state/process-identity.mjs")>();
+        vi.doMock("@ccc/device-lab/providers/state/process-identity.mjs", async (importOriginal) => {
+            const actual = await importOriginal<typeof import("@ccc/device-lab/providers/state/process-identity.mjs")>();
             return {
                 ...actual,
                 readProcessIdentity() {
@@ -274,7 +274,7 @@ describe("device-lab shared mutation lock", () => {
             };
         });
         try {
-            const asyncModule = await import("../../device-lab-mcp/src/state/shared-mutation-lock.mjs?async-process-identity-dedup");
+            const asyncModule = await import("@ccc/device-lab/providers/state/shared-mutation-lock.mjs?async-process-identity-dedup");
             const files = Array.from({ length: 10 }, (_, index) => {
                 const file = lockPath();
                 writeFileSync(file, JSON.stringify({
@@ -305,7 +305,7 @@ describe("device-lab shared mutation lock", () => {
             expect(asyncReadCount).toBe(11);
             expect(maxActiveReads).toBe(4);
         } finally {
-            vi.doUnmock("../../device-lab-mcp/src/state/process-identity.mjs");
+            vi.doUnmock("@ccc/device-lab/providers/state/process-identity.mjs");
             vi.resetModules();
         }
     });
@@ -315,8 +315,8 @@ describe("device-lab shared mutation lock", () => {
         if (!processIdentity) return;
         let asyncReadCount = 0;
         vi.resetModules();
-        vi.doMock("../device-lab-process-identity.js", async (importOriginal) => {
-            const actual = await importOriginal<typeof import("../device-lab-process-identity.js")>();
+        vi.doMock("@ccc/device-lab/device-lab-process-identity.js", async (importOriginal) => {
+            const actual = await importOriginal<typeof import("@ccc/device-lab/device-lab-process-identity.js")>();
             return {
                 ...actual,
                 readDeviceRuntimeProcessIdentity() {
@@ -330,7 +330,7 @@ describe("device-lab shared mutation lock", () => {
             };
         });
         try {
-            const asyncModule = await import("../device-lab-shared-state.js?async-process-identity-dedup");
+            const asyncModule = await import("@ccc/device-lab/device-lab-shared-state.js?async-process-identity-dedup");
             const fileA = lockPath();
             const fileB = lockPath();
             const records = [
@@ -359,7 +359,7 @@ describe("device-lab shared mutation lock", () => {
             })));
             expect(asyncReadCount).toBe(3);
         } finally {
-            vi.doUnmock("../device-lab-process-identity.js");
+            vi.doUnmock("@ccc/device-lab/device-lab-process-identity.js");
             vi.resetModules();
         }
     });
@@ -374,8 +374,8 @@ describe("device-lab shared mutation lock", () => {
         let probes = 0;
         let blockedProbes = 0;
         vi.resetModules();
-        vi.doMock("../device-lab-process-identity.js", async (importOriginal) => {
-            const actual = await importOriginal<typeof import("../device-lab-process-identity.js")>();
+        vi.doMock("@ccc/device-lab/device-lab-process-identity.js", async (importOriginal) => {
+            const actual = await importOriginal<typeof import("@ccc/device-lab/device-lab-process-identity.js")>();
             return {
                 ...actual,
                 async readDeviceRuntimeProcessIdentityAsync() {
@@ -391,7 +391,7 @@ describe("device-lab shared mutation lock", () => {
         const waiters: Promise<unknown>[] = [];
         let bounded: Promise<unknown> | undefined;
         try {
-            const module = await import("../device-lab-shared-state.js?bounded-identity-queue");
+            const module = await import("@ccc/device-lab/device-lab-shared-state.js?bounded-identity-queue");
             // Ordinary acquisition still uses the asynchronous identity reader.
             await module.withSharedMutationLockAsync(lockPath(), () => undefined);
             expect(probes).toBe(1);
@@ -431,7 +431,7 @@ describe("device-lab shared mutation lock", () => {
         } finally {
             release();
             await Promise.all([...waiters, bounded]);
-            vi.doUnmock("../device-lab-process-identity.js");
+            vi.doUnmock("@ccc/device-lab/device-lab-process-identity.js");
             vi.resetModules();
         }
     });
@@ -463,7 +463,7 @@ describe("device-lab shared mutation lock", () => {
         });
 
         try {
-            const racedModule = await import("../../device-lab-mcp/src/state/shared-mutation-lock.mjs?recovery-race");
+            const racedModule = await import("@ccc/device-lab/providers/state/shared-mutation-lock.mjs?recovery-race");
             let entered = false;
             expect(() => racedModule.withSharedMutationLock(file, () => {
                 entered = true;
@@ -655,7 +655,7 @@ describe("device-lab shared mutation lock", () => {
         });
 
         try {
-            const racedModule = await import("../device-lab-shared-state.js?ts-lock-acquire-replacement");
+            const racedModule = await import("@ccc/device-lab/device-lab-shared-state.js?ts-lock-acquire-replacement");
             let entered = false;
             expect(() => racedModule.withSharedMutationLock(file, () => {
                 entered = true;
@@ -698,7 +698,7 @@ describe("device-lab shared mutation lock", () => {
         });
 
         try {
-            const module = await import("../device-lab-shared-state.js?zero-file-id-replacement");
+            const module = await import("@ccc/device-lab/device-lab-shared-state.js?zero-file-id-replacement");
             const identities = module.secureStateParentDirectory(file);
             expect(identities.length).toBeGreaterThan(0);
             expect(identities.every((identity) => identity.stats?.dev === 0 && identity.stats?.ino === 0)).toBe(true);
@@ -773,7 +773,7 @@ describe("device-lab shared mutation lock", () => {
         });
 
         try {
-            const racedModule = await import("../../device-lab-mcp/src/state/shared-mutation-lock.mjs?backend-replacement-race");
+            const racedModule = await import("@ccc/device-lab/providers/state/shared-mutation-lock.mjs?backend-replacement-race");
             expect(() => racedModule.writeFileAtomically(destination, "escaped"))
                 .toThrow(expect.objectContaining({ code: "device-lab-state-directory-invalid" }));
             expect(readdirSync(external)).toEqual([]);

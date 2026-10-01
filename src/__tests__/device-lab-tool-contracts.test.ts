@@ -11,16 +11,51 @@ describe("canonical public input schemas", () => {
         const names = TOOLS.map(tool => tool.name);
         expect(new Set(names).size).toBe(names.length);
         expect(names.every(name => !/^(device|mobile|display)_/.test(name))).toBe(true);
-        for (const name of ["click", "double_click", "move", "type", "key", "screenshot", "status"]) {
+        for (const name of ["click", "move", "type", "key", "screenshot", "status"]) {
             expect(TOOLS.find(tool => tool.name === name)?.inputSchema.required).toContain("deviceId");
         }
     });
 });
 
 describe("device-lab public output contracts", () => {
+    it.each([
+        ["devices", [{}], {}],
+        ["cursor_position", { x: "bad", y: null }, {}],
+        ["wait_for_text", {}, {}],
+        ["wait_for_app", { matched: true, running: false }, {}],
+        ["record_video", {}, { action: "stop" }],
+        ["record_video", { recording: {} }, { action: "status" }],
+        ["list_files", { entries: [{ nonsense: true }] }, {}],
+        ["screenshot", { isError: true, content: [{ type: "image", data: "AA==", mimeType: "image/png" }] }, {}],
+        ["screenshot", { content: [{ type: "image" }] }, {}],
+        ["status", { id: "display", kind: "display", ok: false }, {}],
+    ])("rejects unusable %s observations", (tool, payload, args) => {
+        expect(() => validateDeviceLabToolOutput(tool as keyof typeof DEVICE_LAB_OUTPUT_CONTRACTS, payload, args as Record<string, unknown>)).toThrow("response contract violation");
+    });
+
+    it.each([
+        ["devices", [{ id: "phone", backend: "android-device" }], {}],
+        ["devices", [], {}],
+        ["cursor_position", { x: 0, y: -2 }, {}],
+        ["cursor_position", { cursor: { x: 0, y: -2 }, provider: "windows-helper" }, { detail: true }],
+        ["wait_for_text", { matched: false, found: false, reason: "wait-condition-not-met" }, {}],
+        ["wait_for_app", { running: true }, {}],
+        ["record_video", { recording: null }, { action: "status" }],
+        ["record_video", { stopped: false }, { action: "stop" }],
+        ["record_video", { recording: { active: false, localPath: "/movie.mp4" } }, { action: "stop" }],
+        ["list_files", { entries: [{ name: "file", type: "file", size: 0 }], truncated: false }, {}],
+        ["screenshot", { content: [{ type: "image", data: "AA==", mimeType: "image/png" }] }, {}],
+    ])("accepts useful %s observations", (tool, payload, args) => {
+        expect(validateDeviceLabToolOutput(tool as keyof typeof DEVICE_LAB_OUTPUT_CONTRACTS, payload, args as Record<string, unknown>)).toEqual(payload);
+    });
     it("maps lifecycle and mobile session tools to explicit contracts", () => {
         expect(DEVICE_LAB_OUTPUT_CONTRACTS).toEqual(expect.objectContaining({
-            create: "lifecycle-device-v1",
+            create_android_emulator: "lifecycle-device-v1",
+            create_ios_simulator: "lifecycle-device-v1",
+            create_linux_vm: "lifecycle-device-v1",
+            create_macos_vm: "create_macos_vm-group-v1",
+            create_windows_sandbox: "lifecycle-device-v1",
+            create_windows_vm: "lifecycle-device-v1",
             status: "lifecycle-device-v1",
             start: "lifecycle-device-v1",
             stop: "lifecycle-device-v1",
@@ -30,6 +65,8 @@ describe("device-lab public output contracts", () => {
         expect(hasDeviceLabOutputContract("start")).toBe(true);
         expect(hasDeviceLabOutputContract("click")).toBe(true);
         expect(hasDeviceLabOutputContract("not_a_public_tool")).toBe(false);
+        expect(hasDeviceLabOutputContract("create")).toBe(false);
+        expect(hasDeviceLabOutputContract("device_create")).toBe(false);
     });
 
     it("validates both UI forms and rejects arbitrary empty data", () => {

@@ -8,7 +8,7 @@ import {
     hyperVConsoleText,
     rememberHyperVConsoleFrame,
     withHyperVConsoleLock,
-} from "../device-lab/broker/hyper-v/console.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/console.js";
 
 describe("Hyper-V console input contract", () => {
     it("requires a screenshot from the current incarnation for pixel input", () => {

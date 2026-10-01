@@ -12,7 +12,7 @@ import {
     formatDevicesList,
     formatDevicesStatus,
 } from "../device-lab-admin.js";
-import { deviceLabContainerName, deviceLabOwnerFromProjectMountPath, deviceLabProjectMountPath } from "../device-lab-owner.js";
+import { deviceLabContainerName, deviceLabOwnerFromProjectMountPath, deviceLabProjectMountPath } from "@ccc/device-lab/device-lab-owner.js";
 import { createDeviceLabAdminTestFixture } from "./helpers/device-lab-admin-fixture.js";
 
 describe("device-lab admin CLI formatters", () => {

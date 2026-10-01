@@ -263,7 +263,7 @@ const {
     getProjectId,
 } = await import("../utils.js");
 const { getAllCredentialMounts } = await import("../tool-registry.js");
-const { deviceLabOwnerId } = await import("../device-lab-owner.js");
+const { deviceLabOwnerId } = await import("@ccc/device-lab/device-lab-owner.js");
 const {
     _resetRuntimeCacheForTest,
     _setRuntimeInfoForTest,
@@ -1869,7 +1869,7 @@ describe("docker.ts module exports", () => {
     });
 
     describe("syncManagedMcpBundles", () => {
-        it("stages and atomically installs every managed MCP bundle", () => {
+        it("stages and atomically installs only the Device Lab MCP bundle", () => {
             const digest = createHash("sha256").update("managed-mcp-bundle").digest("hex");
             let digestCalls = 0;
             spawnSyncMock.mockImplementation((_command: unknown, args: unknown) => {
@@ -1883,7 +1883,7 @@ describe("docker.ts module exports", () => {
 
             syncManagedMcpBundles("ccc-test");
 
-            for (const bundle of ["x11-mcp", "device-lab-mcp"]) {
+            for (const bundle of ["device-lab-mcp"]) {
                 const copy = spawnSyncMock.mock.calls.find((call: unknown[]) => {
                     const args = call[1] as string[];
                     return args?.[0] === "cp"
@@ -1900,7 +1900,8 @@ describe("docker.ts module exports", () => {
                 });
                 expect(install).toBeDefined();
             }
-            expect(digestCalls).toBe(4);
+            expect(digestCalls).toBe(2);
+            expect(spawnSyncMock.mock.calls.some((call: unknown[]) => (call[1] as string[]).some((arg) => arg.includes("x11-mcp")))).toBe(false);
             expect(spawnSyncMock.mock.calls.some((call: unknown[]) => {
                 const args = call[1] as string[];
                 return args?.[0] === "exec" && args.includes("rm") && args.includes("/opt/ccc/dist/device-lab-mcp/server.mjs");
@@ -1916,7 +1917,7 @@ describe("docker.ts module exports", () => {
 
             syncManagedMcpBundles("ccc-test");
 
-            expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+            expect(spawnSyncMock).toHaveBeenCalledTimes(1);
             expect(spawnSyncMock.mock.calls.every((call: unknown[]) => (call[1] as string[]).includes("sha256sum"))).toBe(true);
         });
 
@@ -1938,7 +1939,7 @@ describe("docker.ts module exports", () => {
 
             syncManagedMcpBundles("ccc-test");
 
-            expect(spawnSyncMock.mock.calls.filter((call: unknown[]) => (call[1] as string[])[0] === "cp")).toHaveLength(2);
+            expect(spawnSyncMock.mock.calls.filter((call: unknown[]) => (call[1] as string[])[0] === "cp")).toHaveLength(1);
             expect(spawnSyncMock.mock.calls.some((call: unknown[]) => (call[1] as string[]).includes("install"))).toBe(false);
             expect(console.error).toHaveBeenCalledWith(expect.stringContaining("failed to stage managed MCP bundle"));
         });
@@ -1951,7 +1952,7 @@ describe("docker.ts module exports", () => {
             expect(spawnSyncMock.mock.calls.filter((call: unknown[]) => {
                 const args = call[1] as string[];
                 return args[0] === "exec" && args.includes("rm") && args.some((arg) => arg.endsWith("/server.mjs"));
-            })).toHaveLength(2);
+            })).toHaveLength(1);
             expect(console.error).toHaveBeenCalledWith(expect.stringContaining("bundle verification failed"));
         });
     });
@@ -2153,7 +2154,7 @@ describe("docker.ts module exports", () => {
             expect(spawnSyncMock.mock.calls.filter((call: unknown[]) => {
                 const args = call[1] as string[];
                 return args[0] === "cp" && args[2]?.startsWith("abc123:/tmp/ccc-managed-");
-            })).toHaveLength(2);
+            })).toHaveLength(1);
         });
 
         it("joins a macOS credential bind alias after live proof without invoking replacement guard", () => {
@@ -2740,7 +2741,7 @@ describe("docker.ts module exports", () => {
             expect(spawnSyncMock.mock.calls.filter((call: unknown[]) => {
                 const args = call[1] as string[];
                 return args[0] === "cp" && args[2]?.startsWith("abc123:/tmp/ccc-managed-");
-            })).toHaveLength(2);
+            })).toHaveLength(1);
         });
 
         it("recreates container when credential mounts are missing (drift after tool registry update)", () => {
@@ -4617,7 +4618,7 @@ describe("docker.ts module exports", () => {
             expect(spawnSyncMock.mock.calls.filter((call: unknown[]) => {
                 const args = call[1] as string[];
                 return args[0] === "cp" && args[2]?.startsWith(`${TEST_CREATED_CONTAINER_ID}:/tmp/ccc-managed-`);
-            })).toHaveLength(2);
+            })).toHaveLength(1);
             const runArgs = runCall![1] as string[];
             expect(runArgs.some((arg) => /^CCC_DEVICE_LAB_OWNER_BASIS=/.test(arg))).toBe(false);
             expect(runArgs.some((arg) => arg.endsWith(":/home/ccc/.ccc/labs"))).toBe(false);

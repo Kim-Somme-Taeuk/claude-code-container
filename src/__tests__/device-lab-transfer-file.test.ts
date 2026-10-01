@@ -8,7 +8,7 @@ import {
     populateLocalOutputStage,
     restoreLocalOutputStage,
     stageLocalInputFile,
-} from "../../device-lab-mcp/src/transfer-file.mjs";
+} from "@ccc/device-lab/providers/transfer-file.mjs";
 
 describe("device-lab transfer file boundaries", () => {
     const roots: string[] = [];

@@ -4,18 +4,18 @@ import {
     createDeviceLabHyperVWindowsClient,
     createRecordingDeviceLabHyperVWindowsClient,
     hyperVWindowsSessionErrorNeverRan,
-} from "../device-lab/broker/hyper-v/lifecycle-adapter.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/lifecycle-adapter.js";
 import {
     HYPER_V_WINDOWS_SESSION_ERROR_CODES,
     type HyperVWindowsSessionErrorCode,
-} from "../hyper-v-windows/index.js";
-import { redactProviderCommandInput } from "../device-lab/broker/hyper-v/public-response.js";
+} from "@ccc/hyper-v/index.js";
+import { redactProviderCommandInput } from "@ccc/device-lab/device-lab/broker/hyper-v/public-response.js";
 import type {
     HyperVWindowsError,
     HyperVWindowsExecutionRequest,
     HyperVWindowsExecutionResult,
     HyperVWindowsExecutor,
-} from "../hyper-v-windows/index.js";
+} from "@ccc/hyper-v/index.js";
 
 const VM_ID = "12345678-1234-4123-8123-123456789abc";
 

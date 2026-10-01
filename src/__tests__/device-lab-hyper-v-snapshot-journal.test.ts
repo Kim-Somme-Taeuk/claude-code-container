@@ -7,7 +7,7 @@ import {
     recordHyperVSnapshotCreatedId,
     writeHyperVSnapshotJournal,
     type HyperVJournalPersistenceRuntime,
-} from "../device-lab/broker/hyper-v/operation-journal.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/operation-journal.js";
 
 const roots: string[] = [];
 afterEach(() => {

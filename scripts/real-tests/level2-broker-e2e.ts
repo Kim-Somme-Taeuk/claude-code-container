@@ -1,7 +1,8 @@
 import { toolInputError } from "../../device-lab-mcp/src/tool-arguments.mjs";
 import { createInputError } from "../../device-lab-mcp/src/creation-input.mjs";
-import { toolOperation } from "../../device-lab-mcp/src/tools.mjs";
+import { toolOperation, CREATE_TOOL_BACKENDS } from "../../device-lab-mcp/src/tools.mjs";
 import { createBrokerApiClient } from "./broker-api-client.ts";
+import { ownerId } from "#device-lab/providers/context.mjs";
 import assert from "assert";
 import { spawnSync } from "child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from "fs";
@@ -15,6 +16,20 @@ import { aggregateStepResult } from "./result-status.ts";
 
 export const name = "level 2 host broker MCP E2E";
 
+// Keep broker transport separate from the device's own creation fields.
+export function missingWindowsImageProbe(route: Record<string, unknown>, deviceId: string) {
+    const args = { ...route };
+    delete args.port;
+    return {
+        ...args,
+        detail: true,
+        name: "Level 2 missing-image diagnostic",
+        deviceId,
+        image: "ccc-level2-missing-image",
+        dryRun: true,
+    };
+}
+
 const expectedBackends = [
     "android-emulator",
     "android-device",
@@ -27,9 +42,9 @@ const expectedBackends = [
 ];
 const scriptedArgumentFacets = [
     "delete:confirmDestructive=true",
-    "launch_app:bundleId=com.example.missing",
+    "launch_app:appId=com.example.missing",
     "launch_app:component=com.example.missing/.MainActivity",
-    "launch_app:packageName=com.example.missing",
+    "launch_app:appId=com.example.missing",
     "reset:confirmDestructive=true",
     "snapshot:confirmDestructive=true",
     "snapshot:snapshotId=missing-snapshot-id",
@@ -38,15 +53,15 @@ const scriptedArgumentFacets = [
     "snapshot:snapshotId=missing-snapshot-id",
     "snapshot:snapshotName=missing",
     "clear_app_data:confirmDestructive=true",
-    "clear_app_data:bundleId=com.example.missing",
-    "clear_app_data:packageName=com.example.missing",
-    "permission:bundleId=com.example.missing",
-    "permission:packageName=com.example.missing",
+    "clear_app_data:appId=com.example.missing",
+    "clear_app_data:appId=com.example.missing",
+    "permission:appId=com.example.missing",
+    "permission:appId=com.example.missing",
     "permission:permission=android.permission.CAMERA",
-    "permission:service=camera",
-    "launch_app:bundleId=com.example.missing",
+    "permission:permission=camera",
+    "launch_app:appId=com.example.missing",
     "launch_app:component=com.example.missing/.MainActivity",
-    "launch_app:packageName=com.example.missing",
+    "launch_app:appId=com.example.missing",
     "set_orientation:orientation=landscape",
     "set_orientation:orientation=portrait",
     "set_orientation:orientation=reverse-landscape",
@@ -58,19 +73,19 @@ const scriptedArgumentFacets = [
     "set_network:data=true",
     "set_network:confirmDestructive=true",
     "set_network:wifi=true",
-    "toggle_airplane_mode:confirmDestructive=true",
-    "toggle_airplane_mode:enabled=false",
+    "set_network:confirmDestructive=true",
+    "set_network:airplaneMode=false",
     "uninstall_app:confirmDestructive=true",
-    "uninstall_app:bundleId=com.example.missing",
-    "uninstall_app:packageName=com.example.missing",
-    "permission:bundleId=com.example.missing",
-    "permission:packageName=com.example.missing",
+    "uninstall_app:appId=com.example.missing",
+    "uninstall_app:appId=com.example.missing",
+    "permission:appId=com.example.missing",
+    "permission:appId=com.example.missing",
     "permission:permission=android.permission.CAMERA",
-    "permission:service=camera",
-    "stop_app:bundleId=com.example.missing",
-    "stop_app:packageName=com.example.missing",
-    "wait_for_app:bundleId=com.example.missing",
-    "wait_for_app:packageName=com.example.missing",
+    "permission:permission=camera",
+    "stop_app:appId=com.example.missing",
+    "stop_app:appId=com.example.missing",
+    "wait_for_app:appId=com.example.missing",
+    "wait_for_app:appId=com.example.missing",
 ];
 const scriptedTools = new Set();
 
@@ -81,19 +96,18 @@ function scriptedToolCases(cases) {
 
 function failStep(name, error) {
     const message = String(error?.message || error || "unknown error");
-    const firstLine = message.split(/\r?\n/).find(Boolean) || message;
     try {
-        const payload = JSON.parse(firstLine);
+        const payload = JSON.parse(message);
         const launch = payload?.launch || payload?.broker?.launch;
         const parts = [payload?.error || payload?.mode, launch?.detail, launch?.command].filter(Boolean);
         return { name, status: "FAIL", reason: parts.join(": ") || "broker operation failed" };
     } catch {
-        const normalized = firstLine.replace(/\s+/g, " ").trim();
+        const normalized = message.replace(/\s+/g, " ").trim();
         return { name, status: "FAIL", reason: normalized.length > 240 ? `${normalized.slice(0, 237)}...` : normalized };
     }
 }
 
-const PUBLIC_DEVICE_LIFECYCLE_TOOLS = new Set(["create", "start", "stop", "delete"]);
+const PUBLIC_DEVICE_LIFECYCLE_TOOLS = new Set([...Object.keys(CREATE_TOOL_BACKENDS), "start", "stop", "delete"]);
 const PUBLIC_DEVICE_PHYSICAL_TOOLS = new Set(["attach", "detach"]);
 const PUBLIC_DEVICE_READONLY_TOOLS = new Set([
     "window_list",
@@ -138,23 +152,21 @@ function brokerEnumSample(toolName, route, facetKey, facetValue, index) {
     };
     delete args.implicitBroker;
 
-    if (toolName === "create") {
+    if (CREATE_TOOL_BACKENDS[toolName]) {
+        // Creation reserves port for the device; brokerPort selects transport.
+        delete args.port;
         // Every enum probe remains a broker plan, never resource creation.
         for (const key of ["avdName", "systemImage", "deviceType", "runtime", "udid", "image", "provider"]) delete args[key];
         args.name = `Level 2 enum ${facetKey} ${facetValue}`;
         args.deviceId = `level2-enum-${facetKey}-${facetValue}-${index}`;
         args.dryRun = true;
-        if (facetKey === "provider") {
-            args.backend = ["auto", "hyper-v"].includes(facetValue) ? "windows-vm" : "macos-vm";
-            if (facetValue === "container-qemu") args.backend = "linux-vm";
-            args.provider = facetValue;
-        }
-        if (args.backend === "linux-vm" && facetKey === "backend") args.provider = "hyper-v";
-        if (args.backend === "android-emulator") args.systemImage = "system-images;android-35;google_apis;x86_64";
-        else if (args.backend === "ios-simulator") {
+        const backend = CREATE_TOOL_BACKENDS[toolName];
+        if (facetKey === "provider") args.provider = facetValue;
+        if (backend === "android-emulator") args.systemImage = "system-images;android-35;google_apis;x86_64";
+        else if (backend === "ios-simulator") {
             args.deviceType = "com.apple.CoreSimulator.SimDeviceType.iPhone-16";
             args.runtime = "com.apple.CoreSimulator.SimRuntime.iOS-18-0";
-        } else if (["windows-vm", "linux-vm", "macos-vm"].includes(args.backend)) args.image = "missing-image";
+        } else if (["windows-vm", "linux-vm", "macos-vm"].includes(backend)) args.image = "missing-image";
         if (args.provider === "container-qemu") {
             delete args.image;
             args.sourceImage = "/tmp/ccc-level2-missing-image.qcow2";
@@ -168,15 +180,8 @@ function brokerEnumSample(toolName, route, facetKey, facetValue, index) {
     if (toolName === "reset") {
         args.confirmDestructive = true;
     }
-    if ((toolOperation(toolName)?.startsWith("mobile_") || ["click", "double_click", "key", "type"].includes(toolName)) && /ios/.test(String(facetValue))) {
-        if ("packageName" in args && !("bundleId" in args)) {
-            delete args.packageName;
-            args.bundleId = "com.example.missing";
-        }
-        if ("permission" in args && !("service" in args)) {
-            delete args.permission;
-            args.service = "camera";
-        }
+    if (toolName === "permission" && /ios/.test(String(facetValue))) {
+        args.permission = "camera";
     }
     return args;
 }
@@ -262,10 +267,9 @@ export async function runBrokerE2E(options: any = {}) {
         ...process.env,
         HOME: testHome,
         USERPROFILE: testHome,
-        // StdioClientTransport overlays this object on process.env. An empty
-        // value is required to suppress a host/container auth-file override;
-        // deleting the key here would allow the parent value back in.
-        CCC_DEVICE_BROKER_AUTH_FILE: "",
+        // Empty values still discover the container's conventional auth mount.
+        // Both clients must use the secret created by this isolated test broker.
+        CCC_DEVICE_BROKER_AUTH_FILE: join(testHome, ".ccc", "devices", "broker", "auth", `${ownerId()}.json`),
     });
     if (!ccc.ok) {
         rmSync(testHome, { recursive: true, force: true });
@@ -293,14 +297,14 @@ export async function runBrokerE2E(options: any = {}) {
         detail: true,
         autolaunch: true,
         brokerPort: port,
+        port,
         hostCandidates: ["127.0.0.1"],
         timeoutMs: 1000,
         rpcTimeoutMs: 10000,
         launchTimeoutMs: 5000,
     };
-    // Public lifecycle tools reserve `port` for a device port and therefore
-    // use brokerPort. Read-only broker discovery still consumes the broker
-    // transport's `port` field directly.
+    // Internal transport overrides differ between creation and read operations.
+    // Creation probes below remove port and retain brokerPort.
     const publicReadRoute = { ...publicRoute, port };
     const steps = [];
     let mcpOwnedBrokerLaunched = false;
@@ -314,7 +318,7 @@ export async function runBrokerE2E(options: any = {}) {
             const callInternal = (operation: string, args: Record<string, unknown>) => internalBroker.call(operation, args);
             let brokerReady = false;
             try {
-                const status = parseToolPayload(await callTool("backends", { detail: true, ...route })).broker;
+                const status = parseToolPayload(await callTool("devices", { view: "backends", detail: true, ...route })).broker;
                 assert.strictEqual(status.available, true, JSON.stringify(status));
                 assert.strictEqual(status.launch?.ok ?? true, true, JSON.stringify(status.launch));
                 brokerReady = true;
@@ -469,14 +473,14 @@ export async function runBrokerE2E(options: any = {}) {
             }
 
             try {
-            const attachDiagnostic = parseToolPayload(await callInternal("brokerPhysical", {
+            const attachDiagnostic = parseToolResult(await callInternal("brokerPhysical", {
                 ...route,
                 action: "attach",
                 backend: "android-device",
                 name: "Level 2 Broker E2E Missing Android Device",
                 deviceId: "level2-broker-e2e-missing-android-device",
                 serial: "ccc-level2-definitely-missing-android-serial",
-            }));
+            }), { expectedError: true });
             assert.strictEqual(attachDiagnostic.ok, false, JSON.stringify(attachDiagnostic));
             assert.ok([
                 "missing-android-serial",
@@ -491,12 +495,12 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const detachDiagnostic = parseToolPayload(await callInternal("brokerPhysical", {
+            const detachDiagnostic = parseToolResult(await callInternal("brokerPhysical", {
                 ...route,
                 action: "detach",
                 backend: "android-device",
                 deviceId: "level2-broker-e2e-missing-android-device",
-            }));
+            }), { expectedError: true });
             assert.strictEqual(detachDiagnostic.ok, false, JSON.stringify(detachDiagnostic));
             assert.strictEqual(detachDiagnostic.error, "owner-device-not-found", JSON.stringify(detachDiagnostic));
             steps.push({ name: "broker physical detach missing-device diagnostic", status: "PASS" });
@@ -505,11 +509,11 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const apple = parseToolPayload(await callInternal("brokerApple", {
+            const apple = parseToolResult(await callInternal("brokerApple", {
                 ...route,
                 action: "status",
                 backend: "ios-device",
-            }));
+            }), { expectedError: true });
             assert.ok(apple.result || apple.body?.result || apple.error, JSON.stringify(apple));
             steps.push({ name: "broker Apple trust status", status: "PASS", detail: apple.ok === false ? apple.error : "ok" });
         } catch (error) {
@@ -517,12 +521,12 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const applePair = parseToolPayload(await callInternal("brokerApple", {
+            const applePair = parseToolResult(await callInternal("brokerApple", {
                 ...route,
                 action: "pair",
                 backend: "ios-device",
                 udid: "00000000-0000000000000000",
-            }));
+            }), { expectedError: true });
             assert.strictEqual(applePair.ok, false, JSON.stringify(applePair));
             assert.ok(["xctrace-inventory-failed", "ios-wireless-missing-xcrun", "ios-apple-pairing-manual-required"].includes(applePair.error), JSON.stringify(applePair));
             steps.push({ name: "broker Apple trust pair diagnostic", status: "PASS", detail: applePair.error });
@@ -531,12 +535,12 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const appleConnect = parseToolPayload(await callInternal("brokerApple", {
+            const appleConnect = parseToolResult(await callInternal("brokerApple", {
                 ...route,
                 action: "connect",
                 backend: "ios-device",
                 udid: "00000000-0000000000000000",
-            }));
+            }), { expectedError: true });
             assert.strictEqual(appleConnect.ok, false, JSON.stringify(appleConnect));
             assert.ok(["xctrace-inventory-failed", "ios-wireless-missing-xcrun", "ios-apple-pairing-manual-required"].includes(appleConnect.error), JSON.stringify(appleConnect));
             steps.push({ name: "broker Apple trust connect diagnostic", status: "PASS", detail: appleConnect.error });
@@ -545,12 +549,12 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const appium = parseToolPayload(await callInternal("brokerAppium", {
+            const appium = parseToolResult(await callInternal("brokerAppium", {
                 ...route,
                 action: "status",
                 backend: "android-emulator",
                 deviceId: "level2-broker-e2e-appium-status",
-            }));
+            }), { expectedError: true });
             assert.ok(appium.result || appium.error === "owner-device-not-found", JSON.stringify(appium));
             steps.push({ name: "broker Appium status", status: "PASS", detail: appium.ok === false ? appium.error : "ok" });
         } catch (error) {
@@ -572,7 +576,7 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const appiumRecord = parseToolPayload(await callInternal("brokerAppium", {
+            const appiumRecord = parseToolResult(await callInternal("brokerAppium", {
                 ...route,
                 action: "record",
                 backend: "android-emulator",
@@ -582,7 +586,7 @@ export async function runBrokerE2E(options: any = {}) {
                 appiumPort: 4723,
                 automationName: "UiAutomator2",
                 provider: "appium",
-            }));
+            }), { expectedError: true });
             assert.strictEqual(appiumRecord.ok, false, JSON.stringify(appiumRecord));
             assert.strictEqual(appiumRecord.error, "owner-device-not-found", JSON.stringify(appiumRecord));
             steps.push({ name: "broker Appium record missing-device diagnostic", status: "PASS" });
@@ -591,12 +595,12 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const appiumClear = parseToolPayload(await callInternal("brokerAppium", {
+            const appiumClear = parseToolResult(await callInternal("brokerAppium", {
                 ...route,
                 action: "clear",
                 backend: "android-emulator",
                 deviceId: "level2-broker-e2e-appium-record",
-            }));
+            }), { expectedError: true });
             assert.strictEqual(appiumClear.ok, false, JSON.stringify(appiumClear));
             assert.strictEqual(appiumClear.error, "owner-device-not-found", JSON.stringify(appiumClear));
             steps.push({ name: "broker Appium clear missing-device diagnostic", status: "PASS" });
@@ -606,12 +610,12 @@ export async function runBrokerE2E(options: any = {}) {
 
             try {
             for (const action of ["start", "stop", "ensure-session", "delete-session"]) {
-                const appiumDiagnostic = parseToolPayload(await callInternal("brokerAppium", {
+                const appiumDiagnostic = parseToolResult(await callInternal("brokerAppium", {
                     ...route,
                     action,
                     backend: "android-emulator",
                     deviceId: `level2-broker-e2e-appium-${action}`,
-                }));
+                }), { expectedError: true });
                 assert.strictEqual(appiumDiagnostic.ok, false, JSON.stringify(appiumDiagnostic));
                 assert.strictEqual(appiumDiagnostic.error, "owner-device-not-found", JSON.stringify(appiumDiagnostic));
             }
@@ -622,7 +626,7 @@ export async function runBrokerE2E(options: any = {}) {
 
             try {
             for (const method of ["GET", "POST"]) {
-                const appiumRequest = parseToolPayload(await callInternal("brokerAppium", {
+                const appiumRequest = parseToolResult(await callInternal("brokerAppium", {
                     ...route,
                     action: "request",
                     backend: "android-emulator",
@@ -630,7 +634,7 @@ export async function runBrokerE2E(options: any = {}) {
                     method,
                     path: method === "GET" ? "/source" : "/actions",
                     body: method === "POST" ? { actions: [{ type: "pause", duration: 1 }] } : undefined,
-                }));
+                }), { expectedError: true });
                 assert.strictEqual(appiumRequest.ok, false, JSON.stringify(appiumRequest));
                 assert.strictEqual(appiumRequest.error, "owner-device-not-found", JSON.stringify(appiumRequest));
             }
@@ -640,13 +644,13 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const plannedCommand = parseToolPayload(await callInternal("brokerCommand", {
+            const plannedCommand = parseToolResult(await callInternal("brokerCommand", {
                 ...route,
                 action: "plan",
                 backend: "android-emulator",
                 command: "device_status",
                 deviceId: "level2-broker-e2e-command-plan",
-            }));
+            }), { expectedError: true });
             assert.ok(plannedCommand.result || plannedCommand.error === "owner-device-not-found", JSON.stringify(plannedCommand));
             assert.strictEqual(plannedCommand.method, "broker.command.plan", JSON.stringify(plannedCommand));
             steps.push({ name: "broker lifecycle command plan", status: "PASS", detail: plannedCommand.ok === false ? plannedCommand.error : "ok" });
@@ -656,16 +660,16 @@ export async function runBrokerE2E(options: any = {}) {
 
             try {
             for (const command of ["device_create", "device_status", "device_start", "device_stop", "device_delete"]) {
-                const planned = parseToolPayload(await callInternal("brokerCommand", {
+                const planned = parseToolResult(await callInternal("brokerCommand", {
                     ...route,
                     action: "plan",
                     backend: "android-emulator",
                     command,
                     deviceId: `level2-broker-e2e-command-${command}`,
                     name: `level2-broker-e2e-command-${command}`,
-                }));
+                }), { expectedError: true });
                 assert.strictEqual(planned.method, "broker.command.plan", JSON.stringify(planned));
-                if (command === "create") {
+                if (command === "device_create") {
                     assert.strictEqual(planned.ok, true, JSON.stringify(planned));
                     assert.strictEqual(planned.result.command, command, JSON.stringify(planned));
                     assert.strictEqual(planned.result.execution.mutatesHost, false, JSON.stringify(planned));
@@ -704,13 +708,13 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const invokedCommand = parseToolPayload(await callInternal("brokerCommand", {
+            const invokedCommand = parseToolResult(await callInternal("brokerCommand", {
                 ...route,
                 action: "invoke",
                 backend: "android-emulator",
                 command: "device_status",
                 deviceId: "level2-broker-e2e-command-invoke",
-            }));
+            }), { expectedError: true });
             assert.strictEqual(invokedCommand.ok, false, JSON.stringify(invokedCommand));
             assert.strictEqual(invokedCommand.error, "owner-device-not-found", JSON.stringify(invokedCommand));
             assert.strictEqual(invokedCommand.method, "broker.command.invoke", JSON.stringify(invokedCommand));
@@ -739,37 +743,32 @@ export async function runBrokerE2E(options: any = {}) {
         }
 
             try {
-            const backends = parseToolPayload(await callTool("backends", { detail: true, ...publicReadRoute }));
+            const backends = parseToolPayload(await callTool("devices", { view: "backends", detail: true, ...publicReadRoute }));
             assert.strictEqual(backends.routedBy, "device-backends-broker", JSON.stringify(backends));
             assert.strictEqual(backends.source, "host-broker-provider-discovery", JSON.stringify(backends));
             assert.strictEqual(backends.broker?.available, true, JSON.stringify(backends.broker));
-            steps.push({ name: "MCP device_backends routes through broker", status: "PASS" });
+            steps.push({ name: "MCP devices view:backends routes through broker", status: "PASS" });
         } catch (error) {
-            steps.push(failStep("MCP device_backends routes through broker", error));
+            steps.push(failStep("MCP devices view:backends routes through broker", error));
         }
 
             try {
-            const inventory = parseToolPayload(await callTool("inventory", { detail: true, ...publicReadRoute, backend: "android-emulator" }));
+            const inventory = parseToolPayload(await callTool("devices", { view: "available", detail: true, ...publicReadRoute, backend: "android-emulator" }));
             assert.ok(["device-readonly-broker-implicit", "device-readonly-broker"].includes(inventory.routedBy), JSON.stringify(inventory));
             assert.strictEqual(inventory.ok, true, JSON.stringify(inventory));
             assert.strictEqual(inventory.result?.source, "host-broker-owner-state", JSON.stringify(inventory.result));
-            steps.push({ name: "MCP device_inventory routes through broker", status: "PASS" });
+            steps.push({ name: "MCP devices view:available routes through broker", status: "PASS" });
         } catch (error) {
-            steps.push(failStep("MCP device_inventory routes through broker", error));
+            steps.push(failStep("MCP devices view:available routes through broker", error));
         }
 
             try {
             const fakeAndroid = "level2-broker-e2e-public-android";
             const fakeWindows = "level2-broker-e2e-public-windows";
-            const createPlan = parseToolPayload(await callTool("create", { detail: true,
-                ...publicRoute,
-                backend: "windows-vm",
-                name: "Level 2 public dry-run create",
-                deviceId: fakeWindows,
-                image: "ccc-level2-missing-image",
-                dryRun: true,
-            }));
-            assert.strictEqual(createPlan.ok, true, JSON.stringify(createPlan));
+            const createPlan = parseToolResult(await callTool("create_windows_vm",
+                missingWindowsImageProbe(publicRoute, fakeWindows)), { expectedError: true });
+            assert.strictEqual(createPlan.ok, false, JSON.stringify(createPlan));
+            assert.strictEqual(createPlan.error, "hyper-v-base-image-not-prepared", JSON.stringify(createPlan));
             assert.strictEqual(createPlan.routedBy, "device-lifecycle-broker", JSON.stringify(createPlan));
             const publicDeviceDiagnostics = scriptedToolCases([
                 ["start", { ...publicRoute, deviceId: fakeAndroid }],
@@ -785,12 +784,12 @@ export async function runBrokerE2E(options: any = {}) {
                 ["record_video", { action: "stop", ...publicRoute, deviceId: fakeAndroid, timeoutMs: 1 }],
                 ["upload", { ...publicRoute, deviceId: fakeAndroid, localPath: "/tmp/ccc-missing-public-upload.txt", remotePath: "/sdcard/ccc-missing-public-upload.txt", timeoutMs: 1 }],
                 ["download", { ...publicRoute, deviceId: fakeAndroid, remotePath: "/sdcard/ccc-missing-public-download.txt", localPath: "/tmp/ccc-missing-public-download.txt", timeoutMs: 1 }],
-                ["clear_app_data", { ...publicRoute, deviceId: fakeAndroid, packageName: "com.example.missing", confirmDestructive: true }],
-                ["clear_app_data", { ...publicRoute, deviceId: "level2-broker-e2e-public-ios", bundleId: "com.example.missing", confirmDestructive: true }],
+                ["clear_app_data", { ...publicRoute, deviceId: fakeAndroid, appId: "com.example.missing", confirmDestructive: true }],
+                ["clear_app_data", { ...publicRoute, deviceId: "level2-broker-e2e-public-ios", appId: "com.example.missing", confirmDestructive: true }],
                 ["reset", { ...publicRoute, deviceId: "level2-broker-e2e-public-ios", confirmDestructive: true }],
                 ["install_app", { ...publicRoute, deviceId: fakeAndroid, path: "/tmp/ccc-missing-public.apk" }],
-                ["launch_app", { ...publicRoute, deviceId: fakeAndroid, packageName: "com.example.missing" }],
-                ["launch_app", { ...publicRoute, deviceId: fakeAndroid, bundleId: "com.example.missing" }],
+                ["launch_app", { ...publicRoute, deviceId: fakeAndroid, appId: "com.example.missing" }],
+                ["launch_app", { ...publicRoute, deviceId: fakeAndroid, appId: "com.example.missing" }],
                 ["launch_app", { ...publicRoute, deviceId: fakeAndroid, component: "com.example.missing/.MainActivity" }],
                 ["window_list", { ...publicRoute, deviceId: fakeWindows, timeoutMs: 1 }],
                 ["ui", { ...publicRoute, deviceId: fakeWindows, maxDepth: 1, maxNodes: 1, timeoutMs: 1 }],
@@ -802,7 +801,7 @@ export async function runBrokerE2E(options: any = {}) {
                     assertFailureDiagnostic(tool, parseToolResult(result, { expectedError: true }), expectedPublicDeviceRoutedBy(tool, args));
                 } else assertMissingTargetDiagnostic(tool, result, args);
             }
-            steps.push({ name: "public device wrapper dry-run create and missing-device diagnostics", status: "PASS", detail: `diagnostics=${publicDeviceDiagnostics.length}` });
+            steps.push({ name: "public device wrapper missing-device diagnostics", status: "PASS", detail: `diagnostics=${publicDeviceDiagnostics.length}` });
         } catch (error) {
             steps.push(failStep("public device wrapper missing-device diagnostics", error));
         }
@@ -813,7 +812,7 @@ export async function runBrokerE2E(options: any = {}) {
                 ["status", { ...publicRoute, deviceId: fakeMobile }],
                 ["ui", { ...publicRoute, deviceId: fakeMobile }],
                 ["click", { ...publicRoute, deviceId: fakeMobile, x: 1, y: 1 }],
-                ["double_click", { ...publicRoute, deviceId: fakeMobile, x: 1, y: 1 }],
+                ["click", { count: 2, ...publicRoute, deviceId: fakeMobile, x: 1, y: 1 }],
                 ["long_press", { ...publicRoute, deviceId: fakeMobile, x: 1, y: 1, durationMs: 1 }],
                 ["swipe", { ...publicRoute, deviceId: fakeMobile, x1: 1, y1: 1, x2: 2, y2: 2, durationMs: 1 }],
                 ["drag", { ...publicRoute, deviceId: fakeMobile, x1: 1, y1: 1, x2: 2, y2: 2, durationMs: 1 }],
@@ -834,43 +833,43 @@ export async function runBrokerE2E(options: any = {}) {
                 ["set_orientation", { ...publicRoute, deviceId: fakeMobile, orientation: "reverse-portrait" }],
                 ["open_url", { ...publicRoute, deviceId: fakeMobile, url: "https://example.invalid/" }],
                 ["install_app", { ...publicRoute, deviceId: fakeMobile, path: "/tmp/ccc-missing-public.apk" }],
-                ["launch_app", { ...publicRoute, deviceId: fakeMobile, packageName: "com.example.missing" }],
-                ["launch_app", { ...publicRoute, deviceId: fakeMobile, bundleId: "com.example.missing" }],
+                ["launch_app", { ...publicRoute, deviceId: fakeMobile, appId: "com.example.missing" }],
+                ["launch_app", { ...publicRoute, deviceId: fakeMobile, appId: "com.example.missing" }],
                 ["launch_app", { ...publicRoute, deviceId: fakeMobile, component: "com.example.missing/.MainActivity" }],
-                ["uninstall_app", { ...publicRoute, deviceId: fakeMobile, packageName: "com.example.missing", confirmDestructive: true }],
-                ["uninstall_app", { ...publicRoute, deviceId: fakeMobile, bundleId: "com.example.missing", confirmDestructive: true }],
-                ["stop_app", { ...publicRoute, deviceId: fakeMobile, packageName: "com.example.missing" }],
-                ["stop_app", { ...publicRoute, deviceId: fakeMobile, bundleId: "com.example.missing" }],
-                ["clear_app_data", { ...publicRoute, deviceId: fakeMobile, packageName: "com.example.missing", confirmDestructive: true }],
-                ["clear_app_data", { ...publicRoute, deviceId: fakeMobile, bundleId: "com.example.missing", confirmDestructive: true }],
-                ["permission", { action: "grant", ...publicRoute, deviceId: fakeMobile, packageName: "com.example.missing", permission: "android.permission.CAMERA" }],
-                ["permission", { action: "grant", ...publicRoute, deviceId: fakeMobile, bundleId: "com.example.missing", service: "camera" }],
-                ["permission", { action: "revoke", ...publicRoute, deviceId: fakeMobile, packageName: "com.example.missing", permission: "android.permission.CAMERA" }],
-                ["permission", { action: "revoke", ...publicRoute, deviceId: fakeMobile, bundleId: "com.example.missing", service: "camera" }],
+                ["uninstall_app", { ...publicRoute, deviceId: fakeMobile, appId: "com.example.missing", confirmDestructive: true }],
+                ["uninstall_app", { ...publicRoute, deviceId: fakeMobile, appId: "com.example.missing", confirmDestructive: true }],
+                ["stop_app", { ...publicRoute, deviceId: fakeMobile, appId: "com.example.missing" }],
+                ["stop_app", { ...publicRoute, deviceId: fakeMobile, appId: "com.example.missing" }],
+                ["clear_app_data", { ...publicRoute, deviceId: fakeMobile, appId: "com.example.missing", confirmDestructive: true }],
+                ["clear_app_data", { ...publicRoute, deviceId: fakeMobile, appId: "com.example.missing", confirmDestructive: true }],
+                ["permission", { action: "grant", ...publicRoute, deviceId: fakeMobile, appId: "com.example.missing", permission: "android.permission.CAMERA" }],
+                ["permission", { action: "grant", ...publicRoute, deviceId: fakeMobile, appId: "com.example.missing", permission: "camera" }],
+                ["permission", { action: "revoke", ...publicRoute, deviceId: fakeMobile, appId: "com.example.missing", permission: "android.permission.CAMERA" }],
+                ["permission", { action: "revoke", ...publicRoute, deviceId: fakeMobile, appId: "com.example.missing", permission: "camera" }],
                 ["set_location", { ...publicRoute, deviceId: fakeMobile, latitude: 37.7749, longitude: -122.4194 }],
                 ["set_battery", { ...publicRoute, deviceId: fakeMobile, level: 50, confirmDestructive: true }],
                 ["set_battery", { ...publicRoute, deviceId: fakeMobile, status: 2, confirmDestructive: true }],
                 ["set_battery", { ...publicRoute, deviceId: fakeMobile, charging: true, confirmDestructive: true }],
                 ["set_network", { ...publicRoute, deviceId: fakeMobile, wifi: true, confirmDestructive: true }],
                 ["set_network", { ...publicRoute, deviceId: fakeMobile, data: true, confirmDestructive: true }],
-                ["toggle_airplane_mode", { ...publicRoute, deviceId: fakeMobile, enabled: false, confirmDestructive: true }],
+                ["set_network", { ...publicRoute, deviceId: fakeMobile, airplaneMode: false, confirmDestructive: true }],
                 ["clipboard", { ...publicRoute, deviceId: fakeMobile, text: "ccc-public-clipboard" }],
                 ["clipboard", { ...publicRoute, deviceId: fakeMobile }],
                 ["wait_for_text", { ...publicRoute, deviceId: fakeMobile, text: "missing", timeoutMs: 1, intervalMs: 50 }],
-                ["wait_for_app", { ...publicRoute, deviceId: fakeMobile, packageName: "com.example.missing", timeoutMs: 1, intervalMs: 50 }],
-                ["wait_for_app", { ...publicRoute, deviceId: fakeMobile, bundleId: "com.example.missing", timeoutMs: 1, intervalMs: 50 }],
+                ["wait_for_app", { ...publicRoute, deviceId: fakeMobile, appId: "com.example.missing", timeoutMs: 1, intervalMs: 50 }],
+                ["wait_for_app", { ...publicRoute, deviceId: fakeMobile, appId: "com.example.missing", timeoutMs: 1, intervalMs: 50 }],
                 ["screenshot", { ...publicRoute, deviceId: fakeMobile }],
             ]);
             for (const [tool, args] of publicMobileDiagnostics) {
                 assertMissingTargetDiagnostic(tool, await callTool(tool, { detail: true, ...args }), args);
             }
-            const flow = parseToolPayload(markExpectedFlowStepErrors(await callTool("run_flow", { detail: true,
+            const flow = parseToolResult(markExpectedFlowStepErrors(await callTool("run_flow", { detail: true,
                 stopOnError: false,
                 steps: [
                     { tool: "status", arguments: { ...publicRoute, deviceId: fakeMobile } },
                     { tool: "click", arguments: { ...publicRoute, deviceId: fakeMobile, x: 1, y: 1 } },
                 ],
-            }), ["status", "click"]));
+            }), ["status", "click"]), { expectedError: true });
             assert.strictEqual(flow.ok, false, JSON.stringify(flow));
             assert.strictEqual(flow.results?.[0]?.tool, "status", JSON.stringify(flow));
             assert.strictEqual(flow.results?.[1]?.tool, "click", JSON.stringify(flow));
@@ -907,9 +906,21 @@ export async function runBrokerE2E(options: any = {}) {
                     assertFailureDiagnostic(tool, parseToolResult(result, { expectedError: true }), expectedPublicDeviceRoutedBy(tool, args));
                 } else assertMissingTargetDiagnostic(tool, result, args);
             }
+            const missingImageDeviceId = "level2-public-missing-base-image";
+            const imageDefinition = parseToolResult(await callTool("create_macos_vm", {
+                detail: true, name: "Level 2 public missing base image", deviceId: missingImageDeviceId, image: "missing-source",
+            }));
+            assert.strictEqual(imageDefinition.device.id, missingImageDeviceId);
+            try {
+                const materialization = markExpectedToolError(await callTool("start", { detail: true, deviceId: missingImageDeviceId, waitForBoot: false }));
+                assert.strictEqual(materialization?.isError, true, "missing image unexpectedly materialized");
+                assert.ok(String(materialization.content?.[0]?.text || "").length > 0, "missing image start: missing diagnostic text");
+            } finally {
+                const removed = parseToolResult(await callTool("delete", { detail: true, deviceId: missingImageDeviceId, force: true, confirmDestructive: true }));
+                assert.strictEqual(removed.deleted, missingImageDeviceId);
+            }
             const directMacosImageDiagnostics = scriptedToolCases([
-                ["base_image_create", { name: "Level 2 public missing base image", sourceImage: "missing-source" }],
-                ["base_image_clone", { name: "Level 2 public missing clone", sourceDeviceId: "level2-public-missing-source" }],
+                ["create_macos_vm", { name: "Level 2 public missing clone", sourceDeviceId: "level2-public-missing-source" }],
             ]);
             for (const [tool, args] of directMacosImageDiagnostics) {
                 const diagnostic = markExpectedToolError(await callTool(tool, { detail: true, ...args }));
@@ -926,15 +937,16 @@ export async function runBrokerE2E(options: any = {}) {
             const diagnostics = scriptedToolCases(backendProviderEnumDiagnostics(publicRoute));
             let inputRejections = 0;
             for (const [tool, args, facet] of diagnostics) {
-                if (tool === "create" && !["windows-vm", "linux-vm"].includes(args.backend)) {
+                const creationBackend = CREATE_TOOL_BACKENDS[tool];
+                if (creationBackend && !["windows-vm", "linux-vm"].includes(creationBackend)) {
                     // These backends cannot promise direct-provider dry-run behavior.
                     // Prove rejection rather than creating resources for enum coverage.
-                    assert.strictEqual(createInputError(args), `create ${args.backend} does not support dryRun`);
+                    assert.strictEqual(createInputError({ ...args, backend: creationBackend }), `create ${creationBackend} does not support dryRun`);
                     inputRejections++;
                     continue;
                 }
-                if (tool === "create" && args.backend === "linux-vm" && args.provider !== "hyper-v") {
-                    assert.strictEqual(toolInputError(tool, args), "create dryRun on Linux requires provider:hyper-v; container QEMU does not support dryRun");
+                if (creationBackend === "linux-vm" && args.provider !== "hyper-v") {
+                    assert.strictEqual(toolInputError(tool, args), "create_linux_vm dryRun requires provider:hyper-v; container QEMU does not support dryRun");
                     inputRejections++;
                     continue;
                 }

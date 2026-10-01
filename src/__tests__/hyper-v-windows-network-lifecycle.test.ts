@@ -12,7 +12,7 @@ import {
     parseIPv4Cidr,
     type HyperVHostNetworkSpec,
     type HyperVWindowsNetworkClient,
-} from "../hyper-v-windows/low-level/index.js";
+} from "@ccc/hyper-v/low-level/index.js";
 import {
     executeHyperVHostNetworkAction,
     planHyperVHostNetworkCleanup,
@@ -22,7 +22,7 @@ import {
     type HyperVHostNetworkEnsureProvenance,
     type HyperVHostNetworkObservation,
     type HyperVHostNetworkReconciliationOutcome,
-} from "../hyper-v-windows/lifecycle/index.js";
+} from "@ccc/hyper-v/lifecycle/index.js";
 
 const SWITCH_NAME = parseHyperVVirtualSwitchName("ccc-internal");
 const SWITCH_ID = parseHyperVVirtualSwitchId("11111111-2222-3333-4444-555555555555");

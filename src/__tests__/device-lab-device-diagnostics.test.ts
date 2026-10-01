@@ -3,7 +3,7 @@ import { dirname, join } from "path";
 import { describe, expect, it } from "vitest";
 import { cleanupDeviceLabMcpTestContext, createDeviceLabMcpTestContext, repoRoot } from "./helpers/device-lab-mcp-fixture.js";
 
-import { ownerId } from "../../device-lab-mcp/src/context.mjs";
+import { ownerId } from "@ccc/device-lab/providers/context.mjs";
 
 const owner = ownerId({}, repoRoot);
 function store(home: string, backend: string, ids: string[], ownerId = owner) {
@@ -40,7 +40,7 @@ describe("public MCP terminal device diagnostics", () => {
             for (const detail of [false, true]) {
                 const missing = await ctx.client.callTool({ name: "ui", arguments: { detail } });
                 expect(missing.isError).toBe(true);
-                expect(json(missing)).toMatchObject({ ok: false, error: "missing-device-id", detail: expect.stringContaining("list_devices") });
+                expect(json(missing)).toMatchObject({ ok: false, error: "missing-device-id", detail: expect.stringContaining("devices") });
                 for (const deviceId of ["", "..", "../foreign", 7, null]) {
                     const result = await ctx.client.callTool({ name: "ui", arguments: { deviceId, detail } });
                     expect(result.isError).toBe(true);
@@ -48,7 +48,7 @@ describe("public MCP terminal device diagnostics", () => {
                 }
                 const absent = await ctx.client.callTool({ name: "ui", arguments: { detail, deviceId: "absent-target" } });
                 expect(absent.isError).toBe(true);
-                expect(json(absent)).toMatchObject({ error: "device-not-found", deviceId: "absent-target", detail: expect.stringContaining("list_devices") });
+                expect(json(absent)).toMatchObject({ error: "device-not-found", deviceId: "absent-target", detail: expect.stringContaining("devices") });
             }
             expect(ctx.activity().filter((entry) => entry.kind !== "state")).toEqual([]);
         } finally { await cleanupDeviceLabMcpTestContext(ctx); }
@@ -134,7 +134,7 @@ describe("public MCP terminal device diagnostics", () => {
             for (const [name, args, message] of [
                 ["key", { deviceId: "missing" }, "key requires key or keyCode"],
                 ["wait_for_text", { deviceId: "missing" }, "wait_for_text requires text"],
-                ["uninstall_app", { deviceId: "missing", packageName: "app" }, "destructive-action-confirmation-required"],
+                ["uninstall_app", { deviceId: "missing", appId: "app" }, "destructive-action-confirmation-required"],
             ] as const) {
                 ctx.clear();
                 const result = await ctx.client.callTool({ name, arguments: args });

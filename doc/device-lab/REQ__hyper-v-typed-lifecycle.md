@@ -19,13 +19,18 @@ PowerShell command projection without executing it.
 - Stopping an Off VM is a no-op. Normal stop requests guest shutdown with Force;
   force stop requests TurnOff with Force. The returned state comes from a fresh
   observation of the same VM.
-- Rebooting a Running VM invokes Restart-VM once with the requested force flag.
+- Rebooting a Running VM invokes Restart-VM once with `-Force -Confirm:$false`
+  after the identity guard, so its confirmation cannot fail in noninteractive
+  PowerShell. Restart-VM always performs a hard restart; its Force switch
+  suppresses confirmation, independent of the retained API force field.
   Rebooting an Off VM starts it only when startIfStopped is true. Other states
   and Off without that option fail with the existing fixed reboot error codes.
 - The disposable Windows real-host E2E requests `force: true` explicitly. It
-  therefore proves the forced Hyper-V reboot, readiness wait, and post-reboot
-  PowerShell Direct path without making guest shutdown integration-service
-  availability a prerequisite. This does not change the production API default.
+  proves the Hyper-V restart, readiness wait, and post-reboot PowerShell Direct
+  path. Default and explicit-false API requests must use the same noninteractive
+  native restart; there is no forced-shutdown fallback.
+
+These semantics follow [Microsoft's Restart-VM documentation](https://learn.microsoft.com/en-us/powershell/module/hyper-v/restart-vm?view=windowsserver2025-ps).
 
 ## Failure and recovery
 
@@ -46,7 +51,7 @@ PowerShell command projection without executing it.
 ## Verification
 
 Unit tests cover the state matrix, capacity boundaries, native identity guard,
-Restart-VM force mapping, and uncertain mutation handling. Broker integration
+Restart-VM confirmation suppression, and uncertain mutation handling. Broker integration
 tests cover Windows/Linux power commands, both containment paths, journals,
 redaction, and dry-run parity. Linux static checks do not constitute native
 Windows Hyper-V proof; that remains a parent Goal gate.

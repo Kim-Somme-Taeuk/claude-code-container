@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSy
 import { tmpdir } from "os";
 import { basename, join } from "path";
 import { afterEach, describe, expect, it } from "vitest";
-import { quarantineAndRemoveDirectory, type QuarantinedCleanupError } from "../device-lab-safe-cleanup.js";
+import { quarantineAndRemoveDirectory, type QuarantinedCleanupError } from "@ccc/device-lab/device-lab-safe-cleanup.js";
 
 describe("quarantineAndRemoveDirectory", () => {
     const roots: string[] = [];

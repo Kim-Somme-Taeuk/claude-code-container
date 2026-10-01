@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
     materializeMacosSshAskpass,
     writeMacosGuestHelper,
-} from "../../device-lab-mcp/src/backends/macos-vm.mjs";
+} from "@ccc/device-lab/providers/backends/macos-vm.mjs";
 
 describe("device-lab MCP direct macOS executable artifacts", () => {
     let home: string;

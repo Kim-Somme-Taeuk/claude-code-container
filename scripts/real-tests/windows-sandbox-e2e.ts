@@ -7,8 +7,8 @@ import { hiddenSpawnSync, realProviderTempRoot } from "./helpers.ts";
 import {
     windowsBackend,
     windowsDiscovery,
-} from "../../device-lab-mcp/src/backends/windows-sandbox.mjs";
-import { ownerId } from "../../device-lab-mcp/src/context.mjs";
+} from "#device-lab/providers/backends/windows-sandbox.mjs";
+import { ownerId } from "#device-lab/providers/context.mjs";
 import { parseToolPayload, withDeviceLabMcp } from "./device-lab-mcp-client.ts";
 import { providerMcpSessionOptions } from "./provider-mcp-matrix.ts";
 
@@ -412,7 +412,7 @@ export async function runWindowsSandboxE2E(options: any = {}) {
     let stopped = false;
     let deleted = false;
     let recordingActive = false;
-    const advertisedCapabilities = [...new Set<string>(windowsBackend().capabilities.map(publicToolName))].filter(name => TOOLS.some(tool => tool.name === name));
+    const advertisedCapabilities = [...new Set<string>(windowsBackend().capabilities.map(name => publicToolName(name, "windows-sandbox")))].filter(name => TOOLS.some(tool => tool.name === name));
     const calledCapabilities = new Set();
 
     return withDeviceLabMcp(async ({ callTool: rawCallTool }) => {
@@ -427,8 +427,7 @@ export async function runWindowsSandboxE2E(options: any = {}) {
         let passResult = null;
         let currentStep = "create device";
         try {
-            const createResult = parsePayload(await callTool("create", { detail: true,
-                ...direct,
+            const createResult = parsePayload(await callTool("create_windows_sandbox", { detail: true,
                 name: "Real Windows Sandbox Test",
                 deviceId,
                 networking: false,
@@ -441,7 +440,7 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             assert.strictEqual(createResult.device.status, "stopped");
 
             currentStep = "inventory created device";
-            const inventory = parsePayload(await callTool("inventory", { detail: true, ...direct }));
+            const inventory = parsePayload(await callTool("devices", { view: "available", detail: true, ...direct }));
             const inventoryDevices = inventory.devices || inventory.result?.devices;
             assert.ok(Array.isArray(inventoryDevices));
             assert.ok(inventoryDevices.some((device) => device.id === deviceId));
@@ -480,9 +479,9 @@ export async function runWindowsSandboxE2E(options: any = {}) {
 
             currentStep = "double-click controls";
             for (const button of ["left", "right"]) {
-                const doubleClick = parsePayload(await callTool("double_click", { detail: true, deviceId, x: 30, y: 30, button, timeoutMs }));
+                const doubleClick = parsePayload(await callTool("click", { count: 2, detail: true, deviceId, x: 30, y: 30, button, timeoutMs }));
                 assert.strictEqual(doubleClick.provider, "windows-helper");
-                assert.deepStrictEqual(doubleClick.doubleClicked, { x: 30, y: 30, button });
+                assert.deepStrictEqual(doubleClick.doubleClicked, { x: 30, y: 30, button }, `click count=2 expected doubleClicked; response keys=${Object.keys(doubleClick).slice(0, 12).map(key => key.slice(0, 40)).join(",")}`);
             }
 
             currentStep = "keyboard control";

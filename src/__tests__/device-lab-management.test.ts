@@ -17,15 +17,15 @@ function response(name: string, args: any) {
     };
     return { content: [{ type: "text", text: JSON.stringify(payloads[name] || { ok: true }) }] };
 }
-vi.mock("../../device-lab-mcp/src/backends/android.mjs", async (original) => ({
+vi.mock("@ccc/device-lab/providers/backends/android.mjs", async (original) => ({
     ...await original<Record<string, unknown>>(), listAndroidDevices: () => [{ id: "phone" }],
     handleAndroidTool: (name: string, args: any) => args.deviceId === "phone" ? response(name, args) : null,
 }));
-vi.mock("../../device-lab-mcp/src/backends/windows-sandbox.mjs", async (original) => ({
+vi.mock("@ccc/device-lab/providers/backends/windows-sandbox.mjs", async (original) => ({
     ...await original<Record<string, unknown>>(), listWindowsDevices: () => [{ id: "desktop" }],
     handleWindowsTool: (name: string, args: any) => args.deviceId === "desktop" ? response(name, args) : null,
 }));
-vi.mock("../../device-lab-mcp/src/backends/linux-vm.mjs", async (original) => ({
+vi.mock("@ccc/device-lab/providers/backends/linux-vm.mjs", async (original) => ({
     ...await original<Record<string, unknown>>(), handleLinuxVmManagementTool: () => null, handleLinuxVmTool: () => null,
 }));
 vi.mock("../../device-lab-mcp/src/broker.mjs", async (original) => ({
@@ -41,16 +41,22 @@ beforeAll(() => startServer());
 beforeEach(() => { fixture.calls.length = 0; });
 
 describe("focused management tools", () => {
-    it("advertises 59 unique tools without removed preparation or redundant management tools", () => {
-        expect(TOOLS).toHaveLength(59);
-        expect(new Set(TOOLS.map(t => t.name)).size).toBe(59);
-        for (const old of ["disk_materialize", "session_open", "guest_agent_provision", "readiness_probe", "target_list", "guest_agent_status", "broker_status", "automation_status", "snapshot_list", "record_video_start", "get_clipboard", "dump_ui", "accessibility_snapshot"]) {
+    it("advertises 58 unique tools without removed preparation or redundant management tools", () => {
+        expect(TOOLS).toHaveLength(58);
+        expect(new Set(TOOLS.map(t => t.name)).size).toBe(58);
+        expect(TOOLS.filter(t => t.name.startsWith("create_")).map(t => t.name).sort()).toEqual([
+            "create_android_emulator", "create_ios_simulator", "create_linux_vm",
+            "create_macos_vm", "create_windows_sandbox", "create_windows_vm",
+        ]);
+        for (const old of ["create", "disk_materialize", "session_open", "guest_agent_provision", "readiness_probe", "target_list", "guest_agent_status", "broker_status", "automation_status", "snapshot_list", "record_video_start", "get_clipboard", "dump_ui", "accessibility_snapshot"]) {
             expect(toolInputError(old, {})).toContain("Unknown tool");
         }
     });
     it.each(["constructor", "__proto__", "toString", "unknown", "", null, {}, ["list"], ["restore"], ["start"], ["grant"]].map(action => ({ action })))("rejects invalid action %j before dispatch", async ({ action }) => {
         for (const name of ["snapshot", "record_video", "permission"]) {
-            const result = await call(name, { deviceId: "vm", action, snapshotName: "before", packageName: "app", permission: "camera" });
+            const result = await call(name, { deviceId: "vm", action, snapshotName: "before",
+                ...(name === "permission" ? { appId: "app", permission: "camera" } : {}),
+            });
             expect(result.isError).toBe(true);
             expect(JSON.stringify(result)).toContain("requires action");
         }
@@ -82,9 +88,9 @@ describe("focused management tools", () => {
         expect(fixture.calls).toHaveLength(2);
     });
     it.each(["grant", "revoke"])("routes permission %s and requires an app/permission pair", async (action) => {
-        expect((await call("permission", { deviceId: "phone", action, packageName: "app" })).isError).toBe(true);
+        expect((await call("permission", { deviceId: "phone", action, appId: "app" })).isError).toBe(true);
         expect(fixture.calls).toEqual([]);
-        expect((await call("permission", { deviceId: "phone", action, packageName: "app", permission: "camera", implicitBroker: false })).isError).not.toBe(true);
+        expect((await call("permission", { deviceId: "phone", action, appId: "app", permission: "camera", implicitBroker: false })).isError).not.toBe(true);
         expect(fixture.calls[0].name).toBe(`mobile_${action}_permission`);
     });
     it("selects mobile or desktop UI from the owned device", async () => {

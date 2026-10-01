@@ -1,3 +1,4 @@
+import { hyperVMemoryFailureReason } from "./hyper-v-memory-diagnostic.ts";
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
@@ -5,6 +6,9 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { assertHyperVLinuxCreateContract, HYPER_V_LINUX_E2E_DELETE_OPTIONS, HYPER_V_LINUX_PRE_REBOOT_COMMAND, hyperVLinuxBrokerArgs, hyperVLinuxToolPayload, hyperVLinuxVmE2ECapability, prepareHyperVLinuxDownloadDestination, writeHyperVLinuxFailureDiagnostic } from "./hyper-v-linux-vm-e2e.ts";
 import {
+    assertHyperVWindowsDeleted,
+    assertHyperVWindowsNetwork,
+    cleanupPrevious,
     createPackagedCccCandidate,
     ensureHyperVWindowsDownloadDestination,
     HYPER_V_WINDOWS_CONSOLE_TIMELINE_DELAYS_MS,
@@ -20,13 +24,13 @@ import {
 import { captureHyperVWindowsSetupDiagnostics } from "./hyper-v-windows-setup-diagnostics.ts";
 import { brokerRollbackSummary, brokerToolFailureEvidence, formatBrokerToolFailure } from "./device-lab-mcp-client.ts";
 import { repoRoot } from "./helpers.ts";
-import { ownerId as mcpOwnerId } from "../../device-lab-mcp/src/context.mjs";
+import { ownerId as mcpOwnerId } from "#device-lab/providers/context.mjs";
 import {
     HYPER_V_WINDOWS_EVALUATION_LICENSE_ID,
     HYPER_V_WINDOWS_EVALUATION_LICENSE_URL,
     HYPER_V_WINDOWS_SOURCE_TRUST_ID,
     HYPER_V_WINDOWS_SOURCE_URL,
-} from "../../src/device-lab/hyper-v-image-contracts.ts";
+} from "#device-lab/device-lab/hyper-v-image-contracts.js";
 
 const readiness = JSON.stringify({
     available: true,
@@ -430,12 +434,10 @@ describe("Hyper-V E2E zero-config image selection", () => {
     });
 
     it("forces every Hyper-V Linux E2E operation through the broker", () => {
-        expect(hyperVLinuxBrokerArgs("create", {
-            backend: "linux-vm",
+        expect(hyperVLinuxBrokerArgs("create_linux_vm", {
             provider: "container-qemu",
             viaBroker: false,
         })).toEqual({
-            backend: "linux-vm",
             provider: "hyper-v",
             viaBroker: true,
         });
@@ -1123,8 +1125,8 @@ describe("Hyper-V E2E zero-config image selection", () => {
 
     it("keeps the Windows E2E receipt contract free of product file-I/O imports", () => {
         const source = readFileSync(new URL("hyper-v-windows-vm-e2e.ts", import.meta.url), "utf8");
-        expect(source).toContain("hyper-v-image-contracts.ts");
-        expect(source).not.toContain("hyper-v-images.ts");
+        expect(source).toContain("#device-lab/device-lab/hyper-v-image-contracts.js");
+        expect(source).not.toMatch(/hyper-v-images\.(?:ts|js)/);
     });
 
     it("records checkpoint inventory conflict counts without snapshot names or ids", () => {
@@ -1139,6 +1141,29 @@ describe("Hyper-V E2E zero-config image selection", () => {
         });
         expect(evidence.snapshotInventory).toEqual({ untrackedCount: 1, missingCount: 1, observedOwnerSnapshotCount: 0 });
         expect(JSON.stringify(evidence)).not.toContain("secret");
+    });
+
+    it("reports host memory refusal without unrelated guest diagnostics or duplicated broker payloads", async () => {
+        const calls: string[] = [];
+        let error: unknown;
+        try {
+            hyperVWindowsToolPayload({ content: [{ type: "text", text: JSON.stringify({
+                ok: false, error: "provider-command-failed", detail: "hyper-v-host-memory-capacity-exceeded",
+                result: { device: { id: "private-device" } }, attempts: [{ token: "PRIVATE" }],
+            }) }] });
+        } catch (caught) { error = caught; }
+        expect(error).toBeInstanceOf(Error);
+        const unexpected = (() => { calls.push("guest diagnostic"); throw new Error("unexpected"); }) as any;
+        const reason = await hyperVWindowsFailureReason({
+            profile: "windows-server", step: "start and wait for PowerShell Direct", error,
+            created: true, deviceId: "private-device", incarnationId: "a".repeat(32),
+            captureImpl: unexpected, setupDiagnosticsImpl: unexpected, elevateSetupDiagnosticsImpl: unexpected,
+            publishSetupDiagnosticsImpl: unexpected, allowSetupDiagnosticsElevation: true,
+        });
+        expect(reason).toBe("profile=windows-server; start and wait for PowerShell Direct: hyper-v-host-memory-capacity-exceeded. Free host RAM by closing unused VMs or applications, then retry.");
+        expect(calls).toEqual([]);
+        expect(reason).not.toContain("PRIVATE");
+        expect(reason).not.toContain("private-device");
     });
 
     it("captures the Windows guest console before cleanup while preserving the original failure", async () => {
@@ -1889,5 +1914,114 @@ describe("Hyper-V E2E zero-config image selection", () => {
             created: false,
             deviceId: "windows-vm-real-e2e-123",
         })).toBe("profile=windows-server; create VM: provider-command-failed: hyper-v-ps-invalidparameter; rollback=hyper-v-recovery-cleanup-failed/hyper-v-network-elevation-cancelled");
+    });
+});
+
+describe("Windows public deletion observation", () => {
+    const id = "windows-vm-real-e2e-deleted";
+    const response = (value: unknown, isError = false) => ({ isError, content: [{ type: "text", text: JSON.stringify(value) }] });
+    const missing = response({ ok: false, error: "device-not-found", deviceId: id }, true);
+    it("marks coverage as expected only after successful absence verification", () => {
+        const observed = { ...missing, __cccToolCallRecord: { expectedError: false } };
+        expect(() => assertHyperVWindowsDeleted(response({ devices: [{ id }] }), observed, id)).toThrow();
+        expect(observed.__cccToolCallRecord.expectedError).toBe(false);
+        assertHyperVWindowsDeleted(response({ devices: [] }), observed, id);
+        expect(observed.__cccToolCallRecord.expectedError).toBe(true);
+    });
+    it("accepts absence and the deviceId-only missing-device response", () => {
+        expect(() => assertHyperVWindowsDeleted(response({ devices: [{ id: "other" }] }), missing, id)).not.toThrow();
+    });
+    it("rejects a VM still present or an unavailable inventory", () => {
+        for (const inventory of [{ devices: [{ id }] }, {}, { ok: false, error: "host-broker-unavailable" }]) {
+            expect(() => assertHyperVWindowsDeleted(response(inventory), missing, id)).toThrow();
+        }
+    });
+    it("does not accept unrelated errors, another device, or a successful duplicate deletion", () => {
+        for (const value of [
+            { ok: false, error: "host-broker-unavailable", deviceId: id },
+            { ok: false, error: "device-not-found", deviceId: "other" },
+            { ok: true, idempotent: true, alreadyMissing: true },
+        ]) expect(() => assertHyperVWindowsDeleted(response({ devices: [] }), response(value), id)).toThrow();
+    });
+});
+
+
+describe("Windows E2E configured Hyper-V subnet", () => {
+    for (const octet of [29, 30]) {
+        const expected = { prefix: `172.${octet}.0.0/24`, gateway: `172.${octet}.0.1` };
+        const device = { networkPrefix: expected.prefix, networkGateway: expected.gateway, networkAddress: `172.${octet}.0.141` };
+        it(`accepts configured subnet ${octet}`, () => {
+            expect(assertHyperVWindowsNetwork(device, expected)).toBe(device.networkAddress);
+        });
+        it(`rejects invalid or mismatched addresses on subnet ${octet}`, () => {
+            for (const address of [`172.${octet === 29 ? 30 : 29}.0.141`, expected.gateway,
+                `172.${octet}.0.0`, `172.${octet}.0.251`, `172.${octet}.0.255`,
+                `172.${octet}.0.014`, `172.${octet}.0.141'`, "", "garbage"]) {
+                expect(() => assertHyperVWindowsNetwork({ ...device, networkAddress: address }, expected)).toThrow();
+            }
+            expect(() => assertHyperVWindowsNetwork({ ...device, networkPrefix: "172.31.0.0/24" }, expected)).toThrow();
+            expect(() => assertHyperVWindowsNetwork({ ...device, networkGateway: "172.31.0.1" }, expected)).toThrow();
+        });
+    }
+});
+
+
+describe("previous Windows E2E residue cleanup", () => {
+    const device = { id: "windows-vm-real-e2e-previous", incarnationId: "a".repeat(32) };
+    const reply = (value: unknown, isError = false) => ({ isError, content: [{ type: "text", text: JSON.stringify(value) }] });
+    const missing = { ok: false, error: "device-not-found", deviceId: device.id };
+    it("accepts a disappeared VM only after fresh inventory confirms absence", async () => {
+        const calls: Array<{ tool: string; args: any }> = [];
+        let inventoryCalls = 0;
+        await cleanupPrevious(async (tool, args) => {
+            calls.push({ tool, args });
+            if (tool === "devices") return reply({ devices: ++inventoryCalls === 1 ? [device, { id: "unrelated" }] : [] });
+            if (tool === "stop") throw new Error("already disappeared");
+            return reply(missing, true);
+        });
+        expect(calls.map(call => call.tool)).toEqual(["devices", "stop", "delete", "devices"]);
+        for (const call of calls.filter(call => call.tool !== "devices")) {
+            expect(call.args.deviceId).toBe(device.id);
+            expect(call.args.incarnationId).toBe(device.incarnationId);
+        }
+    });
+    it("fails if the device remains, reappears, or inventory cannot confirm absence", async () => {
+        for (const fresh of [{ devices: [device] }, { devices: [{ ...device, incarnationId: "b".repeat(32) }] }, {}, { ok: false, error: "host-broker-unavailable" }]) {
+            let n = 0;
+            await expect(cleanupPrevious(async tool => {
+                if (tool === "devices") return reply(++n === 1 ? { devices: [device] } : fresh);
+                return reply(tool === "delete" ? missing : { ok: true }, tool === "delete");
+            })).rejects.toThrow();
+        }
+    });
+    it("rejects other deletion failures, wrong missing IDs, and malformed initial inventory", async () => {
+        for (const deletion of [{ ok: false, error: "provider-command-failed" }, { ...missing, deviceId: "other" }]) {
+            await expect(cleanupPrevious(async tool => reply(tool === "devices" ? { devices: [device] } : tool === "delete" ? deletion : { ok: true }))).rejects.toThrow();
+        }
+        await expect(cleanupPrevious(async () => reply({}))).rejects.toThrow("cleanup inventory");
+    });
+    it("retains the normal successful cleanup path", async () => {
+        const calls: string[] = [];
+        await cleanupPrevious(async tool => {
+            calls.push(tool);
+            return reply(tool === "devices" ? { devices: [device] } : { ok: true });
+        });
+        expect(calls).toEqual(["devices", "stop", "delete"]);
+    });
+});
+
+
+describe("bounded Hyper-V memory diagnostic", () => {
+    const code = "hyper-v-host-memory-capacity-exceeded";
+    const capacity = { requestedMb: 4096, availableMb: 6000, reserveMb: 6553, shortfallMb: 4649, token: "PRIVATE" };
+    it.each(["root", "body", "selected"])("renders %s broker evidence without envelope secrets", (location) => {
+        const record = { detail: code, result: { execution: { command: { diagnosticCode: code, capacity } } } };
+        const value = location === "body" ? { body: record } : location === "selected" ? { selected: { body: record } } : record;
+        expect(hyperVMemoryFailureReason(value)).toBe(`${code} Requested 4096 MiB; available 6000 MiB; host reserve 6553 MiB; shortfall 4649 MiB. Free host RAM by closing unused VMs or applications, then retry.`);
+    });
+    it("falls back when metrics are malformed and ignores unrelated failures", () => {
+        expect(hyperVMemoryFailureReason({ detail: code, result: { execution: { command: { capacity: { ...capacity, requestedMb: "secret" } } } } }))
+            .toBe(`${code}. Free host RAM by closing unused VMs or applications, then retry.`);
+        expect(hyperVMemoryFailureReason({ detail: "hyper-v-other", result: { execution: { command: { capacity } } } })).toBeUndefined();
     });
 });

@@ -2,10 +2,10 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ownerId } from "../../device-lab-mcp/src/context.mjs";
-import * as leases from "../../device-lab-mcp/src/state/physical-lease-store.mjs";
-import { withTargetStatus, withTargetStatuses } from "../../device-lab-mcp/src/status.mjs";
-import { mutateOwnerDevices, ownerStateFile, ownerStateMutationLockFile, transitionOwnerDeviceRecord, updateOwnerDevice } from "../../device-lab-mcp/src/state/device-store.mjs";
+import { ownerId } from "@ccc/device-lab/providers/context.mjs";
+import * as leases from "@ccc/device-lab/providers/state/physical-lease-store.mjs";
+import { withTargetStatus, withTargetStatuses } from "@ccc/device-lab/providers/status.mjs";
+import { mutateOwnerDevices, ownerStateFile, ownerStateMutationLockFile, transitionOwnerDeviceRecord, updateOwnerDevice } from "@ccc/device-lab/providers/state/device-store.mjs";
 
 let home: string;
 beforeEach(() => {

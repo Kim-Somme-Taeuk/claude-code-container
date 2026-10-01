@@ -4,9 +4,9 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { hyperVImageProfileRoot, resolveHyperVImageForCreate, type HyperVImageStoreRuntime } from "../device-lab/broker/hyper-v/image-store.js";
-import { HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP } from "../hyper-v-windows/low-level/powershell-transport.js";
-import { acceptHyperVWindowsEvaluationLicense, HYPER_V_IMAGE_CATALOG } from "../device-lab/hyper-v-images.js";
+import { hyperVImageProfileRoot, resolveHyperVImageForCreate, type HyperVImageStoreRuntime } from "@ccc/device-lab/device-lab/broker/hyper-v/image-store.js";
+import { HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP } from "@ccc/hyper-v/low-level/powershell-transport.js";
+import { acceptHyperVWindowsEvaluationLicense, HYPER_V_IMAGE_CATALOG } from "@ccc/device-lab/device-lab/hyper-v-images.js";
 
 type Profile = "ubuntu-lts" | "windows-server";
 type Variant = "normal" | "already-sized" | "prepare-failed" | "prepare-response-lost" | "convert-response-lost" | "resize-response-lost" | "source-mutated" | "source-replaced-same-bytes" | "partial-mutated" | "partial-vhd-invalid" | "final-vhd-invalid" | "finalize-response-lost" | "final-hash-acquire-timeout" | "convert-acquire-timeout";

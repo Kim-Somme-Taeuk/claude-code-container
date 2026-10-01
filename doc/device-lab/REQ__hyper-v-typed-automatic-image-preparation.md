@@ -22,6 +22,12 @@ Malformed or foreign manifests and their bases MUST remain untouched.
 The validated prior pair MUST remain recoverable until the replacement manifest
 commits. An interrupted retirement MUST be recovered before the next acquisition.
 
+An omitted create profile MUST resolve to `windows-server` for Windows and
+`ubuntu-lts` for Linux, including configuration checks on an existing device.
+A matching repeat create MUST return that device without provider mutations.
+An explicitly different profile, or conflicting requested base digest or source,
+MUST still fail; an existing device MUST NOT determine the automatic default.
+
 ## Typed VHD boundary
 
 The production automatic path MUST inspect every source, partial, and published

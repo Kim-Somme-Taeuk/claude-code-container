@@ -5,11 +5,11 @@ import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { pathToFileURL } from "url";
 import { afterEach, describe, expect, it } from "vitest";
-import { withSharedMutationLock, writeJsonFileAtomically } from "../device-lab-shared-state.js";
+import { withSharedMutationLock, writeJsonFileAtomically } from "@ccc/device-lab/device-lab-shared-state.js";
 
 const repoRoot = join(__dirname, "../..");
-const sharedStateModule = pathToFileURL(join(repoRoot, "src", "device-lab-shared-state.ts")).href;
-const mcpSharedStateModule = pathToFileURL(join(repoRoot, "device-lab-mcp", "src", "state", "shared-mutation-lock.mjs")).href;
+const sharedStateModule = pathToFileURL(join(repoRoot, "packages", "device-lab", "src", "device-lab-shared-state.ts")).href;
+const mcpSharedStateModule = pathToFileURL(join(repoRoot, "packages", "device-lab", "providers", "state", "shared-mutation-lock.mjs")).href;
 const roots: string[] = [];
 
 type Phase = "lock-held" | "temp-written" | "renamed";

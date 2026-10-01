@@ -1,7 +1,7 @@
 import assert from "assert";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { basename, join, resolve } from "path";
-import { androidDiscovery } from "../../device-lab-mcp/src/backends/android.mjs";
+import { androidDiscovery } from "#device-lab/providers/backends/android.mjs";
 import { materializeAndroidAppFixture } from "./android-app-fixture.ts";
 import { parseToolPayload, withDeviceLabMcp } from "./device-lab-mcp-client.ts";
 import { providerMcpSessionOptions } from "./provider-mcp-matrix.ts";
@@ -108,7 +108,7 @@ export async function run(options: any = {}) {
     return withDeviceLabMcp(async ({ callTool }) => {
         const direct = { backend: "android-device" };
         try {
-            const inventory = parsePayload(await callTool("inventory", { detail: true, ...direct }));
+            const inventory = parsePayload(await callTool("devices", { view: "available", detail: true, ...direct }));
             const hostDevices = Array.isArray(inventory.hostDevices)
                 ? inventory.hostDevices
                 : inventory.hostDevices?.devices;
@@ -177,7 +177,7 @@ export async function run(options: any = {}) {
             assert.strictEqual(tap.provider, "adb");
             assert.deepStrictEqual(tap.tapped, { x: 20, y: 20 });
 
-            const doubleTap = parsePayload(await callTool("double_click", { detail: true, deviceId, x: 30, y: 30 }));
+            const doubleTap = parsePayload(await callTool("click", { count: 2, detail: true, deviceId, x: 30, y: 30 }));
             assert.strictEqual(doubleTap.provider, "adb");
             assert.deepStrictEqual(doubleTap.doubleTapped, { x: 30, y: 30 });
 
@@ -315,7 +315,7 @@ export async function run(options: any = {}) {
                 assert.strictEqual(deviceInstall.provider, "adb");
                 assert.strictEqual(androidDeviceReportedPathMatches(deviceInstall.installed, appApk), true);
 
-                const deviceLaunch = parsePayload(await callTool("launch_app", { detail: true, deviceId, packageName: appPackage }));
+                const deviceLaunch = parsePayload(await callTool("launch_app", { detail: true, deviceId, appId: appPackage }));
                 assert.strictEqual(deviceLaunch.provider, "adb");
                 assert.strictEqual(deviceLaunch.launched, appPackage);
 
@@ -327,39 +327,39 @@ export async function run(options: any = {}) {
                 assert.strictEqual(install.provider, "adb");
                 assert.strictEqual(androidDeviceReportedPathMatches(install.installed, appApk), true);
 
-                const launch = parsePayload(await callTool("launch_app", { detail: true, deviceId, packageName: appPackage }));
+                const launch = parsePayload(await callTool("launch_app", { detail: true, deviceId, appId: appPackage }));
                 assert.strictEqual(launch.provider, "adb");
                 assert.strictEqual(launch.launched, appPackage);
 
                 const waitForApp = parsePayload(await callTool("wait_for_app", { detail: true,
                     deviceId,
-                    packageName: appPackage,
+                    appId: appPackage,
                     timeoutMs: 10000,
                     intervalMs: 500,
                 }));
                 assert.strictEqual(waitForApp.provider, "adb");
-                assert.strictEqual(waitForApp.packageName, appPackage);
+                assert.strictEqual(waitForApp.appId, appPackage);
                 assert.strictEqual(waitForApp.running, true);
                 assert.ok(String(waitForApp.pid || "").trim());
 
-                const grant = parsePayload(await callTool("permission", { action: "grant", detail: true, deviceId, packageName: appPackage, permission: appPermission }));
-                assert.deepStrictEqual(grant.permission, { packageName: appPackage, permission: appPermission, action: "grant" });
-                const revoke = parsePayload(await callTool("permission", { action: "revoke", detail: true, deviceId, packageName: appPackage, permission: appPermission }));
-                assert.deepStrictEqual(revoke.permission, { packageName: appPackage, permission: appPermission, action: "revoke" });
+                const grant = parsePayload(await callTool("permission", { action: "grant", detail: true, deviceId, appId: appPackage, permission: appPermission }));
+                assert.deepStrictEqual(grant.permission, { appId: appPackage, permission: appPermission, action: "grant" });
+                const revoke = parsePayload(await callTool("permission", { action: "revoke", detail: true, deviceId, appId: appPackage, permission: appPermission }));
+                assert.deepStrictEqual(revoke.permission, { appId: appPackage, permission: appPermission, action: "revoke" });
 
-                const stopApp = parsePayload(await callTool("stop_app", { detail: true, deviceId, packageName: appPackage }));
+                const stopApp = parsePayload(await callTool("stop_app", { detail: true, deviceId, appId: appPackage }));
                 assert.strictEqual(stopApp.provider, "adb");
-                assert.strictEqual(stopApp.packageName, appPackage);
+                assert.strictEqual(stopApp.appId, appPackage);
 
-                const reset = parsePayload(await callTool("clear_app_data", { detail: true, deviceId, packageName: appPackage, confirmDestructive: true }));
+                const reset = parsePayload(await callTool("clear_app_data", { detail: true, deviceId, appId: appPackage, confirmDestructive: true }));
                 assert.strictEqual(reset.provider, "adb");
-                assert.deepStrictEqual(reset.reset, { packageName: appPackage });
+                assert.deepStrictEqual(reset.reset, { appId: appPackage });
 
-                const clearAppData = parsePayload(await callTool("clear_app_data", { detail: true, deviceId, packageName: appPackage, confirmDestructive: true }));
+                const clearAppData = parsePayload(await callTool("clear_app_data", { detail: true, deviceId, appId: appPackage, confirmDestructive: true }));
                 assert.strictEqual(clearAppData.provider, "adb");
-                assert.strictEqual(clearAppData.packageName, appPackage);
+                assert.strictEqual(clearAppData.appId, appPackage);
 
-                const uninstall = parsePayload(await callTool("uninstall_app", { detail: true, deviceId, packageName: appPackage, confirmDestructive: true }));
+                const uninstall = parsePayload(await callTool("uninstall_app", { detail: true, deviceId, appId: appPackage, confirmDestructive: true }));
                 assert.strictEqual(uninstall.provider, "adb");
                 assert.strictEqual(uninstall.uninstalled, appPackage);
             }

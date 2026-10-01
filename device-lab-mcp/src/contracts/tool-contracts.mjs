@@ -71,7 +71,7 @@ const OPERATION_CONTRACTS = Object.fromEntries(
     Object.entries(contractGroups).flatMap(([contract, tools]) => tools.map((tool) => [tool, contract])),
 );
 export const DEVICE_LAB_OUTPUT_CONTRACTS = Object.freeze(Object.fromEntries(
-    TOOLS.map(({ name }) => [name, Object.hasOwn(GROUP_OPERATIONS, name) || name === "clipboard" || name === "ui" ? `${name}-group-v1` : SIMPLE_ACTIONS.has(name) ? "action-v1" : OPERATION_CONTRACTS[toolOperation(name)]]),
+    TOOLS.map(({ name }) => [name, Object.hasOwn(GROUP_OPERATIONS, name) || ["clipboard", "ui", "devices", "create_macos_vm"].includes(name) ? `${name}-group-v1` : SIMPLE_ACTIONS.has(name) ? "action-v1" : OPERATION_CONTRACTS[toolOperation(name)]]),
 ));
 
 const requiredFieldsByContract = {
@@ -83,7 +83,7 @@ const requiredFieldsByContract = {
     "vm-readiness-v1": ["readiness"],
     "vm-session-v1": ["session"],
     "display-target-v1": ["id"],
-    "cursor-position-v1": ["x", "y"],
+    "cursor-position-v1": [], // validateObservation handles compact and diagnostic forms.
     "lifecycle-device-v1": ["device"],
     "physical-attach-v1": ["device"],
     "physical-detach-v1": ["detached"],
@@ -108,24 +108,65 @@ const requiredFieldsByContract = {
 const deviceObjectContracts = new Set(["lifecycle-device-v1", "physical-attach-v1", "base-image-device-v1", "snapshot-restore-v1"]);
 const arrayFields = new Set(["devices", "images", "results", "targets", "entries"]);
 
+function validateObservation(tool, value, args) {
+    const reject = (detail) => { throw contractError(tool, detail, value); };
+    const nonempty = (item) => typeof item === "string" && item.trim().length > 0;
+    if (tool === "devices" && toolOperation(tool, args) === "device_list") {
+        const devices = Array.isArray(value) ? value : value.devices;
+        if (!Array.isArray(devices) || devices.some(device => !objectValue(device) || !nonempty(device.id))) reject("devices must contain objects with nonempty id");
+    }
+    if (tool === "cursor_position") {
+        const cursor = objectValue(value.cursor) || value;
+        if (![cursor.x, cursor.y].every(coordinate => typeof coordinate === "number" && Number.isFinite(coordinate))) reject("cursor x and y must be finite numbers");
+    }
+    if (["wait_for_text", "wait_for_app"].includes(tool)) {
+        const outcomes = [value.matched, value.found, ...(tool === "wait_for_app" ? [value.running] : [])].filter(item => item !== undefined);
+        if (!outcomes.length || outcomes.some(item => typeof item !== "boolean") || outcomes.some(item => item !== outcomes[0])) reject("wait requires a consistent boolean condition outcome");
+    }
+    if (tool === "list_files") {
+        if (!Array.isArray(value.entries) || value.entries.some(entry => !objectValue(entry) || !nonempty(entry.name)
+            || !["file", "directory", "symlink", "other"].includes(entry.type)
+            || (entry.size !== undefined && (!Number.isFinite(entry.size) || entry.size < 0)))) reject("entries require a name, file type and optional nonnegative size");
+        if (value.truncated !== undefined && typeof value.truncated !== "boolean") reject("truncated must be a boolean");
+    }
+    if (tool === "record_video") {
+        if (args.action === "stop") {
+            if (typeof value.stopped !== "boolean" && !Object.hasOwn(value, "recording")) reject("recording stop requires stopped or recording outcome");
+        } else if (!Object.hasOwn(value, "recording")) reject("required recording field is missing");
+        if (Object.hasOwn(value, "recording") && value.recording !== null && !objectValue(value.recording)) reject("recording must be an object or null");
+        if (objectValue(value.recording) && typeof value.recording.active !== "boolean") reject("recording requires boolean active state");
+    }
+}
+
 export function validateDeviceLabToolOutput(tool, payload, args = {}) {
     let contract = DEVICE_LAB_OUTPUT_CONTRACTS[tool];
     if (!contract) throw new Error(`No output contract registered for ${tool}`);
+    // Check failure before specialized image/display/list success shortcuts.
+    if (payload?.isError === true || payload?.ok === false || (typeof payload?.error === "string" && payload.error)) {
+        const command = payload.result?.execution?.command || payload.selected?.body?.result?.execution?.command;
+        const cause = command?.error || command?.stderr || command?.stdout;
+        throw contractError(tool, `operation failed (${String(payload.error || "MCP error")})${cause ? `: ${String(cause).trim().slice(-512)}` : ""}`, payload);
+    }
     if (contract.endsWith("-group-v1")) {
         const operation = toolOperation(tool, args);
         if (isSimpleAction(tool, operation) && payload === "ok") return payload;
         if (operation) contract = OPERATION_CONTRACTS[operation];
-        else throw contractError(tool, "action is required to validate grouped output", payload);
+        else throw contractError(tool, tool === "devices" ? "view must be owned, available, or backends" : "action is required to validate grouped output", payload);
         if (tool === "ui") contract = "ui-group-v1";
     }
     if (contract === "action-v1") {
         if (payload === "ok") return payload;
-        contract = OPERATION_CONTRACTS[toolOperation(tool)];
+        contract = OPERATION_CONTRACTS[toolOperation(tool, args)];
     }
-    if (tool === "list_devices" && Array.isArray(payload)) return payload;
+    if (tool === "devices" && toolOperation(tool, args) === "device_list" && Array.isArray(payload)) {
+        validateObservation(tool, payload, args);
+        return payload;
+    }
     if (tool === "status" && typeof payload?.id === "string" && payload.kind === "display") return payload;
     if (contract === "image-content-v1") {
-        if (payload?.content && Array.isArray(payload.content) && payload.content.some((item) => item?.type === "image")) return payload;
+        if (Array.isArray(payload?.content) && payload.content.some((item) => item?.type === "image"
+            && typeof item.data === "string" && item.data.length > 0
+            && typeof item.mimeType === "string" && item.mimeType.startsWith("image/"))) return payload;
         throw contractError(tool, "required MCP image content is missing", payload);
     }
     const value = objectValue(payload);
@@ -137,6 +178,7 @@ export function validateDeviceLabToolOutput(tool, payload, args = {}) {
         throw contractError(tool, `operation failed (${String(value.error || "unknown-error")})${detail}`, payload);
     }
     if (tool === "ui" && !(typeof value.source === "string" || (objectValue(value.accessibility) && "root" in value.accessibility && typeof value.accessibility.nodeCount === "number"))) throw contractError(tool, "required mobile source or desktop accessibility tree is missing", payload);
+    validateObservation(tool, value, args);
     for (const field of requiredFieldsByContract[contract] || []) {
         if (!(field in value)) throw contractError(tool, `required ${field} field is missing`, payload);
         if (arrayFields.has(field) && !Array.isArray(value[field])) throw contractError(tool, `required ${field} array is invalid`, payload);

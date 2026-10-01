@@ -59,11 +59,11 @@ import {
     parseHyperVSnapshotRepairObservation,
     parseHyperVSetupObservation,
     parseHyperVVmObservation,
-} from "../host-control/hyper-v/index.js";
-import { hyperVProviderDiagnosticCode } from "../device-lab/broker/hyper-v/public-response.js";
-import { isoWriterLines } from "../host-control/hyper-v/core.js";
-import { HYPER_V_QEMU_IMG_SIGNATURE_STATUSES } from "../host-control/hyper-v/contracts.js";
-import { hyperVPowerShellAssetPath } from "../host-control/hyper-v/powershell-assets.js";
+} from "@ccc/device-lab/host-control/hyper-v/index.js";
+import { hyperVProviderDiagnosticCode } from "@ccc/device-lab/device-lab/broker/hyper-v/public-response.js";
+import { isoWriterLines } from "@ccc/device-lab/host-control/hyper-v/core.js";
+import { HYPER_V_QEMU_IMG_SIGNATURE_STATUSES } from "@ccc/device-lab/host-control/hyper-v/contracts.js";
+import { hyperVPowerShellAssetPath } from "@ccc/device-lab/host-control/hyper-v/powershell-assets.js";
 
 const ownerId = "0123456789abcdef";
 const deviceId = "windows-ci-01";
@@ -320,7 +320,7 @@ describe("Hyper-V provider adapter", () => {
     });
 
     it("keeps generated Hyper-V PowerShell free of PowerShell 7-only type accelerators", () => {
-        const root = join(__dirname, "..", "host-control", "hyper-v");
+        const root = join(__dirname, "..", "..", "packages", "device-lab", "src", "host-control", "hyper-v");
         const offenders = readdirSync(root)
             .filter((file) => file.endsWith(".ts"))
             .filter((file) => WINDOWS_POWERSHELL_UNSUPPORTED_ACCELERATOR.test(readFileSync(join(root, file), "utf-8")));
@@ -730,6 +730,9 @@ describe("Hyper-V provider adapter", () => {
         expect(script).toContain("$WindowsMaxBytes = [long]16GB");
         expect(script).toContain("ResponseHeadersRead");
         expect(script).toContain("$Response.Content.Headers.ContentLength");
+        expect(script).toContain("$RequiredBytes = [long]$ContentLength + [long]10GB");
+        expect(script.indexOf("$ContentLength -gt $MaximumBytes")).toBeLessThan(script.indexOf("$RequiredBytes = [long]$ContentLength"));
+        expect(script.indexOf("$DestinationDrive.AvailableFreeSpace -lt $RequiredBytes")).toBeLessThan(script.indexOf("$OutputStream = [IO.File]::Open"));
         expect(script).toContain("$Handler.AllowAutoRedirect = $false");
         expect(script).toContain("Add-Type -AssemblyName System.Net.Http -ErrorAction Stop");
         expect(script).toContain("for ($Redirects = 0; $Redirects -le 10; $Redirects++)");
@@ -774,7 +777,8 @@ describe("Hyper-V provider adapter", () => {
         expect(script).toContain("$Security.SetOwner($CurrentSid)");
         expect(script).toContain("[IO.Directory]::SetAccessControl($Target, $Security)");
         expect(script).toContain("[IO.File]::SetAccessControl($Target, $Security)");
-        expect(script).toContain("$AllowedSids = @($CurrentSid.Value, $SystemSid.Value, $AdministratorsSid.Value)");
+        expect(script).toContain("$AllowedSids = @($AllowedSidObjects.Value)");
+        expect(script).toContain("foreach ($Sid in $AllowedSidObjects)");
         expect(script).toContain("$Observed.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $CurrentSid.Value");
         expect(script).toContain("if ($ObservedRules.Count -ne $AllowedSids.Count) { throw 'hyper-v-base-image-acl-failed' }");
         expect(script).toContain("$Matching[0].FileSystemRights -ne $FullControl");
@@ -1091,6 +1095,11 @@ describe("Hyper-V provider adapter", () => {
         expect(script).toContain("02:11:22:33:44:55");
         expect(script).toContain("hyper-v-network-switch-unavailable");
         expect(script).toContain("$DiskReserveBytes = 10GB");
+        expect(script).toContain("$CopyBytes = [long]$DiskCopySource.Length");
+        expect(script).toContain("$DiskDrive.Free -lt ($CopyBytes + $DiskReserveBytes)");
+        expect(script).not.toContain("$DiskDrive.Free -lt ($DiskMaxBytes + $DiskReserveBytes)");
+        expect(script.indexOf("$CopyBytes = [long]$DiskCopySource.Length")).toBeGreaterThan(script.indexOf("Assert-NoReparsePath $BaseImage"));
+        expect(script.indexOf("$DiskDrive.Free -lt ($CopyBytes + $DiskReserveBytes)")).toBeLessThan(script.indexOf("$DiskCopyOutput = [IO.File]::Open"));
         expect(script).toContain("hyper-v-host-disk-capacity-exceeded");
         expect(script).toContain("Remove-VM -VM $CreatedVm -Force");
         expect(script).toContain("Remove-Item -LiteralPath $DiskPath -Force");
@@ -2033,15 +2042,18 @@ describe("Hyper-V provider adapter", () => {
         expect(startScript).toContain("hyper-v-host-memory-capacity-exceeded");
         expect(startScript).toContain("hyper-v-host-cpu-capacity-exceeded");
         const rebootScript = scriptOf(hyperVRebootCommand({ ...options, force: true, startIfStopped: true }));
-        expect(rebootScript).toContain("Restart-VM -VM $Vm -Force:$Force -Confirm:$false");
-        expect(rebootScript).toContain("$Force = $true");
+        expect(rebootScript).toContain("Restart-VM -VM $Vm -Force -Confirm:$false");
         expect(rebootScript).toContain("throw 'hyper-v-reboot-command-failed'");
         expect(rebootScript).toContain("throw 'hyper-v-reboot-start-failed'");
 
-        const defaultRebootScript = scriptOf(hyperVRebootCommand(options));
-        expect(defaultRebootScript).toContain("$Force = $false");
-        const gracefulRebootScript = scriptOf(hyperVRebootCommand({ ...options, force: false }));
-        expect(gracefulRebootScript).toContain("$Force = $false");
+        for (const force of [undefined, false, true]) {
+            const noninteractiveReboot = scriptOf(hyperVRebootCommand({ ...options, force }));
+            expect(noninteractiveReboot).toContain("Restart-VM -VM $Vm -Force -Confirm:$false");
+            expect(noninteractiveReboot).not.toContain("$Force");
+            expect(noninteractiveReboot).not.toContain("Stop-VM");
+            expect(noninteractiveReboot.indexOf("hyper-v-vm-ownership-mismatch"))
+                .toBeLessThan(noninteractiveReboot.indexOf("Restart-VM -VM $Vm"));
+        }
         expect(rebootScript).toContain("hyper-v-reboot-requires-running-vm");
         expect(rebootScript).toContain("Start-VM -VM $Vm");
         const deleteScript = scriptOf(hyperVDeleteCommand({
@@ -3000,4 +3012,56 @@ describe("Hyper-V provider adapter", () => {
 
         expect(result.status, result.stderr || result.error?.message).toBe(0);
     });
+});
+
+
+const aclPowerShell = process.platform === "win32" ? "powershell.exe" : "pwsh";
+const hasAclPowerShell = spawnSync(aclPowerShell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "exit 0"], { timeout: 5000 }).status === 0;
+
+describe("Hyper-V ACL principal selection", () => {
+    const options = { executable: "powershell.exe", profile: "windows-server", imageRoot: "/state/images/hyper-v", expectedGeneration: 2 } as const;
+    const programs = [
+        ["combined image acquisition", scriptOf(hyperVAcquireBaseImageCommand(options))],
+        ["image preparation", scriptOf(hyperVAcquireBaseImagePrepareCommand(options))],
+        ["image finalization", scriptOf(hyperVAcquireBaseImageFinalizeCommand({ ...options, expectedPartialSha256: baseImageSha256, expectedPartialFileId: "123", expectedVirtualSizeBytes: 64 * 1024 ** 3, expectedVhdType: "Dynamic" }))],
+        ["legacy VM creation", scriptOf(hyperVCreateCommand({
+            executable: "powershell.exe", ownerId, deviceId, incarnationId,
+            vmName: hyperVVmName(ownerId, deviceId, incarnationId),
+            baseImageRoot: "/state/images/hyper-v", baseImagePath: "/state/images/hyper-v/base.vhdx",
+            baseImageSha256, baseImageGeneration: 2,
+            deviceRoot: "/state/owners/device", diskPath: "/state/owners/device/root.vhdx",
+            diskMaxBytes: 64 * 1024 ** 3, memoryMb: 4096, cpus: 4,
+        }))],
+    ];
+    for (const [label, script] of programs) {
+        it.skipIf(!hasAclPowerShell).each(["S-1-5-18", "S-1-5-32-544", "S-1-5-21-111-222-333-1001"])(`${label} installs and validates distinct principals for %s`, (currentSid) => {
+            // SID constructors are Windows-only. Mock only those immutable value objects;
+            // execute the generated PowerShell selection, installation enumeration and count check.
+            const assignments = script.split("\n").filter((line) => /^\s*\$AllowedSid(?:Objects|s) =/.test(line)).join("\n")
+                .replace(/\[Security\.Principal\.SecurityIdentifier\]::new\('([^']+)'\)/g, "([pscustomobject]@{Value='$1'})");
+            const loop = script.match(/foreach \(\$Sid in (\$AllowedSidObjects|\$AllowedSids)\)/)?.[0];
+            const countCheck = script.split("\n").find((line) => line.includes("if ($ObservedRules.Count -ne $AllowedSids.Count)"));
+            expect(assignments).not.toBe("");
+            expect(loop).toBeDefined();
+            expect(countCheck).toBeDefined();
+            const program = [
+                "$ErrorActionPreference = 'Stop'",
+                `$CurrentSid = [pscustomobject]@{Value='${currentSid}'}`,
+                "$SystemSid = [pscustomobject]@{Value='S-1-5-18'}",
+                "$AdministratorsSid = [pscustomobject]@{Value='S-1-5-32-544'}",
+                assignments,
+                `$Installed = @(${loop} { $Sid.Value })`,
+                "$ObservedRules = @($Installed | Sort-Object -Unique)",
+                countCheck,
+                "$RejectedExtra = $false; $ObservedRules += 'S-1-1-0'",
+                `try { ${countCheck} } catch { $RejectedExtra = $true }`,
+                "@{ installed=$Installed; rejectedExtra=$RejectedExtra } | ConvertTo-Json -Compress",
+            ].join("\n");
+            const result = spawnSync(aclPowerShell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(program, "utf16le").toString("base64")], { encoding: "utf8", timeout: 10000 });
+            expect(result.status, result.stderr).toBe(0);
+            const observation = JSON.parse(result.stdout);
+            expect(observation.installed).toEqual([...new Set([currentSid, "S-1-5-18", "S-1-5-32-544"])].sort());
+            expect(observation.rejectedExtra).toBe(true);
+        });
+    }
 });

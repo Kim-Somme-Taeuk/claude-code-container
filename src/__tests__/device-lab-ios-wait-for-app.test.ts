@@ -13,7 +13,7 @@ vi.mock("@modelcontextprotocol/sdk/server/index.js", () => ({ Server: class {
     async connect() {}
 } }));
 vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({ StdioServerTransport: class {} }));
-vi.mock("../../device-lab-mcp/src/commands.mjs", async (importOriginal) => ({
+vi.mock("@ccc/device-lab/providers/commands.mjs", async (importOriginal) => ({
     ...await importOriginal<Record<string, unknown>>(),
     commandPath: (name: string) => name === "xcrun" ? "/fixture/xcrun" : null,
     run: (_cmd: string, args: string[], options?: { timeout?: number }) => {
@@ -25,12 +25,12 @@ vi.mock("../../device-lab-mcp/src/commands.mjs", async (importOriginal) => ({
         return fixture.observe(args);
     },
 }));
-vi.mock("../../device-lab-mcp/src/state/ios-state.mjs", async (importOriginal) => ({
+vi.mock("@ccc/device-lab/providers/state/ios-state.mjs", async (importOriginal) => ({
     ...await importOriginal<Record<string, unknown>>(),
     findIosDevice: (id: string) => fixture.device?.id === id ? fixture.device : null,
 }));
-import { ownerId } from "../../device-lab-mcp/src/context.mjs";
-import { waitForIosApp } from "../../device-lab-mcp/src/backends/ios-simulator.mjs";
+import { ownerId } from "@ccc/device-lab/providers/context.mjs";
+import { waitForIosApp } from "@ccc/device-lab/providers/backends/ios-simulator.mjs";
 import { startServer } from "../../device-lab-mcp/src/server.mjs";
 
 const bundleId = "com.apple.mobilesafari";
@@ -43,7 +43,7 @@ async function finish<T>(pending: Promise<T>) {
 }
 const wait = (timeoutMs = 1) => finish(waitForIosApp("/fixture/xcrun", "SIM-UDID", bundleId, timeoutMs, 50));
 const call = (name: string, args: Record<string, unknown>) => finish(fixture.handlers[1]({ params: { name, arguments: args } }));
-const args = { deviceId: "ios-observation-fixture", bundleId, timeoutMs: 1, intervalMs: 50, implicitBroker: false };
+const args = { deviceId: "ios-observation-fixture", appId: bundleId, timeoutMs: 1, intervalMs: 50, implicitBroker: false };
 
 beforeAll(async () => { await startServer(); });
 beforeEach(() => {
@@ -92,7 +92,7 @@ describe("iOS Simulator app observation", () => {
 
     it("uses clean pgrep absence metadata despite failed fallback commands", async () => {
         fixture.observe = (argv) => isPgrep(argv) ? result(1) : failed();
-        expect(await wait()).toEqual({ running: false, timeoutMs: 1, stdout: "", stderr: "", status: 1,
+        expect(await wait()).toEqual({ running: false, timeoutMs: 1, stdout: "", stderr: "", status: 0, nativeStatus: 1,
             observedBy: "pgrep-and-launchctl" });
     });
 
@@ -137,7 +137,7 @@ describe("iOS Simulator app observation", () => {
         const observed = await wait(51);
         expect(fixture.calls).toHaveLength(10);
         if (firstClean) expect(observed.error.stderr).toContain("simulator unavailable");
-        else expect(observed).toMatchObject({ running: false, status: 1, stderr: "" });
+        else expect(observed).toMatchObject({ running: false, status: 0, nativeStatus: 1, stderr: "" });
     });
 
     it("bounds long multibyte failure details and marks truncation", async () => {
@@ -162,7 +162,7 @@ describe("public iOS wait and flow errors", () => {
         fixture.observe = (argv) => isPgrep(argv) ? result(1) : failed();
         const observed = await call("wait_for_app", { ...args, detail: true });
         expect(observed.isError).toBe(false);
-        expect(JSON.parse(observed.content[0].text)).toMatchObject({ running: false, bundleId, provider: "simctl", status: 1 });
+        expect(JSON.parse(observed.content[0].text)).toMatchObject({ running: false, matched: false, appId: bundleId, provider: "simctl", status: 0, nativeStatus: 1 });
     });
 
     it.each(["run_flow"])("%s stops with the original observation error before the next action", async (name) => {

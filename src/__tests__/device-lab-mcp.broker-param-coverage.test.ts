@@ -7,7 +7,6 @@ const BROKER_DEVICE_TOOL_ROUTABLE_TOOLS = new Set([
     "exec",
     "screenshot",
     "click",
-    "double_click",
     "key",
     "type",
     "scroll",
@@ -25,7 +24,6 @@ const BROKER_DEVICE_TOOL_ROUTABLE_TOOLS = new Set([
     "status",
     "ui",
     "click",
-    "double_click",
     "long_press",
     "swipe",
     "drag",
@@ -52,7 +50,7 @@ const BROKER_DEVICE_TOOL_ROUTABLE_TOOLS = new Set([
     "set_location",
     "set_battery",
     "set_network",
-    "toggle_airplane_mode",
+    "set_network",
     "clipboard",
     "clipboard",
     "wait_for_text",
@@ -61,6 +59,7 @@ const BROKER_DEVICE_TOOL_ROUTABLE_TOOLS = new Set([
 ]);
 
 const BROKER_ROUTE_ONLY_PROPERTIES = new Set([
+    "count", // Public selector consumed before provider dispatch.
     "detail", // Presentation-only: stripped before provider dispatch.
     "broker",
     "viaBroker",
@@ -84,6 +83,8 @@ describe("device-lab broker device tool param coverage", () => {
             .map((tool) => {
                 const missing = Object.keys(tool.inputSchema?.properties || {})
                     .filter((property) => !BROKER_ROUTE_ONLY_PROPERTIES.has(property))
+                    .flatMap((property) => property === "appId" ? ["packageName", "bundleId"]
+                        : property === "permission" && tool.name === "permission" ? ["permission", "service"] : [property])
                     .filter((property) => !forwarded.has(property))
                     .sort();
                 return { name: tool.name, missing };

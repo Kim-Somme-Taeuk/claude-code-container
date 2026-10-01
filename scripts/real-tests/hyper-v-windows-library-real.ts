@@ -641,7 +641,9 @@ export async function loadHyperVWindowsLibrary(): Promise<HyperVWindowsLibraryMo
         "..",
         "..",
         "dist",
-        "hyper-v-windows",
+        "packages",
+        "hyper-v",
+        "dist",
         "index.js",
     )).href;
     return import(publicRoot) as Promise<HyperVWindowsLibraryModule>;

@@ -1,7 +1,7 @@
 import { readFileSync } from "fs";
 import { describe, expect, it, vi } from "vitest";
 
-import { createHyperVWindowsClient, parseHyperVWindowsGuestBootDiagnostic, type HyperVWindowsExecutionContext, type HyperVWindowsExecutionRequest } from "../hyper-v-windows/index.js";
+import { createHyperVWindowsClient, parseHyperVWindowsGuestBootDiagnostic, type HyperVWindowsExecutionContext, type HyperVWindowsExecutionRequest } from "@ccc/hyper-v/index.js";
 
 const vmId = "11111111-2222-3333-4444-555555555555";
 const identity = { selector: { kind: "id" as const, id: vmId }, expectedName: "ccc-vm", expectedNotes: "opaque-owner-marker" };
@@ -57,7 +57,7 @@ describe("typed Hyper-V boot diagnostic", () => {
     });
 
     it("fences native readers after identity and retains independent partial sections", () => {
-        const source = readFileSync(new URL("../../scripts/host-control/hyper-v/Invoke-HyperVWindowsOperation.ps1", import.meta.url), "utf8");
+        const source = readFileSync(new URL("../../packages/hyper-v/powershell/Invoke-HyperVWindowsOperation.ps1", import.meta.url), "utf8");
         const branch = source.slice(source.indexOf('"Get-VMDiagnostic" {'));
         expect(branch.indexOf("diagnostic-vm-identity-mismatch")).toBeLessThan(branch.indexOf("Get-HyperVWindowsGuestBootDiagnosticResult -Vm"));
         for (const code of [

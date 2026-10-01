@@ -6,7 +6,7 @@ import { getProjectId } from "./utils.js";
 import { locksDir } from "./home-layout.js";
 import { runtimeCli } from "./container-runtime.js";
 import { cleanupOwnerDevices } from "./device-lab-admin.js";
-import { withSharedMutationLock, withSharedMutationLockAsync } from "./device-lab-shared-state.js";
+import { withSharedMutationLock, withSharedMutationLockAsync } from "@ccc/device-lab/device-lab-shared-state.js";
 import { observeProcessStarts, processStartToken, sessionLockLiveness, sessionLockOwner } from "./session-lock-liveness.js";
 
 function containerLifecycleLock(containerPrefix: string): string {

@@ -20,12 +20,12 @@ import {
     type HyperVNetNat,
     type HyperVVirtualSwitch,
     type HyperVWindowsNetworkClient,
-} from "../hyper-v-windows/index.js";
+} from "@ccc/hyper-v/index.js";
 import {
     hyperVCleanupNetworkCommand,
     hyperVEnsureNetworkCommand,
     hyperVInspectNetworkAllocationsCommand,
-} from "../host-control/hyper-v/index.js";
+} from "@ccc/device-lab/host-control/hyper-v/index.js";
 import {
     adoptHyperVLinuxSshHostIdentity,
     cachedHyperVOwnerDevicesReader,
@@ -39,8 +39,8 @@ import {
     validateHyperVLinuxSshHostIdentity,
     type HyperVNetworkCommandResult,
     type HyperVNetworkRuntime,
-} from "../device-lab/broker/hyper-v/network.js";
-import { HYPER_V_ELEVATION_SUPPRESSED_EXECUTOR } from "../device-lab/broker/hyper-v/elevation-gate.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/network.js";
+import { HYPER_V_ELEVATION_SUPPRESSED_EXECUTOR } from "@ccc/device-lab/device-lab/broker/hyper-v/elevation-gate.js";
 
 const OWNER_ID = "0123456789abcdef";
 const DEVICE_ID = "network-test";
@@ -3217,7 +3217,7 @@ describe("Hyper-V network module", () => {
 
     it("does not import the broker facade", () => {
         const source = readFileSync(
-            new URL("../device-lab/broker/hyper-v/network.ts", import.meta.url),
+            new URL("../../packages/device-lab/src/device-lab/broker/hyper-v/network.ts", import.meta.url),
             "utf8",
         );
 

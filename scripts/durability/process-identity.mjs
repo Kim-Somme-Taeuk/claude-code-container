@@ -1,6 +1,6 @@
 import { spawnSync } from "child_process";
 import { readFileSync, readdirSync } from "fs";
-import { hiddenWindowsPowerShellArgs } from "../../device-lab-mcp/src/state/windows-system-powershell.mjs";
+import { hiddenWindowsPowerShellArgs } from "#device-lab/providers/state/windows-system-powershell.mjs";
 
 function linuxProcessSnapshot(procRoot = "/proc") {
     const entries = [];

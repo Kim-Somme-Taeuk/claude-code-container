@@ -25,7 +25,7 @@ import { fileURLToPath } from "url";
 import { CLIPBOARD_FILES_CONTAINER_DIR } from "./utils.js";
 import { clipboardFilesDir, clipboardPortFile, clipboardStartingLock, clipboardStateDir, helperBinDir, locksDir } from "./home-layout.js";
 import { sessionLockLiveness } from "./session-lock-liveness.js";
-import { canonicalWindowsPowerShellPath, hiddenWindowsPowerShellArgs } from "./windows-system-powershell.js";
+import { canonicalWindowsPowerShellPath, hiddenWindowsPowerShellArgs } from "@ccc/device-lab/windows-system-powershell.js";
 
 // === Version (for auto-restart on upgrade) ===
 // Uses content hash of the compiled server file so ANY code change triggers restart

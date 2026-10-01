@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { observeDeviceLabHyperVStatus } from "../device-lab/broker/hyper-v/status.js";
-import type { DeviceLabHyperVCommandRunner } from "../device-lab/broker/hyper-v/lifecycle-adapter.js";
-import type { HyperVWindowsExecutionRequest } from "../hyper-v-windows/index.js";
+import { observeDeviceLabHyperVStatus } from "@ccc/device-lab/device-lab/broker/hyper-v/status.js";
+import type { DeviceLabHyperVCommandRunner } from "@ccc/device-lab/device-lab/broker/hyper-v/lifecycle-adapter.js";
+import type { HyperVWindowsExecutionRequest } from "@ccc/hyper-v/index.js";
 
 const vmId = "12345678-1234-1234-1234-123456789abc";
 const snapshotId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";

@@ -10,11 +10,11 @@ function text(result: any): string { return result.content[0].text; }
 function json(result: any) { return JSON.parse(text(result)); }
 
 const invalid: Array<[string, Record<string, unknown>, RegExp]> = [
-    ["key", {}, /key requires key or keyCode/],
-    ["key", { key: "" }, /key requires key or keyCode/],
-    ["key", { key: null }, /key requires key or keyCode/],
-    ["key", { key: {} }, /key requires key or keyCode/],
-    ["key", { keyCode: false }, /key requires key or keyCode/],
+    ["key", {}, /key (requires|keyCode)/],
+    ["key", { key: "" }, /key (requires|keyCode)/],
+    ["key", { key: null }, /key (requires|keyCode)/],
+    ["key", { key: {} }, /key (requires|keyCode)/],
+    ["key", { keyCode: false }, /key (requires|keyCode)/],
     ["wait_for_text", {}, /wait_for_text requires text/],
     ["wait_for_text", { text: "" }, /wait_for_text requires text/],
     ["wait_for_text", { text: 7 }, /wait_for_text requires text/],
@@ -58,7 +58,7 @@ require('module').syncBuiltinESMExports();`);
             // Prove the trace observes real preparation when valid input proceeds.
             writeFileSync(log, "");
             await context.client.callTool(route === "direct"
-                ? { name: "backends", arguments: { implicitBroker: false } }
+                ? { name: "devices", arguments: { view: "backends", implicitBroker: false } }
                 : { name: "key", arguments: { ...routing, keyCode: 0 } });
             expect(readFileSync(log, "utf8")).not.toBe("");
         } finally { await cleanupDeviceLabMcpTestContext(context); }
@@ -70,12 +70,12 @@ require('module').syncBuiltinESMExports();`);
             const catalog = await context.client.listTools();
             const ajv = new Ajv({ strict: false });
             const keySchema = catalog.tools.find((tool) => tool.name === "key")!.inputSchema;
-            expect(keySchema.anyOf).toBeDefined();
+            expect(keySchema.oneOf).toBeDefined();
             const key = ajv.compile(keySchema);
-            for (const args of [{ key: "Return" }, { keyCode: 0 }, { key: "Return", keyCode: 4 }, { key: " " }]) {
+            for (const args of [{ key: "Return" }, { keyCode: 0 }, { key: " " }]) {
                 expect(key({ deviceId: "android-test", ...args }), JSON.stringify(args)).toBe(true);
             }
-            for (const args of [{}, { key: "" }, { key: {} }, { keyCode: false }]) {
+            for (const args of [{}, { key: "" }, { key: {} }, { keyCode: false }, { key: "Return", keyCode: 4 }]) {
                 expect(key({ deviceId: "android-test", ...args }), JSON.stringify(args)).toBe(false);
             }
             const wait = ajv.compile(catalog.tools.find((tool) => tool.name === "wait_for_text")!.inputSchema);
@@ -84,22 +84,25 @@ require('module').syncBuiltinESMExports();`);
         } finally { await cleanupDeviceLabMcpTestContext(context); }
     });
 
-    it("preserves zero, whitespace and Android mixed-field precedence", { timeout: 30000 }, async () => {
+    it("preserves zero and whitespace while rejecting ambiguous Android key inputs", { timeout: 30000 }, async () => {
         const context = await createFakeAndroidMcpContext();
         try {
-            const created = await context.client.callTool({ name: "create", arguments: {
-                backend: "android-emulator", name: "Preflight", avdName: "Preflight", port: 5582,
+            const created = await context.client.callTool({ name: "create_android_emulator", arguments: {
+                 name: "Preflight", avdName: "Preflight", port: 5582,
             } });
             expect(created.isError).not.toBe(true);
             const deviceId = json(created).device.id;
             for (const [args, expected] of [
                 [{ keyCode: 0 }, 0], [{ key: "KEYCODE_ENTER" }, "KEYCODE_ENTER"],
-                [{ key: "KEYCODE_ENTER", keyCode: 4 }, 4],
-                [{ key: "", keyCode: 0 }, 0],
             ] as const) {
                 const result = await context.client.callTool({ name: "key", arguments: { deviceId, ...args } });
                 expect(result.isError, text(result)).not.toBe(true);
                 expect(json(result)).toMatchObject({ key: expected, provider: "adb" });
+            }
+            for (const args of [{ key: "KEYCODE_ENTER", keyCode: 4 }, { key: "", keyCode: 0 }]) {
+                const result = await context.client.callTool({ name: "key", arguments: { deviceId, ...args } });
+                expect(result.isError).toBe(true);
+                expect(text(result)).toContain("exactly one");
             }
             const wait = await context.client.callTool({ name: "wait_for_text", arguments: {
                 deviceId, text: " ", timeoutMs: 1000, intervalMs: 50,
@@ -112,10 +115,10 @@ require('module').syncBuiltinESMExports();`);
     it("rejects Android keyCode on iOS and preserves supported keys", { timeout: 30000 }, async () => {
         const context = await createFakeIosMcpContext();
         try {
-            const created = await context.client.callTool({ name: "create", arguments: {
-                backend: "ios-simulator", name: "Preflight", deviceId: "ios-preflight",
+            const created = await context.client.callTool({ name: "create_ios_simulator", arguments: {
+                 name: "Preflight", deviceId: "ios-preflight",
                 deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
-                runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0", createSimulator: true,
+                runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0",
             } });
             expect(created.isError, text(created)).not.toBe(true);
             const started = await context.client.callTool({ name: "start", arguments: { deviceId: "ios-preflight", bootTimeoutMs: 1000 } });

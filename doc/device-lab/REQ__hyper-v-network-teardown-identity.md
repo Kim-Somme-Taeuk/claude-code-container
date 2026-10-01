@@ -7,7 +7,7 @@ status: current
 # REQ — Network-switch teardown ownership authority is the switch GUID
 
 ## Requirement
-`hyperVCleanupNetworkCommand` (src/host-control/hyper-v/host.ts) MUST treat the
+`hyperVCleanupNetworkCommand` (packages/device-lab/src/host-control/hyper-v/host.ts) MUST treat the
 switch **GUID** (`$ExpectedSwitchId`) as the ownership authority, not the `Notes`
 marker string:
 

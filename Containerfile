@@ -15,15 +15,19 @@ COPY scripts/localhost-proxy/ .
 RUN CGO_ENABLED=0 go build -ldflags='-s -w' -o ccc-proxy .
 
 # ==========================================================
-# Stage 3: Build bundled CCC MCP servers
+# Stage 3: Build bundled Device Lab MCP
 # ==========================================================
 FROM node:22-slim AS mcp-builder
 WORKDIR /build
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json tsconfig.json ./
+COPY packages/hyper-v/package.json ./packages/hyper-v/package.json
+COPY packages/device-lab/package.json ./packages/device-lab/package.json
+COPY device-lab-mcp/package.json ./device-lab-mcp/package.json
 RUN npm ci --ignore-scripts --no-audit --no-fund
-COPY x11-mcp ./x11-mcp
+COPY packages ./packages
 COPY device-lab-mcp ./device-lab-mcp
-RUN npm run build:x11-mcp && npm run build:device-lab-mcp
+COPY scripts/workspace-build.mjs ./scripts/workspace-build.mjs
+RUN node scripts/workspace-build.mjs build && npm run build:device-lab-mcp && node scripts/workspace-build.mjs assemble
 
 # ==========================================================
 # Stage 4: Main image
@@ -175,27 +179,19 @@ RUN --mount=type=secret,id=github_token,uid=1000,mode=0444 \
     ~/.local/bin/mise use -g uv@latest
 
 # ============================================================
-# LAYER 7.5: CCC-managed MCP servers baked into image
+# LAYER 7.5: Device Lab MCP baked into image
 # /opt/ccc/dist/*/server.mjs paths are referenced by src/mcp-forward.ts and
 # spawned in-container via `mise exec node@22 -- node ...`. We bake bundled
-# dist servers at build time so list/call surfaces cannot drift from source
-# files copied into /opt/ccc/* for provider child helpers. Order matters:
-#   1) mkdir + chown (root)
-#   2) COPY package*.json + npm ci  ← cacheable, only invalidates on dep change
-#   3) COPY server.mjs              ← editing the server alone reuses npm layer
+# server and its embedded workspace runtime together. The Device Lab source
+# path remains a thin launcher; the core package owns provider and Appium assets.
 # ============================================================
 USER root
-RUN mkdir -p /opt/ccc/x11-mcp /opt/ccc/device-lab-mcp /opt/ccc/dist && chown -R ccc:ccc /opt/ccc
+RUN mkdir -p /opt/ccc/device-lab-mcp /opt/ccc/dist && chown -R ccc:ccc /opt/ccc
 USER ccc
-COPY --from=mcp-builder --chown=ccc:ccc /build/dist/x11-mcp /opt/ccc/dist/x11-mcp
 COPY --from=mcp-builder --chown=ccc:ccc /build/dist/device-lab-mcp /opt/ccc/dist/device-lab-mcp
-COPY --chown=ccc:ccc x11-mcp/package.json x11-mcp/package-lock.json /opt/ccc/x11-mcp/
-RUN cd /opt/ccc/x11-mcp && ~/.local/bin/mise exec node@22 -- npm ci --omit=dev --no-audit --no-fund
-COPY --chown=ccc:ccc x11-mcp/server.mjs /opt/ccc/x11-mcp/server.mjs
-COPY --chown=ccc:ccc device-lab-mcp/package.json device-lab-mcp/package-lock.json /opt/ccc/device-lab-mcp/
-RUN cd /opt/ccc/device-lab-mcp && ~/.local/bin/mise exec node@22 -- npm ci --omit=dev --no-audit --no-fund
-COPY --chown=ccc:ccc device-lab-mcp/server.mjs /opt/ccc/device-lab-mcp/server.mjs
-COPY --chown=ccc:ccc device-lab-mcp/src /opt/ccc/device-lab-mcp/src
+COPY --from=mcp-builder --chown=ccc:ccc /build/dist/packages /opt/ccc/dist/packages
+RUN cd /opt/ccc/dist/packages/device-lab/appium-runtime && ~/.local/bin/mise exec node@22 -- npm ci --omit=dev --no-audit --no-fund
+RUN printf '%s\n' 'import "../dist/device-lab-mcp/server.mjs";' > /opt/ccc/device-lab-mcp/server.mjs
 
 # ============================================================
 # claude-code is installed at runtime and cached in mise volume.

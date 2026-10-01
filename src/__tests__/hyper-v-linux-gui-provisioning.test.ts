@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { hyperVLinuxGuiPrepareCommand, hyperVLinuxGuiReadyCommand, hyperVLinuxGuiTypeGuestCommand, hyperVLinuxGuiScrollGuestCommand } from "../host-control/hyper-v/index.js";
+import { hyperVLinuxGuiPrepareCommand, hyperVLinuxGuiReadyCommand, hyperVLinuxGuiTypeGuestCommand, hyperVLinuxGuiScrollGuestCommand } from "@ccc/device-lab/host-control/hyper-v/index.js";
 
 const ssh = {
     executable: "ssh.exe",

@@ -1,12 +1,13 @@
+import { hyperVMemoryFailureReason } from "./hyper-v-memory-diagnostic.ts";
 import assert from "assert";
 import { randomBytes } from "crypto";
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { ownerId as deviceLabOwnerId } from "../../device-lab-mcp/src/context.mjs";
-import { inspectHyperVUbuntuImageCache } from "../../src/device-lab/broker/hyper-v/image-store.ts";
-import { hyperVLinuxImageBlockers, hyperVLinuxImageSkipReason } from "../../src/device-lab/hyper-v-linux-image-readiness.ts";
-import { hyperVReadinessCommand, parseHyperVReadiness } from "../../src/host-control/hyper-v/index.ts";
+import { ownerId as deviceLabOwnerId } from "#device-lab/providers/context.mjs";
+import { inspectHyperVUbuntuImageCache } from "#device-lab/device-lab/broker/hyper-v/image-store.js";
+import { hyperVLinuxImageBlockers, hyperVLinuxImageSkipReason } from "#device-lab/device-lab/hyper-v-linux-image-readiness.js";
+import { hyperVReadinessCommand, parseHyperVReadiness } from "#device-lab/host-control/hyper-v/index.js";
 import { hiddenSpawnSync, repoRoot } from "./helpers.ts";
 import { brokerToolFailureEvidence, formatBrokerToolFailure, lifecycleDevice, parseToolPayload, parseToolResult, withDeviceLabMcp } from "./device-lab-mcp-client.ts";
 import { providerMcpSessionOptions } from "./provider-mcp-matrix.ts";
@@ -14,7 +15,7 @@ import { runHyperVGuiE2E } from "./hyper-v-gui-e2e.ts";
 
 const DEVICE_PREFIX = "linux-hyper-v-real-e2e-";
 const CAPABILITIES = [
-    "inventory", "create", "delete", "start", "stop", "reboot", "status",
+    "devices", "create_linux_vm", "delete", "start", "stop", "reboot", "status",
     "exec", "upload", "download",
     "snapshot", "snapshot", "snapshot", "snapshot",
 ];
@@ -50,6 +51,8 @@ function boundedFailureMessage(error: unknown) {
 }
 
 function terminalFailureSummary(error: unknown) {
+    const memoryFailure = hyperVMemoryFailureReason((error as any)?.brokerPayload);
+    if (memoryFailure) return memoryFailure;
     return (error as any)?.brokerPayload
         ? formatBrokerToolFailure((error as any).brokerPayload, "Hyper-V Linux broker operation failed")
         : boundedFailureMessage(error);
@@ -145,7 +148,7 @@ export function hyperVLinuxBrokerArgs(tool: string, args: Record<string, unknown
     return {
         ...args,
         viaBroker: true,
-        ...(tool === "create" ? { provider: "hyper-v" } : {}),
+        ...(tool === "create_linux_vm" ? { provider: "hyper-v" } : {}),
     };
 }
 
@@ -191,7 +194,7 @@ export function hyperVLinuxVmE2ECapability(options: any = {}) {
 }
 
 async function cleanupPrevious(callTool: (tool: string, args: any) => Promise<any>) {
-    const inventory = resultValue(hyperVLinuxToolPayload(await callTool("inventory", { detail: true, backend: "linux-vm" })));
+    const inventory = resultValue(hyperVLinuxToolPayload(await callTool("devices", { view: "available", detail: true, backend: "linux-vm" })));
     const devices = Array.isArray(inventory?.devices) ? inventory.devices : [];
     for (const device of devices.filter((candidate: any) => String(candidate?.id || "").startsWith(DEVICE_PREFIX))) {
         try { await callTool("stop", { detail: true, deviceId: device.id, incarnationId: device.incarnationId, force: true }); } catch { /* delete is still attempted */ }
@@ -224,14 +227,13 @@ export async function runHyperVLinuxVmE2E(options: any = {}) {
             await cleanupPrevious(callTool);
 
             currentStep = "create VM and cloud-init seed";
-            const createdDevice = lifecycleDevice(hyperVLinuxToolPayload(await callTool("create", { detail: true,
-                backend: "linux-vm",
+            const createdDevice = lifecycleDevice(hyperVLinuxToolPayload(await callTool("create_linux_vm", { detail: true,
+
                 ...direct,
                 name: "Real Hyper-V Ubuntu VM Test",
                 profile: "ubuntu-lts",
                 memoryMb: 2048,
                 cpus: 2,
-                networking: true,
                 ...(capability.sourceImage ? { sourceImage: capability.sourceImage } : {}),
             })), "create");
             direct.incarnationId = createdDevice.incarnationId;
@@ -240,7 +242,7 @@ export async function runHyperVLinuxVmE2E(options: any = {}) {
             const networkAddress = String(createdDevice.networkAddress || "");
 
             currentStep = "inventory VM";
-            const inventory = resultValue(hyperVLinuxToolPayload(await callTool("inventory", { detail: true, backend: "linux-vm" })));
+            const inventory = resultValue(hyperVLinuxToolPayload(await callTool("devices", { view: "available", detail: true, backend: "linux-vm" })));
             assert.ok(Array.isArray(inventory.devices) && inventory.devices.some((device: any) => device.id === deviceId));
 
             currentStep = "start and wait for SSH";

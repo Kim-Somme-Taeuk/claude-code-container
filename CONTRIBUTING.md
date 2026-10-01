@@ -33,12 +33,49 @@ CCC_RUNTIME=podman node dist/index.js runtime
 node dist/index.js --runtime docker status
 ```
 
+### Device Lab packages
+
+Device Lab is split into npm workspaces in the same repository. The root CLI
+owns containers and sessions; `@ccc/device-lab` owns providers and the host
+broker; `@ccc/device-lab-mcp` owns MCP tools and responses; `@ccc/hyper-v` owns
+its typed Windows library. X11 screen controls use the Device Lab provider and
+the same public actions with `deviceId: "x11-current-display"`.
+
+Run `npm ci` once at the repository root, then `npm run build:packages` to build
+core dependencies. Individual builds use `npm run build --workspace <name>`.
+`npm run build` also embeds the runtime packages in the CCC distribution, so end
+users still install only CCC. `npm run test:packages` checks package boundaries
+and the extracted distribution; normal unit tests use `npm test`. Native provider
+E2Es still require their corresponding host and devices.
+
+See [the package architecture decision](doc/device-lab/ADR__workspace-packages.md)
+for dependency and asset ownership.
+
+Keep Windows and Linux dependency trees separate. When the checkout is mounted
+from Windows into a Linux container, run Linux installs and builds in a separate
+Linux-owned checkout or Docker builder. Linux workspace symlinks can prevent
+Windows npm from cleaning the shared `node_modules` directory.
+
+If Windows `npm ci` fails unlinking a workspace link, preserve the dependency
+tree outside the repository and reinstall from PowerShell:
+
+```powershell
+$backup = Join-Path (Split-Path -Parent $PWD.Path) ("ccc-dependencies-backup-" + [guid]::NewGuid().ToString("N"))
+Move-Item -LiteralPath .\node_modules -Destination $backup -ErrorAction Stop
+npm ci
+if ($LASTEXITCODE -eq 0) { npm run build }
+```
+
+Do not delete a workspace link's target. Keep the backup outside the repository
+so source snapshots and nested VM tests do not include it. If moving fails,
+inspect the link and the original error before changing permissions.
+
 ### Build Commands
 
 | Command | Description |
 |---------|-------------|
 | `npm install` | Install dependencies |
-| `npm run build` | Compile TypeScript |
+| `npm run build` | Build workspaces, CLI and embedded distribution |
 | `npm test` | Run tests (vitest) |
 | `npm run test:watch` | Run tests in watch mode |
 

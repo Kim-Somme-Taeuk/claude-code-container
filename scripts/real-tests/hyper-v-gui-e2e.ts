@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { parseToolPayload } from "./device-lab-mcp-client.ts";
+import { markExpectedToolError, parseToolPayload } from "./device-lab-mcp-client.ts";
 import { unfilteredHyperVConsolePixels } from "./hyper-v-console-host.ts";
 
-const GUI_TOOLS = ["screenshot", "click", "double_click", "key", "type", "scroll", "cursor_position", "move"] as const;
+const GUI_TOOLS = ["screenshot", "click", "key", "type", "scroll", "cursor_position", "move"] as const;
 
 function accepted(result: any, tool: string): any {
     const value = parseToolPayload(result);
@@ -173,7 +173,7 @@ export async function runHyperVGuiE2E(
         accepted(await callTool("type", { detail: true, ...direct, text: "awk 'BEGIN {for(n=0;n<200;n++){c=sprintf(\"%c\",65+n%26);s=\"\";for(i=0;i<60;i++)s=s c;print n,s}}'" }), "type");
         accepted(await callTool("key", { detail: true, ...direct, key: "Enter" }), "key");
     }
-    const rejected = await callTool("click", { detail: true, ...direct, x: 640, y: 240 });
+    const rejected = markExpectedToolError(await callTool("click", { detail: true, ...direct, x: 640, y: 240 }));
     assert.ok(/hyper-v-console-pixel-invalid/.test(JSON.stringify(rejected)), "hyper-v-gui-out-of-bounds-click-accepted");
     accepted(await callTool("move", { detail: true, ...direct, x: 10, y: 10 }), "cursor_position");
     const movedAway = accepted(await callTool("cursor_position", { detail: true, ...direct }), "cursor_position");
@@ -184,7 +184,7 @@ export async function runHyperVGuiE2E(
     assert.ok(Math.abs(Number(cursor.x) - 320) <= 2 && Math.abs(Number(cursor.y) - 240) <= 2,
         "hyper-v-gui-cursor-second-position-failed");
     accepted(await callTool("click", { detail: true, ...direct, x: 320, y: 240 }), "click");
-    accepted(await callTool("double_click", { detail: true, ...direct, x: 320, y: 240 }), "double_click");
+    accepted(await callTool("click", { count: 2, detail: true, ...direct, x: 320, y: 240 }), "click count=2");
     await delay(700);
     const beforeScroll = screenshot(await callTool("screenshot", { detail: true, ...direct }), String(direct.incarnationId));
     accepted(await callTool("scroll", { detail: true, ...direct, x: 320, y: 240, direction: "up", amount: 10 }), "scroll");

@@ -10,7 +10,7 @@ import {
     type HyperVWindowsExecutionContext,
     type HyperVWindowsExecutor,
     type HyperVWindowsSessionErrorCode,
-} from "../hyper-v-windows/index.js";
+} from "@ccc/hyper-v/index.js";
 import {
     HyperVElevatedNetworkSessionError,
     withElevatedHyperVNetworkExecutor,
@@ -18,14 +18,14 @@ import {
     type HyperVElevatedNetworkRelayCompletion,
     type HyperVElevatedNetworkRelayProcess,
     type HyperVElevatedNetworkRelaySpawn,
-} from "../device-lab/broker/hyper-v/elevated-network-session.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/elevated-network-session.js";
 import {
     HYPER_V_ELEVATION_SUPPRESSED_EXECUTOR,
     hyperVElevationGateStatus,
     resetHyperVElevationGateForTest,
     withHyperVElevationGate,
-} from "../device-lab/broker/hyper-v/elevation-gate.js";
-import { deviceBrokerStatus, withHyperVAdministratorExecutorForTest } from "../device-lab-broker.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/elevation-gate.js";
+import { deviceBrokerStatus, withHyperVAdministratorExecutorForTest } from "@ccc/device-lab/device-lab-broker.js";
 
 const executable = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
 const context: HyperVWindowsExecutionContext = { timeoutMilliseconds: 5_000, maximumOutputBytes: 64 * 1024 };
@@ -385,7 +385,7 @@ describe("Hyper-V elevation gate", () => {
     });
 
     it("composes the broker's administrator client through the gate", () => {
-        const source = readFileSync(join(__dirname, "..", "device-lab-broker.ts"), "utf8");
+        const source = readFileSync(join(__dirname, "..", "..", "packages", "device-lab", "src", "device-lab-broker.ts"), "utf8");
         const start = source.indexOf("withAdministratorClient: async <Result>");
         const composition = source.slice(start, source.indexOf("kind: \"unavailable\"", start));
         const helperStart = source.indexOf("function withHyperVAdministratorExecutor<Result>(");

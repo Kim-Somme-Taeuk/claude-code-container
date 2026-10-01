@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "child_process";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterEach, describe, expect, it } from "vitest";
-import { inspectProcessIdentity, waitForProcessIdentity } from "../../device-lab-mcp/src/state/process-identity.mjs";
+import { inspectProcessIdentity, waitForProcessIdentity } from "@ccc/device-lab/providers/state/process-identity.mjs";
 import { cleanupFakeIosMcpContext, createFakeIosMcpContext, TIMEOUT, type FakeIosMcpContext } from "./helpers/fake-ios-mcp-fixture.js";
 
 type DeviceRecord = Record<string, unknown> & {

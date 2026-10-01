@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { assertResultMatrix, PROVIDER_RESULT_SPECS } from "../../scripts/real-tests/assert-matrix.js";
 import { TOOLS } from "../../device-lab-mcp/src/tools.mjs";
 
-const imageTools = ["base_image_create", "base_image_clone"];
+const imageTools = ["create_macos_vm"];
 
 function matrix(tools = imageTools, change: (call: any) => any = (call) => call) {
     const calls = ["source", "dist"].flatMap((source) => tools.map((tool) => change({
@@ -38,6 +38,16 @@ describe("canonical provider result evidence", () => {
         });
         expect(result.providerEvidence["macos-vm"].dist.missingTools).toEqual(imageTools);
         expect(result.ok).toBe(false);
+    });
+
+    it.each([1, 2])("credits double-click provider evidence only for count2, observed %s", count => {
+        expect(PROVIDER_RESULT_SPECS.find(spec => spec.id === "windows-vm")?.tools).toContain("click:count=2");
+        const result = assertResultMatrix([{ host: { platform: "win32" }, mcpSessions: ["source", "dist"].map(source => ({ id: source, serverSource: source })), toolCoverage: { advertisedTools: ["click"], calls: ["source", "dist"].map(source => ({ tool: "click", outcome: "ok", file: "provider-e2e.ts", mcpSessionId: source, facets: ["click:backend=windows-vm", `click:count=${count}`] })) } }], {
+            advertisedTools: ["click"], requireLinuxVm: false,
+            providerSpecs: [{ id: "windows-vm", files: ["provider-e2e.ts"], tools: ["click", "click:count=2"] }],
+        });
+        expect(result.providerEvidence["windows-vm"].dist.missingTools).toEqual(count === 2 ? [] : ["click:count=2"]);
+        expect(result.ok).toBe(count === 2);
     });
 
     it("does not credit snapshot list for restore or delete on the same provider", () => {

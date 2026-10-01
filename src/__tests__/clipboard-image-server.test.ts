@@ -12,8 +12,8 @@ vi.mock("fs", async () => {
     const actual = await vi.importActual<typeof import("fs")>("fs");
     return { ...actual, existsSync: (path: string) => String(path).endsWith("clipboard-helper-darwin") || actual.existsSync(path) };
 });
-vi.mock("../windows-system-powershell.js", async () => ({
-    ...await vi.importActual<typeof import("../windows-system-powershell.js")>("../windows-system-powershell.js"),
+vi.mock("@ccc/device-lab/windows-system-powershell.js", async () => ({
+    ...await vi.importActual<typeof import("@ccc/device-lab/windows-system-powershell.js")>("@ccc/device-lab/windows-system-powershell.js"),
     canonicalWindowsPowerShellPath: () => "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
 }));
 

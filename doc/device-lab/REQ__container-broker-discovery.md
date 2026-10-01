@@ -7,13 +7,13 @@ status: current
 # REQ — The in-container MCP must accept the host broker it can actually reach
 
 ## Requirement
-1. **Capability families match forward.** A capability named `family-vN` is satisfied by
-   an advertised `family-vM` with `M >= N`. The family is everything before the final
-   `-v<digits>`. Unversioned capabilities still need an exact match. `missingCapabilities`
-   lists only the requirements that nothing satisfies. One module implements the rule,
-   `device-lab-mcp/src/contracts/broker-capabilities.mjs`, and every compatibility gate
-   uses it: the MCP client (`probeCccHostBrokerCapabilities`), the host CLI
-   (`probeHostBrokerStatus`) and the level-3 attestation (`ensureHostBrokerReady`).
+1. **One shared wire protocol.** `broker.protocolVersion` must exactly equal the
+   integer exported by `packages/device-lab/providers/contracts/broker-protocol.mjs`.
+   Missing, malformed, older and newer versions are incompatible. Package versions
+   are informational and feature patch lists are no longer advertised or matched.
+   The MCP (`probeCccHostBrokerProtocol`), host CLI (`probeHostBrokerStatus`) and
+   Level 3 (`ensureHostBrokerReady`) use this same contract. Automatic replacement
+   still requires verified process identity and never downgrades a newer protocol.
 2. **Forwarded loopback counts as outside the container.** Inside a container
    (`/.dockerenv`), a `managedBy: "ccc-host"` runtime reached at `127.0.0.1`,
    `localhost` or `::1` is accepted as `loopback-forwarded-container-boundary`. Its trust
@@ -64,7 +64,8 @@ status: current
    `/status`. Caller RPC options can never assert a container boundary.
 
 ## Why
-- Container images routinely lag the host install. With exact matching, every capability
+- Historical context (before the shared protocol replaced feature lists): container
+  images routinely lagged the host install. With exact feature matching, every capability
   bump broke every older container. This was seen live: an MCP that required
   `hyper-v-network-failure-diagnostics-v9` (and `-v39`, `x11-type-v1`) refused a host
   broker that advertised `-v10` (`-v40`, `-v2`). Every device tool then failed with
@@ -82,16 +83,16 @@ status: current
   file claims.
 
 ## Invariant / consistency
-- An OLDER broker (`M < N`) is still missing the capability. Host `ccc` keeps replacing
-  stale brokers, and the exact-version gate (`versionCompatible`) is unchanged. A newer
-  same-version broker is now reused instead of downgraded, which matches
-  `broker-newer-than-cli`.
-- A change that older clients cannot use must not ship as a family bump. It needs a new
-  family name, or the broker must keep serving the older contract.
-- Termination paths (`terminateVerifiedBrokerRuntime`, `brokerShutdown`) are unchanged.
-  They never signal a process they did not verify locally.
-- The four-list invariant tests in `device-lab-broker.test.ts` still compare exact
-  strings on purpose. A build must advertise exactly what it requires.
+- The shared integer protocol is the only compatibility gate. Equal protocol values
+  are compatible across package releases; a missing or different value is rejected.
+- A breaking change or a fix requiring replacement of old brokers increments the
+  shared protocol once. There are no feature-family counters or duplicated requirement lists.
+- Verified older/legacy brokers may be replaced by host CCC. A higher protocol must
+  never be downgraded automatically, even when process identity is otherwise valid.
+- Termination paths (`terminateVerifiedBrokerRuntime`, `brokerShutdown`) retain local
+  process identity checks. Compatibility does not establish permission to signal a PID.
+- HTTP and replacement tests cover exact matching, malformed/missing versions,
+  cross-package reuse, no-downgrade behavior, and process/generation identity.
 
 ## Known limits
 - The check runs before the RPC connects, so there is a window between the two. The
@@ -120,13 +121,13 @@ status: current
 - Podman containers (`/run/.containerenv`) are not yet detected as a container boundary.
 
 ## Regression coverage
-- `src/__tests__/device-lab-broker-capabilities.test.ts`: the matcher, the MCP probe, host
-  CLI reuse of a newer same-version broker, and level-3 attestation of newer and older
-  generations.
+- `src/__tests__/device-lab-broker-capabilities.test.ts`: exact protocol validation, actual HTTP probing,
+  cross-package CLI reuse, and refusal to downgrade a newer protocol.
+- `scripts/real-tests/hyper-v.test.ts`: Level 3 protocol and process identity attestation.
 - `src/__tests__/device-lab-mcp.broker-container-boundary.test.ts`: the decision matrix,
   the RPC generation check, and the procfs inspector against a fake and the live `/proc`.
 - `src/__tests__/device-lab-mcp.broker.test.ts`: `device_broker_status` end to end reuses
-  a broker one generation ahead. The container-local listener case is still rejected.
+  a matching-protocol broker with a different package version. The container-local listener case is still rejected.
 # Isolated owner credential discovery
 
 Managed Device Lab MCP configuration explicitly supplies the fixed read-only
@@ -147,5 +148,11 @@ Backend discovery RPCs use a separate 30-second default execution budget for
 `device_backends` and implicit Hyper-V provider selection. The short health
 probe timeout remains unchanged; a reachable broker may need longer to inspect
 its host providers. An explicit `rpcTimeoutMs` overrides the discovery default
-within the existing RPC timeout limit. `timeoutMs` continues to control probing
-and does not shorten the default backend discovery RPC budget.
+within the existing RPC timeout limit. Public operation `timeoutMs` controls
+the device helper or wait; public translation supplies a separate internal
+`brokerProbeTimeoutMs` of 1000 ms for discovery and broker identity checks.
+Thus a 1 ms operation deadline does not become a 1 ms broker handshake.
+Low-level broker callers that do not supply this internal override retain
+their explicit `timeoutMs` probe budget. Neither probe setting shortens the
+default backend discovery RPC budget; an Appium request's remaining overall
+wait budget still bounds its identity check.

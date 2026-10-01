@@ -1,3 +1,4 @@
+import { isolatedDeviceLabPackage } from "./helpers/isolated-device-lab-package.js";
 import { createHash } from "crypto";
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { createServer } from "http";
@@ -5,9 +6,9 @@ import { AddressInfo } from "net";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { appiumWebDriverRequestTimeoutMs, createDeviceBrokerServer, DEVICE_BROKER_APPIUM_LOCK_MANIFEST_LIMIT_BYTES, DEVICE_BROKER_APPIUM_RESPONSE_LIMIT_BYTES, managedAppiumCommandLine, registerDeviceBrokerOwner } from "../device-lab-broker.js";
-import { deviceLabOwnerId } from "../device-lab-owner.js";
-import { readDeviceRuntimeProcessIdentity } from "../device-lab-process-identity.js";
+import { appiumWebDriverRequestTimeoutMs, createDeviceBrokerServer, DEVICE_BROKER_APPIUM_LOCK_MANIFEST_LIMIT_BYTES, DEVICE_BROKER_APPIUM_RESPONSE_LIMIT_BYTES, managedAppiumCommandLine, registerDeviceBrokerOwner } from "@ccc/device-lab/device-lab-broker.js";
+import { deviceLabOwnerId } from "@ccc/device-lab/device-lab-owner.js";
+import { readDeviceRuntimeProcessIdentity } from "@ccc/device-lab/device-lab-process-identity.js";
 import { cleanupOwner, close, listen, ownerRpcEndpoint, ownerRpcHeaders, writeBrokerDevices } from "./helpers/host-broker-test-fixture.js";
 
 async function createFakeAppiumServer(sessionId = "BROKER-SESSION-1", options: { deleteStatus?: number; readyAfterStatusRequests?: number; sessionCreateFailures?: number; onSessionCreated?: () => void } = {}) {
@@ -56,7 +57,7 @@ async function createFakeAppiumServer(sessionId = "BROKER-SESSION-1", options: {
 function writePackagedAppiumManifests(packageRoot: string) {
     const packageText = JSON.stringify({ name: "@ccc/device-lab-mcp", version: "0.1.0", dependencies: { appium: "3.5.0" } });
     const lockText = JSON.stringify({ name: "@ccc/device-lab-mcp", version: "0.1.0", lockfileVersion: 3, packages: {} });
-    const mcpRoot = join(packageRoot, "device-lab-mcp");
+    const mcpRoot = join(packageRoot, "appium-runtime");
     mkdirSync(mcpRoot, { recursive: true });
     writeFileSync(join(mcpRoot, "package.json"), packageText);
     writeFileSync(join(mcpRoot, "package-lock.json"), lockText);
@@ -478,11 +479,11 @@ describe("device-lab host broker Appium session authority", () => {
         const javaHome = join(packageRoot, "android-studio", "jbr");
         const packageBytes = JSON.stringify({ name: "@ccc/device-lab-mcp", version: "0.1.0", dependencies: { appium: "3.5.0" } });
         const lockBytes = JSON.stringify({ name: "@ccc/device-lab-mcp", version: "0.1.0", lockfileVersion: 3, packages: {} });
-        mkdirSync(join(packageRoot, "device-lab-mcp"), { recursive: true });
+        mkdirSync(join(packageRoot, "appium-runtime"), { recursive: true });
         mkdirSync(join(packageRoot, "android-sdk", "platform-tools"), { recursive: true });
         mkdirSync(join(javaHome, "bin"), { recursive: true });
-        writeFileSync(join(packageRoot, "device-lab-mcp", "package.json"), packageBytes);
-        writeFileSync(join(packageRoot, "device-lab-mcp", "package-lock.json"), lockBytes);
+        writeFileSync(join(packageRoot, "appium-runtime", "package.json"), packageBytes);
+        writeFileSync(join(packageRoot, "appium-runtime", "package-lock.json"), lockBytes);
         writeFileSync(adb, "");
         writeFileSync(join(javaHome, "bin", "java.exe"), "");
         let externalMarker: string | null = null;
@@ -519,7 +520,8 @@ describe("device-lab host broker Appium session authority", () => {
                 stderr: "",
             };
         });
-        const server = createDeviceBrokerServer({
+        const { createDeviceBrokerServer: createIsolatedBrokerServer } = await isolatedDeviceLabPackage(packageRoot);
+        const server = createIsolatedBrokerServer({
             cwd: packageRoot,
             cliPath: join(packageRoot, "dist", "index.js"),
             host: "127.0.0.1",
@@ -590,7 +592,8 @@ describe("device-lab host broker Appium session authority", () => {
         const externalPackage = join(packageRoot, "external-package.json");
         writeFileSync(externalPackage, JSON.stringify({ name: "external" }));
         const commandRunner = vi.fn(() => ({ mode: "exec" as const, provider: "unexpected", status: 0, stdout: "", stderr: "" }));
-        const server = createDeviceBrokerServer({
+        const { createDeviceBrokerServer: createIsolatedBrokerServer } = await isolatedDeviceLabPackage(packageRoot);
+        const server = createIsolatedBrokerServer({
             cwd: packageRoot,
             host: "127.0.0.1",
             port: 0,
@@ -677,7 +680,8 @@ describe("device-lab host broker Appium session authority", () => {
         const { runtimeRoot } = brokerAppiumTestPaths();
         symlinkSync(externalRuntime, runtimeRoot);
         const commandRunner = vi.fn(() => ({ mode: "exec" as const, provider: "unexpected", status: 0, stdout: "", stderr: "" }));
-        const server = createDeviceBrokerServer({ cwd: packageRoot, host: "127.0.0.1", port: 0, commandRunner });
+        const { createDeviceBrokerServer: createIsolatedBrokerServer } = await isolatedDeviceLabPackage(packageRoot);
+        const server = createIsolatedBrokerServer({ cwd: packageRoot, host: "127.0.0.1", port: 0, commandRunner });
         const baseUrl = await listen(server);
         writeBrokerDevices(ownerId, "android", [
             { id: "pixel-runtime-fence", status: "running", backend: "android-emulator", appium: null },
@@ -717,7 +721,8 @@ describe("device-lab host broker Appium session authority", () => {
         mkdirSync(runtimeRoot);
         symlinkSync(externalModules, nodeModules);
         const commandRunner = vi.fn(() => ({ mode: "exec" as const, provider: "unexpected", status: 0, stdout: "", stderr: "" }));
-        const server = createDeviceBrokerServer({ cwd: packageRoot, host: "127.0.0.1", port: 0, commandRunner });
+        const { createDeviceBrokerServer: createIsolatedBrokerServer } = await isolatedDeviceLabPackage(packageRoot);
+        const server = createIsolatedBrokerServer({ cwd: packageRoot, host: "127.0.0.1", port: 0, commandRunner });
         const baseUrl = await listen(server);
         writeBrokerDevices(ownerId, "android", [
             { id: "pixel-modules-fence", status: "running", backend: "android-emulator", appium: null },
@@ -761,7 +766,8 @@ describe("device-lab host broker Appium session authority", () => {
         let syntheticNow = 0;
         vi.spyOn(Date, "now").mockImplementation(() => (syntheticNow += 400000));
         const commandRunner = vi.fn(() => ({ mode: "exec" as const, provider: "unexpected", status: 0, stdout: "", stderr: "" }));
-        const server = createDeviceBrokerServer({ cwd: packageRoot, host: "127.0.0.1", port: 0, commandRunner });
+        const { createDeviceBrokerServer: createIsolatedBrokerServer } = await isolatedDeviceLabPackage(packageRoot);
+        const server = createIsolatedBrokerServer({ cwd: packageRoot, host: "127.0.0.1", port: 0, commandRunner });
         const baseUrl = await listen(server);
         writeBrokerDevices(ownerId, "android", [
             { id: "pixel-install-lock", status: "running", backend: "android-emulator", appium: null },
@@ -810,7 +816,8 @@ describe("device-lab host broker Appium session authority", () => {
             stdout: "",
             stderr: "",
         }));
-        const server = createDeviceBrokerServer({ cwd: packageRoot, host: "127.0.0.1", port: 0, commandRunner });
+        const { createDeviceBrokerServer: createIsolatedBrokerServer } = await isolatedDeviceLabPackage(packageRoot);
+        const server = createIsolatedBrokerServer({ cwd: packageRoot, host: "127.0.0.1", port: 0, commandRunner });
         const baseUrl = await listen(server);
         writeBrokerDevices(ownerId, "android", [
             { id: "pixel-entry-fence", status: "running", backend: "android-emulator", appium: null },
@@ -869,7 +876,8 @@ describe("device-lab host broker Appium session authority", () => {
                 stderr: "",
             };
         });
-        const server = createDeviceBrokerServer({ cwd: packageRoot, host: "127.0.0.1", port: 0, commandRunner });
+        const { createDeviceBrokerServer: createIsolatedBrokerServer } = await isolatedDeviceLabPackage(packageRoot);
+        const server = createIsolatedBrokerServer({ cwd: packageRoot, host: "127.0.0.1", port: 0, commandRunner });
         const baseUrl = await listen(server);
         writeBrokerDevices(ownerId, "android", [
             { id: "pixel-destination-fence", status: "running", backend: "android-emulator", appium: null },

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { ownerBasis, ownerId, projectMountPath } from "../../device-lab-mcp/src/context.mjs";
-import { deviceLabOwnerBasis, deviceLabOwnerId, deviceLabProjectMountPath } from "../device-lab-owner.js";
+import { ownerBasis, ownerId, projectMountPath } from "@ccc/device-lab/providers/context.mjs";
+import { deviceLabOwnerBasis, deviceLabOwnerId, deviceLabProjectMountPath } from "@ccc/device-lab/device-lab-owner.js";
 
 describe("device-lab-mcp owner context", () => {
     const originalProfile = process.env.CCC_PROFILE;

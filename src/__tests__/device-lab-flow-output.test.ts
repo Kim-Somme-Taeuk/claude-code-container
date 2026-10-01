@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { flowJsonResult, jsonResult } from "../../device-lab-mcp/src/responses.mjs";
+import { flowJsonResult, jsonResult } from "@ccc/device-lab/providers/responses.mjs";
 import { compactToolValue } from "../../device-lab-mcp/src/public-output.mjs";
 import { cleanupFakeAndroidMcpContext, createFakeAndroidMcpContext } from "./helpers/fake-android-mcp-fixture.js";
 import { cleanupDeviceLabMcpTestContext, createDeviceLabMcpTestContext } from "./helpers/device-lab-mcp-fixture.js";
@@ -14,7 +14,7 @@ vi.mock("@modelcontextprotocol/sdk/server/index.js", () => ({ Server: class {
     async connect() {}
 } }));
 vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({ StdioServerTransport: class {} }));
-vi.mock("../../device-lab-mcp/src/backends/android.mjs", async (importOriginal) => ({
+vi.mock("@ccc/device-lab/providers/backends/android.mjs", async (importOriginal) => ({
     ...await importOriginal<Record<string, unknown>>(),
     handleAndroidTool: async () => {
         nativeFixture.calls++;
@@ -22,7 +22,7 @@ vi.mock("../../device-lab-mcp/src/backends/android.mjs", async (importOriginal) 
         return structuredClone(nativeFixture.result);
     },
 }));
-vi.mock("../../device-lab-mcp/src/backends/linux-vm.mjs", async (importOriginal) => ({
+vi.mock("@ccc/device-lab/providers/backends/linux-vm.mjs", async (importOriginal) => ({
     ...await importOriginal<Record<string, unknown>>(),
     handleLinuxVmManagementTool: async () => null, handleLinuxVmTool: async () => null,
 }));
@@ -41,8 +41,8 @@ describe("flow output before diagnostic bounds", () => {
     it.each(["run_flow"])("returns two inspectable screenshots in one real stdio %s call", async (name) => {
         const context = await createFakeAndroidMcpContext();
         try {
-            const created = value(await context.client.callTool({ name: "create", arguments: {
-                backend: "android-emulator", name: "Flow images", avdName: "Flow", port: 5582,
+            const created = value(await context.client.callTool({ name: "create_android_emulator", arguments: {
+                 name: "Flow images", avdName: "Flow", port: 5582,
             } }));
             const screenshot = { tool: "screenshot", arguments: { deviceId: created.device.id, implicitBroker: false } };
             for (const detail of [false, true]) {
@@ -74,7 +74,7 @@ describe("flow output before diagnostic bounds", () => {
                 expect(value(result)).toMatchObject({ ok: false, stoppedAt: 0, results: [
                     { index: 0, tool: "key", label: "key", isError: true },
                 ] });
-                expect(text(result)).toContain("key requires key or keyCode");
+                expect(text(result)).toContain("key requires exactly one of key or keyCode");
             }
             for (const malformed of [{ payload }, [payload]]) {
                 for (const field of ["tool", "name"]) {
@@ -87,7 +87,7 @@ describe("flow output before diagnostic bounds", () => {
                         { index: 0, tool: "key", label: "prior failure", isError: true },
                         { index: 1, label: "step-2", isError: true, error: "Flow step requires tool; name is not supported" },
                     ] });
-                    expect(text(result)).toContain("key requires key or keyCode");
+                    expect(text(result)).toContain("key requires exactly one of key or keyCode");
                 }
             }
         } finally { await cleanupDeviceLabMcpTestContext(context); }
@@ -100,8 +100,8 @@ describe("flow output before diagnostic bounds", () => {
             writeFileSync(adb, readFileSync(adb, "utf8").replaceAll(
                 "printf '%s\\n' '<hierarchy><node text=\"Hello\" resource-id=\"com.example:id/title\"/></hierarchy>'",
                 '/bin/cat "$HOME/flow-ui.xml"'));
-            const created = value(await context.client.callTool({ name: "create", arguments: {
-                backend: "android-emulator", name: "Flow", avdName: "Flow", port: 5582,
+            const created = value(await context.client.callTool({ name: "create_android_emulator", arguments: {
+                 name: "Flow", avdName: "Flow", port: 5582,
             } }));
             const deviceId = created.device.id;
             const steps = [
@@ -115,14 +115,14 @@ describe("flow output before diagnostic bounds", () => {
                 { index: 0, label: "large observation", tool: "wait_for_text", isError: false },
                 { index: 1, label: "actual failure", tool: "key", isError: true },
             ] });
-            expect(text(compact)).toContain("key requires key or keyCode");
+            expect(text(compact)).toContain("key requires exactly one of key or keyCode");
             expect(parsed.results[0].content[0].value.source).toBeUndefined();
             expect(Buffer.byteLength(text(compact))).toBeLessThan(2000);
             const detailed = value(await context.client.callTool({ name, arguments: { detail: true, steps } }));
             expect(detailed).toMatchObject({ ok: false, stoppedAt: 1, diagnosticTruncated: true });
             expect(detailed.results[0].content[0]).toMatchObject({ omitted: true, diagnosticTruncated: true });
             expect(detailed.results[0].content[0].originalBytes).toBeGreaterThan(70000);
-            expect(JSON.stringify(detailed.results[1])).toContain("key requires key or keyCode");
+            expect(JSON.stringify(detailed.results[1])).toContain("key requires exactly one of key or keyCode");
             const smallSource = '<hierarchy><node text="Hello"/></hierarchy>';
             writeFileSync(join(context.homeDir, "flow-ui.xml"), smallSource);
             const small = value(await context.client.callTool({ name, arguments: { detail: true, steps } }));

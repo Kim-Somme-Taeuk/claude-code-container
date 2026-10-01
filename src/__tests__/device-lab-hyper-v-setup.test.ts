@@ -3,14 +3,14 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { devicesCliAsync, setupHyperVHost, spawnableWindowsExecutablePath } from "../device-lab-admin.js";
-import { hyperVSetupCommand } from "../host-control/hyper-v/index.js";
+import { hyperVSetupCommand } from "@ccc/device-lab/host-control/hyper-v/index.js";
 import {
     HYPER_V_IMAGE_CATALOG,
     HYPER_V_WINDOWS_EVALUATION_LICENSE_ID,
     HYPER_V_WINDOWS_EVALUATION_LICENSE_URL,
     readHyperVWindowsEvaluationReceipt,
-} from "../device-lab/hyper-v-images.js";
-import { deviceLabOwnerId } from "../device-lab-owner.js";
+} from "@ccc/device-lab/device-lab/hyper-v-images.js";
+import { deviceLabOwnerId } from "@ccc/device-lab/device-lab-owner.js";
 
 describe("Hyper-V host setup CLI", () => {
     const roots: string[] = [];
@@ -462,23 +462,32 @@ describe("Hyper-V host setup CLI", () => {
 
     // Everything above injects the fabric call, so none of it would notice the default
     // wiring being dropped. Left uninjected, setup must reach the real broker entry —
-    // on a host without PowerShell that entry fails closed with a bounded code before
-    // it reads or writes any state, which is exactly what makes this safe to assert
-    // here. Skipped on Windows, where the same call would reconcile the real host.
+    // With PowerShell discovery isolated to an empty directory, that entry fails
+    // closed before host network mutation, even when pwsh is installed on the test host.
+    // The existing Windows exclusion keeps this from exercising native host setup.
     it.skipIf(process.platform === "win32")("reaches the real broker fabric entry when no ensure is injected", async () => {
         const root = join(tmpdir(), `ccc-hyper-v-fabric-wiring-${Date.now()}-${Math.random().toString(16).slice(2)}`);
         roots.push(root);
 
-        const result = await setupHyperVHost(true, {
-            platform: "win32",
-            powershell: "powershell.exe",
-            stateRoot: root,
-            commandRunner: confirmedSetupRunner(),
-        });
+        const emptyBin = join(root, "empty-bin");
+        mkdirSync(emptyBin, { recursive: true });
+        const originalPath = process.env.PATH;
+        process.env.PATH = emptyBin;
+        try {
+            const result = await setupHyperVHost(true, {
+                platform: "win32",
+                powershell: "powershell.exe",
+                stateRoot: root,
+                commandRunner: confirmedSetupRunner(),
+            });
 
-        expect(result.ok).toBe(false);
-        expect(result.text).toContain("powershell");
-        expect(result.text).not.toContain("is not a function");
+            expect(result.ok).toBe(false);
+            expect(result.text).toContain("powershell");
+            expect(result.text).not.toContain("is not a function");
+        } finally {
+            if (originalPath === undefined) delete process.env.PATH;
+            else process.env.PATH = originalPath;
+        }
     });
 
     it("enables Hyper-V only through the confirmed setup path and reports a pending reboot", async () => {

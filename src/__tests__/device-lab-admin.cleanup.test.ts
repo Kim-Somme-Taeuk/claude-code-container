@@ -13,7 +13,7 @@ import {
     stopAllProjectDevices,
     stopOwnerDevice,
 } from "../device-lab-admin.js";
-import { readDeviceRuntimeProcessIdentity } from "../device-lab-process-identity.js";
+import { readDeviceRuntimeProcessIdentity } from "@ccc/device-lab/device-lab-process-identity.js";
 import { createDeviceLabAdminTestFixture } from "./helpers/device-lab-admin-fixture.js";
 
 const sleeper = new Int32Array(new SharedArrayBuffer(4));

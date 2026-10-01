@@ -840,7 +840,7 @@ describe("standalone launcher and boundary", () => {
         const source = readFileSync(join(root, "hyper-v-windows-library-real.ts"), "utf8");
         const launcher = readFileSync(join(root, "hyper-v-windows-library.ts"), "utf8");
         const fixture = readFileSync(join(root, "hyper-v-windows-library-fixture.ps1"), "utf8");
-        expect(source).toMatch(/"dist",\s*"hyper-v-windows",\s*"index\.js"/);
+        expect(source).toMatch(/"dist",\s*"packages",\s*"hyper-v",\s*"dist",\s*"index\.js"/);
         expect(source).toContain("process.env.ProgramData");
         expect(source).toContain("GLOBALROOT\\\\SystemRoot");
         expect(source).not.toContain("process.env.SystemRoot");

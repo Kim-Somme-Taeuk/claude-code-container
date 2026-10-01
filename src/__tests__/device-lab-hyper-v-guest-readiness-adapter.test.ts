@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { waitForDeviceLabHyperVGuestReadiness } from "../device-lab/broker/hyper-v/guest-readiness-adapter.js";
-import type { HyperVWindowsExecutionRequest } from "../hyper-v-windows/index.js";
+import { waitForDeviceLabHyperVGuestReadiness } from "@ccc/device-lab/device-lab/broker/hyper-v/guest-readiness-adapter.js";
+import type { HyperVWindowsExecutionRequest } from "@ccc/hyper-v/index.js";
 
 const id = "12345678-1234-1234-1234-123456789abc";
 const marker = "ccc-device-lab:owner:device:incarnation";

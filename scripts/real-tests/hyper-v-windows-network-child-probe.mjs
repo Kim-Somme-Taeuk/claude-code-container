@@ -22,7 +22,7 @@ function encodedPowerShell(source) {
 }
 
 function loadChildPrograms() {
-    const module = join(repositoryRoot, "src", "device-lab", "broker", "hyper-v", "elevated-network-session.ts");
+    const module = fileURLToPath(import.meta.resolve("#device-lab/device-lab/broker/hyper-v/elevated-network-session.js"));
     const moduleUrl = `file:///${module.replace(/\\/g, "/")}`;
     const probe = spawnSync(process.execPath, [
         "--import", "tsx",

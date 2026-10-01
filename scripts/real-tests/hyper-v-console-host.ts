@@ -19,7 +19,7 @@ import {
     hyperVWindowsPowerShellMemoryInput,
     type HyperVWindowsExecutionContext,
     type HyperVWindowsPowerShellFileRequest,
-} from "../../src/hyper-v-windows/low-level/index.js";
+} from "#hyper-v/low-level/index.js";
 
 type Fixture = { vmId: string; expectedName: string; expectedNotes: string; x: number; y: number };
 

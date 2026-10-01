@@ -6,10 +6,11 @@ import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     inspectLocalLoopbackListenerForTest,
-    REQUIRED_CCC_HOST_BROKER_CAPABILITIES,
     reusableBrokerProcessVerificationForTest,
     verifyAuthenticatedBrokerGenerationForTest,
 } from "../../device-lab-mcp/src/broker.mjs";
+import { DEVICE_BROKER_PROTOCOL_VERSION } from "@ccc/device-lab/providers/contracts/broker-protocol.mjs";
+import { normalizePublicToolArgs } from "../../device-lab-mcp/src/tool-arguments.mjs";
 
 // The runtime a Windows host CLI writes into the shared ~/.ccc/devices mount (trimmed).
 const hostRuntime = {
@@ -207,16 +208,18 @@ describe("authenticated RPC generation check for a loopback-forwarded broker", (
     let server: Server;
     let port: number;
     let originalEscape: string | undefined;
+    let statusDelayMs: number;
     let statusIdentity = { pid: hostRuntime.pid, startToken: hostRuntime.processStartToken, startedAt: hostRuntime.startedAt };
 
     beforeEach(async () => {
         originalEscape = process.env.CCC_DEVICE_LAB_TEST_ALLOW_UNVERIFIED_BROKER;
         delete process.env.CCC_DEVICE_LAB_TEST_ALLOW_UNVERIFIED_BROKER;
+        statusDelayMs = 0;
         statusIdentity = { pid: hostRuntime.pid, startToken: hostRuntime.processStartToken, startedAt: hostRuntime.startedAt };
         server = createServer((req, res) => {
             res.setHeader("content-type", "application/json");
             if (req.url === "/status") {
-                res.end(JSON.stringify({
+                const status = JSON.stringify({
                     ok: true,
                     broker: {
                         name: "ccc-device-broker",
@@ -224,9 +227,11 @@ describe("authenticated RPC generation check for a loopback-forwarded broker", (
                         port,
                         process: { pid: statusIdentity.pid, startToken: statusIdentity.startToken },
                         startedAt: statusIdentity.startedAt,
-                        implemented: REQUIRED_CCC_HOST_BROKER_CAPABILITIES,
+                        protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION,
                     },
-                }));
+                });
+                if (statusDelayMs) setTimeout(() => res.end(status), statusDelayMs);
+                else res.end(status);
                 return;
             }
             res.statusCode = 404;
@@ -260,6 +265,15 @@ describe("authenticated RPC generation check for a loopback-forwarded broker", (
             containerBoundary: true,
             localListenerInspector: () => absent,
         })).resolves.toBeNull();
+    });
+    it("keeps a short public operation deadline separate from authenticated generation checks", async () => {
+        statusDelayMs = 30;
+        const runtime = { ...hostRuntime, port };
+        const boundary = { containerBoundary: true, localListenerInspector: () => absent };
+        await expect(verifyAuthenticatedBrokerGenerationForTest("127.0.0.1", port, { runtime },
+            normalizePublicToolArgs("exec", { deviceId: "vm", timeoutMs: 1 }), boundary)).resolves.toEqual(runtime);
+        await expect(verifyAuthenticatedBrokerGenerationForTest("127.0.0.1", port, { runtime },
+            { timeoutMs: 1 }, boundary)).resolves.toBeNull();
     });
 
     it("requires local port verification when a visible local process holds the port", async () => {

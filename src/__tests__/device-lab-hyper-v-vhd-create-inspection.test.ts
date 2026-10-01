@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { hyperVCreateVhdReadError, inspectHyperVCreateVhd } from "../device-lab/broker/hyper-v/vhd-create-inspection.js";
-import { HyperVWindowsError } from "../hyper-v-windows/low-level/index.js";
+import { hyperVCreateVhdReadError, inspectHyperVCreateVhd } from "@ccc/device-lab/device-lab/broker/hyper-v/vhd-create-inspection.js";
+import { HyperVWindowsError } from "@ccc/hyper-v/low-level/index.js";
 
 const path = "C:\\owners\\abc\\root.vhdx";
 const metadata = {

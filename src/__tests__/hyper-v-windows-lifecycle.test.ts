@@ -11,7 +11,7 @@ import {
     type HyperVVirtualMachineInspection,
     type HyperVVirtualMachineReconciliationOutcome,
     type HyperVWindowsClient,
-} from "../hyper-v-windows/index.js";
+} from "@ccc/hyper-v/index.js";
 
 const vmId = "12345678-1234-1234-1234-123456789abc";
 const foreignVmId = "87654321-4321-4321-4321-cba987654321";

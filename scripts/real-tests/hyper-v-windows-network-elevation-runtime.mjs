@@ -4,4 +4,4 @@ export {
     getHyperVElevatedNetworkTerminationDiagnostic,
     getHyperVElevatedNetworkTerminationStage,
     withElevatedHyperVNetworkExecutor,
-} from "../../src/device-lab/broker/hyper-v/elevated-network-session.ts";
+} from "#device-lab/device-lab/broker/hyper-v/elevated-network-session.js";

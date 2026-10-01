@@ -6,8 +6,8 @@ import { PassThrough, Writable } from "stream";
 const adapter = vi.hoisted(() => ({ spawn: vi.fn(), spawnSync: vi.fn(), trusted: vi.fn() }));
 vi.mock("child_process", () => ({ spawn: adapter.spawn, spawnSync: adapter.spawnSync }));
 vi.mock("os", async () => ({ ...await vi.importActual<typeof import("os")>("os"), platform: () => "win32" }));
-vi.mock("../windows-system-powershell.js", async () => ({
-    ...await vi.importActual<typeof import("../windows-system-powershell.js")>("../windows-system-powershell.js"),
+vi.mock("@ccc/device-lab/windows-system-powershell.js", async () => ({
+    ...await vi.importActual<typeof import("@ccc/device-lab/windows-system-powershell.js")>("@ccc/device-lab/windows-system-powershell.js"),
     canonicalWindowsPowerShellPath: adapter.trusted,
 }));
 

@@ -22,7 +22,7 @@ import {
     type HyperVWindowsExecutionRequest,
     type HyperVWindowsExecutor,
     type HyperVWindowsNetworkClient,
-} from "../hyper-v-windows/index.js";
+} from "@ccc/hyper-v/index.js";
 import {
     cleanupDeviceLabHyperVHostNetwork,
     createDeviceLabHyperVWindowsNetworkClient,
@@ -31,7 +31,7 @@ import {
     type DeviceLabHyperVHostNetworkCleanupTransactionResult,
     type DeviceLabHyperVHostNetworkEnsureTransactionResult,
     type WithAdministratorHyperVWindowsNetworkClient,
-} from "../device-lab/broker/hyper-v/network-adapter.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/network-adapter.js";
 
 const SWITCH_NAME = parseHyperVVirtualSwitchName("CCC Device Lab");
 const SWITCH_ID = parseHyperVVirtualSwitchId("11111111-2222-3333-4444-555555555555");

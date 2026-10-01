@@ -5,9 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     OWNER_DEVICE_STATE_FILE_LIMIT_BYTES,
     readOwnerDeviceStateFile,
-} from "../device-lab-owner-state.js";
-import { writeJsonFileAtomically } from "../device-lab-shared-state.js";
-import { readOwnerDeviceStateFile as readMcpOwnerDeviceStateFile } from "../../device-lab-mcp/src/state/owner-device-state.mjs";
+} from "@ccc/device-lab/device-lab-owner-state.js";
+import { writeJsonFileAtomically } from "@ccc/device-lab/device-lab-shared-state.js";
+import { readOwnerDeviceStateFile as readMcpOwnerDeviceStateFile } from "@ccc/device-lab/providers/state/owner-device-state.mjs";
 import { TOOLS } from "../../device-lab-mcp/src/tools.mjs";
 import {
     mutateOwnerDevices,
@@ -15,7 +15,7 @@ import {
     readOwnerDevices,
     transitionOwnerDeviceRecord,
     writeOwnerDevices,
-} from "../../device-lab-mcp/src/state/device-store.mjs";
+} from "@ccc/device-lab/providers/state/device-store.mjs";
 
 describe("owner device state validation", () => {
     let homeDir: string;
@@ -84,7 +84,7 @@ describe("owner device state validation", () => {
             const deviceId = tool.inputSchema?.properties?.deviceId;
             return deviceId ? [{ tool: tool.name, deviceId }] : [];
         });
-        expect(properties).toHaveLength(53);
+        expect(properties).toHaveLength(58);
         for (const { tool, deviceId } of properties) {
             expect(deviceId, tool).toEqual(expect.objectContaining({
                 type: "string",
@@ -206,7 +206,7 @@ describe("owner device state validation", () => {
         });
 
         try {
-            const raced = await import("../device-lab-shared-state.js?owner-parent-race");
+            const raced = await import("@ccc/device-lab/device-lab-shared-state.js?owner-parent-race");
             expect(() => raced.writeJsonFileAtomically(file, { devices: [{ id: "escaped" }] })).toThrow(
                 /Unsafe device-lab state directory/,
             );

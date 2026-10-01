@@ -24,7 +24,7 @@ const SCENARIO_DEADLINE_MILLISECONDS = 5 * 60 * 1000;
 type RuntimeLibrary = HyperVWindowsNetworkLibraryModule;
 
 async function loadRuntimeLibrary(): Promise<RuntimeLibrary> {
-    const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "dist", "hyper-v-windows", "index.js");
+    const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "dist", "packages", "hyper-v", "dist", "index.js");
     return import(pathToFileURL(root).href) as Promise<RuntimeLibrary>;
 }
 
@@ -72,15 +72,7 @@ export async function runHyperVWindowsNetworkHost(
         const ordinaryClient = library.createHyperVWindowsNetworkClient(ordinaryExecutor);
         const withElevated = dependencies.withElevatedExecutorImpl ?? withElevatedHyperVNetworkExecutor;
         const runScenario = dependencies.runScenarioImpl ?? runHyperVWindowsNetworkRealScenario;
-        const operationAssetPath = join(
-            dirname(fileURLToPath(import.meta.url)),
-            "..",
-            "..",
-            "scripts",
-            "host-control",
-            "hyper-v",
-            "Invoke-HyperVWindowsOperation.ps1",
-        );
+        const operationAssetPath = fileURLToPath(import.meta.resolve("#hyper-v/powershell/Invoke-HyperVWindowsOperation.ps1"));
 
         const withExclusive = dependencies.withExclusiveRunImpl ?? withExclusiveHyperVLibraryRun;
         const result: HyperVWindowsNetworkRealResult = await withExclusive(() => withElevated({

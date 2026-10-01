@@ -6,7 +6,7 @@ import {
     validateLocalInputPath,
     validateLocalOutputPath,
     validateLocalReferencePath,
-} from "../../device-lab-mcp/src/policy/files.mjs";
+} from "@ccc/device-lab/providers/policy/files.mjs";
 
 describe("device-lab local file policy", () => {
     const roots: string[] = [];

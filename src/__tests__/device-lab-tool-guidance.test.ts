@@ -18,23 +18,26 @@ describe("public Device Lab tool guidance", () => {
     afterAll(async () => { await cleanupDeviceLabMcpTestContext(context); });
 
     it("advertises unique unprefixed names within the catalog byte budget", () => {
-        expect(tools).toHaveLength(59);
+        expect(tools).toHaveLength(58);
         expect(new Set(tools.map(tool => tool.name)).size).toBe(tools.length);
         expect(tools.every(tool => !/^(device_|mobile_|display_)/.test(tool.name))).toBe(true);
         expect(Buffer.byteLength(JSON.stringify(tools), "utf8")).toBeLessThan(45579);
     });
 
-    it("distinguishes owned targets, backend prerequisites, and single-backend inventory", () => {
-        expect(description("list_devices")).toMatch(/owned|owner/);
-        expect(description("backends")).toMatch(/prerequisite|availability|available/);
-        expect(description("backends")).toMatch(/without starting|does not start|no.*start/);
-        expect(description("inventory")).toMatch(/one backend|single.backend/);
-        expect(description("inventory")).toContain("list_devices");
+    it("distinguishes owned targets, backend readiness, and candidates through view", () => {
+        expect(description("devices")).toMatch(/owned|owner/);
+        expect(description("devices")).toMatch(/available.*backend/);
+        expect(description("devices")).toMatch(/backend readiness/);
+        expect((tool("devices").inputSchema as any).properties.view.enum).toEqual(["owned", "available", "backends"]);
+        expect((tool("devices").inputSchema as any).allOf[0].then.required).toEqual(["backend"]);
     });
 
     it("separates definition creation, startup, and physical attachment", () => {
-        expect(description("create")).toMatch(/create/);
-        expect(description("create")).toContain("start");
+        for (const name of ["create_android_emulator", "create_ios_simulator", "create_windows_vm", "create_windows_sandbox", "create_linux_vm", "create_macos_vm"]) {
+            expect(description(name)).toContain("create");
+            expect(description(name)).toContain("start");
+            expect(tool(name).inputSchema.properties).not.toHaveProperty("backend");
+        }
         expect(description("start")).toMatch(/start|boot/);
         expect(description("attach")).toMatch(/physical/);
         expect(description("attach")).toMatch(/connect|attach/);
@@ -46,21 +49,20 @@ describe("public Device Lab tool guidance", () => {
             const properties = Object.assign({}, schema.properties, ...(schema.oneOf || []).map((branch: any) => branch.properties));
             return (properties[field].description || "").toLowerCase();
         };
-        expect(guidance("create", "image")).toMatch(/hyper-v.*macos.*ssh/);
-        expect(guidance("create", "sourceImage")).toMatch(/hyper-v.*qemu/);
-        expect(guidance("create", "sourceImage")).not.toMatch(/macos/);
-        for (const platform of [/android/, /ios/, /hyper-v/, /macos/, /qemu/]) expect(description("create")).toMatch(platform);
+        expect(guidance("create_macos_vm", "image")).toMatch(/macos.*ssh/);
+        expect(guidance("create_linux_vm", "sourceImage")).toMatch(/hyper-v.*qemu/);
+        expect(guidance("create_windows_vm", "sourceImage")).not.toMatch(/macos|qemu/);
         for (const name of ["launch_app", "uninstall_app", "stop_app", "wait_for_app"]) {
-            expect(guidance(name, "packageName")).toContain("android");
-            expect(guidance(name, "bundleId")).toContain("ios");
+            expect(guidance(name, "appId")).toContain("android");
+            expect(guidance(name, "appId")).toContain("ios");
         }
         for (const name of ["permission"]) {
             expect(guidance(name, "permission")).toContain("android");
-            expect(guidance(name, "service")).toMatch(/ios.*simulator/);
+            expect(guidance(name, "permission")).toMatch(/ios.*simulator/);
         }
         for (const name of ["upload", "download"]) {
             expect(guidance(name, "localPath")).toMatch(/project.*host/);
-            expect(guidance(name, "remotePath")).toMatch(/ios simulator.*relative.*bundleid/);
+            expect(guidance(name, "remotePath")).toMatch(/ios simulator.*relative.*appid/);
             expect(guidance(name, "containerType")).toMatch(/ios simulator.*default.*data/);
         }
         expect(guidance("install_app", "path")).toMatch(/package.*project.*host/);
@@ -73,7 +75,7 @@ describe("public Device Lab tool guidance", () => {
         expect(guidance("set_battery", "status")).toMatch(/1.*unknown.*2.*charging.*3.*discharging.*4.*not charging.*5.*full/);
     });
 
-    it.each(["image_list", "image_import"])("%s identifies its container QEMU scope", name => {
+    it.each(["list_images", "import_image"])("%s identifies its container QEMU scope", name => {
         expect(description(name)).toMatch(/container.*qemu/);
     });
 

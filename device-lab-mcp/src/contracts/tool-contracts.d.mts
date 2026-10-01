@@ -35,6 +35,13 @@ export interface MobileSessionStatusOutput {
 export interface DeviceListOutput { devices: DeviceRecord[] }
 export interface FlowOutput { results: ObjectOutput[] }
 export interface ImageToolResult { content: Array<{ type: string; data?: string; mimeType?: string; [key: string]: unknown }>; isError?: boolean }
+export interface WaitOutput extends ObjectOutput {
+    matched: boolean;
+    appId?: string;
+    found?: boolean;
+    running?: boolean;
+    reason?: "wait-condition-not-met";
+}
 
 export interface DeviceLabToolOutputMap {
     snapshot: ObjectOutput;
@@ -43,16 +50,19 @@ export interface DeviceLabToolOutputMap {
     clipboard: ActionOutput;
     ui: ObjectOutput;
     list_files: { entries: Array<{ name: string; type: "file" | "directory" | "symlink" | "other"; size?: number }>; truncated?: true };
-    backends: ObjectOutput;
-    list_devices: DeviceListOutput | DeviceRecord[];
-    inventory: ObjectOutput;
+    devices: DeviceListOutput | DeviceRecord[] | ObjectOutput;
     wireless: ObjectOutput;
-    image_list: ObjectOutput;
-    image_import: ObjectOutput;
+    list_images: ObjectOutput;
+    import_image: ObjectOutput;
     reboot: ObjectOutput;
     workspace_sync: ObjectOutput;
     artifacts_export: ObjectOutput;
-    create: LifecycleOutput;
+    create_android_emulator: LifecycleOutput;
+    create_ios_simulator: LifecycleOutput;
+    create_windows_vm: LifecycleOutput;
+    create_windows_sandbox: LifecycleOutput;
+    create_linux_vm: LifecycleOutput;
+    create_macos_vm: LifecycleOutput;
     attach: LifecycleOutput;
     detach: ObjectOutput;
     delete: DeleteOutput;
@@ -62,14 +72,11 @@ export interface DeviceLabToolOutputMap {
     exec: ObjectOutput;
     screenshot: ImageToolResult;
     click: ActionOutput;
-    double_click: ActionOutput;
     key: ActionOutput;
     type: ActionOutput;
     scroll: ActionOutput;
-    cursor_position: ObjectOutput;
+    cursor_position: ObjectOutput & ({ x: number; y: number } | { cursor: { x: number; y: number } });
     window_list: ObjectOutput;
-    base_image_create: LifecycleOutput;
-    base_image_clone: LifecycleOutput;
     upload: ObjectOutput;
     download: ObjectOutput;
     reset: ObjectOutput;
@@ -93,9 +100,8 @@ export interface DeviceLabToolOutputMap {
     set_location: ActionOutput;
     set_battery: ActionOutput;
     set_network: ActionOutput;
-    toggle_airplane_mode: ActionOutput;
-    wait_for_text: ObjectOutput;
-    wait_for_app: ObjectOutput;
+    wait_for_text: WaitOutput;
+    wait_for_app: WaitOutput;
     run_flow: FlowOutput;
     move: ActionOutput;
 }

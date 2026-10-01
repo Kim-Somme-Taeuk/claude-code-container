@@ -15,8 +15,8 @@ import {
     type HyperVWindowsExecutionResult,
     type HyperVWindowsExecutor,
     type HyperVWindowsOperation,
-} from "../hyper-v-windows/low-level/index.js";
-import { HYPER_V_POWERSHELL_MANIFEST } from "../host-control/hyper-v/powershell-manifest.js";
+} from "@ccc/hyper-v/low-level/index.js";
+import { HYPER_V_POWERSHELL_MANIFEST } from "@ccc/device-lab/host-control/hyper-v/powershell-manifest.js";
 
 const vmId = "12345678-1234-1234-1234-123456789ABC";
 const canonicalVmId = vmId.toLowerCase();
@@ -597,7 +597,10 @@ describe("Hyper-V Windows PowerShell transport", () => {
             expect(guard, `${operation} must guard identity`).toBeGreaterThanOrEqual(0);
             expect(mutation, `${operation} must mutate after the guard`).toBeGreaterThan(guard);
         }
-        expect(source).toContain('Hyper-V\\Restart-VM -VM $VirtualMachine -Force:([bool]$Request.force) -Confirm:$false -ErrorAction Stop');
+        const restartBranch = source.split('        "Restart-VM" {')[1]?.split('        "Remove-VM" {')[0] || "";
+        expect(restartBranch).toContain('Hyper-V\\Restart-VM -VM $VirtualMachine -Force -Confirm:$false -ErrorAction Stop');
+        expect(restartBranch).not.toContain("$Request.force");
+        expect(restartBranch).not.toContain("Stop-VM");
         expect(source).toContain("Remove-VM -VM $VirtualMachine");
         expect(source.match(/\bRemove-Item\b/g)).toHaveLength(2);
         expect(source).toContain("Remove-Item -LiteralPath $StdoutPath,$StderrPath -Force -ErrorAction SilentlyContinue");
@@ -671,7 +674,7 @@ describe("Hyper-V Windows PowerShell transport", () => {
     });
 
     it("accepts only an integrity-pinned embedded operation asset", async () => {
-        const assetPath = join(process.cwd(), "scripts", "host-control", "hyper-v", HYPER_V_WINDOWS_POWERSHELL_ASSET.name);
+        const assetPath = join(process.cwd(), "packages", "hyper-v", "powershell", HYPER_V_WINDOWS_POWERSHELL_ASSET.name);
         const scriptSource = readFileSync(assetPath, "utf8");
         const run = vi.fn(() => response("Get-VM"));
         const request: HyperVWindowsExecutionRequest = {
@@ -717,6 +720,14 @@ describe("Hyper-V Windows creation primitives", () => {
         }));
         return { client, requests };
     }
+
+    it("forwards an explicit nesting flag and rejects non-boolean values before execution", async () => {
+        const { client, requests } = recordingClient();
+        await client.setVMProcessor({ selector, count: 4, exposeVirtualizationExtensions: true });
+        expect(requests[0]).toMatchObject({ operation: "Set-VMProcessor", count: 4, exposeVirtualizationExtensions: true });
+        await expect(client.setVMProcessor({ selector, count: 4, exposeVirtualizationExtensions: "true" as unknown as boolean })).rejects.toThrow();
+        expect(requests).toHaveLength(1);
+    });
 
     it("sends one native operation per method, with normalized parameters", async () => {
         const { client, requests } = recordingClient();

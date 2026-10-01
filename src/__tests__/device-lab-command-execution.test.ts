@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { run } from "../../device-lab-mcp/src/commands.mjs";
+import { run } from "@ccc/device-lab/providers/commands.mjs";
 
 describe("device-lab provider command execution bounds", () => {
     it("terminates a provider command at its configured deadline", () => {

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import * as library from "../../src/hyper-v-windows/index.ts";
-import { HyperVElevatedNetworkSessionError } from "../../src/device-lab/broker/hyper-v/elevated-network-session.ts";
+import * as library from "#hyper-v/index.js";
+import { HyperVElevatedNetworkSessionError } from "#device-lab/device-lab/broker/hyper-v/elevated-network-session.js";
 import { runHyperVWindowsNetworkHost } from "./hyper-v-windows-network-host.ts";
 import { runHyperVWindowsNetworkRealScenario } from "./hyper-v-windows-network-real.ts";
 

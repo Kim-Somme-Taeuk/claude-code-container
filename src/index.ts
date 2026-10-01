@@ -98,7 +98,7 @@ import {
 import {
     DEVICE_BROKER_DEFAULT_HOST,
     ensureHostDeviceBroker,
-} from "./device-lab-broker.js";
+} from "@ccc/device-lab/device-lab-broker.js";
 import {
     ensureClaudeInContainer,
     ensureTools,
@@ -243,7 +243,7 @@ async function prepareHostDeviceBroker(fullPath: string, profile?: string): Prom
     const result = await ensureHostDeviceBroker({
         cwd: fullPath,
         profile,
-        cliPath: __filename,
+        trustedCliPaths: [__filename],
         bindHost: deviceBrokerBindHostForContainer(),
         probeHost: DEVICE_BROKER_DEFAULT_HOST,
         timeoutMs: 250,

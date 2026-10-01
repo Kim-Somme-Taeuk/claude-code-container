@@ -2,6 +2,8 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as commands from "@ccc/device-lab/providers/commands.mjs";
+import { waitForAndroidText } from "@ccc/device-lab/providers/backends/android-wait.mjs";
 
 const fixture = vi.hoisted(() => ({ root: "", callTool: vi.fn() }));
 vi.mock("../../scripts/real-tests/device-lab-mcp-client.ts", async importOriginal => ({
@@ -28,13 +30,13 @@ describe("Android real E2E fixture cleanup", () => {
             for (const suffix of ["APK", "PACKAGE", "PERMISSION"]) vi.stubEnv(`${prefix}${suffix}`, "");
         }
         fixture.callTool.mockImplementation(async (tool: string, args: Record<string, unknown>) => {
-            if (tool === "device_create") {
+            if (tool === "create_android_emulator") {
                 createdId = String(args.deviceId);
                 return payload({ device: { id: createdId, port: 5554, provisioned: true } });
             }
-            if (tool === "device_inventory") throw new Error("primary-inventory-failure");
-            if (tool === "device_stop") return payload({ device: { id: createdId, status: "stopped" } });
-            if (tool === "device_delete") return payload({ deleted: createdId, avdDeleted: true });
+            if (tool === "inventory") throw new Error("primary-inventory-failure");
+            if (tool === "stop") return payload({ device: { id: createdId, status: "stopped" } });
+            if (tool === "delete") return payload({ deleted: createdId, avdDeleted: true });
             throw new Error(`unexpected tool ${tool}`);
         });
     });
@@ -43,18 +45,18 @@ describe("Android real E2E fixture cleanup", () => {
         vi.unstubAllEnvs();
     });
 
-    const cleanupCalls = () => fixture.callTool.mock.calls.filter(([tool]) => tool === "device_stop" || tool === "device_delete");
+    const cleanupCalls = () => fixture.callTool.mock.calls.filter(([tool]) => tool === "stop" || tool === "delete");
     const assertOwnedCleanup = () => {
         expect(cleanupCalls()).toEqual([
-            ["device_stop", expect.objectContaining({ backend: "android-emulator", deviceId: createdId })],
-            ["device_delete", expect.objectContaining({ backend: "android-emulator", deviceId: createdId,
+            ["stop", expect.objectContaining({ detail: true, deviceId: createdId })],
+            ["delete", expect.objectContaining({ detail: true, deviceId: createdId,
                 force: true, deleteAvd: true, confirmDestructive: true })],
         ]);
         expect(readdirSync(fixture.root)).toEqual([]);
     };
 
     it("cleans normalized creation without ok after a later failure and preserves that failure", async () => {
-        await expect(run()).rejects.toThrow("device_inventory: primary-inventory-failure");
+        await expect(run()).rejects.toThrow("inventory: primary-inventory-failure");
         assertOwnedCleanup();
     });
 
@@ -63,9 +65,9 @@ describe("Android real E2E fixture cleanup", () => {
             createdId = String(args.deviceId);
             return payload({ device: { id: createdId, port: "invalid", provisioned: false } });
         });
-        await expect(run()).rejects.toThrow("device_create");
+        await expect(run()).rejects.toThrow("create_android_emulator");
         assertOwnedCleanup();
-        expect(fixture.callTool.mock.calls.some(([tool]) => tool === "device_inventory")).toBe(false);
+        expect(fixture.callTool.mock.calls.some(([tool]) => tool === "inventory")).toBe(false);
     });
 
     it.each(["mcp-error", "structured-error", "wrong-identity"])("never cleans an unowned fixture after %s creation", async kind => {
@@ -74,7 +76,7 @@ describe("Android real E2E fixture cleanup", () => {
             return kind === "mcp-error" ? { ...payload({ device, error: "create-failed" }), isError: true }
                 : payload({ ...(kind === "structured-error" ? { ok: false, error: "create-failed" } : {}), device });
         });
-        await expect(run()).rejects.toThrow("device_create");
+        await expect(run()).rejects.toThrow("create_android_emulator");
         expect(fixture.callTool.mock.calls).toHaveLength(1);
         expect(cleanupCalls()).toEqual([]);
         expect(readdirSync(fixture.root)).toEqual([]);
@@ -83,23 +85,23 @@ describe("Android real E2E fixture cleanup", () => {
     it.each(["mcp-error", "structured-error", "throw"])("reports %s stop/delete failures alongside the primary failure and attempts both", async kind => {
         const normal = fixture.callTool.getMockImplementation()!;
         fixture.callTool.mockImplementation(async (tool: string, args: Record<string, unknown>) => {
-            if (tool !== "device_stop" && tool !== "device_delete") return normal(tool, args);
+            if (tool !== "stop" && tool !== "delete") return normal(tool, args);
             const error = `${tool}-cleanup-failed`;
             if (kind === "throw") throw new Error(error);
             return { ...payload({ ok: false, error }), ...(kind === "mcp-error" ? { isError: true } : {}) };
         });
         const failure = await run().then(() => "unexpected success", error => String(error));
         expect(failure).toContain("primary-inventory-failure");
-        expect(failure).toContain("device_stop-cleanup-failed");
-        expect(failure).toContain("device_delete-cleanup-failed");
+        expect(failure).toContain("stop-cleanup-failed");
+        expect(failure).toContain("delete-cleanup-failed");
         assertOwnedCleanup();
     });
 
     it("does not accept successful-looking cleanup replies for a different fixture", async () => {
         const normal = fixture.callTool.getMockImplementation()!;
         fixture.callTool.mockImplementation(async (tool: string, args: Record<string, unknown>) => {
-            if (tool === "device_stop") return payload({ device: { id: "unrelated-device", status: "stopped" } });
-            if (tool === "device_delete") return payload({ deleted: "unrelated-device", avdDeleted: true });
+            if (tool === "stop") return payload({ device: { id: "unrelated-device", status: "stopped" } });
+            if (tool === "delete") return payload({ deleted: "unrelated-device", avdDeleted: true });
             return normal(tool, args);
         });
         const failure = await run().then(() => "unexpected success", error => String(error));
@@ -110,66 +112,110 @@ describe("Android real E2E fixture cleanup", () => {
         assertOwnedCleanup();
     });
 
+    it.each(["wrong-identity", "stopped", "missing-device"])("rejects %s status before device operations", async kind => {
+        const normal = fixture.callTool.getMockImplementation()!;
+        fixture.callTool.mockImplementation(async (tool: string, args: Record<string, unknown>) => {
+            if (tool === "inventory") return payload({ devices: [{ id: createdId }] });
+            if (tool === "start") return payload({ device: { id: createdId, status: "running" }, boot: { ready: true } });
+            if (tool === "status") return payload(kind === "missing-device" ? {} : {
+                device: { id: kind === "wrong-identity" ? "unrelated-device" : createdId,
+                    status: kind === "stopped" ? "stopped" : "running" },
+            });
+            return normal(tool, args);
+        });
+        await expect(run()).rejects.toThrow("status:");
+        expect(fixture.callTool.mock.calls.filter(([tool]) => tool === "status")).toHaveLength(1);
+        expect(fixture.callTool.mock.calls.some(([tool]) => tool === "exec")).toBe(false);
+        assertOwnedCleanup();
+    });
+
     it.each(["mcp-error", "structured-error"])("continues fixture cleanup after %s recording-stop failure", async kind => {
         const normal = fixture.callTool.getMockImplementation()!;
         let uploaded = Buffer.alloc(0);
+        let uploadedRemotePath = "";
         fixture.callTool.mockImplementation(async (tool: string, args: Record<string, any>) => {
-            if (["device_create", "device_stop", "device_delete"].includes(tool)) return normal(tool, args);
-            if (tool === "device_inventory") return payload({ devices: [{ id: createdId }] });
-            if (tool === "device_start") return payload({ device: { id: createdId, status: "running" }, boot: { ready: true } });
-            if (tool === "device_status") return payload({ device: { id: createdId, status: "running" } });
-            if (tool === "device_exec") return payload({ stdout: "ccc-adb-e2e-ok" });
-            if (tool === "device_upload") {
+            if (["create_android_emulator", "stop", "delete"].includes(tool)) return normal(tool, args);
+            if (tool === "inventory") return payload({ devices: [{ id: createdId }] });
+            if (tool === "start") return payload({ device: { id: createdId, status: "running" }, boot: { ready: true } });
+            if (tool === "status") return payload({ device: { id: createdId, status: "running" } });
+            if (tool === "exec") return payload({ stdout: "ccc-adb-e2e-ok" });
+            if (tool === "upload") {
                 uploaded = readFileSync(args.localPath);
+                uploadedRemotePath = args.remotePath;
                 return payload({ provider: "adb", uploaded: { localPath: args.localPath, remotePath: args.remotePath } });
             }
-            if (tool === "device_download") {
+            if (tool === "download") {
                 writeFileSync(args.localPath, uploaded);
                 return payload({ provider: "adb", downloaded: { localPath: args.localPath, remotePath: args.remotePath } });
             }
-            if (tool === "mobile_session_status") return payload({ authority: "host-broker", device: { id: createdId } });
-            if (tool === "mobile_dump_ui") return payload({ provider: "adb-uiautomator", source: '<node text="Fixture"/>' });
-            if (tool === "mobile_wait_for_text") return payload({ provider: "adb-uiautomator", text: args.text, found: true });
-            if (tool === "device_record_video_start") return payload({ recording: { provider: "adb-screenrecord", active: true } });
-            if (tool === "device_record_video_status") throw new Error("primary-recording-status-failure");
-            if (tool === "device_record_video_stop") return {
+            if (tool === "list_files") return payload({ entries: [{ name: uploadedRemotePath.split("/").at(-1), type: "file" }] });
+            if (tool === "ui") return payload({ provider: "adb-uiautomator", source: '<node text="Fixture"/>' });
+            if (tool === "wait_for_text") {
+                // Exercise the real shrinking-budget observer with a slow valid dump.
+                // A five-second E2E budget would time out before the XML can be read.
+                let elapsed = 0;
+                const clock = vi.spyOn(performance, "now").mockImplementation(() => elapsed);
+                const adb = vi.spyOn(commands, "runWithTimeout").mockImplementation((_executable, argv, timeoutMs) => {
+                    const dump = argv.includes("uiautomator");
+                    const duration = dump ? 7000 : 100;
+                    elapsed += Math.min(duration, timeoutMs);
+                    return timeoutMs < duration
+                        ? { status: null, stdout: "", stderr: "", error: Object.assign(new Error("ADB ETIMEDOUT"), { code: "ETIMEDOUT" }) }
+                        : { status: 0, stdout: dump ? "UI hierarchy dumped" : '<node text="Fixture"/>', stderr: "" };
+                });
+                try {
+                    const observed = await waitForAndroidText("fixture-adb", ["-s", "fixture-emulator"], "/sdcard/fixture.xml", args.text, args.timeoutMs, args.intervalMs);
+                    expect(observed).toMatchObject({ found: true });
+                    expect(adb).toHaveBeenCalledTimes(2);
+                    expect(elapsed).toBe(7100);
+                    return payload({ ...observed, provider: "adb-uiautomator", text: args.text });
+                } finally {
+                    adb.mockRestore();
+                    clock.mockRestore();
+                }
+            }
+            if (tool === "record_video" && args.action === "start") return payload({ recording: { provider: "adb-screenrecord", active: true } });
+            if (tool === "record_video" && args.action === "status") throw new Error("primary-recording-status-failure");
+            if (tool === "record_video" && args.action === "stop") return {
                 ...payload({ ok: false, error: "recording-stop-failed" }),
                 ...(kind === "mcp-error" ? { isError: true } : {}),
             };
 
             const successes: Record<string, unknown> = {
-                mobile_home: { status: 0 }, mobile_tap: { status: 0 },
-                mobile_double_tap: { doubleTapped: { x: args.x, y: args.y } },
-                mobile_long_press: { longPressed: { x: args.x, y: args.y, durationMs: args.durationMs } },
-                mobile_swipe: { swiped: { x1: args.x1, y1: args.y1, x2: args.x2, y2: args.y2, durationMs: args.durationMs } },
-                mobile_drag: { dragged: { x1: args.x1, y1: args.y1, x2: args.x2, y2: args.y2, durationMs: args.durationMs } },
-                mobile_type_text: { typed: true }, mobile_key: { status: 0 },
-                mobile_back: { back: true }, mobile_forward: { forward: true }, mobile_recents: { recents: true },
-                mobile_lock: { locked: true }, mobile_unlock: { unlocked: true },
-                mobile_rotate_left: { orientation: "landscape" }, mobile_rotate_right: { orientation: "reverse-landscape" },
-                mobile_set_orientation: { orientation: args.orientation }, mobile_open_url: { openedUrl: args.url },
-                mobile_set_location: { provider: "adb-emulator", location: { latitude: args.latitude, longitude: args.longitude, altitude: args.altitude } },
-                mobile_set_battery: { battery: { level: args.level, status: args.status, charging: args.charging } },
-                device_install_app: { installed: args.path }, mobile_install_app: { installed: args.path },
-                device_launch_app: { launched: args.packageName }, mobile_launch_app: { launched: args.packageName },
-                mobile_wait_for_app: { packageName: args.packageName, running: true, pid: "1234" },
-                mobile_grant_permission: { permission: { packageName: args.packageName, permission: args.permission, action: "grant" } },
-                mobile_revoke_permission: { permission: { packageName: args.packageName, permission: args.permission, action: "revoke" } },
-                mobile_stop_app: { stopped: args.packageName }, device_reset: { reset: { packageName: args.packageName } },
-                mobile_clear_app_data: { reset: { packageName: args.packageName } }, mobile_uninstall_app: { uninstalled: args.packageName },
+                home: { status: 0 }, click: { status: 0 },
+                double_click: { doubleTapped: { x: args.x, y: args.y } },
+                long_press: { longPressed: { x: args.x, y: args.y, durationMs: args.durationMs } },
+                swipe: { swiped: { x1: args.x1, y1: args.y1, x2: args.x2, y2: args.y2, durationMs: args.durationMs } },
+                drag: { dragged: { x1: args.x1, y1: args.y1, x2: args.x2, y2: args.y2, durationMs: args.durationMs } },
+                type: { typed: true }, key: { status: 0 },
+                back: { back: true }, forward: { forward: true }, recents: { recents: true },
+                lock: { locked: true }, unlock: { unlocked: true },
+                set_orientation: { orientation: args.orientation }, open_url: { openedUrl: args.url },
+                set_location: { provider: "adb-emulator", location: { latitude: args.latitude, longitude: args.longitude, altitude: args.altitude } },
+                set_battery: { battery: { level: args.level, status: args.status, charging: args.charging } },
+                install_app: { installed: args.path },
+                launch_app: { launched: args.packageName },
+                wait_for_app: { packageName: args.packageName, running: true, pid: "1234" },
+                permission: { permission: { packageName: args.packageName, permission: args.permission, action: args.action } },
+                stop_app: { stopped: args.packageName },
+                clear_app_data: { reset: { packageName: args.packageName } }, uninstall_app: { uninstalled: args.packageName },
             };
             if (!(tool in successes)) throw new Error(`unexpected tool before recording: ${tool}`);
             return payload({ provider: "adb", ...(successes[tool] as object) });
         });
         const failure = await run().then(() => "unexpected success", error => String(error));
-        expect(failure).toContain("device_record_video_status: primary-recording-status-failure");
+        // The current public status contract carries device identity/state, not routing authority.
+        // It is inspected once; no redundant legacy session-status request is needed.
+        expect(fixture.callTool.mock.calls.filter(([tool]) => tool === "status")).toHaveLength(1);
+        expect(fixture.callTool).toHaveBeenCalledWith("ui", { detail: true, deviceId: createdId });
+        expect(failure).toContain("record_video: primary-recording-status-failure");
         expect(failure).toContain("recording stop");
         expect(failure).toContain("recording-stop-failed");
-        expect(fixture.callTool.mock.calls.slice(-4).map(([tool]) => tool)).toEqual([
-            "device_record_video_status", "device_record_video_stop", "device_stop", "device_delete",
+        expect(fixture.callTool.mock.calls.slice(-4).map(([tool, args]) => [tool, args.action])).toEqual([
+            ["record_video", "status"], ["record_video", "stop"], ["stop", undefined], ["delete", undefined],
         ]);
-        expect(fixture.callTool).toHaveBeenCalledWith("device_record_video_stop", {
-            backend: "android-emulator", deviceId: createdId,
+        expect(fixture.callTool).toHaveBeenCalledWith("record_video", { action: "stop",
+            detail: true, deviceId: createdId,
         });
         assertOwnedCleanup();
     });

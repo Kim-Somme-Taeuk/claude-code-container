@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
     formatLabMcpSmokeReport,
     runLabMcpSmoke,
-} from "../../device-lab-mcp/src/backends/linux-vm-smoke.mjs";
+} from "@ccc/device-lab/providers/backends/linux-vm-smoke.mjs";
 
 describe("device-lab Linux VM provider smoke runner", () => {
     it("passes the fake-provider lifecycle without external VM prerequisites", async () => {

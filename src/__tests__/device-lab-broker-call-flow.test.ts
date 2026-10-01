@@ -8,8 +8,9 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { freePort } from "./helpers/fake-broker-mcp-fixture.js";
-import { ownerId } from "../../device-lab-mcp/src/context.mjs";
-import { brokerRpc, brokerStatus, REQUIRED_CCC_HOST_BROKER_CAPABILITIES, withBrokerOperation } from "../../device-lab-mcp/src/broker.mjs";
+import { ownerId } from "@ccc/device-lab/providers/context.mjs";
+import { brokerRpc, brokerStatus, withBrokerOperation } from "../../device-lab-mcp/src/broker.mjs";
+import { DEVICE_BROKER_PROTOCOL_VERSION } from "@ccc/device-lab/providers/contracts/broker-protocol.mjs";
 
 // Real HTTP and Linux process identity; deliberately no NODE_ENV=test escape.
 describe.skipIf(process.platform !== "linux")("broker setup reuse with authenticated generation checks", () => {
@@ -49,7 +50,7 @@ const server=http.createServer((req,res)=>{
  const state=JSON.parse(fs.readFileSync(behavior,'utf8'));
  const send=(code,body)=>{res.writeHead(code,{'content-type':'application/json'});res.end(JSON.stringify(body));};
  if(req.url==='/health')return send(200,{ok:true,name:'ccc-device-broker'});
- if(req.url==='/status')return send(200,{ok:true,broker:{name:'ccc-device-broker',mode:'host-broker-daemon',port,process:{pid:process.pid,startToken:state.changedGeneration?'replacement-token':token},startedAt,implemented:state.incompatible?[]:${JSON.stringify(REQUIRED_CCC_HOST_BROKER_CAPABILITIES)}}});
+ if(req.url==='/status')return send(200,{ok:true,broker:{name:'ccc-device-broker',mode:'host-broker-daemon',port,process:{pid:process.pid,startToken:state.changedGeneration?'replacement-token':token},startedAt,protocolVersion:state.incompatible?0:${JSON.stringify(DEVICE_BROKER_PROTOCOL_VERSION)}}});
  if(req.url==='/v1/owner/resolve')return send(200,{ok:true,result:{ownerId:owner}});
  let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
   const h=req.headers,secret=JSON.parse(fs.readFileSync(${JSON.stringify(auth)},'utf8')).secret;
@@ -119,7 +120,7 @@ server.listen(port,'127.0.0.1',()=>process.stdout.write(JSON.stringify({pid:proc
             const result = await client.callTool({
                 name: "run_flow",
                 arguments: { steps: [0, 1].map(() => ({
-                    tool: "inventory", arguments: { ...options, backend: "android-emulator", viaBroker: true },
+                    tool: "devices", arguments: { view: "available", ...options, backend: "android-emulator", viaBroker: true },
                 })) },
             });
             expect(result.isError).not.toBe(true);

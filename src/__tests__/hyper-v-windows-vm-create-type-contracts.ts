@@ -2,12 +2,12 @@ import type {
     HyperVBiosStartupDevice,
     HyperVSecureBootSetting,
     HyperVVirtualMachineGeneration,
-} from "../hyper-v-windows/low-level/contracts.js";
+} from "@ccc/hyper-v/low-level/contracts.js";
 import type {
     HyperVCreateEffect,
     HyperVCreateNetworkIntent,
     HyperVCreateStep,
-} from "../hyper-v-windows/lifecycle/vm-create-contracts.js";
+} from "@ccc/hyper-v/lifecycle/vm-create-contracts.js";
 
 // These assertions fail by COMPILING. Each `@ts-expect-error` is a claim that the combination
 // below it cannot be written; if a future change makes one writable, the directive becomes

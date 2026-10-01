@@ -4,7 +4,7 @@ import tseslint from "typescript-eslint";
 export default tseslint.config(
     { ignores: ["src/__tests__/**"] },
     {
-        files: ["src/**/*.ts"],
+        files: ["src/**/*.ts", "packages/*/src/**/*.ts"],
         extends: [tseslint.configs.base],
         plugins: { n: pluginN },
         rules: {

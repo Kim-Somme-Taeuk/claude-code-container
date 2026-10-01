@@ -15,13 +15,13 @@ import {
     hyperVLinuxGuestSignalTimedOut,
     hyperVLinuxGuestReadyTraceFailureCode,
     hyperVProviderDeadlineAt,
-} from "../device-lab-broker.js";
-import { deviceLabOwnerId } from "../device-lab-owner.js";
-import { HYPER_V_IMAGE_CATALOG } from "../device-lab/hyper-v-images.js";
+} from "@ccc/device-lab/device-lab-broker.js";
+import { deviceLabOwnerId } from "@ccc/device-lab/device-lab-owner.js";
+import { HYPER_V_IMAGE_CATALOG } from "@ccc/device-lab/device-lab/hyper-v-images.js";
 import {
     HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP,
     type HyperVWindowsExecutionRequest,
-} from "../hyper-v-windows/index.js";
+} from "@ccc/hyper-v/index.js";
 import { backendRoot, cleanupOwner, close, listen, ownerRpcEndpoint, ownerRpcHeaders, writeBrokerDevices } from "./helpers/host-broker-test-fixture.js";
 import {
     configureTypedHyperVNetworkOperations,

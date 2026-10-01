@@ -1,3 +1,4 @@
+import { DEVICE_BROKER_PROTOCOL_VERSION } from "@ccc/device-lab/providers/contracts/broker-protocol.mjs";
 import { spawn } from "child_process";
 import { createHash } from "crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
@@ -18,13 +19,13 @@ import {
     parseBrokerServiceArgs,
     parseBrokerServeArgs,
     startDeviceBrokerServe,
-} from "../device-lab-broker.js";
+} from "@ccc/device-lab/device-lab-broker.js";
 import { deviceLabOwnerId, devicesCli, devicesCliAsync } from "../device-lab-admin.js";
 import { CLI_VERSION } from "../utils.js";
-import { readDeviceRuntimeProcessStartToken } from "../device-lab-process-identity.js";
+import { readDeviceRuntimeProcessStartToken } from "@ccc/device-lab/device-lab-process-identity.js";
 import { close, listen } from "./helpers/host-broker-test-fixture.js";
 import { freePort } from "./helpers/fake-broker-mcp-fixture.js";
-import { withSharedMutationLockAsync } from "../../device-lab-mcp/src/state/shared-mutation-lock.mjs";
+import { withSharedMutationLockAsync } from "@ccc/device-lab/providers/state/shared-mutation-lock.mjs";
 
 async function waitForBrokerHealth(port: number, timeoutMs = 30000) {
     const deadline = Date.now() + timeoutMs;
@@ -988,7 +989,7 @@ describe("device-lab host broker physical attach and CLI", () => {
         const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
         const ensureHostBroker = vi.fn(async () => ({
             ok: true, launched: true, reused: false, host: "127.0.0.1", port: 54321,
-            verifiedCapabilities: ["internal-v123"], verifiedBrokerPid: 4321,
+            verifiedProtocolVersion: DEVICE_BROKER_PROTOCOL_VERSION, verifiedBrokerPid: 4321,
         }));
         expect(await deviceBrokerCliAsync(["status"], "/project/minimal-cli", undefined, { ensureHostBroker })).toBe(0);
         expect(log.mock.calls).toEqual([["Broker: ready (started)\nhttp://127.0.0.1:54321"]]);
@@ -1021,7 +1022,7 @@ describe("device-lab host broker physical attach and CLI", () => {
         expect(direct).toContain("deviceStateMounted: false");
         expect(direct).toContain("warning: device-lab container wiring is incomplete");
         expect(direct).toContain("remedy: restart or recreate ccc from the host");
-        expect(direct).toContain("host-ccc-auto-start-compatible");
+        expect(direct).toContain(`protocolVersion: ${DEVICE_BROKER_PROTOCOL_VERSION}`);
 
         const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
         const exitCode = deviceBrokerCli(["status", "--verbose"], "/project/broker-cli-test");
@@ -1052,7 +1053,7 @@ describe("device-lab host broker physical attach and CLI", () => {
             host: "127.0.0.1",
             probeHost: "127.0.0.1",
             port: 54321,
-            verifiedCapabilities: ["hyper-v-vm-managed-auto-images-v20", "hyper-v-windows-boot-contract-v1"],
+            verifiedProtocolVersion: DEVICE_BROKER_PROTOCOL_VERSION,
             verifiedBrokerPid: 4321,
             verifiedBrokerStartedAt: "2026-07-28T00:00:00.000Z",
             attempts: [],
@@ -1066,7 +1067,7 @@ describe("device-lab host broker physical attach and CLI", () => {
         expect(log).toHaveBeenCalledWith(expect.stringContaining("url: http://127.0.0.1:54321"));
         expect(log).toHaveBeenCalledWith("brokerReady: true");
         expect(log).toHaveBeenCalledWith("brokerLaunched: true");
-        expect(log).toHaveBeenCalledWith("brokerVerifiedCapabilities: hyper-v-vm-managed-auto-images-v20, hyper-v-windows-boot-contract-v1");
+        expect(log).toHaveBeenCalledWith(`brokerVerifiedProtocolVersion: ${DEVICE_BROKER_PROTOCOL_VERSION}`);
         expect(log).toHaveBeenCalledWith("brokerVerifiedPid: 4321");
         expect(log).toHaveBeenCalledWith("brokerVerifiedStartedAt: 2026-07-28T00:00:00.000Z");
         expect(error).not.toHaveBeenCalled();
@@ -1089,7 +1090,7 @@ describe("device-lab host broker physical attach and CLI", () => {
         const exitCode = await devicesCliAsync(["broker", "status", "--verbose"], "/project/devices-broker-cli-async-test", "work", { ensureHostBroker });
 
         expect(exitCode).toBe(0);
-        expect(ensureHostBroker).toHaveBeenCalledWith({ cwd: "/project/devices-broker-cli-async-test", profile: "work" });
+        expect(ensureHostBroker).toHaveBeenCalledWith({ cwd: "/project/devices-broker-cli-async-test", profile: "work", trustedCliPaths: [join(import.meta.dirname, "..", "..", "dist", "index.js")] });
         expect(log).toHaveBeenCalledWith(expect.stringContaining(`owner: ${deviceLabOwnerId("/project/devices-broker-cli-async-test", "work")}`));
         expect(log).toHaveBeenCalledWith("brokerReady: true");
         expect(log).toHaveBeenCalledWith("brokerReused: true");

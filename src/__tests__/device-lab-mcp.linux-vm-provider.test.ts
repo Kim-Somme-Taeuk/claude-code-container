@@ -25,8 +25,8 @@ import {
     startLab,
     stopLab,
     deleteLab,
-} from "../../device-lab-mcp/src/backends/linux-vm.mjs";
-import { ownerId as deviceLabOwnerId } from "../../device-lab-mcp/src/context.mjs";
+} from "@ccc/device-lab/providers/backends/linux-vm.mjs";
+import { ownerId as deviceLabOwnerId } from "@ccc/device-lab/providers/context.mjs";
 
 describe("device-lab Linux VM container-QEMU provider", () => {
     const roots: string[] = [];

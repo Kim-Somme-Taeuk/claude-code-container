@@ -7,7 +7,7 @@ import {
     ownerStateDir,
     withOwnerDeviceOperation,
     withOwnerDeviceOperations,
-} from "../../device-lab-mcp/src/state/device-store.mjs";
+} from "@ccc/device-lab/providers/state/device-store.mjs";
 
 describe("owner device operation lock", () => {
     const backends: string[] = [];

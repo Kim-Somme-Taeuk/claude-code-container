@@ -2,8 +2,8 @@ import { createHash } from "crypto";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 
-import operationSource from "../host-control/hyper-v/Invoke-HyperVWindowsOperation.ps1";
-import * as library from "../../src/hyper-v-windows/index.ts";
+import operationSource from "#hyper-v/powershell/Invoke-HyperVWindowsOperation.ps1";
+import * as library from "#hyper-v/index.js";
 import fixtureSource from "./hyper-v-windows-library-fixture.ps1";
 import {
     HYPER_V_WINDOWS_LIBRARY_FIXTURE_SHA256,

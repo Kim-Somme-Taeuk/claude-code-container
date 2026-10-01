@@ -32,14 +32,18 @@ const failures = [];
 const toolCoverage = summary.toolCoverage || {};
 const mcpSessions = Array.isArray(summary.mcpSessions) ? summary.mcpSessions : [];
 const toolCalls = Array.isArray(toolCoverage.calls) ? toolCoverage.calls : [];
+const invalidInputRejections = toolCalls.filter(record => record.expectedInputError !== undefined && !(
+    record.schemaValid === false && record.schemaErrorCount === 1 && record.schemaErrors?.length === 1
+    && record.schemaErrors[0] === record.expectedInputError && record.errorCode === record.expectedInputError
+    && typeof record.expectedInputError === "string" && record.expectedInputError.length > 0
+    && record.outcome === "error-result" && record.isError === true && record.expectedError === true && record.errorPayloadJson === true
+));
 const skipCategories = Array.isArray(summary.skipCategories) ? summary.skipCategories : [];
 const categorizedSkipCount = skipCategories.reduce((total, item) => total + Number(item?.count || 0), 0);
 const unexpectedSkipCategories = skipCategories.filter((item) => !allowedSkipCategories.has(item?.category));
 const providerGapSkipCategories = new Set(["provider-prerequisite", "host-platform", "host-permission", "host-virtualization"]);
 const providerValues = new Set(["auto", "tart", "vz", "utmctl"]);
 const directOkExemptDiagnosticTools = new Set([
-    "base_image_clone",
-    "base_image_create",
     "snapshot",
     "snapshot",
     "snapshot",
@@ -158,6 +162,7 @@ if (!platformResult && unexplainedProviderArgumentEnumFacets.length > 0) failure
 if ((toolCoverage.unadvertisedTools || []).length > 0) failures.push(`unadvertisedTools=${toolCoverage.unadvertisedTools.length}`);
 if ((toolCoverage.incompleteOutcomeRecords || []).length > 0) failures.push(`incompleteOutcomeRecords=${toolCoverage.incompleteOutcomeRecords.length}`);
 if ((toolCoverage.argumentSchemaFailureRecords || []).length > 0) failures.push(`argumentSchemaFailureRecords=${toolCoverage.argumentSchemaFailureRecords.length}`);
+if (invalidInputRejections.length > 0) failures.push(`invalidInputRejections=${invalidInputRejections.length}`);
 if ((toolCoverage.flowStepArgumentSchemaFailures || []).length > 0) failures.push(`flowStepArgumentSchemaFailures=${toolCoverage.flowStepArgumentSchemaFailures.length}`);
 if ((toolCoverage.unexpectedErrorResultRecords || []).length > 0) failures.push(`unexpectedErrorResultRecords=${toolCoverage.unexpectedErrorResultRecords.length}`);
 if ((toolCoverage.expectedErrorPayloadFailures || []).length > 0) failures.push(`expectedErrorPayloadFailures=${toolCoverage.expectedErrorPayloadFailures.length}`);
@@ -168,7 +173,7 @@ if ((toolCoverage.expectedFlowStepPayloadFailures || []).length > 0) failures.pu
 if ((toolCoverage.okPublicFlowStepPayloadFailures || []).length > 0) failures.push(`okPublicFlowStepPayloadFailures=${toolCoverage.okPublicFlowStepPayloadFailures.length}`);
 if ((toolCoverage.emptyOkPublicFlowStepPayloadRecords || []).length > 0) failures.push(`emptyOkPublicFlowStepPayloadRecords=${toolCoverage.emptyOkPublicFlowStepPayloadRecords.length}`);
 if (unexpectedSkipCategories.length > 0) failures.push(`unexpectedSkipCategories=${unexpectedSkipCategories.map((item) => item.category).join(",")}`);
-if (artifactToolSurface.sha256 !== currentToolSurface.sha256 || artifactToolSurface.toolCount !== currentToolSurface.toolCount) failures.push("canonicalToolSurfaceMismatch");
+if (artifactToolSurface.sha256 !== currentToolSurface.sha256 || artifactToolSurface.toolCount !== currentToolSurface.toolCount) failures.push("canonicalToolSurfaceMismatch(source-changed-since-run; saved results do not validate the current tool schema)");
 if (mcpSessions.length === 0) failures.push("mcpSessionsMissing");
 const invalidMcpSessions = mcpSessions.filter((session) => !session?.serverPath || !session?.serverSource);
 if (invalidMcpSessions.length > 0) failures.push(`invalidMcpSessions=${invalidMcpSessions.length}`);

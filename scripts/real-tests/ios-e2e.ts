@@ -7,7 +7,7 @@ import { join } from "path";
 import {
     iosAppiumDiscovery,
     iosDiscovery,
-} from "../../device-lab-mcp/src/backends/ios-simulator.mjs";
+} from "#device-lab/providers/backends/ios-simulator.mjs";
 import { lifecycleDevice, parseContractToolPayload, parseToolPayload, withDeviceLabMcp } from "./device-lab-mcp-client.ts";
 import { providerMcpSessionOptions } from "./provider-mcp-matrix.ts";
 import { findSimctlDevice, selectPhysicalIosDevice, simctlDevices, simctlJson } from "./providers/apple.ts";
@@ -140,8 +140,7 @@ export async function runIosSimulatorE2E(options: any = {}) {
     return withDeviceLabMcp(async ({ callTool }) => {
         const direct = { backend: "ios-simulator" };
         try {
-            const create = parseContractToolPayload("create", await callTool("create", { detail: true,
-                ...direct,
+            const create = parseContractToolPayload("create_ios_simulator", await callTool("create_ios_simulator", { detail: true,
                 name,
                 deviceId,
                 deviceType: cap.deviceType.identifier,
@@ -193,17 +192,17 @@ export async function runIosSimulatorE2E(options: any = {}) {
 
             const waitForSafari = parsePayload(await callTool("wait_for_app", { detail: true,
                 deviceId,
-                bundleId: "com.apple.mobilesafari",
+                appId: "com.apple.mobilesafari",
                 timeoutMs: 10000,
                 intervalMs: 500,
             }));
             assertSimulatorMobileProvider(waitForSafari, "mobile_wait_for_app Safari");
-            assert.strictEqual(waitForSafari.bundleId, "com.apple.mobilesafari");
+            assert.strictEqual(waitForSafari.appId, "com.apple.mobilesafari");
             assert.strictEqual(waitForSafari.running, true, `mobile_wait_for_app Safari failed: ${JSON.stringify(waitForSafari)}`);
 
             const stopSafari = parsePayload(await callTool("stop_app", { detail: true,
                 deviceId,
-                bundleId: "com.apple.mobilesafari",
+                appId: "com.apple.mobilesafari",
             }));
             assertSimulatorMobileProvider(stopSafari, "mobile_stop_app Safari");
             assert.strictEqual(stopSafari.stopped, "com.apple.mobilesafari");
@@ -217,18 +216,18 @@ export async function runIosSimulatorE2E(options: any = {}) {
 
                 const deviceLaunch = parsePayload(await callTool("launch_app", { detail: true,
                     deviceId,
-                    bundleId: appBundleId,
+                    appId: appBundleId,
                 }));
                 assert.strictEqual(deviceLaunch.launched, appBundleId);
 
                 const waitForInstalledApp = parsePayload(await callTool("wait_for_app", { detail: true,
                     deviceId,
-                    bundleId: appBundleId,
+                    appId: appBundleId,
                     timeoutMs: 10000,
                     intervalMs: 500,
                 }));
                 assertSimulatorMobileProvider(waitForInstalledApp, "mobile_wait_for_app installed app");
-                assert.strictEqual(waitForInstalledApp.bundleId, appBundleId);
+                assert.strictEqual(waitForInstalledApp.appId, appBundleId);
                 assert.strictEqual(waitForInstalledApp.running, true, `mobile_wait_for_app installed app failed: ${JSON.stringify(waitForInstalledApp)}`);
 
                 const uploadSource = join(tempDir, "upload.txt");
@@ -237,54 +236,54 @@ export async function runIosSimulatorE2E(options: any = {}) {
                 writeFileSync(uploadSource, `ccc-ios-simulator-file-${suffix}`);
                 const upload = parsePayload(await callTool("upload", { detail: true,
                     deviceId,
-                    bundleId: appBundleId,
+                    appId: appBundleId,
                     localPath: uploadSource,
                     remotePath,
                 }));
                 assert.strictEqual(upload.provider, "simctl-app-container");
                 assert.strictEqual(upload.uploaded.localPath, uploadSource);
                 assert.strictEqual(upload.uploaded.remotePath, remotePath);
-                assert.strictEqual(upload.uploaded.bundleId, appBundleId);
+                assert.strictEqual(upload.uploaded.appId, appBundleId);
 
-                const listing = parsePayload(await callTool("list_files", { detail: true, deviceId, path: "Documents", limit: 500, bundleId: appBundleId }));
+                const listing = parsePayload(await callTool("list_files", { detail: true, deviceId, path: "Documents", limit: 500, appId: appBundleId }));
                 assert.ok(listing.entries.some((entry: any) => entry.name === remotePath.split("/").at(-1) && entry.type === "file"));
 
                 const download = parsePayload(await callTool("download", { detail: true,
                     deviceId,
-                    bundleId: appBundleId,
+                    appId: appBundleId,
                     remotePath,
                     localPath: downloadTarget,
                 }));
                 assert.strictEqual(download.provider, "simctl-app-container");
                 assert.strictEqual(download.downloaded.remotePath, remotePath);
                 assert.strictEqual(download.downloaded.localPath, downloadTarget);
-                assert.strictEqual(download.downloaded.bundleId, appBundleId);
+                assert.strictEqual(download.downloaded.appId, appBundleId);
                 assert.strictEqual(readFileSync(downloadTarget, "utf-8"), `ccc-ios-simulator-file-${suffix}`);
 
                 const mobileStop = parsePayload(await callTool("stop_app", { detail: true,
                     deviceId,
-                    bundleId: appBundleId,
+                    appId: appBundleId,
                 }));
                 assertSimulatorMobileProvider(mobileStop, "mobile_stop_app installed app");
                 assert.strictEqual(mobileStop.stopped, appBundleId);
 
                 const clearAppData = parsePayload(await callTool("clear_app_data", { detail: true,
                     deviceId,
-                    bundleId: appBundleId,
+                    appId: appBundleId,
                     confirmDestructive: true,
                 }));
                 assert.strictEqual(clearAppData.provider, "simctl-app-container");
-                assert.deepStrictEqual(clearAppData.reset, { bundleId: appBundleId, containerType: "data" });
+                assert.deepStrictEqual(clearAppData.reset, { appId: appBundleId, containerType: "data" });
 
                 const mobileLaunch = parsePayload(await callTool("launch_app", { detail: true,
                     deviceId,
-                    bundleId: appBundleId,
+                    appId: appBundleId,
                 }));
                 assert.strictEqual(mobileLaunch.launched, appBundleId);
 
                 const mobileUninstall = parsePayload(await callTool("uninstall_app", { detail: true,
                     deviceId,
-                    bundleId: appBundleId,
+                    appId: appBundleId,
                     confirmDestructive: true,
                 }));
                 assertSimulatorMobileProvider(mobileUninstall, "uninstall_app");
@@ -298,15 +297,15 @@ export async function runIosSimulatorE2E(options: any = {}) {
 
                 const deviceReset = parsePayload(await callTool("clear_app_data", { detail: true,
                     deviceId,
-                    bundleId: appBundleId,
+                    appId: appBundleId,
                     confirmDestructive: true,
                 }));
                 assert.strictEqual(deviceReset.provider, "simctl-app-container");
-                assert.deepStrictEqual(deviceReset.reset, { bundleId: appBundleId, containerType: "data" });
+                assert.deepStrictEqual(deviceReset.reset, { appId: appBundleId, containerType: "data" });
 
                 const finalUninstall = parsePayload(await callTool("uninstall_app", { detail: true,
                     deviceId,
-                    bundleId: appBundleId,
+                    appId: appBundleId,
                     confirmDestructive: true,
                 }));
                 assertSimulatorMobileProvider(finalUninstall, "mobile_uninstall_app final");
@@ -323,19 +322,19 @@ export async function runIosSimulatorE2E(options: any = {}) {
 
             const grantPermission = parsePayload(await callTool("permission", { action: "grant", detail: true,
                 deviceId,
-                bundleId: "com.apple.mobilesafari",
-                service: "location",
+                appId: "com.apple.mobilesafari",
+                permission: "location",
             }));
             assertSimulatorMobileProvider(grantPermission, "permission");
-            assert.deepStrictEqual(grantPermission.permission, { bundleId: "com.apple.mobilesafari", service: "location", action: "grant" });
+            assert.deepStrictEqual(grantPermission.permission, { appId: "com.apple.mobilesafari", service: "location", action: "grant" });
 
             const revokePermission = parsePayload(await callTool("permission", { action: "revoke", detail: true,
                 deviceId,
-                bundleId: "com.apple.mobilesafari",
-                service: "location",
+                appId: "com.apple.mobilesafari",
+                permission: "location",
             }));
             assertSimulatorMobileProvider(revokePermission, "permission");
-            assert.deepStrictEqual(revokePermission.permission, { bundleId: "com.apple.mobilesafari", service: "location", action: "revoke" });
+            assert.deepStrictEqual(revokePermission.permission, { appId: "com.apple.mobilesafari", service: "location", action: "revoke" });
 
             const setClipboard = parsePayload(await callTool("clipboard", { detail: true, deviceId, text: "ccc-ios-clipboard-e2e-ok" }));
             assertSimulatorMobileProvider(setClipboard, "clipboard");
@@ -370,7 +369,7 @@ export async function runIosSimulatorE2E(options: any = {}) {
                 assert.strictEqual(tap.provider, "appium-xcuitest");
                 assert.deepStrictEqual(tap.tapped, { x: 20, y: 20 });
 
-                const doubleTap = parsePayload(await callTool("double_click", { detail: true, deviceId, x: 30, y: 30 }));
+                const doubleTap = parsePayload(await callTool("click", { count: 2, detail: true, deviceId, x: 30, y: 30 }));
                 assert.strictEqual(doubleTap.provider, "appium-xcuitest");
                 assert.deepStrictEqual(doubleTap.doubleTapped, { x: 30, y: 30 });
 
@@ -437,7 +436,7 @@ export async function runIosSimulatorE2E(options: any = {}) {
             deleted = true;
             assert.strictEqual(del.deleted, deviceId);
             assert.strictEqual(findSimctlDevice(cap.discovery.xcrun, (device) => device?.udid === createdUdid), null, `simctl simulator survived delete: ${createdUdid}`);
-            const listAfterDelete = parsePayload(await callTool("list_devices", { detail: true }));
+            const listAfterDelete = parsePayload(await callTool("devices", { detail: true }));
             assert.strictEqual(listAfterDelete.devices.some((device) => device.id === deviceId), false);
 
             return {
@@ -535,7 +534,7 @@ export async function runIosRealDeviceE2E(options: any = {}) {
                 assert.strictEqual(tap.physical, true);
                 assert.deepStrictEqual(tap.tapped, { x: 20, y: 20 });
 
-                const doubleTap = parsePayload(await callTool("double_click", { detail: true, deviceId, x: 30, y: 30 }));
+                const doubleTap = parsePayload(await callTool("click", { count: 2, detail: true, deviceId, x: 30, y: 30 }));
                 assert.strictEqual(doubleTap.provider, "appium-xcuitest");
                 assert.strictEqual(doubleTap.physical, true);
                 assert.deepStrictEqual(doubleTap.doubleTapped, { x: 30, y: 30 });
@@ -619,22 +618,22 @@ export async function runIosRealDeviceE2E(options: any = {}) {
                         assert.strictEqual(install.installed, appPath);
                     }
 
-                    const launch = parsePayload(await callTool("launch_app", { detail: true, deviceId, bundleId: appBundleId }));
+                    const launch = parsePayload(await callTool("launch_app", { detail: true, deviceId, appId: appBundleId }));
                     assert.strictEqual(launch.provider, "xcrun-devicectl");
                     assert.strictEqual(launch.launched, appBundleId);
 
                     const waitedApp = parsePayload(await callTool("wait_for_app", { detail: true,
                         deviceId,
-                        bundleId: appBundleId,
+                        appId: appBundleId,
                         timeoutMs: 10000,
                         intervalMs: 500,
                     }));
                     assert.strictEqual(waitedApp.provider, "appium-xcuitest");
                     assert.strictEqual(waitedApp.physical, true);
-                    assert.strictEqual(waitedApp.bundleId, appBundleId);
+                    assert.strictEqual(waitedApp.appId, appBundleId);
                     assert.strictEqual(waitedApp.found, true);
 
-                    const stopApp = parsePayload(await callTool("stop_app", { detail: true, deviceId, bundleId: appBundleId }));
+                    const stopApp = parsePayload(await callTool("stop_app", { detail: true, deviceId, appId: appBundleId }));
                     assert.strictEqual(stopApp.provider, "appium-xcuitest");
                     assert.strictEqual(stopApp.physical, true);
                     assert.strictEqual(stopApp.stopped, appBundleId);
@@ -652,7 +651,7 @@ export async function runIosRealDeviceE2E(options: any = {}) {
             const detach = parsePayload(await callTool("detach", { detail: true, deviceId }));
             attached = false;
             assert.strictEqual(detach.detached, deviceId);
-            const listAfterDetach = parsePayload(await callTool("list_devices", { detail: true }));
+            const listAfterDetach = parsePayload(await callTool("devices", { detail: true }));
             assert.strictEqual(listAfterDetach.devices.some((device) => device.id === deviceId), false);
 
             return {

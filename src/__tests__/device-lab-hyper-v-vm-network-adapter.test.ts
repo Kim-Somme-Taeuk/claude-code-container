@@ -8,7 +8,7 @@ import {
     discoverDeviceLabHyperVBootstrapNetwork,
     teardownDeviceLabHyperVBootstrapNetwork,
     type DeviceLabHyperVOwnedVm,
-} from "../device-lab/broker/hyper-v/vm-network-adapter.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/vm-network-adapter.js";
 import {
     parseHyperVInterfaceIndex,
     parseHyperVMacAddress,
@@ -17,7 +17,7 @@ import {
     parseIPv4Address,
     parseIPv4PrefixLength,
     type HyperVVMNetworkAdapter,
-} from "../hyper-v-windows/low-level/index.js";
+} from "@ccc/hyper-v/low-level/index.js";
 
 const VM_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const MANAGED_MAC = "02:15:5d:01:1a:2c";
@@ -364,11 +364,11 @@ describe("Device Lab bootstrap teardown", () => {
 // rather than a value, because the invariant is about what the code may reach -- elevation
 // enters this codebase only through these two names, and neither may appear on this path.
 describe("Device Lab bootstrap privilege", () => {
-    const root = join(__dirname, "..");
+    const root = join(__dirname, "..", "..", "packages", "device-lab", "src");
 
     it.each([
         ["the bootstrap adapter", join("device-lab", "broker", "hyper-v", "vm-network-adapter.ts")],
-        ["the bootstrap reconciliation", join("hyper-v-windows", "lifecycle", "vm-network-reconcile.ts")],
+        ["the bootstrap reconciliation", join("..", "..", "hyper-v", "src", "lifecycle", "vm-network-reconcile.ts")],
     ])("never reaches elevation from %s", (_label, relativePath) => {
         const source = readFileSync(join(root, relativePath), "utf8");
         expect(source).not.toContain("withAdministratorClient");

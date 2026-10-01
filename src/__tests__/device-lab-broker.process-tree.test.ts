@@ -11,7 +11,7 @@ import {
     runBrokerBackendChild,
     terminateBrokerSpawnedProcessTree,
     windowsHiddenVbsLauncherScript,
-} from "../device-lab-broker.js";
+} from "@ccc/device-lab/device-lab-broker.js";
 
 const roots: string[] = [];
 

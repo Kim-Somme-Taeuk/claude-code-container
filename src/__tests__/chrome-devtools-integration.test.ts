@@ -6,13 +6,7 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 // Gracefully skipped when Chromium is not available (e.g. pure unit test CI).
 const TIMEOUT = 90000;
 
-// The MCP SDK applies its own 60s request timeout, which is shorter than the
-// 90s these tests declare — so the client always gave up first and the test's
-// stated budget was never the one in force. Run alone that gap never shows;
-// under the full suite's eight workers a real headless-Chromium screenshot
-// crosses 60s and the run fails with `MCP error -32001: Request timed out` at
-// 60056ms, in a file that passes on its own in nine seconds. Passing the same
-// number to both makes the declared budget the real one.
+// Keep the MCP SDK's request budget aligned with the test budget.
 const REQUEST_OPTIONS = { timeout: TIMEOUT };
 
 const chromiumAvailable = (() => {
@@ -22,6 +16,7 @@ const chromiumAvailable = (() => {
 describe.skipIf(!chromiumAvailable)("chrome-devtools MCP integration", () => {
     let handle: McpClientHandle;
     let client: Client;
+    let pageId: number;
 
     beforeAll(async () => {
         handle = await createMcpClient();
@@ -50,28 +45,21 @@ describe.skipIf(!chromiumAvailable)("chrome-devtools MCP integration", () => {
             name: "new_page",
             arguments: { url: "about:blank" },
         }, undefined, REQUEST_OPTIONS);
+        expect(result.isError).not.toBe(true);
         expect(result.content).toBeDefined();
-        expect((result.content as Array<{ type: string; text?: string }>)[0].text).toBeTruthy();
+        const text = (result.content as Array<{ type: string; text?: string }>)[0].text || "";
+        const selected = /^(\d+): .*\[selected\]/m.exec(text);
+        expect(selected, text).not.toBeNull();
+        pageId = Number(selected![1]);
     });
 
-    // chrome-devtools-mcp made pageId REQUIRED on the page-scoped tools, and numeric — these three
-    // tests had been failing on every run here since, with the failure reading like "Chrome is
-    // missing" when Chromium is in fact installed at CHROME_BIN and the server starts fine. The
-    // server reports pages as an indexed list ("1: about:blank"), and passing a string is rejected
-    // with "Expected number, received string", so the index is the id.
-    //
-    // `new_page` above leaves at least one page open, so index 1 always exists by the time these run.
-    // Note the tools act on the id given, NOT on the page marked [selected] — measured: with page 2
-    // selected, navigating pageId 1 moves page 1 from about:blank to the data URI and a script
-    // evaluated against pageId 1 reads back that page's body. So these assertions are about the
-    // page they name, and "navigates" verifies a navigation rather than merely a call that did
-    // not error.
-    const PAGE_ID = 1;
+    // Use the page new_page selected. Hardcoding 1 targets the background startup tab;
+    // its screenshot can stall even while navigation and script evaluation succeed.
 
     it("navigates to a data URI page", { timeout: TIMEOUT }, async () => {
         const result = await client.callTool({
             name: "navigate_page",
-            arguments: { pageId: PAGE_ID, url: "data:text/html,<h1>ccc-test</h1>", type: "url" },
+            arguments: { pageId, url: "data:text/html,<h1>ccc-test</h1>", type: "url" },
         }, undefined, REQUEST_OPTIONS);
         expect(result.isError).not.toBe(true);
     });
@@ -79,17 +67,20 @@ describe.skipIf(!chromiumAvailable)("chrome-devtools MCP integration", () => {
     it("evaluates a script and returns the result", { timeout: TIMEOUT }, async () => {
         const result = await client.callTool({
             name: "evaluate_script",
-            arguments: { pageId: PAGE_ID, function: "() => 6 * 7" },
+            arguments: { pageId, function: "() => ({ answer: 6 * 7, heading: document.querySelector('h1')?.textContent })" },
         }, undefined, REQUEST_OPTIONS);
+        expect(result.isError).not.toBe(true);
         const content = result.content as Array<{ type: string; text?: string }>;
         expect(content[0].text).toContain("42");
+        expect(content[0].text).toContain("ccc-test");
     });
 
     it("takes a screenshot and returns an image", { timeout: TIMEOUT }, async () => {
         const result = await client.callTool({
             name: "take_screenshot",
-            arguments: { pageId: PAGE_ID },
+            arguments: { pageId },
         }, undefined, REQUEST_OPTIONS);
+        expect(result.isError).not.toBe(true);
         const content = result.content as Array<{ type: string; mimeType?: string }>;
         // content[0] is always text summary, content[1] is the image
         expect(content[1]).toBeDefined();

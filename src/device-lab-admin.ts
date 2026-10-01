@@ -14,31 +14,31 @@ import {
     type HyperVNetworkFabricResult,
     invokeHostDeviceBrokerOwnerRpc,
     type HostDeviceBrokerOwnerRpcResult,
-} from "./device-lab-broker.js";
-import { deviceLabOwnerBasis, deviceLabOwnerId as canonicalDeviceLabOwnerId } from "./device-lab-owner.js";
-import { inspectDeviceRuntimeProcessIdentity, signalDeviceRuntimeProcess } from "./device-lab-process-identity.js";
-import { assertOwnerDeviceStateWritable, readOwnerDeviceStateFile } from "./device-lab-owner-state.js";
-import { readPhysicalLeaseStateFile, readWindowsSandboxLockStateFile, validatePhysicalLease } from "./device-lab-ownership-state.js";
-import { DeviceLabProjectEnumerationError, enumerateDeviceProjectIds } from "./device-lab-project-state.js";
+} from "@ccc/device-lab/device-lab-broker.js";
+import { deviceLabOwnerBasis, deviceLabOwnerId as canonicalDeviceLabOwnerId } from "@ccc/device-lab/device-lab-owner.js";
+import { inspectDeviceRuntimeProcessIdentity, signalDeviceRuntimeProcess } from "@ccc/device-lab/device-lab-process-identity.js";
+import { assertOwnerDeviceStateWritable, readOwnerDeviceStateFile } from "@ccc/device-lab/device-lab-owner-state.js";
+import { readPhysicalLeaseStateFile, readWindowsSandboxLockStateFile, validatePhysicalLease } from "@ccc/device-lab/device-lab-ownership-state.js";
+import { DeviceLabProjectEnumerationError, enumerateDeviceProjectIds } from "@ccc/device-lab/device-lab-project-state.js";
 import {
     withSharedMutationLock,
     withSharedMutationLockAsync,
     writeJsonFileAtomically,
-} from "./device-lab-shared-state.js";
-import { readDeviceLabStateFile } from "./device-lab-state-file.js";
+} from "@ccc/device-lab/device-lab-shared-state.js";
+import { readDeviceLabStateFile } from "@ccc/device-lab/device-lab-state-file.js";
 import {
     acceptHyperVWindowsEvaluationLicense,
     HYPER_V_WINDOWS_EVALUATION_LICENSE_URL,
     readHyperVWindowsEvaluationReceipt,
-} from "./device-lab/hyper-v-images.js";
-import { inspectHyperVUbuntuImageCache } from "./device-lab/broker/hyper-v/image-store.js";
-import { hyperVLinuxImageBlockers, hyperVLinuxSmokeImageResult } from "./device-lab/hyper-v-linux-image-readiness.js";
+} from "@ccc/device-lab/device-lab/hyper-v-images.js";
+import { inspectHyperVUbuntuImageCache } from "@ccc/device-lab/device-lab/broker/hyper-v/image-store.js";
+import { hyperVLinuxImageBlockers, hyperVLinuxSmokeImageResult } from "@ccc/device-lab/device-lab/hyper-v-linux-image-readiness.js";
 import {
     hyperVReadinessCommand,
     hyperVSetupCommand,
     parseHyperVReadiness,
     parseHyperVSetupObservation,
-} from "./host-control/hyper-v/index.js";
+} from "@ccc/device-lab/host-control/hyper-v/index.js";
 
 export const DEVICE_BACKENDS = [
     { stateKey: "android", name: "android-emulator", tools: ["adb", "emulator", "avdmanager"] },
@@ -172,7 +172,7 @@ type DeviceLabWiringDiagnostic = {
     incomplete: boolean;
 };
 
-export { DeviceLabProjectEnumerationError } from "./device-lab-project-state.js";
+export { DeviceLabProjectEnumerationError } from "@ccc/device-lab/device-lab-project-state.js";
 
 const OPT_DIST_DEVICE_LAB_MCP_SERVER = "/opt/ccc/dist/device-lab-mcp/server.mjs";
 const OPT_SOURCE_DEVICE_LAB_MCP_SERVER = "/opt/ccc/device-lab-mcp/server.mjs";
@@ -2355,7 +2355,7 @@ export async function devicesCliAsync(
 ): Promise<number> {
     const subcommand = args[0] || "status";
     if (subcommand === "broker") {
-        return deviceBrokerCliAsync(args.slice(1), cwd, profile, hooks);
+        return deviceBrokerCliAsync(args.slice(1), cwd, profile, { ...hooks, trustedCliPaths: [join(packageRoot(), "dist", "index.js")] });
     }
     if (subcommand === "setup") {
         const setupArgs = args.slice(2);
@@ -2388,7 +2388,7 @@ export async function devicesCliAsync(
             backend: parsed.backend,
             deviceId: parsed.deviceId,
             ...parsed.params,
-        }, { cwd, profile, rpcTimeoutMs: 150000 });
+        }, { cwd, profile, trustedCliPaths: [join(packageRoot(), "dist", "index.js")], rpcTimeoutMs: 150000 });
         if (!result.ok) {
             console.error(formatSnapshotError(parsed.action, result));
             return 1;
@@ -2420,6 +2420,7 @@ export async function devicesCliAsync(
         }, {
             cwd,
             profile,
+            trustedCliPaths: [join(packageRoot(), "dist", "index.js")],
             rpcTimeoutMs: parsed.action === "status"
                 ? 15000
                 : parsed.action === "create" && (parsed.backend === "windows-vm" || parsed.backend === "linux-vm")

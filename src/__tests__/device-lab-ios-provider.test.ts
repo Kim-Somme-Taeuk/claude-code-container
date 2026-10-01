@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { iosSimulatorCreateCommand, iosSimulatorCreatedUdid, iosSimulatorDeleteCommand } from "../device-lab/providers/ios-simulator.js";
+import { iosSimulatorCreateCommand, iosSimulatorCreatedUdid, iosSimulatorDeleteCommand } from "@ccc/device-lab/device-lab/providers/ios-simulator.js";
 
 describe("iOS Simulator host provider adapter", () => {
     it("plans owner-scoped create/delete commands and parses the created UDID", () => {

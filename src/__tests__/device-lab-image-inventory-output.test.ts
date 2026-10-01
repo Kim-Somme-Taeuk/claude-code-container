@@ -118,15 +118,15 @@ describe("producer-shaped image and inventory presentation", () => {
                 expect(result.isError).not.toBe(true);
                 return payload(result);
             };
-            expect(await call("image_list", { detail: false })).toEqual({ backend: "linux-vm", images: [] });
-            const detailed = await call("image_import", { detail: true, name: "Base", sourcePath: "incoming/base.qcow2" });
+            expect(await call("list_images", { detail: false })).toEqual({ backend: "linux-vm", images: [] });
+            const detailed = await call("import_image", { detail: true, name: "Base", sourcePath: "incoming/base.qcow2" });
             expect(detailed.ownerId).toEqual(expect.any(String));
             expect(detailed.image).toMatchObject({ id: "base", provider: "container-qemu", format: "qcow2", copied: true,
                 ownerId: detailed.ownerId, createdAt: expect.any(String), updatedAt: expect.any(String), path: expect.any(String), sourcePath: expect.any(String) });
             const { ownerId: _owner, createdAt: _created, updatedAt: _updated, ...expectedImage } = detailed.image;
-            expect(await call("image_list", { detail: false })).toEqual({ backend: "linux-vm", images: [expectedImage] });
-            expect(await call("image_list", { detail: true })).toEqual({ ok: true, backend: "linux-vm", ownerId: detailed.ownerId, images: [detailed.image] });
-            const compactImport = await call("image_import", { detail: false, name: "Base", sourcePath: "incoming/base.qcow2", force: true });
+            expect(await call("list_images", { detail: false })).toEqual({ backend: "linux-vm", images: [expectedImage] });
+            expect(await call("list_images", { detail: true })).toEqual({ ok: true, backend: "linux-vm", ownerId: detailed.ownerId, images: [detailed.image] });
+            const compactImport = await call("import_image", { detail: false, name: "Base", sourcePath: "incoming/base.qcow2", force: true });
             expect(compactImport).toEqual({ backend: "linux-vm", image: expectedImage });
         } finally { await cleanupDeviceLabMcpTestContext(context); }
     });

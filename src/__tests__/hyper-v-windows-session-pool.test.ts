@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
     HYPER_V_WINDOWS_SESSION_READY_MARKER,
     type HyperVWindowsSessionErrorCode,
-} from "../hyper-v-windows/index.js";
+} from "@ccc/hyper-v/index.js";
 
 const MARKER = HYPER_V_WINDOWS_SESSION_READY_MARKER;
 
@@ -47,7 +47,7 @@ import {
     HYPER_V_WINDOWS_CHILD_DEATH_EVENTS,
     hyperVWindowsChildDeathCode,
     retainBrokerHyperVWindowsSessions,
-} from "../device-lab/broker/hyper-v/session-pool.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/session-pool.js";
 
 // The pool is module scoped, so every test releases what it retains and drains the map before it
 // returns. A leaked holder would make a later test's release a no-op and hide a real regression.
@@ -452,7 +452,7 @@ describe("broker Hyper-V session pool", () => {
         // `server.once("close", retainBrokerHyperVWindowsSessions)` differ by two characters; the
         // second retains on close and never releases, pinning the pool open forever. Every
         // pool-level test above passes either way.
-        const { createDeviceBrokerServer } = await import("../device-lab-broker.js");
+        const { createDeviceBrokerServer } = await import("@ccc/device-lab/device-lab-broker.js");
         const home = process.env.HOME;
         // Constructing a server registers owner state under HOME, which is read-only here.
         process.env.HOME = mkdtempSync(join(tmpdir(), "ccc-session-pool-home-"));

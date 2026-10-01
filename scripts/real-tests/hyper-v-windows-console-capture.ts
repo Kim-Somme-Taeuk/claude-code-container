@@ -1,7 +1,7 @@
 import { randomBytes } from "crypto";
 import { lstatSync, mkdirSync, renameSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
-import { hyperVVmName } from "../../src/host-control/hyper-v/index.ts";
+import { hyperVVmName } from "#device-lab/host-control/hyper-v/index.js";
 import { hiddenSpawnSync, repoRoot } from "./helpers.ts";
 
 const WIDTH = 640;

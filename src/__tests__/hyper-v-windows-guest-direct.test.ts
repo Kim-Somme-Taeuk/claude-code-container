@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createHyperVGuestDirectClient, type HyperVWindowsExecutionRequest } from "../hyper-v-windows/index.js";
-import { invokeDeviceLabHyperVGuestDirect } from "../device-lab/broker/hyper-v/guest-direct-adapter.js";
+import { createHyperVGuestDirectClient, type HyperVWindowsExecutionRequest } from "@ccc/hyper-v/index.js";
+import { invokeDeviceLabHyperVGuestDirect } from "@ccc/device-lab/device-lab/broker/hyper-v/guest-direct-adapter.js";
 
 const identity = {
     selector: { kind: "id" as const, id: "12345678-1234-1234-1234-123456789abc" },

@@ -2,7 +2,7 @@
 
 ## Current canonical contract (2026-09-30)
 
-Discovery and public dispatch now share one 59-tool unprefixed catalog. The historical
+Discovery and public dispatch now share one 64-tool unprefixed catalog. The historical
 compatibility observations below are superseded: six mobile aliases and hidden
 broker/image operations are no longer public MCP calls. Creation arguments are
 flat, existing-device tools use deviceId without backend selectors, and flow steps require
@@ -31,8 +31,11 @@ listing adapter yet. See [file listing requirements](REQ__file-listing.md).
 
 The preparation follow-up removes public `workspace_sync` and `artifacts_export`,
 which operate on management storage rather than the guest. The resulting catalog
-has 59 tools. Create now separates four common schema fields from backend-specific
-branches and automatically provisions mobile resources from creation inputs.
+had 59 tools. The approved OS-specific creation split replaces `create` with
+`create_android_emulator`, `create_ios_simulator`, `create_windows_vm`,
+`create_windows_sandbox`, `create_linux_vm`, and `create_macos_vm`, producing 64.
+Each tool exposes only platform-specific fields without `backend`, including
+platform-specific provider/profile enums. Mobile resources provision from inputs.
 `reset` exclusively erases iOS Simulator; `clear_app_data` targets an app. Public
 operation deadlines use `timeoutMs`, with helper deadlines translated internally.
 See [preparation-free requirements](REQ__preparation-free-tools.md).

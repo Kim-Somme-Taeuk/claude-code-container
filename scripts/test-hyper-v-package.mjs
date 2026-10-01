@@ -41,7 +41,7 @@ try {
     const consumerSource = join(temporaryRoot, "hyper-v-network-consumer.mts");
     const consumerConfig = join(temporaryRoot, "hyper-v-network-consumer.json");
     writeFileSync(consumerSource, [
-        'import { createHyperVGuestDirectClient, createHyperVHostNetworkSpec, parseHyperVNatName, parseHyperVVirtualSwitchName, planHyperVVirtualMachineCreation, type HyperVConvertVHDRequest, type HyperVCreateVirtualMachineRequest, type HyperVGetVMDiagnosticRequest, type HyperVGuestDirectRequest, type HyperVGuestDirectResult, type HyperVHostNetworkReconciliationOutcome, type HyperVMountVHDRequest, type HyperVRemoveHostFilesRequest, type HyperVRemoveHostFilesResult, type HyperVRemoveVMGuard, type HyperVResizeVHDRequest, type HyperVVhdMutationCallOptions, type HyperVVirtualHardDisk, type HyperVWindowsClient } from "./package/dist/hyper-v-windows/index.js";',
+        'import { createHyperVGuestDirectClient, createHyperVHostNetworkSpec, parseHyperVNatName, parseHyperVVirtualSwitchName, planHyperVVirtualMachineCreation, type HyperVConvertVHDRequest, type HyperVCreateVirtualMachineRequest, type HyperVGetVMDiagnosticRequest, type HyperVGuestDirectRequest, type HyperVGuestDirectResult, type HyperVHostNetworkReconciliationOutcome, type HyperVMountVHDRequest, type HyperVRemoveHostFilesRequest, type HyperVRemoveHostFilesResult, type HyperVRemoveVMGuard, type HyperVResizeVHDRequest, type HyperVVhdMutationCallOptions, type HyperVVirtualHardDisk, type HyperVWindowsClient } from "./package/dist/packages/hyper-v/dist/index.js";',
         'const network = createHyperVHostNetworkSpec({ switchName: parseHyperVVirtualSwitchName("consumer-switch"), natName: parseHyperVNatName("consumer-nat"), cidr: "172.29.0.0/24", gateway: "172.29.0.1" });',
         'function outcomeKind(outcome: HyperVHostNetworkReconciliationOutcome): string { switch (outcome.kind) { case "settled": case "conflict": case "needs-administrator": case "execute": case "indeterminate": return outcome.kind; } }',
         'function createVm(client: HyperVWindowsClient, request: HyperVCreateVirtualMachineRequest) {',
@@ -146,13 +146,13 @@ try {
     if (!fixtureReplacementRejected) throw new Error("replaced packaged Hyper-V fixture asset was accepted");
     writeFileSync(packagedFixturePath, packagedFixtureOriginal);
 
-    const packagedLibrary = await import(pathToFileURL(join(packageRoot, "dist", "hyper-v-windows", "index.js")).href);
+    const packagedLibrary = await import(pathToFileURL(join(packageRoot, "dist", "packages", "hyper-v", "dist", "index.js")).href);
     if (typeof packagedLibrary.createHyperVGuestDirectClient !== "function"
         || !["Get-VMDiagnostic", "Restart-VM", "Remove-VM", "Remove-HostFiles", "Invoke-Guest"]
             .every((operation) => packagedLibrary.HYPER_V_WINDOWS_OPERATIONS.includes(operation))) {
         throw new Error("packaged Hyper-V typed operations are incomplete");
     }
-    const operationAsset = join(packageRoot, "scripts", "host-control", "hyper-v", "Invoke-HyperVWindowsOperation.ps1");
+    const operationAsset = join(packageRoot, "dist", "packages", "hyper-v", "powershell", "Invoke-HyperVWindowsOperation.ps1");
     const operationOriginal = readFileSync(operationAsset);
     const operationExecutor = packagedLibrary.createHyperVWindowsPowerShellExecutor({
         executable: "unused-by-package-integrity-probe",
@@ -199,7 +199,7 @@ try {
             throw new Error("packaged Hyper-V network real-test entrypoint did not use its prebuilt host proof");
         }
     }
-    const resolverUrl = pathToFileURL(join(packageRoot, "dist", "host-control", "hyper-v", "powershell-assets.js"));
+    const resolverUrl = pathToFileURL(join(packageRoot, "dist", "packages", "device-lab", "dist", "host-control", "hyper-v", "powershell-assets.js"));
     const { hyperVPowerShellAssetPath } = await import(resolverUrl.href);
 
     // "snapshot-create" left the manifest when the typed library took over checkpoints; the
@@ -213,7 +213,7 @@ try {
         }
     }
 
-    const coreModule = join(packageRoot, "scripts", "host-control", "hyper-v", "Ccc.HyperV.Core.psm1");
+    const coreModule = join(packageRoot, "dist", "packages", "device-lab", "powershell", "Ccc.HyperV.Core.psm1");
     const replacement = `${coreModule}.replacement`;
     writeFileSync(replacement, `${readFileSync(coreModule, "utf8")}\n# replaced after verification\n`);
     renameSync(replacement, coreModule);

@@ -4,8 +4,8 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { hyperVOwnerImageProfileRoot, readHyperVImageManifestMetadata, resolveHyperVImageForCreate, type HyperVImageStoreRuntime } from "../device-lab/broker/hyper-v/image-store.js";
-import { HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP } from "../hyper-v-windows/low-level/powershell-transport.js";
+import { hyperVOwnerImageProfileRoot, readHyperVImageManifestMetadata, resolveHyperVImageForCreate, type HyperVImageStoreRuntime } from "@ccc/device-lab/device-lab/broker/hyper-v/image-store.js";
+import { HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP } from "@ccc/hyper-v/low-level/powershell-transport.js";
 
 type Variant = "normal" | "fixed" | "mbr" | "mount-response-lost" | "dismount-malformed" | "detach-unconfirmed" | "readback-failed" | "hash-changed" | "unsupported-partition" | "invalid-vhd" | "unsupported-vhd-type" | "deadline-expire" | "manifest-created-race";
 const roots: string[] = [];

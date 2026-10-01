@@ -3,7 +3,7 @@ import { createServer } from "http";
 import type { AddressInfo } from "net";
 import { dirname, join } from "path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { fetchIosAppiumJson, IOS_APPIUM_HTTP_MAX_TIMEOUT_MS, IOS_APPIUM_RESPONSE_LIMIT_BYTES, normalizeIosAppiumHttpTimeoutMs } from "../../device-lab-mcp/src/backends/ios-simulator.mjs";
+import { fetchIosAppiumJson, IOS_APPIUM_HTTP_MAX_TIMEOUT_MS, IOS_APPIUM_RESPONSE_LIMIT_BYTES, normalizeIosAppiumHttpTimeoutMs } from "@ccc/device-lab/providers/backends/ios-simulator.mjs";
 import { exerciseStaleExternalIosSession, cleanupFakeIosMcpContext, createFakeIosMcpContext, TIMEOUT, type FakeIosMcpContext } from "./helpers/fake-ios-mcp-fixture.js";
 
 function parseToolJson(result: { content?: unknown }) {
@@ -151,8 +151,8 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
 
     it("reports iOS simctl inventory without booting simulators", { timeout: TIMEOUT }, async () => {
         const inventory = await client.callTool({
-            name: "inventory",
-            arguments: { backend: "ios-simulator" },
+            name: "devices",
+            arguments: { view: "available", backend: "ios-simulator" },
         });
         expect(inventory.isError).not.toBe(true);
         const payload = JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -182,17 +182,17 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
 
     it("creates, boots, stops, and deletes owner-prefixed iOS simulators only when explicit", { timeout: TIMEOUT }, async () => {
         const inventory = await client.callTool({
-            name: "inventory",
-            arguments: { backend: "ios-simulator" },
+            name: "devices",
+            arguments: { view: "available", backend: "ios-simulator" },
         });
         const ownerId = (JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as { ownerId: string }).ownerId;
         const simulatorName = `ccc-${ownerId}-iphone-owned`;
         const ownedDeviceId = `ios-iphone-owned-${Date.now()}`;
 
         const create = await client.callTool({
-            name: "create",
+            name: "create_ios_simulator",
             arguments: {
-                backend: "ios-simulator",
+
                 name: "iPhone Owned",
                 deviceId: ownedDeviceId,
                 simulatorName,
@@ -252,7 +252,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
 
         const launchApp = await client.callTool({
             name: "launch_app",
-            arguments: { deviceId: ownedDeviceId, bundleId: "com.example.Test" },
+            arguments: { deviceId: ownedDeviceId, appId: "com.example.Test" },
         });
         expect(launchApp.isError).not.toBe(true);
         expect(parseToolJson(launchApp)).toEqual(expect.objectContaining({
@@ -274,7 +274,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
 
         const commonLaunch = await client.callTool({
             name: "launch_app",
-            arguments: { deviceId: ownedDeviceId, bundleId: "com.example.Common" },
+            arguments: { deviceId: ownedDeviceId, appId: "com.example.Common" },
         });
         expect(commonLaunch.isError).not.toBe(true);
         expect(parseToolJson(commonLaunch)).toEqual(expect.objectContaining({
@@ -285,7 +285,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
 
         const stopApp = await client.callTool({
             name: "stop_app",
-            arguments: { deviceId: ownedDeviceId, bundleId: "com.example.Test" },
+            arguments: { deviceId: ownedDeviceId, appId: "com.example.Test" },
         });
         expect(stopApp.isError).not.toBe(true);
         expect(JSON.parse(((stopApp.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -297,17 +297,17 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         mkdirSync(iosContainerRoot, { recursive: true });
         const clearAppData = await client.callTool({
             name: "clear_app_data",
-            arguments: { deviceId: ownedDeviceId, bundleId: "com.example.Test", confirmDestructive: true },
+            arguments: { deviceId: ownedDeviceId, appId: "com.example.Test", confirmDestructive: true },
         });
         expect(clearAppData.isError, (clearAppData.content as Array<{ text?: string }>)[0]?.text ?? "").not.toBe(true);
         expect(JSON.parse(((clearAppData.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
-            reset: { bundleId: "com.example.Test", containerType: "data" },
+            reset: { appId: "com.example.Test", containerType: "data" },
             provider: "simctl-app-container",
         }));
 
         const uninstallApp = await client.callTool({
             name: "uninstall_app",
-            arguments: { deviceId: ownedDeviceId, bundleId: "com.example.Test", confirmDestructive: true },
+            arguments: { deviceId: ownedDeviceId, appId: "com.example.Test", confirmDestructive: true },
         });
         expect(uninstallApp.isError).not.toBe(true);
         expect(JSON.parse(((uninstallApp.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -316,12 +316,12 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         }));
 
         const advancedIosCalls: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
-            ["permission", { action: "grant", deviceId: ownedDeviceId, bundleId: "com.example.Test", service: "camera" }, { provider: "simctl", permission: { bundleId: "com.example.Test", service: "camera", action: "grant" } }],
-            ["permission", { action: "revoke", deviceId: ownedDeviceId, bundleId: "com.example.Test", service: "camera" }, { provider: "simctl", permission: { bundleId: "com.example.Test", service: "camera", action: "revoke" } }],
+            ["permission", { action: "grant", deviceId: ownedDeviceId, appId: "com.example.Test", permission: "camera" }, { provider: "simctl", permission: { appId: "com.example.Test", service: "camera", action: "grant" } }],
+            ["permission", { action: "revoke", deviceId: ownedDeviceId, appId: "com.example.Test", permission: "camera" }, { provider: "simctl", permission: { appId: "com.example.Test", service: "camera", action: "revoke" } }],
             ["set_location", { deviceId: ownedDeviceId, latitude: 37.7749, longitude: -122.4194 }, { provider: "simctl", location: { latitude: 37.7749, longitude: -122.4194 } }],
             ["clipboard", { deviceId: ownedDeviceId, text: "ios clip" }, { provider: "simctl", clipboard: { set: true } }],
             ["clipboard", { deviceId: ownedDeviceId }, { provider: "simctl", text: "", status: 0 }],
-            ["wait_for_app", { deviceId: ownedDeviceId, bundleId: "com.example.Test", timeoutMs: 1000, intervalMs: 50 }, { provider: "simctl", bundleId: "com.example.Test", running: true }],
+            ["wait_for_app", { deviceId: ownedDeviceId, appId: "com.example.Test", timeoutMs: 1000, intervalMs: 50 }, { provider: "simctl", appId: "com.example.Test", running: true }],
         ] as const;
         for (const [name, callArgs, expectedPayload] of advancedIosCalls) {
             const action = await client.callTool({ name, arguments: callArgs });
@@ -334,16 +334,16 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         writeFileSync(localUploadPath, "ios upload content");
         const upload = await client.callTool({
             name: "upload",
-            arguments: { deviceId: ownedDeviceId, localPath: localUploadPath, remotePath: "/Documents/uploaded.txt", bundleId: "com.example.Test" },
+            arguments: { deviceId: ownedDeviceId, localPath: localUploadPath, remotePath: "/Documents/uploaded.txt", appId: "com.example.Test" },
         });
         expect(upload.isError, (upload.content as Array<{ text?: string }>)[0].text).not.toBe(true);
         const uploadPayload = JSON.parse(((upload.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            uploaded: { remotePath: string; bundleId: string; containerType: string };
+            uploaded: { remotePath: string; appId: string; containerType: string };
             containerRoot: string;
         };
         expect(uploadPayload.uploaded).toEqual(expect.objectContaining({
             remotePath: "Documents/uploaded.txt",
-            bundleId: "com.example.Test",
+            appId: "com.example.Test",
             containerType: "data",
         }));
         expect(uploadPayload.containerRoot).toBe(iosContainerRoot);
@@ -351,7 +351,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
 
         writeFileSync(join(iosContainerRoot, "Documents/.hidden"), "abc");
         const files = await client.callTool({ name: "list_files", arguments: {
-            deviceId: ownedDeviceId, path: "Documents", bundleId: "com.example.Test",
+            deviceId: ownedDeviceId, path: "Documents", appId: "com.example.Test",
         } });
         expect(files.isError, JSON.stringify(files)).not.toBe(true);
         expect(parseToolJson(files)).toEqual({ entries: expect.arrayContaining([
@@ -359,21 +359,26 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
             expect.objectContaining({ name: ".hidden", type: "file" }),
         ]) });
         const limitedFiles = await client.callTool({ name: "list_files", arguments: {
-            deviceId: ownedDeviceId, path: "Documents", bundleId: "com.example.Test", limit: 1,
+            deviceId: ownedDeviceId, path: "Documents", appId: "com.example.Test", limit: 1,
         } });
         expect(parseToolJson(limitedFiles)).toMatchObject({ entries: [expect.any(Object)], truncated: true });
-        for (const invalid of [{ path: "Documents" }, { path: "../", bundleId: "com.example.Test" }, { path: "absent", bundleId: "com.example.Test" }]) {
+        for (const [invalid, expectedError] of [
+            [{ path: "Documents" }, "list-files-bundle-id-required"],
+            [{ path: "../", appId: "com.example.Test" }, "list-files-container-escape"],
+            [{ path: "absent", appId: "com.example.Test" }, "Unable to resolve iOS app container path"],
+        ] as const) {
             const refused = await client.callTool({ name: "list_files", arguments: { deviceId: ownedDeviceId, ...invalid } });
             expect(refused.isError, JSON.stringify(refused)).toBe(true);
+            expect((refused.content as Array<{ text?: string }>)[0].text).toContain(expectedError);
         }
 
         const download = await client.callTool({
             name: "download",
-            arguments: { deviceId: ownedDeviceId, remotePath: "Documents/uploaded.txt", localPath: localDownloadPath, bundleId: "com.example.Test" },
+            arguments: { deviceId: ownedDeviceId, remotePath: "Documents/uploaded.txt", localPath: localDownloadPath, appId: "com.example.Test" },
         });
         expect(download.isError).not.toBe(true);
         expect(parseToolJson(download)).toEqual(expect.objectContaining({
-            downloaded: { remotePath: "Documents/uploaded.txt", localPath: localDownloadPath, bundleId: "com.example.Test", containerType: "data" },
+            downloaded: { remotePath: "Documents/uploaded.txt", localPath: localDownloadPath, appId: "com.example.Test", containerType: "data" },
             containerRoot: iosContainerRoot,
             provider: "simctl-app-container",
         }));
@@ -388,14 +393,14 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
 
         const missingLocalUpload = await client.callTool({
             name: "upload",
-            arguments: { deviceId: ownedDeviceId, localPath: join(homeDir, "missing-upload.txt"), remotePath: "Documents/missing.txt", bundleId: "com.example.Test" },
+            arguments: { deviceId: ownedDeviceId, localPath: join(homeDir, "missing-upload.txt"), remotePath: "Documents/missing.txt", appId: "com.example.Test" },
         });
         expect(missingLocalUpload.isError).toBe(true);
         expect((missingLocalUpload.content as Array<{ text?: string }>)[0].text).toContain("upload-local-path-does-not-exist");
 
         const escapingUpload = await client.callTool({
             name: "upload",
-            arguments: { deviceId: ownedDeviceId, localPath: localUploadPath, remotePath: "../escape.txt", bundleId: "com.example.Test" },
+            arguments: { deviceId: ownedDeviceId, localPath: localUploadPath, remotePath: "../escape.txt", appId: "com.example.Test" },
         });
         expect(escapingUpload.isError).toBe(true);
         expect((escapingUpload.content as Array<{ text?: string }>)[0].text).toContain("Refusing path outside iOS app container");
@@ -406,7 +411,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         symlinkSync(outsideContainerDir, join(iosContainerRoot, "Links"));
         const symlinkUpload = await client.callTool({
             name: "upload",
-            arguments: { deviceId: ownedDeviceId, localPath: localUploadPath, remotePath: "Links/new-dir/escape.txt", bundleId: "com.example.Test" },
+            arguments: { deviceId: ownedDeviceId, localPath: localUploadPath, remotePath: "Links/new-dir/escape.txt", appId: "com.example.Test" },
         });
         expect(symlinkUpload.isError).toBe(true);
         expect((symlinkUpload.content as Array<{ text?: string }>)[0].text).toContain("escapes the container");
@@ -414,33 +419,33 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
 
         const symlinkDownload = await client.callTool({
             name: "download",
-            arguments: { deviceId: ownedDeviceId, remotePath: "Links/outside.txt", localPath: join(homeDir, "symlink-download.txt"), bundleId: "com.example.Test" },
+            arguments: { deviceId: ownedDeviceId, remotePath: "Links/outside.txt", localPath: join(homeDir, "symlink-download.txt"), appId: "com.example.Test" },
         });
         expect(symlinkDownload.isError).toBe(true);
         expect((symlinkDownload.content as Array<{ text?: string }>)[0].text).toContain("escapes the container");
 
         const escapedFiles = await client.callTool({ name: "list_files", arguments: {
-            deviceId: ownedDeviceId, path: "Links", bundleId: "com.example.Test",
+            deviceId: ownedDeviceId, path: "Links", appId: "com.example.Test",
         } });
         expect(escapedFiles.isError, JSON.stringify(escapedFiles)).toBe(true);
         expect(JSON.stringify(escapedFiles)).not.toContain('"entries"');
 
         const reset = await client.callTool({
             name: "clear_app_data",
-            arguments: { deviceId: ownedDeviceId, bundleId: "com.example.Test", confirmDestructive: true },
+            arguments: { deviceId: ownedDeviceId, appId: "com.example.Test", confirmDestructive: true },
         });
         expect(reset.isError).not.toBe(true);
         const resetPayload = JSON.parse(((reset.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            reset: { bundleId: string; containerType: string };
+            reset: { appId: string; containerType: string };
             containerRoot: string;
         };
-        expect(resetPayload.reset).toEqual({ bundleId: "com.example.Test", containerType: "data" });
+        expect(resetPayload.reset).toEqual({ appId: "com.example.Test", containerType: "data" });
         expect(resetPayload.containerRoot).toBe(iosContainerRoot);
         expect(() => readFileSync(join(iosContainerRoot, "Documents/uploaded.txt"), "utf-8")).toThrow();
 
         const missingRemoteDownload = await client.callTool({
             name: "download",
-            arguments: { deviceId: ownedDeviceId, remotePath: "Documents/uploaded.txt", localPath: join(homeDir, "missing-download.txt"), bundleId: "com.example.Test" },
+            arguments: { deviceId: ownedDeviceId, remotePath: "Documents/uploaded.txt", localPath: join(homeDir, "missing-download.txt"), appId: "com.example.Test" },
         });
         expect(missingRemoteDownload.isError).toBe(true);
         expect((missingRemoteDownload.content as Array<{ text?: string }>)[0].text).toContain("remotePath does not exist");
@@ -750,7 +755,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
 
         const iosAppiumActions = [
             ["click", { deviceId: ownedDeviceId, x: 10, y: 20 }],
-            ["double_click", { deviceId: ownedDeviceId, x: 11, y: 21 }],
+            ["click", { count: 2, deviceId: ownedDeviceId, x: 11, y: 21 }],
             ["long_press", { deviceId: ownedDeviceId, x: 12, y: 22, durationMs: 900 }],
             ["swipe", { deviceId: ownedDeviceId, x1: 10, y1: 20, x2: 30, y2: 40, durationMs: 250 }],
             ["drag", { deviceId: ownedDeviceId, x1: 15, y1: 25, x2: 35, y2: 45, durationMs: 800 }],
@@ -783,7 +788,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
             arguments: { deviceId: ownedDeviceId },
         });
         expect(missingIosKey.isError).toBe(true);
-        expect((missingIosKey.content as Array<{ text?: string }>)[0].text).toContain("key requires key or keyCode");
+        expect((missingIosKey.content as Array<{ text?: string }>)[0].text).toContain("key requires exactly one of key or keyCode");
 
         const invalidOrientation = await client.callTool({
             name: "set_orientation",
@@ -927,14 +932,14 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
     });
 
     it("rolls back a boot superseded by a same-id state generation", { timeout: TIMEOUT }, async () => {
-        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "ios-simulator" } });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "ios-simulator" } });
         const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
         const deviceId = `ios-generation-race-${Date.now()}`;
         const simulatorName = `ccc-${ownerId}-generation-race`;
         const create = await client.callTool({
-            name: "create",
+            name: "create_ios_simulator",
             arguments: {
-                backend: "ios-simulator",
+
                 deviceId,
                 name: "iOS generation race",
                 simulatorName,
@@ -981,14 +986,14 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
     });
 
     it.each(["stop", "delete"])("preserves a same-id successor that supersedes iOS Simulator %s", { timeout: TIMEOUT }, async (operation) => {
-        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "ios-simulator" } });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "ios-simulator" } });
         const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
         const deviceId = `ios-${operation}-race-${Date.now()}`;
         const simulatorName = `ccc-${ownerId}-${operation}-race`;
         const create = await client.callTool({
-            name: "create",
+            name: "create_ios_simulator",
             arguments: {
-                backend: "ios-simulator",
+
                 deviceId,
                 name: `iOS ${operation} race`,
                 simulatorName,
@@ -1040,13 +1045,13 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
     });
 
     it("preserves booted state when simctl shutdown fails", { timeout: TIMEOUT }, async () => {
-        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "ios-simulator" } });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "ios-simulator" } });
         const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
         const deviceId = `ios-shutdown-failure-${Date.now()}`;
         const create = await client.callTool({
-            name: "create",
+            name: "create_ios_simulator",
             arguments: {
-                backend: "ios-simulator",
+
                 deviceId,
                 name: "iOS shutdown failure",
                 simulatorName: `ccc-${ownerId}-shutdown-failure`,
@@ -1079,13 +1084,13 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
     });
 
     it("preserves active recording metadata when device stop cannot verify the recorder", { timeout: TIMEOUT }, async () => {
-        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "ios-simulator" } });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "ios-simulator" } });
         const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
         const deviceId = `ios-stop-recorder-mismatch-${Date.now()}`;
         const create = await client.callTool({
-            name: "create",
+            name: "create_ios_simulator",
             arguments: {
-                backend: "ios-simulator",
+
                 deviceId,
                 name: "iOS stop recorder mismatch",
                 simulatorName: `ccc-${ownerId}-stop-recorder-mismatch`,
@@ -1126,13 +1131,13 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
     });
 
     it("persists recorder and simulator shutdown when later Appium cleanup fails", { timeout: TIMEOUT }, async () => {
-        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "ios-simulator" } });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "ios-simulator" } });
         const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
         const deviceId = `ios-stop-partial-cleanup-${Date.now()}`;
         expect((await client.callTool({
-            name: "create",
+            name: "create_ios_simulator",
             arguments: {
-                backend: "ios-simulator",
+
                 deviceId,
                 name: "iOS stop partial cleanup",
                 simulatorName: `ccc-${ownerId}-stop-partial-cleanup`,
@@ -1189,13 +1194,13 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
     });
 
     it("preserves Appium metadata when forced delete cannot verify the owned process", { timeout: TIMEOUT }, async () => {
-        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "ios-simulator" } });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "ios-simulator" } });
         const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
         const deviceId = `ios-delete-appium-mismatch-${Date.now()}`;
         const create = await client.callTool({
-            name: "create",
+            name: "create_ios_simulator",
             arguments: {
-                backend: "ios-simulator",
+
                 deviceId,
                 name: "iOS delete Appium mismatch",
                 simulatorName: `ccc-${ownerId}-delete-appium-mismatch`,
@@ -1243,13 +1248,13 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
     });
 
     it("commits stopped recording and Appium state when simctl delete fails", { timeout: TIMEOUT }, async () => {
-        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "ios-simulator" } });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "ios-simulator" } });
         const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
         const deviceId = `ios-delete-partial-simctl-${Date.now()}`;
         expect((await client.callTool({
-            name: "create",
+            name: "create_ios_simulator",
             arguments: {
-                backend: "ios-simulator",
+
                 deviceId,
                 name: "iOS delete partial simctl",
                 simulatorName: `ccc-${ownerId}-delete-partial-simctl`,
@@ -1291,13 +1296,13 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
     });
 
     it("does not restore device metadata after simulator deletion when staging cleanup fails", { timeout: TIMEOUT }, async () => {
-        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "ios-simulator" } });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "ios-simulator" } });
         const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
         const deviceId = `ios-delete-partial-stage-${Date.now()}`;
         expect((await client.callTool({
-            name: "create",
+            name: "create_ios_simulator",
             arguments: {
-                backend: "ios-simulator",
+
                 deviceId,
                 name: "iOS delete partial stage",
                 simulatorName: `ccc-${ownerId}-delete-partial-stage`,
@@ -1306,7 +1311,8 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
             },
         })).isError).not.toBe(true);
         expect((await client.callTool({ name: "start", arguments: { deviceId, bootTimeoutMs: 1000 } })).isError).not.toBe(true);
-        expect((await client.callTool({ name: "ui", arguments: { deviceId } })).isError).not.toBe(true);
+        const ui = await client.callTool({ name: "ui", arguments: { deviceId } });
+        expect(ui.isError, JSON.stringify(ui)).not.toBe(true);
         const recordStart = await client.callTool({
             name: "record_video",
             arguments: { action: "start", deviceId, localPath: join(homeDir, "delete-partial-stage.mp4") },
@@ -1337,23 +1343,23 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
 
     it("provisions iOS simulators by default and refuses non-owned simulator operations", { timeout: TIMEOUT }, async () => {
         const inventory = await client.callTool({
-            name: "inventory",
-            arguments: { backend: "ios-simulator" },
+            name: "devices",
+            arguments: { view: "available", backend: "ios-simulator" },
         });
         const ownerId = (JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as { ownerId: string }).ownerId;
         const metadataOnlyName = `ccc-${ownerId}-ios-metadata-only`;
 
         const metadataOnly = await client.callTool({
-            name: "create",
+            name: "create_ios_simulator",
             arguments: {
-                backend: "ios-simulator",
+
                 name: "iOS Metadata Only",
                 simulatorName: metadataOnlyName,
                 deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
                 runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-0",
             },
         });
-        expect(metadataOnly.isError).not.toBe(true);
+        expect(metadataOnly.isError, JSON.stringify(metadataOnly)).not.toBe(true);
         const metadataPayload = JSON.parse(((metadataOnly.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             device: { provisioning: string; udid: string | null };
         };
@@ -1369,9 +1375,9 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         const forgedAliasId = "ios-forged-owner-alias";
         const forgedAliasName = `ccc-${ownerId}-forged-owner-alias`;
         const forgedAlias = await client.callTool({
-            name: "create",
+            name: "create_ios_simulator",
             arguments: {
-                backend: "ios-simulator",
+
                 name: "Forged Owner Alias",
                 deviceId: forgedAliasId,
                 simulatorName: forgedAliasName,
@@ -1397,9 +1403,9 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         expect(forgedAliasDeleted.isError).not.toBe(true);
 
         const foreignCreate = await client.callTool({
-            name: "create",
+            name: "create_ios_simulator",
             arguments: {
-                backend: "ios-simulator",
+
                 name: "Foreign iOS Create",
                 simulatorName: "foreign-ios",
                 deviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-15",
@@ -1410,9 +1416,9 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         expect((foreignCreate.content as Array<{ text?: string }>)[0].text).toContain("Refusing to create non-owned iOS Simulator name");
 
         const foreignMetadata = await client.callTool({
-            name: "create",
+            name: "create_ios_simulator",
             arguments: {
-                backend: "ios-simulator",
+
                 name: "Foreign iOS Metadata",
                 simulatorName: "foreign-ios",
                 udid: "FOREIGN-UDID",
@@ -1430,21 +1436,21 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         writeFileSync(join(homeDir, "foreign-ios-upload.txt"), "foreign");
         const foreignUpload = await client.callTool({
             name: "upload",
-            arguments: { deviceId: "ios-foreign-ios-metadata", localPath: join(homeDir, "foreign-ios-upload.txt"), remotePath: "Documents/foreign.txt", bundleId: "com.example.Test" },
+            arguments: { deviceId: "ios-foreign-ios-metadata", localPath: join(homeDir, "foreign-ios-upload.txt"), remotePath: "Documents/foreign.txt", appId: "com.example.Test" },
         });
         expect(foreignUpload.isError).toBe(true);
         expect((foreignUpload.content as Array<{ text?: string }>)[0].text).toContain("Refusing iOS Simulator upload for non-owned simulator name");
 
         const foreignDownload = await client.callTool({
             name: "download",
-            arguments: { deviceId: "ios-foreign-ios-metadata", remotePath: "Documents/foreign.txt", localPath: join(homeDir, "foreign-download.txt"), bundleId: "com.example.Test" },
+            arguments: { deviceId: "ios-foreign-ios-metadata", remotePath: "Documents/foreign.txt", localPath: join(homeDir, "foreign-download.txt"), appId: "com.example.Test" },
         });
         expect(foreignDownload.isError).toBe(true);
         expect((foreignDownload.content as Array<{ text?: string }>)[0].text).toContain("Refusing iOS Simulator download for non-owned simulator name");
 
         const foreignAppReset = await client.callTool({
             name: "clear_app_data",
-            arguments: { deviceId: "ios-foreign-ios-metadata", bundleId: "com.example.Test", confirmDestructive: true },
+            arguments: { deviceId: "ios-foreign-ios-metadata", appId: "com.example.Test", confirmDestructive: true },
         });
         expect(foreignAppReset.isError).toBe(true);
         expect((foreignAppReset.content as Array<{ text?: string }>)[0].text).toContain("non-owned simulator name");

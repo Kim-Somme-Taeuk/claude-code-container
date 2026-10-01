@@ -6,10 +6,17 @@ import { dirname, join, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { execSync, execFileSync, spawnSync } from "child_process";
 import { homedir } from "os";
-import { canonicalWindowsPowerShellPath, hiddenWindowsPowerShellArgs } from "../device-lab-mcp/src/state/windows-system-powershell.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..");
+// Source installs run before compilation; installed distributions use the embedded
+// provider package. Neither form depends on a workspace symlink in node_modules.
+const powershellModule = [
+    join(projectRoot, "packages", "device-lab", "providers", "state", "windows-system-powershell.mjs"),
+    join(projectRoot, "dist", "packages", "device-lab", "providers", "state", "windows-system-powershell.mjs"),
+].find(path => existsSync(path));
+if (!powershellModule) throw new Error("CCC provider runtime is missing; reinstall the complete package.");
+const { canonicalWindowsPowerShellPath, hiddenWindowsPowerShellArgs } = await import(pathToFileURL(powershellModule).href);
 const distFile = join(projectRoot, "dist", "index.js");
 const isWindows = process.platform === "win32";
 
@@ -39,7 +46,7 @@ function getContentHash() {
     for (const f of files) {
         hash.update(readFileSync(join(projectRoot, f)));
     }
-    for (const dir of ["src", "scripts", "x11-mcp", "device-lab-mcp"]) {
+    for (const dir of ["src", "scripts", "packages", "device-lab-mcp"]) {
         hashDirectory(hash, join(projectRoot, dir));
     }
     return hash.digest("hex").substring(0, 12);
@@ -49,6 +56,7 @@ function hashDirectory(hash, dir) {
     const entries = readdirSync(dir, { withFileTypes: true })
         .sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
+        if (["node_modules", "dist", ".git"].includes(entry.name)) continue;
         const fullPath = join(dir, entry.name);
         hash.update(fullPath);
         if (entry.isDirectory()) {
@@ -249,19 +257,8 @@ export function materializeUnixInstallPayload(sourceRoot, targetDir) {
     cpSync(join(resolvedSourceRoot, "Containerfile"), join(resolvedTargetDir, "Containerfile"));
     cpSync(join(resolvedSourceRoot, "scripts"), join(resolvedTargetDir, "scripts"), { recursive: true });
 
-    const deviceLabTarget = join(resolvedTargetDir, "device-lab-mcp");
-    mkdirSync(deviceLabTarget, { recursive: true });
-    for (const file of ["package.json", "package-lock.json", "server.mjs"]) {
-        cpSync(join(resolvedSourceRoot, "device-lab-mcp", file), join(deviceLabTarget, file));
-    }
-    cpSync(
-        join(resolvedSourceRoot, "device-lab-mcp", "src"),
-        join(deviceLabTarget, "src"),
-        { recursive: true },
-    );
-
     const sourcePackage = JSON.parse(readFileSync(join(resolvedSourceRoot, "package.json"), "utf-8"));
-    const packageContent = JSON.stringify({ type: "module", version: sourcePackage.version }, null, 2);
+    const packageContent = JSON.stringify({ type: "module", version: sourcePackage.version, imports: sourcePackage.imports }, null, 2);
     writeFileSync(join(resolvedTargetDir, "package.json"), packageContent);
 }
 

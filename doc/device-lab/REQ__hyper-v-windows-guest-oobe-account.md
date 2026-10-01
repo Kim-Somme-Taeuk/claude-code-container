@@ -7,7 +7,7 @@ status: current
 # REQ — Create the Windows guest account in the oobeSystem pass
 
 ## Requirement
-`hyperVGuestProvisionCommand` (src/host-control/hyper-v/windows-guest.ts) MUST create the CCC
+`hyperVGuestProvisionCommand` (packages/device-lab/src/host-control/hyper-v/windows-guest.ts) MUST create the CCC
 PowerShell-Direct account in the Windows unattend **`oobeSystem`** configuration pass — via
 `<UserAccounts><LocalAccounts><LocalAccount wcm:action="add">` (member of the built-in
 `Administrators` group, password supplied through the `$PasswordXml` variable, never the literal

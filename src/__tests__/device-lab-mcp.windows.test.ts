@@ -4,7 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { cleanupWindowsSandboxMinimizeWatchdogs, windowsHelperScript, windowsReadyMinimizeWatchdogArgs, windowsSandboxGuestProcessStatus, windowsSandboxMinimizeWatchdogArgs, windowsSandboxRuntimeDelta, windowsSandboxSessionIdsFromListOutput, windowsWsbConfigLaunchArgs } from "../../device-lab-mcp/src/backends/windows-sandbox.mjs";
+import { cleanupWindowsSandboxMinimizeWatchdogs, windowsHelperScript, windowsReadyMinimizeWatchdogArgs, windowsSandboxGuestProcessStatus, windowsSandboxMinimizeWatchdogArgs, windowsSandboxRuntimeDelta, windowsSandboxSessionIdsFromListOutput, windowsWsbConfigLaunchArgs } from "@ccc/device-lab/providers/backends/windows-sandbox.mjs";
 import { installDefaultImplicitBroker } from "./helpers/device-lab-mcp-fixture.js";
 
 const repoRoot = join(__dirname, "../..");
@@ -176,7 +176,7 @@ exit 0
             guestUploadsDir: "C:\\ccc\\scratch\\uploads",
             guestDownloadsDir: "C:\\ccc\\scratch\\downloads",
         });
-        const asset = readFileSync(join(repoRoot, "device-lab-mcp", "src", "backends", "windows-helper.ps1"), "utf-8");
+        const asset = readFileSync(join(repoRoot, "packages", "device-lab", "providers", "backends", "windows-helper.ps1"), "utf-8");
         expect(asset).toBe(generated);
     });
 
@@ -278,9 +278,9 @@ exit 0
 
     it("writes owner-scoped Windows Sandbox config with helper bootstrap only on explicit start", { timeout: TIMEOUT }, async () => {
         const create = await client.callTool({
-            name: "create",
+            name: "create_windows_sandbox",
             arguments: {
-                backend: "windows-sandbox",
+
                 name: "Win Helper",
                 networking: false,
                 clipboard: false,
@@ -298,8 +298,8 @@ exit 0
 
         expect(readFileSync(logPath, { encoding: "utf-8", flag: "a+" })).not.toContain("wsb start");
         const inventory = await client.callTool({
-            name: "inventory",
-            arguments: { backend: "windows-sandbox" },
+            name: "devices",
+            arguments: { view: "available", backend: "windows-sandbox" },
         });
         expect(inventory.isError).not.toBe(true);
         const inventoryPayload = JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -607,8 +607,8 @@ exit 0
         });
 
         const doubleClick = await client.callTool({
-            name: "double_click",
-            arguments: { deviceId: "windows-win-helper", x: 30, y: 50, timeoutMs: 1000 },
+            name: "click",
+            arguments: { count: 2, deviceId: "windows-win-helper", x: 30, y: 50, timeoutMs: 1000 },
         });
         expect(doubleClick.isError).not.toBe(true);
         expect(JSON.parse(((doubleClick.content as Array<{ text?: string }>)[0].text ?? "{}")).doubleClicked).toEqual({
@@ -970,9 +970,9 @@ exit 0
 
     it("cleans Windows Sandbox scratch on delete and preserves state when forced stop fails", { timeout: TIMEOUT }, async () => {
         const stoppedCreate = await client.callTool({
-            name: "create",
+            name: "create_windows_sandbox",
             arguments: {
-                backend: "windows-sandbox",
+
                 name: "Win Delete Stopped",
                 deviceId: "windows-delete-stopped",
             },
@@ -991,9 +991,9 @@ exit 0
         expect(existsSync(stoppedCreated.device.helper.scratchDir)).toBe(false);
 
         const runningCreate = await client.callTool({
-            name: "create",
+            name: "create_windows_sandbox",
             arguments: {
-                backend: "windows-sandbox",
+
                 name: "Win Delete Running",
                 deviceId: "windows-delete-running",
             },
@@ -1034,8 +1034,8 @@ exit 0
         expect(logAfterForceDelete.slice(logBeforeForceDelete.length)).toMatch(/wsb stop --id [0-9a-f-]{36}/);
         expect(existsSync(runningCreated.device.helper.scratchDir)).toBe(false);
         const inventoryAfterDelete = await client.callTool({
-            name: "inventory",
-            arguments: { backend: "windows-sandbox" },
+            name: "devices",
+            arguments: { view: "available", backend: "windows-sandbox" },
         });
         expect(inventoryAfterDelete.isError).not.toBe(true);
         const inventoryAfterDeletePayload = JSON.parse(((inventoryAfterDelete.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -1044,9 +1044,9 @@ exit 0
         expect(inventoryAfterDeletePayload.devices.some((device) => device.id === "windows-delete-running")).toBe(false);
 
         const failCreate = await client.callTool({
-            name: "create",
+            name: "create_windows_sandbox",
             arguments: {
-                backend: "windows-sandbox",
+
                 name: "Win Delete Stop Failure",
                 deviceId: "windows-delete-stop-failure",
             },
@@ -1087,9 +1087,9 @@ exit 0
 
     it("falls back to a one-shot helper request when the long-running helper does not answer", { timeout: TIMEOUT }, async () => {
         const create = await client.callTool({
-            name: "create",
+            name: "create_windows_sandbox",
             arguments: {
-                backend: "windows-sandbox",
+
                 name: "Win One Shot",
                 deviceId: "windows-one-shot",
             },
@@ -1166,9 +1166,9 @@ exit 0
         writeFileSync(failExistingLoginPath, "fail");
         const logBefore = readFileSync(logPath, { encoding: "utf-8", flag: "a+" });
         const create = await client.callTool({
-            name: "create",
+            name: "create_windows_sandbox",
             arguments: {
-                backend: "windows-sandbox",
+
                 name: "Win Existing Login Retry",
                 deviceId: "windows-existing-login-retry",
             },
@@ -1220,18 +1220,18 @@ exit 0
 
     it("treats Windows Sandbox runtime as one host-wide instance", { timeout: TIMEOUT }, async () => {
         const firstCreate = await client.callTool({
-            name: "create",
+            name: "create_windows_sandbox",
             arguments: {
-                backend: "windows-sandbox",
+
                 name: "Win Singleton One",
                 deviceId: "windows-singleton-one",
             },
         });
         expect(firstCreate.isError).not.toBe(true);
         const secondCreate = await client.callTool({
-            name: "create",
+            name: "create_windows_sandbox",
             arguments: {
-                backend: "windows-sandbox",
+
                 name: "Win Singleton Two",
                 deviceId: "windows-singleton-two",
             },
@@ -1272,8 +1272,8 @@ exit 0
         expect((blockedSecondStart.content as Array<{ text?: string }>)[0].text).toContain("Windows Sandbox is already claimed on this host");
 
         const lockedInventory = await client.callTool({
-            name: "inventory",
-            arguments: { backend: "windows-sandbox" },
+            name: "devices",
+            arguments: { view: "available", backend: "windows-sandbox" },
         });
         expect(lockedInventory.isError).not.toBe(true);
         const lockedPayload = JSON.parse(((lockedInventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -1302,12 +1302,12 @@ exit 0
     });
 
     it.each(["start", "stop", "delete"])("preserves successor state and singleton ownership during superseded Windows Sandbox %s", { timeout: TIMEOUT }, async (operation) => {
-        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "windows-sandbox" } });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "windows-sandbox" } });
         const ownerId = (JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as { ownerId: string }).ownerId;
         const deviceId = `windows-generation-${operation}-${Date.now()}`;
         const create = await client.callTool({
-            name: "create",
-            arguments: { backend: "windows-sandbox", name: `Windows ${operation} generation`, deviceId },
+            name: "create_windows_sandbox",
+            arguments: {  name: `Windows ${operation} generation`, deviceId },
         });
         expect(create.isError).not.toBe(true);
         if (operation !== "start") {
@@ -1376,8 +1376,8 @@ exit 0
         const deviceId = `windows-singleton-recovery-${Date.now()}`;
         const lockPath = join(homeDir, ".ccc", "devices", "host-locks", "windows-sandbox.json");
         const create = await client.callTool({
-            name: "create",
-            arguments: { backend: "windows-sandbox", name: "Windows singleton recovery", deviceId },
+            name: "create_windows_sandbox",
+            arguments: {  name: "Windows singleton recovery", deviceId },
         });
         expect(create.isError).not.toBe(true);
         const start = await client.callTool({ name: "start", arguments: { deviceId } });
@@ -1420,8 +1420,8 @@ exit 0
     it("reconciles an interrupted stopped record from its matching singleton generation", { timeout: TIMEOUT }, async () => {
         const deviceId = `windows-stopped-runtime-recovery-${Date.now()}`;
         const create = await client.callTool({
-            name: "create",
-            arguments: { backend: "windows-sandbox", name: "Windows stopped runtime recovery", deviceId },
+            name: "create_windows_sandbox",
+            arguments: {  name: "Windows stopped runtime recovery", deviceId },
         });
         expect(create.isError).not.toBe(true);
         const start = await client.callTool({ name: "start", arguments: { deviceId } });
@@ -1451,9 +1451,9 @@ exit 0
     it("rejects malformed Windows Sandbox ownership state without replacing it", { timeout: TIMEOUT }, async () => {
         const lockPath = join(homeDir, ".ccc/devices/host-locks/windows-sandbox.json");
         const create = await client.callTool({
-            name: "create",
+            name: "create_windows_sandbox",
             arguments: {
-                backend: "windows-sandbox",
+
                 name: "Win Malformed Lock",
                 deviceId: "windows-malformed-lock",
             },

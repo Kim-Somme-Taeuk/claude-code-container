@@ -2,8 +2,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { homedir, tmpdir } from "os";
 import { dirname, join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDeviceBrokerServer, DEVICE_BROKER_PHYSICAL_LEASE_DIRECTORY_ENTRY_LIMIT, deviceBrokerOwnerToken, registerDeviceBrokerOwner } from "../device-lab-broker.js";
-import { deviceLabOwnerId } from "../device-lab-owner.js";
+import { createDeviceBrokerServer, DEVICE_BROKER_PHYSICAL_LEASE_DIRECTORY_ENTRY_LIMIT, deviceBrokerOwnerToken, registerDeviceBrokerOwner } from "@ccc/device-lab/device-lab-broker.js";
+import { deviceLabOwnerId } from "@ccc/device-lab/device-lab-owner.js";
 import { close, listen } from "./helpers/host-broker-test-fixture.js";
 
 describe("device-lab host broker physical leases", () => {

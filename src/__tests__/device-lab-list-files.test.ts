@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildListFilesCommand, listContainedDirectory, parseListFilesOutput, validateListFilesArgs, LIST_FILES_OUTPUT_LIMIT_BYTES } from "../../device-lab-mcp/src/file-listing.mjs";
+import { buildListFilesCommand, listContainedDirectory, parseListFilesOutput, validateListFilesArgs, LIST_FILES_OUTPUT_LIMIT_BYTES } from "@ccc/device-lab/providers/file-listing.mjs";
 
 const roots: string[] = [];
 function directory() { const root = mkdtempSync(join(tmpdir(), "ccc-list-files-")); roots.push(root); return root; }

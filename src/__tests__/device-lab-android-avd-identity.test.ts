@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { readAndroidAvdIdentity } from "../../device-lab-mcp/src/state/android-avd-identity.mjs";
+import { readAndroidAvdIdentity } from "@ccc/device-lab/providers/state/android-avd-identity.mjs";
 
 describe("Android console AVD identity", () => {
     const serial = "emulator-5638";

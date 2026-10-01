@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { spawnSync } from "child_process";
 
-import { hyperVCreateCompensationCommand, hyperVCreatePrologueCommand, parseHyperVCreatePrologueFailure } from "../host-control/hyper-v/vm-create-prologue.js";
-import { parseHyperVCreatePrologueObservation } from "../host-control/hyper-v/observations.js";
+import { hyperVCreateCompensationCommand, hyperVCreatePrologueCommand, parseHyperVCreatePrologueFailure } from "@ccc/device-lab/host-control/hyper-v/vm-create-prologue.js";
+import { parseHyperVCreatePrologueObservation } from "@ccc/device-lab/host-control/hyper-v/observations.js";
 
 // POSIX spellings, as every other host-control test uses: the path validators resolve with
 // the running platform's rules, so a Windows literal is not a valid path here.
@@ -197,4 +198,35 @@ describe("reading incomplete prologue cleanup", () => {
         expect(parseHyperVCreatePrologueFailure(`CCC_HYPER_V_STAGE:hyper-v-vm-path-inspection-failed\n${partial}`)).toEqual(JSON.parse(partial));
         expect(parseHyperVCreatePrologueFailure('{"ok":false,"deviceRootRemaining":true}')).toBeNull();
     });
+});
+
+
+const aclPowerShell = process.platform === "win32" ? "powershell.exe" : "pwsh";
+const hasAclPowerShell = spawnSync(aclPowerShell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "exit 0"], { timeout: 5000 }).status === 0;
+
+it.skipIf(!hasAclPowerShell).each(["S-1-5-18", "S-1-5-32-544", "S-1-5-21-111-222-333-1001"])("prologue grants each distinct SID once when run as %s", (currentSid) => {
+    const script = scriptOf();
+    // Replace Windows-only SID constructors, preserving the generated enumeration.
+    const selection = script.split("\n").find((line) => line.includes("$AllowedSids ="))!
+        .replace(/\[Security\.Principal\.SecurityIdentifier\]::new\('([^']+)'\)/g, "([pscustomobject]@{Value='$1'})");
+    const loop = script.match(/foreach \(\$Sid in \$AllowedSids\)/)?.[0];
+    const countCheck = script.split("\n").find((line) => line.includes("if ($ObservedRules.Count -ne $AllowedSids.Count)"));
+    expect(loop).toBeDefined();
+    expect(countCheck).toBeDefined();
+    const program = [
+        "$ErrorActionPreference = 'Stop'",
+        `$CurrentSid = [pscustomobject]@{Value='${currentSid}'}`,
+        selection,
+        `$Installed = @(${loop} { $Sid.Value })`,
+        "$ObservedRules = @($Installed | Sort-Object -Unique)",
+        countCheck,
+        "$RejectedExtra = $false; $ObservedRules += 'S-1-1-0'",
+        `try { ${countCheck} } catch { $RejectedExtra = $true }`,
+        "@{ installed=$Installed; rejectedExtra=$RejectedExtra } | ConvertTo-Json -Compress",
+    ].join("\n");
+    const result = spawnSync(aclPowerShell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(program, "utf16le").toString("base64")], { encoding: "utf8", timeout: 10000 });
+    expect(result.status, result.stderr).toBe(0);
+    const observation = JSON.parse(result.stdout);
+    expect(observation.installed).toEqual([...new Set([currentSid, "S-1-5-18", "S-1-5-32-544"])].sort());
+    expect(observation.rejectedExtra).toBe(true);
 });

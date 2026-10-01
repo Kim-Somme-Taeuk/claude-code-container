@@ -14,8 +14,8 @@ import {
     releasePhysicalLeaseWithMutation,
     startPhysicalLeaseHeartbeat,
     stopPhysicalLeaseHeartbeat,
-} from "../../device-lab-mcp/src/state/physical-lease-store.mjs";
-import { ownerId } from "../../device-lab-mcp/src/context.mjs";
+} from "@ccc/device-lab/providers/state/physical-lease-store.mjs";
+import { ownerId } from "@ccc/device-lab/providers/context.mjs";
 
 describe("device-lab MCP direct physical lease store", () => {
     let originalHome: string | undefined;
@@ -42,12 +42,12 @@ describe("device-lab MCP direct physical lease store", () => {
 
     async function withInjectedAtomicWriteFailure(
         shouldFail: (file: string) => boolean,
-        operation: (store: typeof import("../../device-lab-mcp/src/state/physical-lease-store.mjs")) => void,
+        operation: (store: typeof import("@ccc/device-lab/providers/state/physical-lease-store.mjs")) => void,
     ) {
-        const sharedMutationModule = "../../device-lab-mcp/src/state/shared-mutation-lock.mjs";
+        const sharedMutationModule = "@ccc/device-lab/providers/state/shared-mutation-lock.mjs";
         vi.resetModules();
         vi.doMock(sharedMutationModule, async (importOriginal) => {
-            const original = await importOriginal<typeof import("../../device-lab-mcp/src/state/shared-mutation-lock.mjs")>();
+            const original = await importOriginal<typeof import("@ccc/device-lab/providers/state/shared-mutation-lock.mjs")>();
             let injected = false;
             return {
                 ...original,
@@ -61,7 +61,7 @@ describe("device-lab MCP direct physical lease store", () => {
             };
         });
         try {
-            operation(await import("../../device-lab-mcp/src/state/physical-lease-store.mjs"));
+            operation(await import("@ccc/device-lab/providers/state/physical-lease-store.mjs"));
         } finally {
             vi.doUnmock(sharedMutationModule);
             vi.resetModules();
@@ -69,7 +69,7 @@ describe("device-lab MCP direct physical lease store", () => {
     }
 
     function runLeaseChild(profile: string, hardwareId: string) {
-        const moduleUrl = pathToFileURL(resolve("device-lab-mcp/src/state/physical-lease-store.mjs")).href;
+        const moduleUrl = pathToFileURL(resolve("packages/device-lab/providers/state/physical-lease-store.mjs")).href;
         const script = `import { claimPhysicalLease } from ${JSON.stringify(moduleUrl)}; console.log(JSON.stringify(claimPhysicalLease("android-device", ${JSON.stringify(hardwareId)}, ${JSON.stringify(`device-${profile}`)}, { ttlMs: 60000 })));`;
         return new Promise<Record<string, unknown>>((resolveChild, rejectChild) => {
             const child = spawn(process.execPath, ["--input-type=module", "-e", script], {

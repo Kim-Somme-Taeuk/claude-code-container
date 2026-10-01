@@ -3,16 +3,17 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { hiddenWindowsPowerShellArgs } from "../device-lab-mcp/src/state/windows-system-powershell.mjs";
+import { hiddenWindowsPowerShellArgs } from "#device-lab/providers/state/windows-system-powershell.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const assetRoot = join(repoRoot, "scripts", "host-control", "hyper-v");
+const assetRoot = join(repoRoot, "packages", "device-lab", "powershell");
+const libraryAssetRoot = join(repoRoot, "packages", "hyper-v", "powershell");
 const requireParser = process.argv.includes("--require-parser");
 const runPester = process.argv.includes("--pester");
 const libraryFixtureOnly = process.argv.includes("--library-fixture-only");
 
 function validateNetworkOperationAsset() {
-    const path = join(assetRoot, "Invoke-HyperVWindowsOperation.ps1");
+    const path = join(libraryAssetRoot, "Invoke-HyperVWindowsOperation.ps1");
     const source = readFileSync(path, "utf8");
     const requiredTrustFragments = [
         '[Environment]::SystemDirectory',
@@ -125,7 +126,7 @@ function validatePinnedTestModuleSetup() {
     }
     const packageScripts = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")).scripts;
     const pesterCommand = packageScripts["test:hyper-v:pester"];
-    const installCall = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/host-control/hyper-v/install-test-modules.ps1";
+    const installCall = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File packages/device-lab/powershell/install-test-modules.ps1";
     const testCall = "node scripts/validate-hyper-v-powershell.mjs --require-parser --pester";
     if (pesterCommand !== `${installCall} && ${testCall}` || "setup:hyper-v:pester" in packageScripts) {
         throw new Error("Hyper-V Pester must install pinned dependencies and verify through one public test command");
@@ -194,7 +195,7 @@ async function bootstrapSource() {
     // Read from the built module rather than parsed out of its text, so what the parser checks is
     // the exact string the session hands to PowerShell. Absent before a build, which is why this
     // degrades to skipping that one file rather than failing.
-    const built = join(repoRoot, "dist", "hyper-v-windows", "low-level", "powershell-session.js");
+    const built = join(repoRoot, "packages", "hyper-v", "dist", "low-level", "powershell-session.js");
     if (!existsSync(built)) return null;
     const { HYPER_V_WINDOWS_SESSION_BOOTSTRAP } = await import(pathToFileURL(built).href);
     if (typeof HYPER_V_WINDOWS_SESSION_BOOTSTRAP !== "string") return null;
@@ -204,7 +205,7 @@ async function bootstrapSource() {
 }
 
 async function elevatedRelayBootstrapSource() {
-    const module = pathToFileURL(join(repoRoot, "src", "device-lab", "broker", "hyper-v", "elevated-network-session.ts")).href;
+    const module = pathToFileURL(join(repoRoot, "packages", "device-lab", "src", "device-lab", "broker", "hyper-v", "elevated-network-session.ts")).href;
     const probe = spawnSync(process.execPath, [
         "--import", "tsx",
         "-e", `import(${JSON.stringify(module)}).then((m) => process.stdout.write(JSON.stringify(m.HYPER_V_ELEVATED_NETWORK_RELAY_BOOTSTRAP)))`,
@@ -226,7 +227,7 @@ async function elevatedRelayBootstrapSource() {
 // were never parse-checked: the child runs hidden, non-interactive, and elevated, so a program that
 // fails before it reaches the pipe is indistinguishable from a handshake timeout on a Windows host.
 async function elevatedChildSources() {
-    const module = pathToFileURL(join(repoRoot, "src", "device-lab", "broker", "hyper-v", "elevated-network-session.ts")).href;
+    const module = pathToFileURL(join(repoRoot, "packages", "device-lab", "src", "device-lab", "broker", "hyper-v", "elevated-network-session.ts")).href;
     const probe = spawnSync(process.execPath, [
         "--import", "tsx",
         "-e", `import(${JSON.stringify(module)}).then((m) => process.stdout.write(JSON.stringify(m.hyperVElevatedNetworkChildPrograms())))`,
@@ -279,6 +280,22 @@ async function setupDiagnosticsSources() {
     });
 }
 
+async function nestedDevelopmentSources() {
+    const module = pathToFileURL(join(repoRoot, "scripts", "real-tests", "nested-hyper-v.ts")).href;
+    const probe = spawnSync(process.execPath, ["--import", "tsx", "-e",
+        `import(${JSON.stringify(module)}).then(m => process.stdout.write(JSON.stringify([m.NESTED_CLAIM_COMMAND,m.NESTED_PREPARE_COMMAND,m.nestedLaunchCommand('a'.repeat(32),'b'.repeat(64),'22.23.2','windows')])))`,
+    ], { cwd: repoRoot, encoding: "utf8", timeout: 60000, maxBuffer: 1024 * 1024, windowsHide: true });
+    if (probe.error || probe.status !== 0) throw new Error("nested-development-programs-unavailable");
+    const programs = JSON.parse(probe.stdout);
+    if (!Array.isArray(programs) || programs.length !== 3 || programs.some(p => typeof p !== "string" || !p)) throw new Error("nested-development-programs-invalid");
+    const directory = mkdtempSync(join(tmpdir(), "ccc-nested-programs-"));
+    return programs.map((program, index) => {
+        const file = join(directory, `nested-${index}.ps1`);
+        writeFileSync(file, program, "utf8");
+        return file;
+    });
+}
+
 // One flag drives all three decisions below — which sources are wanted, whether the bootstrap is
 // fetched, and whether its absence is an error. Three separate reads of `libraryFixtureOnly` would
 // be three chances to disagree.
@@ -287,6 +304,7 @@ const bootstrap = useFullAssetSet ? await bootstrapSource() : null;
 const elevatedRelayBootstrap = useFullAssetSet ? await elevatedRelayBootstrapSource() : null;
 const elevatedChild = useFullAssetSet ? await elevatedChildSources() : null;
 const setupDiagnostics = useFullAssetSet ? await setupDiagnosticsSources() : null;
+const nestedDevelopment = useFullAssetSet ? await nestedDevelopmentSources() : [];
 // `--library-fixture-only` narrows the file set to the library fixture ON PURPOSE, so a null
 // bootstrap there is the mode working, not evidence of a missing build. Before this distinction
 // existed the two flags contradicted each other and the combination could never succeed — which is
@@ -295,11 +313,14 @@ const setupDiagnostics = useFullAssetSet ? await setupDiagnosticsSources() : nul
 // as the cause, so the failure read as a local environment problem rather than a flag conflict.
 const files = (useFullAssetSet ? [
     ...filesUnder(assetRoot),
+    ...filesUnder(libraryAssetRoot),
     libraryFixture,
+    join(repoRoot, "scripts", "real-tests", "nested-hyper-v-job.ps1"),
     ...(bootstrap ? [bootstrap] : []),
     ...(elevatedRelayBootstrap ? [elevatedRelayBootstrap] : []),
     ...(elevatedChild || []),
     ...(setupDiagnostics || []),
+    ...nestedDevelopment,
 ] : [libraryFixture]).filter((candidate) => /\.ps(?:1|m1)$/i.test(candidate));
 // Keyed on the same flag that decided whether to fetch a bootstrap at all, so this asks "a source
 // this mode wanted is missing" rather than restating the mode. If the fixture-only set ever gains
@@ -321,7 +342,7 @@ if (requireParser && useFullAssetSet && !bootstrap) {
     // that mode is the same defect in a different place. The usual cause is running this before
     // `tsc`, since the bootstrap is read from dist/.
     throw new Error(
-        "session bootstrap unavailable for parsing: dist/hyper-v-windows/low-level/powershell-session.js"
+        "session bootstrap unavailable for parsing: packages/hyper-v/dist/low-level/powershell-session.js"
         + " is missing or exports no HYPER_V_WINDOWS_SESSION_BOOTSTRAP string."
         + " Run `npm run build:hyper-v:windows:library` (or any tsc build) before --require-parser.",
     );
@@ -329,14 +350,14 @@ if (requireParser && useFullAssetSet && !bootstrap) {
 if (requireParser && useFullAssetSet && !elevatedRelayBootstrap) {
     throw new Error(
         "elevated relay bootstrap unavailable for parsing:"
-        + " src/device-lab/broker/hyper-v/elevated-network-session.ts"
+        + " packages/device-lab/src/device-lab/broker/hyper-v/elevated-network-session.ts"
         + " did not yield HYPER_V_ELEVATED_NETWORK_RELAY_BOOTSTRAP through the source loader.",
     );
 }
 if (requireParser && useFullAssetSet && !elevatedChild) {
     throw new Error(
         "elevated child programs unavailable for parsing:"
-        + " src/device-lab/broker/hyper-v/elevated-network-session.ts"
+        + " packages/device-lab/src/device-lab/broker/hyper-v/elevated-network-session.ts"
         + " did not yield hyperVElevatedNetworkChildPrograms() through the source loader.",
     );
 }

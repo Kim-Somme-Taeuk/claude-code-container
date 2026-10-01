@@ -10,7 +10,7 @@ import {
     androidAvdHome,
     listOwnedAndroidAvdArtifacts,
     removeOwnedAndroidAvdArtifacts,
-} from "../../device-lab-mcp/src/state/android-avd-storage.mjs";
+} from "#device-lab/providers/state/android-avd-storage.mjs";
 import {
     androidAvdManagerInventoryInvocation,
     cleanupTestTempArtifacts,

@@ -1,3 +1,4 @@
+import { DEVICE_BROKER_PROTOCOL_VERSION } from "#device-lab/providers/contracts/broker-protocol.mjs";
 import { describe, expect, it, vi } from "vitest";
 import { spawnSync } from "child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
@@ -9,89 +10,108 @@ import { repoRoot } from "./helpers.ts";
 import {
     buildLevel3Artifacts,
     ensureHostBrokerReady,
-    HYPER_V_LEVEL3_NETWORK_DIAGNOSTICS_CONTRACT,
-    HYPER_V_LEVEL3_NETWORK_OWNERSHIP_CONTRACT,
-    HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
-    HYPER_V_LEVEL3_GUEST_DIAGNOSTICS_CONTRACT,
-    HYPER_V_LEVEL3_LINUX_X11_TYPE_CONTRACT,
-    HYPER_V_LEVEL3_PROVIDER_CONTRACT,
-    HYPER_V_LEVEL3_POWERSHELL_DIRECT_BOUNDED_PROBE_CONTRACT,
-    HYPER_V_LEVEL3_WINDOWS_UNATTEND_OOBE_SCHEMA_CONTRACT,
-    HYPER_V_LEVEL3_WINDOWS_LIBRARY_CONTRACT,
-    probeHostBrokerCapabilities,
+    probeHostBrokerProtocol,
 } from "./support/level3-host.ts";
 
 const verifiedBrokerPid = 4321;
 const verifiedBrokerStartedAt = "2026-07-28T00:00:00.000Z";
 
-function brokerStatusOutput(capabilities = HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES) {
+function brokerStatusOutput(protocolVersion = DEVICE_BROKER_PROTOCOL_VERSION) {
     return [
         "port: 17373",
         "brokerReady: true",
-        `brokerVerifiedCapabilities: ${capabilities.join(", ")}`,
+        `brokerVerifiedProtocolVersion: ${protocolVersion}`,
         `brokerVerifiedPid: ${verifiedBrokerPid}`,
         `brokerVerifiedStartedAt: ${verifiedBrokerStartedAt}`,
     ].join("\n");
 }
 
+describe("Level 3 artifact preparation", () => {
+    const workspaceBuild = join("/repo", "scripts", "workspace-build.mjs");
+    const tsc = join("/repo", "node_modules", "typescript", "bin", "tsc");
+    const esbuild = join("/repo", "node_modules", "esbuild-wasm", "bin", "esbuild");
+    const linuxStages = [
+        [workspaceBuild, "build"],
+        [tsc],
+        [tsc, "-p", join("/repo", "tsconfig.real-tests.json")],
+        [esbuild, "device-lab-mcp/server.mjs", "--bundle", "--platform=node", "--format=esm", "--outfile=dist/device-lab-mcp/server.mjs", "--banner:js=// device-lab-mcp-version: 1"],
+        [workspaceBuild, "assemble"],
+    ];
+    const windowsStages = [
+        ...linuxStages.slice(0, -1),
+        [esbuild, "scripts/real-tests/hyper-v-windows-setup-diagnostics-privileged.ts", "--bundle", "--platform=node", "--format=esm", "--target=node20", "--outfile=dist/real-tests/hyper-v-windows-setup-diagnostics-privileged.mjs"],
+        [workspaceBuild, "assemble"],
+    ];
+
+    it("builds workspace dependencies before compiling and assembles the Linux runtime last", () => {
+        const env = { NODE_OPTIONS: "--require=hidden-child-processes.cjs", TEST_ENV: "1" };
+        const spawn = vi.fn((_command: string, _args: string[], _options: any) => ({ status: 0, stdout: "", stderr: "" }));
+        const writeFile = vi.fn();
+        const status = buildLevel3Artifacts("/repo", {
+            platform: "linux",
+            env,
+            spawn,
+            readFile: (path: string) => path.endsWith("package.json") ? '{"version":"1.2.3"}' : 'export const version = "__CLI_VERSION__";',
+            writeFile,
+        });
+        expect(status).toBe(0);
+        expect(spawn.mock.calls).toEqual(linuxStages.map(args => [
+            process.execPath, args, { cwd: "/repo", env, encoding: "utf-8", windowsHide: true },
+        ]));
+        expect(writeFile).toHaveBeenCalledWith(join("/repo", "dist", "utils.js"), 'export const version = "1.2.3";');
+    });
+
+    it.each([
+        ["workspace package build", "linux", 0],
+        ["root compilation", "linux", 1],
+        ["real-test typecheck", "linux", 2],
+        ["MCP bundle", "linux", 3],
+        ["Linux runtime assembly", "linux", 4],
+        ["Windows privileged bundle", "win32", 4],
+        ["Windows runtime assembly", "win32", 5],
+    ] as const)("stops after failed %s and preserves its exit status", (_stage, platform, failedIndex) => {
+        let calls = 0;
+        const spawn = vi.fn((_command: string, _args: string[], _options: any) => ({
+            status: calls++ === failedIndex ? 7 : 0,
+            stdout: "",
+            stderr: "stage failed\n",
+        }));
+        const writeError = vi.fn();
+        const status = buildLevel3Artifacts("/repo", {
+            platform,
+            spawn,
+            writeError,
+            readFile: () => '{"version":"1.0.0"}',
+            writeFile: () => undefined,
+        });
+        const stages = platform === "win32" ? windowsStages : linuxStages;
+        expect(status).toBe(7);
+        expect(spawn.mock.calls.map(call => call[1])).toEqual(stages.slice(0, failedIndex + 1));
+        expect(writeError).toHaveBeenCalledOnce();
+        expect(writeError).toHaveBeenCalledWith("stage failed\n");
+    });
+
+    it.each([
+        ["workspace package build", 0, "CCC workspace package build failed\n"],
+        ["runtime assembly", 4, "CCC embedded runtime assembly failed\n"],
+    ] as const)("fails closed when %s has no exit status", (_stage, failedIndex, fallback) => {
+        let calls = 0;
+        const spawn = vi.fn((_command: string, _args: string[], _options: any) => ({ status: calls++ === failedIndex ? null : 0, stdout: "", stderr: "" }));
+        const writeError = vi.fn();
+        const status = buildLevel3Artifacts("/repo", {
+            platform: "linux",
+            spawn,
+            writeError,
+            readFile: () => '{"version":"1.0.0"}',
+            writeFile: () => undefined,
+        });
+        expect(status).toBe(1);
+        expect(spawn).toHaveBeenCalledTimes(failedIndex + 1);
+        expect(writeError).toHaveBeenCalledWith(fallback);
+    });
+});
+
 describe("Hyper-V Level 3 launcher", () => {
-    it("requires the current Hyper-V network ownership contract", () => {
-        expect(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES).toContain(HYPER_V_LEVEL3_NETWORK_OWNERSHIP_CONTRACT);
-        expect(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES).toContain(HYPER_V_LEVEL3_GUEST_DIAGNOSTICS_CONTRACT);
-        expect(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES).toContain(HYPER_V_LEVEL3_WINDOWS_UNATTEND_OOBE_SCHEMA_CONTRACT);
-        expect(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES).toContain(HYPER_V_LEVEL3_POWERSHELL_DIRECT_BOUNDED_PROBE_CONTRACT);
-        expect(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES).toContain(HYPER_V_LEVEL3_WINDOWS_LIBRARY_CONTRACT);
-        expect(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES).toContain(HYPER_V_LEVEL3_PROVIDER_CONTRACT);
-        expect(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES).toContain(HYPER_V_LEVEL3_NETWORK_DIAGNOSTICS_CONTRACT);
-        expect(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES).toContain(HYPER_V_LEVEL3_LINUX_X11_TYPE_CONTRACT);
-    });
-
-    it("rejects a running broker that predates Linux X11 text input", async () => {
-        let diagnostic = "";
-        const originalWrite = process.stderr.write;
-        process.stderr.write = ((chunk: any) => {
-            diagnostic += String(chunk);
-            return true;
-        }) as typeof process.stderr.write;
-        try {
-            const status = await ensureHostBrokerReady("/repo", {
-                spawn: () => ({
-                    status: 0,
-                    stdout: brokerStatusOutput(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
-                        .filter((capability) => capability !== HYPER_V_LEVEL3_LINUX_X11_TYPE_CONTRACT)),
-                    stderr: "",
-                }),
-            });
-            expect(status).toBe(1);
-            expect(diagnostic).toContain(HYPER_V_LEVEL3_LINUX_X11_TYPE_CONTRACT);
-        } finally {
-            process.stderr.write = originalWrite;
-        }
-    });
-
-    it("rejects a build whose compiled Hyper-V provider lacks the current contract", () => {
-        const reads = new Map([
-            ["/repo/dist/host-control/hyper-v/contracts.js", "export const oldContract = true;"],
-        ]);
-        let diagnostic = "";
-        const originalWrite = process.stderr.write;
-        process.stderr.write = ((chunk: any) => {
-            diagnostic += String(chunk);
-            return true;
-        }) as typeof process.stderr.write;
-        try {
-            const status = buildLevel3Artifacts("/repo", {
-                spawn: () => ({ status: 0, stdout: "", stderr: "" }),
-                readFile: (path: string) => reads.get(path) || "{}",
-                writeFile: () => undefined,
-            });
-            expect(status).toBe(1);
-            expect(diagnostic).toContain(HYPER_V_LEVEL3_PROVIDER_CONTRACT);
-        } finally {
-            process.stderr.write = originalWrite;
-        }
-    });
-
     it("selects both Hyper-V providers by default", () => {
         expect(hyperVTestFiles("all").map((file) => basename(file))).toEqual([
             "level2-hyper-v-windows-vm.ts",
@@ -104,15 +124,15 @@ describe("Hyper-V Level 3 launcher", () => {
         expect(hyperVTestFiles("linux").map((file) => basename(file))).toEqual(["level2-hyper-v-linux-vm.ts"]);
     });
 
-    it("loads split TypeScript host-control modules in the standalone real-test runner", () => {
+    it("loads split TypeScript host-control modules in the standalone real-test runner", { timeout: 60000 }, () => {
         const tempDir = mkdtempSync(join(tmpdir(), "ccc-hyper-v-source-loader-"));
         const fixture = join(tempDir, "level2-hyper-v-linux-vm.ts");
-        const hostControlUrl = pathToFileURL(join(repoRoot, "src", "host-control", "hyper-v", "index.ts")).href;
+        const hostControlUrl = pathToFileURL(join(repoRoot, "packages", "device-lab", "src", "host-control", "hyper-v", "index.ts")).href;
         writeFileSync(fixture, [
-            `import { HYPER_V_PROVIDER_IMAGE_FINALIZATION_CONTRACT } from ${JSON.stringify(hostControlUrl)};`,
+            `import { HYPER_V_NETWORK_PREFIX } from ${JSON.stringify(hostControlUrl)};`,
             "export const name = 'host-control source loader';",
             "export async function run() {",
-            "  return HYPER_V_PROVIDER_IMAGE_FINALIZATION_CONTRACT",
+            "  return HYPER_V_NETWORK_PREFIX",
             "    ? { status: 'PASS' }",
             "    : { status: 'FAIL', reason: 'missing Hyper-V contract' };",
             "}",
@@ -291,13 +311,13 @@ describe("Hyper-V Level 3 launcher", () => {
         }));
         const probe = vi.fn(async () => ({
             ok: true,
-            capabilities: HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
+            protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION,
             pid: verifiedBrokerPid,
             startedAt: verifiedBrokerStartedAt,
         }));
         const status = await ensureHostBrokerReady("/repo", {
             spawn,
-            probeHostBrokerCapabilitiesImpl: probe,
+            probeHostBrokerProtocolImpl: probe,
         });
 
         expect(status).toBe(0);
@@ -316,9 +336,9 @@ describe("Hyper-V Level 3 launcher", () => {
             for (const elevationGate of [{ state: "never-asked" }, undefined]) {
                 const status = await ensureHostBrokerReady("/repo", {
                     spawn: () => ({ status: 0, stdout: brokerStatusOutput(), stderr: "" }),
-                    probeHostBrokerCapabilitiesImpl: async () => ({
+                    probeHostBrokerProtocolImpl: async () => ({
                         ok: true,
-                        capabilities: HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
+                        protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION,
                         pid: verifiedBrokerPid,
                         startedAt: verifiedBrokerStartedAt,
                         ...(elevationGate ? { elevationGate } : {}),
@@ -352,11 +372,11 @@ describe("Hyper-V Level 3 launcher", () => {
         try {
             const status = await ensureHostBrokerReady("/repo", {
                 spawn,
-                probeHostBrokerCapabilitiesImpl: async () => {
+                probeHostBrokerProtocolImpl: async () => {
                     probeCalls += 1;
                     return {
                         ok: true,
-                        capabilities: HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
+                        protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION,
                         pid: verifiedBrokerPid,
                         startedAt: verifiedBrokerStartedAt,
                         // Only the confirmation read has seen the refusal: the later read decides.
@@ -441,11 +461,11 @@ describe("Hyper-V Level 3 launcher", () => {
                         stderr: "",
                     };
                 },
-                probeHostBrokerCapabilitiesImpl: async (_port: number, options: { timeoutMs?: number }) => {
+                probeHostBrokerProtocolImpl: async (_port: number, options: { timeoutMs?: number }) => {
                     observedProbeTimeouts.push(Number(options.timeoutMs));
                     return {
                         ok: true,
-                        capabilities: HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
+                        protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION,
                         pid: verifiedBrokerPid,
                         startedAt: verifiedBrokerStartedAt,
                     };
@@ -460,132 +480,14 @@ describe("Hyper-V Level 3 launcher", () => {
         }
     });
 
-    it("rejects a healthy broker that did not attest the candidate Hyper-V generation", async () => {
-        let diagnostic = "";
-        const originalWrite = process.stderr.write;
-        process.stderr.write = ((chunk: any) => {
-            diagnostic += String(chunk);
-            return true;
-        }) as typeof process.stderr.write;
+    it.each([0, DEVICE_BROKER_PROTOCOL_VERSION + 1])("rejects incompatible protocol %s before provider work", async (protocolVersion) => {
+        const diagnostic = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
         try {
-            const status = await ensureHostBrokerReady("/repo", {
-                spawn: () => ({
-                    status: 0,
-                    stdout: brokerStatusOutput([
-                        "hyper-v-vm-managed-auto-images-v19",
-                        "hyper-v-windows-boot-contract-v1",
-                    ]),
-                    stderr: "",
-                }),
-            });
-
-            expect(status).toBe(1);
-            expect(diagnostic).toContain("hyper-v-vm-managed-auto-images-v20");
-        } finally {
-            process.stderr.write = originalWrite;
-        }
-    });
-
-    it("rejects a broker that predates the Windows boot contract", async () => {
-        let diagnostic = "";
-        const originalWrite = process.stderr.write;
-        process.stderr.write = ((chunk: any) => {
-            diagnostic += String(chunk);
-            return true;
-        }) as typeof process.stderr.write;
-        try {
-            const status = await ensureHostBrokerReady("/repo", {
-                spawn: () => ({
-                    status: 0,
-                    stdout: brokerStatusOutput([
-                        "hyper-v-vm-managed-auto-images-v20",
-                        "hyper-v-windows-iso-unattend-v1",
-                    ]),
-                    stderr: "",
-                }),
-            });
-
-            expect(status).toBe(1);
-            expect(diagnostic).toContain("hyper-v-windows-boot-contract-v1");
-        } finally {
-            process.stderr.write = originalWrite;
-        }
-    });
-
-    it("rejects a broker that predates the Windows unattend oobe schema contract", async () => {
-        let diagnostic = "";
-        const originalWrite = process.stderr.write;
-        process.stderr.write = ((chunk: any) => {
-            diagnostic += String(chunk);
-            return true;
-        }) as typeof process.stderr.write;
-        try {
-            const status = await ensureHostBrokerReady("/repo", {
-                spawn: () => ({
-                    status: 0,
-                    stdout: brokerStatusOutput(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
-                        .filter((capability) => capability !== HYPER_V_LEVEL3_WINDOWS_UNATTEND_OOBE_SCHEMA_CONTRACT)
-                        .concat("hyper-v-windows-unattend-oobe-schema-v2")),
-                    stderr: "",
-                }),
-            });
-
-            expect(status).toBe(1);
-            expect(diagnostic).toContain(HYPER_V_LEVEL3_WINDOWS_UNATTEND_OOBE_SCHEMA_CONTRACT);
-        } finally {
-            process.stderr.write = originalWrite;
-        }
-    });
-
-    it("rejects a broker that predates bounded PowerShell Direct probes", async () => {
-        let diagnostic = "";
-        const originalWrite = process.stderr.write;
-        process.stderr.write = ((chunk: any) => {
-            diagnostic += String(chunk);
-            return true;
-        }) as typeof process.stderr.write;
-        try {
-            const status = await ensureHostBrokerReady("/repo", {
-                spawn: () => ({
-                    status: 0,
-                    stdout: brokerStatusOutput(HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
-                        .filter((capability) => capability !== HYPER_V_LEVEL3_POWERSHELL_DIRECT_BOUNDED_PROBE_CONTRACT)),
-                    stderr: "",
-                }),
-            });
-
-            expect(status).toBe(1);
-            expect(diagnostic).toContain(HYPER_V_LEVEL3_POWERSHELL_DIRECT_BOUNDED_PROBE_CONTRACT);
-        } finally {
-            process.stderr.write = originalWrite;
-        }
-    });
-
-    it("rejects a broker that predates the internal Hyper-V Windows library", async () => {
-        let diagnostic = "";
-        const originalWrite = process.stderr.write;
-        process.stderr.write = ((chunk: any) => {
-            diagnostic += String(chunk);
-            return true;
-        }) as typeof process.stderr.write;
-        try {
-            const status = await ensureHostBrokerReady("/repo", {
-                spawn: () => ({
-                    status: 0,
-                    stdout: brokerStatusOutput([
-                        ...HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
-                            .filter((capability) => capability !== HYPER_V_LEVEL3_WINDOWS_LIBRARY_CONTRACT),
-                        "hyper-v-windows-library-v10",
-                    ]),
-                    stderr: "",
-                }),
-            });
-
-            expect(status).toBe(1);
-            expect(diagnostic).toContain(HYPER_V_LEVEL3_WINDOWS_LIBRARY_CONTRACT);
-        } finally {
-            process.stderr.write = originalWrite;
-        }
+            expect(await ensureHostBrokerReady("/repo", {
+                spawn: () => ({status: 0, stdout: brokerStatusOutput(protocolVersion)}),
+            })).toBe(1);
+            expect(diagnostic).toHaveBeenCalledWith(expect.stringContaining("protocol mismatch"));
+        } finally { diagnostic.mockRestore(); }
     });
 
     it("rejects a stale broker observed after CLI repair attestation", async () => {
@@ -602,39 +504,30 @@ describe("Hyper-V Level 3 launcher", () => {
                     stdout: brokerStatusOutput(),
                     stderr: "",
                 }),
-                probeHostBrokerCapabilitiesImpl: async () => ({
+                probeHostBrokerProtocolImpl: async () => ({
                     ok: true,
-                    capabilities: [
-                        ...HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
-                            .filter((capability) => capability !== HYPER_V_LEVEL3_WINDOWS_LIBRARY_CONTRACT),
-                        "hyper-v-windows-library-v10",
-                    ],
+                    protocolVersion: 0,
                     pid: verifiedBrokerPid,
                     startedAt: verifiedBrokerStartedAt,
                 }),
             });
 
             expect(status).toBe(1);
-            expect(diagnostic).toContain("remote capability attestation failed");
-            expect(diagnostic).toContain(HYPER_V_LEVEL3_WINDOWS_LIBRARY_CONTRACT);
-            expect(diagnostic).toContain("hyper-v-windows-library-v10");
+            expect(diagnostic).toContain("remote protocol attestation failed");
         } finally {
             process.stderr.write = originalWrite;
         }
     });
 
     it("reads capabilities directly from the running loopback broker", async () => {
-        const capabilities = [
-            ...HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
-            "http-health",
-        ];
-        const observed = await probeHostBrokerCapabilities(17373, {
+        const protocolVersion = DEVICE_BROKER_PROTOCOL_VERSION;
+        const observed = await probeHostBrokerProtocol(17373, {
             fetchImpl: async (url: string) => {
                 expect(url).toBe("http://127.0.0.1:17373/status");
                 return new Response(JSON.stringify({
                     ok: true,
                     broker: {
-                        implemented: capabilities,
+                        protocolVersion,
                         process: { pid: verifiedBrokerPid },
                         startedAt: verifiedBrokerStartedAt,
                     },
@@ -647,7 +540,7 @@ describe("Hyper-V Level 3 launcher", () => {
 
         expect(observed).toEqual({
             ok: true,
-            capabilities,
+            protocolVersion,
             pid: verifiedBrokerPid,
             startedAt: verifiedBrokerStartedAt,
             elevationGate: { state: "unreported" },
@@ -655,11 +548,11 @@ describe("Hyper-V Level 3 launcher", () => {
     });
 
     it("reads the elevation gate from the running broker and echoes only bounded values", async () => {
-        const observe = (hyperVElevationGate: unknown) => probeHostBrokerCapabilities(17373, {
+        const observe = (hyperVElevationGate: unknown) => probeHostBrokerProtocol(17373, {
             fetchImpl: async () => new Response(JSON.stringify({
                 ok: true,
                 broker: {
-                    implemented: HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
+                    protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION,
                     process: { pid: verifiedBrokerPid },
                     startedAt: verifiedBrokerStartedAt,
                     hyperVElevationGate,
@@ -690,7 +583,7 @@ describe("Hyper-V Level 3 launcher", () => {
 
     it("rejects an oversized direct broker status response before reading it", async () => {
         let bodyRead = false;
-        const observed = await probeHostBrokerCapabilities(17373, {
+        const observed = await probeHostBrokerProtocol(17373, {
             fetchImpl: async () => ({
                 ok: true,
                 status: 200,
@@ -704,7 +597,7 @@ describe("Hyper-V Level 3 launcher", () => {
             }),
         });
 
-        expect(observed).toEqual({ ok: false, error: "response-too-large", capabilities: [] });
+        expect(observed).toEqual({ ok: false, error: "response-too-large", protocolVersion: null });
         expect(bodyRead).toBe(false);
     });
 
@@ -719,11 +612,11 @@ describe("Hyper-V Level 3 launcher", () => {
                 cancelled = true;
             },
         });
-        const observed = await probeHostBrokerCapabilities(17373, {
+        const observed = await probeHostBrokerProtocol(17373, {
             fetchImpl: async () => new Response(body, { status: 200 }),
         });
 
-        expect(observed).toEqual({ ok: false, error: "response-too-large", capabilities: [] });
+        expect(observed).toEqual({ ok: false, error: "response-too-large", protocolVersion: null });
         expect(cancelled).toBe(true);
     });
 
@@ -744,11 +637,11 @@ describe("Hyper-V Level 3 launcher", () => {
                     stderr: "",
                 };
             },
-            probeHostBrokerCapabilitiesImpl: async () => {
+            probeHostBrokerProtocolImpl: async () => {
                 probeCalls += 1;
                 return {
                     ok: true,
-                    capabilities: HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
+                    protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION,
                     pid: probeCalls === 1 ? verifiedBrokerPid : successorPid,
                     startedAt: probeCalls === 1 ? verifiedBrokerStartedAt : successorStartedAt,
                 };
@@ -772,11 +665,11 @@ describe("Hyper-V Level 3 launcher", () => {
                     stderr: "",
                 };
             },
-            probeHostBrokerCapabilitiesImpl: async () => {
+            probeHostBrokerProtocolImpl: async () => {
                 probeCalls += 1;
                 return {
                     ok: true,
-                    capabilities: HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES,
+                    protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION,
                     pid: probeCalls % 2 === 1 ? verifiedBrokerPid : verifiedBrokerPid + 1,
                     startedAt: verifiedBrokerStartedAt,
                 };
@@ -793,13 +686,11 @@ describe("Hyper-V Level 3 launcher", () => {
         const spawn = vi.fn(() => ({ status: 0, stdout: brokerStatusOutput(), stderr: "" }));
         const status = await ensureHostBrokerReady("/repo", {
             spawn,
-            probeHostBrokerCapabilitiesImpl: async () => {
+            probeHostBrokerProtocolImpl: async () => {
                 probeCalls += 1;
                 return {
                     ok: true,
-                    capabilities: probeCalls === 1
-                        ? HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES
-                        : HYPER_V_LEVEL3_REQUIRED_BROKER_CAPABILITIES.slice(1),
+                    protocolVersion: probeCalls === 1 ? DEVICE_BROKER_PROTOCOL_VERSION : 0,
                     pid: verifiedBrokerPid,
                     startedAt: verifiedBrokerStartedAt,
                 };

@@ -1,22 +1,23 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { HYPER_V_ELEVATED_NETWORK_ERROR_CODES } from "../device-lab/broker/hyper-v/elevated-network-session.js";
+import { HYPER_V_ELEVATED_NETWORK_ERROR_CODES } from "@ccc/device-lab/device-lab/broker/hyper-v/elevated-network-session.js";
 import {
     boundedPowerShellErrorId,
+    redactProviderCommandInput,
     hyperVProviderDiagnosticCode,
     hyperVTypedErrorCode,
     hyperVTypedErrorOperation,
     publicHyperVCreateConfiguration,
     redactHyperVDeviceSecrets,
     redactHyperVResultSecrets,
-} from "../device-lab/broker/hyper-v/public-response.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/public-response.js";
 import {
     HYPER_V_WINDOWS_SESSION_ERROR_CODES,
     HyperVWindowsError,
     type HyperVWindowsErrorCategory,
     type HyperVWindowsOperation,
-} from "../hyper-v-windows/low-level/index.js";
+} from "@ccc/hyper-v/low-level/index.js";
 
 describe("Hyper-V bounded PowerShell error id (last-resort diagnostic)", () => {
     it("surfaces a bounded hyper-v-ps-* code from a raw PowerShell FullyQualifiedErrorId", () => {
@@ -554,7 +555,7 @@ describe("Hyper-V typed error code", () => {
 // compensation module is deliberately not scanned: runHyperVCreateCompensation records its
 // failures as attempts and never replaces the error that triggered it.
 describe("Hyper-V typed create failure codes", () => {
-    const root = join(__dirname, "..");
+    const root = join(__dirname, "..", "..", "packages", "device-lab", "src");
     const broker = readFileSync(join(root, "device-lab-broker.ts"), "utf8");
     const createStart = broker.indexOf("async function runTypedHyperVCreate(");
     // Up to the catch: codes thrown inside compensation callbacks never become the result either.
@@ -565,7 +566,7 @@ describe("Hyper-V typed create failure codes", () => {
             join("device-lab", "broker", "hyper-v", "vhd-create-inspection.ts"),
             join("device-lab", "broker", "hyper-v", "vm-create-preflight.ts"),
             join("device-lab", "broker", "hyper-v", "deadline.ts"),
-            join("hyper-v-windows", "lifecycle", "vm-create-reconcile.ts"),
+            join("..", "..", "hyper-v", "src", "lifecycle", "vm-create-reconcile.ts"),
         ].map((relativePath) => [relativePath, readFileSync(join(root, relativePath), "utf8")] as const),
         ["runTypedHyperVCreate", createBody] as const,
     ];
@@ -639,5 +640,19 @@ describe("Hyper-V typed create failure codes", () => {
         ]) {
             expect(scanned).toContain(code);
         }
+    });
+});
+
+
+describe("Hyper-V memory admission evidence", () => {
+    const capacity = { requestedMb: 4096, availableMb: 6000, reserveMb: 6553, shortfallMb: 4649 };
+    const execution = { mode: "exec", provider: "hyper-v", error: "hyper-v-host-memory-capacity-exceeded" };
+    it("preserves only numeric capacity fields for a memory refusal", () => {
+        expect(redactProviderCommandInput({ ...execution, capacity: { ...capacity, secret: "hidden" } }, true).capacity).toEqual(capacity);
+        expect(redactProviderCommandInput({ ...execution, error: "hyper-v-host-cpu-capacity-exceeded", capacity }, true)).not.toHaveProperty("capacity");
+    });
+    it.each([null, [], {}, { ...capacity, availableMb: "6000" }, { ...capacity, reserveMb: -1 },
+        { ...capacity, shortfallMb: Infinity }, { ...capacity, requestedMb: Number.MAX_SAFE_INTEGER + 1 }])("omits malformed capacity %j", (value) => {
+        expect(redactProviderCommandInput({ ...execution, capacity: value }, true)).not.toHaveProperty("capacity");
     });
 });

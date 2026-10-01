@@ -12,7 +12,7 @@ vi.mock("@modelcontextprotocol/sdk/server/index.js", () => ({ Server: class {
     async connect() {}
 } }));
 vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({ StdioServerTransport: class {} }));
-vi.mock("../../device-lab-mcp/src/backends/android.mjs", async (original) => ({
+vi.mock("@ccc/device-lab/providers/backends/android.mjs", async (original) => ({
     ...await original<Record<string, unknown>>(),
     listAndroidDevices: () => fixture.android,
     handleAndroidTool: async (name: string, args: any) => {
@@ -21,7 +21,7 @@ vi.mock("../../device-lab-mcp/src/backends/android.mjs", async (original) => ({
         return { content: [{ type: "text", text: '{"ok":true}' }] };
     },
 }));
-vi.mock("../../device-lab-mcp/src/backends/windows-sandbox.mjs", async (original) => ({
+vi.mock("@ccc/device-lab/providers/backends/windows-sandbox.mjs", async (original) => ({
     ...await original<Record<string, unknown>>(),
     listWindowsDevices: () => fixture.desktop,
     handleWindowsTool: async (name: string, args: any) => {
@@ -30,14 +30,14 @@ vi.mock("../../device-lab-mcp/src/backends/windows-sandbox.mjs", async (original
         return { content: [{ type: "text", text: '{"ok":true}' }] };
     },
 }));
-vi.mock("../../device-lab-mcp/src/display/x11.mjs", async (original) => ({
+vi.mock("@ccc/device-lab/providers/display/x11.mjs", async (original) => ({
     ...await original<Record<string, unknown>>(),
     handleDisplayTool: async (name: string, args: any) => {
         fixture.calls.push({ name, args });
         return { content: [{ type: "text", text: '{"ok":true}' }] };
     },
 }));
-vi.mock("../../device-lab-mcp/src/backends/linux-vm.mjs", async (original) => ({
+vi.mock("@ccc/device-lab/providers/backends/linux-vm.mjs", async (original) => ({
     ...await original<Record<string, unknown>>(),
     handleLinuxVmManagementTool: async () => null, handleLinuxVmTool: async () => null,
 }));
@@ -89,7 +89,7 @@ describe("unprefixed unified actions", () => {
     });
     it.each([
         ["click", "mobile_tap", "device_click", { x: 1, y: 2 }],
-        ["double_click", "mobile_double_tap", "device_double_click", { x: 1, y: 2 }],
+        ["click", "mobile_double_tap", "device_double_click", { count: 2, x: 1, y: 2 }],
         ["type", "mobile_type_text", "device_type", { text: "hello" }],
         ["key", "mobile_key", "device_key", { key: "Enter" }],
     ] as const)("routes %s by device for both direct and broker calls", async (name, mobile, desktop, args) => {

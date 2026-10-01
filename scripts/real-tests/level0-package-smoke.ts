@@ -9,14 +9,14 @@ export const name = "level 0 package smoke";
 export async function run() {
     assert.strictEqual(existsSync(join(repoRoot, "dist", "index.js")), true);
     assert.strictEqual(existsSync(join(repoRoot, "dist", "device-lab-mcp", "server.mjs")), true);
-    assert.strictEqual(existsSync(join(repoRoot, "scripts", "host-control", "hyper-v", "Ccc.HyperV.Core.psm1")), true);
-    assert.strictEqual(existsSync(join(repoRoot, "scripts", "host-control", "hyper-v", "Get-LinuxBootstrapNetwork.ps1")), true);
-    assert.strictEqual(existsSync(join(repoRoot, "scripts", "host-control", "hyper-v", "Get-GuestBootDiagnostic.ps1")), true);
+    assert.strictEqual(existsSync(join(repoRoot, "dist", "packages", "device-lab", "powershell", "Ccc.HyperV.Core.psm1")), true);
+    assert.strictEqual(existsSync(join(repoRoot, "dist", "packages", "device-lab", "powershell", "Get-LinuxBootstrapNetwork.ps1")), true);
+    assert.strictEqual(existsSync(join(repoRoot, "dist", "packages", "device-lab", "powershell", "Get-GuestBootDiagnostic.ps1")), true);
     assert.strictEqual(existsSync(join(repoRoot, "dist", "lab-mcp", "server.mjs")), false);
-    assert.strictEqual(existsSync(join(repoRoot, "device-lab-mcp", "src", "state", "ios-state.mjs")), true);
-    assert.strictEqual(existsSync(join(repoRoot, "device-lab-mcp", "src", "state", "macos-state.mjs")), true);
-    assert.strictEqual(existsSync(join(repoRoot, "device-lab-mcp", "src", "state", "ios-device-state.mjs")), true);
-    assert.strictEqual(existsSync(join(repoRoot, "device-lab-mcp", "src", "state", "physical-lease-store.mjs")), true);
+    assert.strictEqual(existsSync(join(repoRoot, "dist", "packages", "device-lab", "providers", "state", "ios-state.mjs")), true);
+    assert.strictEqual(existsSync(join(repoRoot, "dist", "packages", "device-lab", "providers", "state", "macos-state.mjs")), true);
+    assert.strictEqual(existsSync(join(repoRoot, "dist", "packages", "device-lab", "providers", "state", "ios-device-state.mjs")), true);
+    assert.strictEqual(existsSync(join(repoRoot, "dist", "packages", "device-lab", "providers", "state", "physical-lease-store.mjs")), true);
     assert.strictEqual(existsSync(join(repoRoot, "scripts", "test-level.js")), true);
     assert.strictEqual(existsSync(join(repoRoot, "scripts", "real-tests", "run.ts")), true);
     assert.strictEqual(existsSync(join(repoRoot, "scripts", "real-tests", "assert-json.ts")), true);
@@ -52,6 +52,6 @@ export async function run() {
     });
     assert.strictEqual(installedMcpSmoke.status, "PASS");
     assert.strictEqual(installedMcpSmoke.publicDispatchTools, installedMcpSmoke.tools);
-    assert.ok(installedMcpSmoke.currentDisplayAliases.includes("device_status"));
+    assert.ok(installedMcpSmoke.currentDisplayCapabilities.includes("status"));
     return { status: "PASS", installedMcpSmoke };
 }

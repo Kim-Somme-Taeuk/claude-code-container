@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as childProcess from "child_process";
-import * as identity from "../device-lab-process-identity.js";
-import { discoverBrokerPortProcessForTest, hostBrokerRuntimeFromPortProcessForTest } from "../device-lab-broker.js";
+import * as identity from "@ccc/device-lab/device-lab-process-identity.js";
+import { discoverBrokerPortProcessForTest, hostBrokerRuntimeFromPortProcessForTest } from "@ccc/device-lab/device-lab-broker.js";
 
 vi.mock("child_process", async (importOriginal) => ({ ...await importOriginal<typeof import("child_process")>(), spawnSync: vi.fn() }));
 afterEach(() => vi.restoreAllMocks());

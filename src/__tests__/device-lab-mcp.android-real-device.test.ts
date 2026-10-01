@@ -48,8 +48,8 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
 
     it("attaches, uses, and detaches host-connected Android real devices without emulator lifecycle commands", { timeout: TIMEOUT }, async () => {
         const inventory = await client.callTool({
-            name: "inventory",
-            arguments: { backend: "android-device" },
+            name: "devices",
+            arguments: { view: "available", backend: "android-device" },
         });
         expect(inventory.isError).not.toBe(true);
         const inventoryPayload = JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -78,7 +78,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
             expect.objectContaining({ serial: "192.168.1.50:5555", connection: "wifi" }),
         ]));
 
-        const listBeforeWirelessPrepare = await client.callTool({ name: "list_devices", arguments: {} });
+        const listBeforeWirelessPrepare = await client.callTool({ name: "devices", arguments: {} });
         const listedBeforeWirelessPrepare = JSON.parse(((listBeforeWirelessPrepare.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             devices: Array<{ backend?: string }>;
         };
@@ -148,8 +148,8 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
             error: string;
             pair: { args: string[] };
         };
-        expect(pairMissingConnectTargetPayload.error).toBe("android-wireless-connect-requires-host");
-        expect(pairMissingConnectTargetPayload.pair.args).toEqual(["pair", "192.168.1.70:37099", "[redacted]"]);
+        expect(pairMissingConnectTargetPayload.error).toContain("connect:true requires host");
+        expect(pairMissingConnectTargetPayload).not.toHaveProperty("pair");
 
         const failedPair = await client.callTool({
             name: "wireless",
@@ -165,7 +165,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         expect(failedPairPayload.command).toEqual(expect.objectContaining({ status: 1, stderr: expect.stringContaining("Failed to pair") }));
         expect(failedPairPayload.command.args).toEqual(["pair", "192.168.1.70:37099", "[redacted]"]);
 
-        const listAfterWirelessPrepare = await client.callTool({ name: "list_devices", arguments: {} });
+        const listAfterWirelessPrepare = await client.callTool({ name: "devices", arguments: {} });
         const listedAfterWirelessPrepare = JSON.parse(((listAfterWirelessPrepare.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             devices: Array<{ backend?: string }>;
         };
@@ -325,7 +325,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
             ["ui", { deviceId: "android-device-real-pixel" }, { provider: "adb-uiautomator", source: expect.stringContaining("<hierarchy>"), remotePath: "/sdcard/window-android-device-real-pixel.xml" }],
             ["wait_for_text", { deviceId: "android-device-real-pixel", text: "Hello", timeoutMs: 100, intervalMs: 50 }, { provider: "adb-uiautomator", text: "Hello", found: true }],
             ["install_app", { deviceId: "android-device-real-pixel", path: "/tmp/Real.apk" }, { provider: "adb", installed: "/tmp/Real.apk" }],
-            ["launch_app", { deviceId: "android-device-real-pixel", packageName: "com.example.real" }, { provider: "adb", launched: "com.example.real" }],
+            ["launch_app", { deviceId: "android-device-real-pixel", appId: "com.example.real" }, { provider: "adb", launched: "com.example.real" }],
             ["screenshot", { deviceId: "android-device-real-pixel" }, { type: "image", data: expectedAndroidPng, mimeType: "image/png" }],
         ] as Array<[string, Record<string, unknown>, Record<string, unknown>]>) {
             const result = await client.callTool({ name: tool, arguments: args });
@@ -449,7 +449,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         expect(wifiSerialDetach.isError).not.toBe(true);
         expect(() => readFileSync(join(androidLeaseDir, `${encodeURIComponent("192.168.1.60:5555")}.json`), "utf-8")).toThrow();
 
-        const list = await client.callTool({ name: "list_devices", arguments: {} });
+        const list = await client.callTool({ name: "devices", arguments: {} });
         const listed = JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             devices: Array<{ id: string }>;
         };
@@ -532,9 +532,9 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
     it("rejects ambiguous device IDs without provider effects or changing either owned record", { timeout: TIMEOUT }, async () => {
         const sharedId = "android-shared-target";
         const createEmulator = await client.callTool({
-            name: "create",
+            name: "create_android_emulator",
             arguments: {
-                backend: "android-emulator",
+
                 name: "Shared Target Emulator",
                 deviceId: sharedId,
                 avdName: "ccc-shared-target",
@@ -793,7 +793,7 @@ exec "${delegatedAdbPath}" "$@"
 
             const launch = await client.callTool({
                 name: "launch_app",
-                arguments: { deviceId, packageName: "com.example.real.missing" },
+                arguments: { deviceId, appId: "com.example.real.missing" },
             });
             expect(launch.isError).toBe(true);
             expect((launch.content as Array<{ text?: string }>)[0]?.text).toContain("No activities found");

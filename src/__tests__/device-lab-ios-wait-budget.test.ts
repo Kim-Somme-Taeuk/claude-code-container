@@ -2,16 +2,16 @@ import { createServer } from "http";
 import { AddressInfo } from "net";
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { withSharedMutationLock } from "../../device-lab-mcp/src/state/shared-mutation-lock.mjs";
+import { withSharedMutationLock } from "@ccc/device-lab/providers/state/shared-mutation-lock.mjs";
 import { join } from "path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import * as commands from "../../device-lab-mcp/src/commands.mjs";
-import * as simulatorState from "../../device-lab-mcp/src/state/ios-state.mjs";
-import { ownerId } from "../../device-lab-mcp/src/context.mjs";
-import * as simulator from "../../device-lab-mcp/src/backends/ios-simulator.mjs";
-import * as state from "../../device-lab-mcp/src/state/ios-device-state.mjs";
-import * as leases from "../../device-lab-mcp/src/state/physical-lease-store.mjs";
-import { handleIosRealTool } from "../../device-lab-mcp/src/backends/ios-device.mjs";
+import * as commands from "@ccc/device-lab/providers/commands.mjs";
+import * as simulatorState from "@ccc/device-lab/providers/state/ios-state.mjs";
+import { ownerId } from "@ccc/device-lab/providers/context.mjs";
+import * as simulator from "@ccc/device-lab/providers/backends/ios-simulator.mjs";
+import * as state from "@ccc/device-lab/providers/state/ios-device-state.mjs";
+import * as leases from "@ccc/device-lab/providers/state/physical-lease-store.mjs";
+import { handleIosRealTool } from "@ccc/device-lab/providers/backends/ios-device.mjs";
 
 const homeFixture = vi.hoisted(() => ({ root: null as string | null }));
 vi.mock("os", async (importOriginal) => {

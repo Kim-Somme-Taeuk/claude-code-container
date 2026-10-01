@@ -1,7 +1,8 @@
+import { DEVICE_BROKER_PROTOCOL_VERSION } from "@ccc/device-lab/providers/contracts/broker-protocol.mjs";
 import { callInternalBroker } from "./helpers/device-lab-mcp-fixture.js";
 import { spawn } from "child_process";
 import { createHash, createHmac } from "crypto";
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { createServer } from "http";
 import { AddressInfo } from "net";
 import { homedir, tmpdir } from "os";
@@ -15,8 +16,8 @@ import {
     type DeviceLabMcpTestContext,
 } from "./helpers/device-lab-mcp-fixture.js";
 import { freePort, installFakeCccBroker, installIgnoringCccBroker, pidAlive, waitForHealthUnavailable } from "./helpers/fake-broker-mcp-fixture.js";
-import { BROKER_CONTROL_RESPONSE_LIMIT_BYTES, BROKER_RPC_RESPONSE_LIMIT_BYTES, BROKER_RPC_SCREENSHOT_RESPONSE_LIMIT_BYTES, REQUIRED_CCC_HOST_BROKER_CAPABILITIES, authenticatedBrokerHeadersForTest, brokerCommand, brokerDeviceTool, brokerLaunchInvocation, brokerLogTail, brokerRpc, brokerStatus, implicitBrokerProbeOptions, launchedBrokerProcessVerificationForTest, parseWindowsNetstatListenerForTest, reusableBrokerProcessVerificationForTest, terminateVerifiedBrokerRuntimeForTest, verifiedBrokerProcessForTest, waitForBrokerOwnerResolve } from "../../device-lab-mcp/src/broker.mjs";
-import { projectMountPath } from "../../device-lab-mcp/src/context.mjs";
+import { BROKER_CONTROL_RESPONSE_LIMIT_BYTES, BROKER_RPC_RESPONSE_LIMIT_BYTES, BROKER_RPC_SCREENSHOT_RESPONSE_LIMIT_BYTES, authenticatedBrokerHeadersForTest, brokerCommand, brokerDeviceTool, brokerLaunchInvocation, brokerLogTail, brokerRpc, brokerStatus, implicitBrokerProbeOptions, launchedBrokerProcessVerificationForTest, parseWindowsNetstatListenerForTest, reusableBrokerProcessVerificationForTest, terminateVerifiedBrokerRuntimeForTest, verifiedBrokerProcessForTest, waitForBrokerOwnerResolve } from "../../device-lab-mcp/src/broker.mjs";
+import { projectMountPath } from "@ccc/device-lab/providers/context.mjs";
 
 const TEST_BROKER_OWNER_ID = "1111111111111111";
 const HOOK_TIMEOUT = Math.max(TIMEOUT, 60000);
@@ -57,20 +58,14 @@ function sendTestOwnerResolve(req: { method?: string; url?: string }, res: { set
 function sendCurrentBrokerStatus(req: { url?: string }, res: { setHeader(name: string, value: string): void; end(data?: string): void }) {
     if (req.url !== "/status") return false;
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ ok: true, broker: { implemented: REQUIRED_CCC_HOST_BROKER_CAPABILITIES } }));
+    res.end(JSON.stringify({ ok: true, broker: { protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION } }));
     return true;
 }
 
 describe("device-lab MCP", () => {
     it("requires the current Hyper-V computer-use broker capability and caps screenshot responses separately", () => {
-        expect(REQUIRED_CCC_HOST_BROKER_CAPABILITIES).toContain("hyper-v-windows-library-v17");
-        expect(REQUIRED_CCC_HOST_BROKER_CAPABILITIES).toContain("hyper-v-linux-x11-type-v2");
         expect(BROKER_RPC_SCREENSHOT_RESPONSE_LIMIT_BYTES).toBe(8 * 1024 * 1024);
         expect(BROKER_RPC_SCREENSHOT_RESPONSE_LIMIT_BYTES).toBeLessThan(BROKER_RPC_RESPONSE_LIMIT_BYTES);
-    });
-
-    it("requires the current hidden Windows provider child contract", () => {
-        expect(REQUIRED_CCC_HOST_BROKER_CAPABILITIES).toContain("windows-hidden-provider-children-v7");
     });
 
     it("binds authenticated RPC headers to the broker generation without sending the owner token", () => {
@@ -380,7 +375,7 @@ describe("device-lab MCP", () => {
         originalBrokerAuthFile = process.env.CCC_DEVICE_BROKER_AUTH_FILE;
         delete process.env.CCC_DEVICE_BROKER_AUTH_FILE;
         const mcpEnv: Record<string, string> = {};
-        context = await createDeviceLabMcpTestContext({ defaultImplicitBroker: true, env: mcpEnv, setupHome: fixtureHome => {
+        context = await createDeviceLabMcpTestContext({ isolatedLauncher: true, defaultImplicitBroker: true, env: mcpEnv, setupHome: fixtureHome => {
             // The real container's mounted credential must never participate in these
             // synthetic-owner subprocess tests. Preserve ordinary filesystem validation.
             const preload = join(fixtureHome, "isolate-broker-auth.cjs");
@@ -400,7 +395,7 @@ describe("device-lab MCP", () => {
         else process.env.CCC_DEVICE_BROKER_AUTH_FILE = originalBrokerAuthFile;
     }, HOOK_TIMEOUT);
 
-    it("launches the packaged CLI directly for Windows broker recovery", () => {
+    it("launches the core package broker directly for Windows broker recovery", () => {
         const invocation = brokerLaunchInvocation("127.0.0.1", 17373, {
             platform: "win32",
             packageRoot: join(repoRoot, "device-lab-mcp"),
@@ -409,7 +404,7 @@ describe("device-lab MCP", () => {
 
         expect(invocation.command).toBe("C:\\Program Files\\nodejs\\node.exe");
         expect(invocation.args).toEqual([
-            join(repoRoot, "dist", "index.js"),
+            join(repoRoot, "packages", "device-lab", "dist", "broker-entry.js"),
             "devices", "broker", "serve", "--host", "127.0.0.1", "--port", "17373",
         ]);
     });
@@ -469,7 +464,7 @@ describe("device-lab MCP", () => {
         };
 
         expect(payload.available).toBe(false);
-        const discovery = await client.callTool({ name: "backends", arguments: { implicitBroker: false, detail: true } });
+        const discovery = await client.callTool({ name: "devices", arguments: { view: "backends", implicitBroker: false, detail: true } });
         expect(discovery.isError).not.toBe(true);
         const discovered = JSON.parse((discovery.content as Array<{ text?: string }>)[0].text || "{}");
         expect(discovered.broker.state.ownerRoot).toBe(payload.state.ownerRoot);
@@ -1240,7 +1235,7 @@ describe("device-lab MCP", () => {
             }
             if (req.url === "/status") {
                 res.setHeader("content-type", "application/json");
-                res.end(JSON.stringify({ ok: true, broker: { implemented: REQUIRED_CCC_HOST_BROKER_CAPABILITIES } }));
+                res.end(JSON.stringify({ ok: true, broker: { protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION } }));
                 return;
             }
             if (sendTestOwnerResolve(req, res)) return;
@@ -1286,12 +1281,7 @@ describe("device-lab MCP", () => {
         }
     });
 
-    it("reuses a newer host broker whose capability families are ahead of this MCP", { timeout: TIMEOUT }, async () => {
-        // A container image is routinely older than the host install. The broker then advertises
-        // the next generation of each family (-v10 where this client requires -v9); exact matching
-        // refused it and no device tool could run until the image was rebuilt.
-        const newerFamilies = REQUIRED_CCC_HOST_BROKER_CAPABILITIES.map((capability: string) =>
-            capability.replace(/-v(\d+)$/, (_match: string, version: string) => `-v${Number(version) + 1}`));
+    it("reuses a host broker with the same protocol regardless of package version", { timeout: TIMEOUT }, async () => {
         const initial = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: false, autolaunch: false } });
         const initialPayload = JSON.parse(((initial.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             state: { runtimeFile: string };
@@ -1303,7 +1293,7 @@ describe("device-lab MCP", () => {
                 return;
             }
             if (req.url === "/status") {
-                res.end(JSON.stringify({ ok: true, broker: { implemented: newerFamilies } }));
+                res.end(JSON.stringify({ ok: true, broker: { protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION, version: "999.0.0" } }));
                 return;
             }
             if (sendTestOwnerResolve(req, res)) return;
@@ -1341,7 +1331,7 @@ describe("device-lab MCP", () => {
         }
     });
 
-    it("rejects a ccc-host runtime missing required broker capabilities without version metadata", { timeout: TIMEOUT }, async () => {
+    it("rejects a legacy ccc-host runtime without protocol metadata", { timeout: TIMEOUT }, async () => {
         const initial = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: false, autolaunch: false } });
         const initialPayload = JSON.parse(((initial.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             state: { runtimeFile: string };
@@ -1390,182 +1380,16 @@ describe("device-lab MCP", () => {
                     ok: false,
                     error: "host-broker-incompatible",
                     compatibility: expect.objectContaining({
-                        missingCapabilities: [...REQUIRED_CCC_HOST_BROKER_CAPABILITIES],
+                        protocolVersion: null, expectedProtocolVersion: DEVICE_BROKER_PROTOCOL_VERSION,
                     }),
                 }),
             }));
-            expect(payload.warnings.join(" ")).toContain("windows-sandbox-window-minimize-v4");
+            expect(payload.warnings.join(" ")).toContain("protocol mismatch");
         } finally {
             await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
             rmSync(initialPayload.state.runtimeFile, { force: true });
         }
     });
-
-    it("rejects a stale v18 Hyper-V broker even when runtime metadata is missing", { timeout: TIMEOUT }, async () => {
-        const server = createServer((req, res) => {
-            res.setHeader("content-type", "application/json");
-            if (req.url === "/health") {
-                res.end(JSON.stringify({ ok: true, name: "ccc-device-broker", mode: "host-broker-daemon" }));
-                return;
-            }
-            if (req.url === "/status") {
-                res.end(JSON.stringify({
-                    ok: true,
-                    broker: {
-                        implemented: [
-                            ...REQUIRED_CCC_HOST_BROKER_CAPABILITIES.filter((capability) =>
-                                capability !== "hyper-v-vm-managed-auto-images-v20"),
-                            "hyper-v-vm-managed-auto-images-v18",
-                        ],
-                    },
-                }));
-                return;
-            }
-            if (sendTestOwnerResolve(req, res)) return;
-            res.statusCode = 404;
-            res.end(JSON.stringify({ ok: false, error: "not-found" }));
-        });
-        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-        const address = server.address() as AddressInfo;
-
-        try {
-            const result = await brokerRpc({
-                method: "broker.echo",
-                hostCandidates: ["127.0.0.1"],
-                port: address.port,
-                timeoutMs: 3000,
-                autolaunch: true,
-            });
-            expect(result).toEqual(expect.objectContaining({
-                ok: false,
-                error: "host-broker-incompatible",
-                launch: expect.objectContaining({
-                    ok: false,
-                    reused: false,
-                    error: "host-broker-incompatible",
-                    compatibility: expect.objectContaining({
-                        missingCapabilities: ["hyper-v-vm-managed-auto-images-v20"],
-                    }),
-                }),
-            }));
-        } finally {
-            await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-        }
-    });
-
-    it("rejects a current Hyper-V lifecycle broker with the previous network capability", { timeout: TIMEOUT }, async () => {
-        const server = createServer((req, res) => {
-            res.setHeader("content-type", "application/json");
-            if (req.url === "/health") {
-                res.end(JSON.stringify({ ok: true, name: "ccc-device-broker", mode: "host-broker-daemon" }));
-                return;
-            }
-            if (req.url === "/status") {
-                res.end(JSON.stringify({
-                    ok: true,
-                    broker: {
-                        implemented: [
-                            ...REQUIRED_CCC_HOST_BROKER_CAPABILITIES.filter((capability) => capability !== "hyper-v-setup-network-v11"),
-                            "hyper-v-setup-network-v10",
-                        ],
-                    },
-                }));
-                return;
-            }
-            if (sendTestOwnerResolve(req, res)) return;
-            res.statusCode = 404;
-            res.end(JSON.stringify({ ok: false, error: "not-found" }));
-        });
-        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-        const address = server.address() as AddressInfo;
-
-        try {
-            const result = await brokerRpc({
-                method: "broker.echo",
-                hostCandidates: ["127.0.0.1"],
-                port: address.port,
-                timeoutMs: 3000,
-                autolaunch: true,
-            });
-            expect(result).toEqual(expect.objectContaining({
-                ok: false,
-                error: "host-broker-incompatible",
-                launch: expect.objectContaining({
-                    ok: false,
-                    reused: false,
-                    error: "host-broker-incompatible",
-                    compatibility: expect.objectContaining({
-                        missingCapabilities: ["hyper-v-setup-network-v11"],
-                    }),
-                }),
-            }));
-        } finally {
-            await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-        }
-    });
-
-    it.each([
-        ["Azure Hyper-V bootstrap DHCP networking", "hyper-v-azure-bootstrap-dhcp-v1"],
-        ["Hyper-V bootstrap NIC cleanup", "hyper-v-bootstrap-nic-cleanup-v1"],
-        ["Hyper-V bootstrap SSH finalization", "hyper-v-bootstrap-ssh-finalize-v2"],
-        ["Windows specialize Hyper-V guest seeding", "hyper-v-windows-specialize-seed-v1"],
-        ["Windows specialize Hyper-V account creation", "hyper-v-windows-specialize-account-v1"],
-        ["Windows Hyper-V boot contract", "hyper-v-windows-boot-contract-v1"],
-        ["Hyper-V boot disk generation selection", "hyper-v-boot-disk-generation-v1"],
-        ["Hyper-V Linux create response contract", "hyper-v-linux-create-response-v1"],
-        ["Hyper-V image acquisition stage/cache contract", "hyper-v-image-acquisition-stage-cache-v1"],
-        ["Hyper-V PowerShell stage propagation contract", "hyper-v-powershell-stage-propagation-v1"],
-        ["Hyper-V provider-bound automatic image finalization contract", "hyper-v-provider-image-finalization-v40"],
-        ["Hyper-V redacted network failure diagnostics", "hyper-v-network-failure-diagnostics-v11"],
-        ["Android emulator stop completion", "android-emulator-stop-completion-v1"],
-    ])("rejects a same-version broker without %s", async (_label, missingCapability) => {
-        const server = createServer((req, res) => {
-            res.setHeader("content-type", "application/json");
-            if (req.url === "/health") {
-                res.end(JSON.stringify({ ok: true, name: "ccc-device-broker", mode: "host-broker-daemon" }));
-                return;
-            }
-            if (req.url === "/status") {
-                res.end(JSON.stringify({
-                    ok: true,
-                    broker: {
-                        implemented: REQUIRED_CCC_HOST_BROKER_CAPABILITIES.filter((capability) =>
-                            capability !== missingCapability),
-                    },
-                }));
-                return;
-            }
-            if (sendTestOwnerResolve(req, res)) return;
-            res.statusCode = 404;
-            res.end(JSON.stringify({ ok: false, error: "not-found" }));
-        });
-        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-        const address = server.address() as AddressInfo;
-
-        try {
-            const result = await brokerRpc({
-                method: "broker.echo",
-                hostCandidates: ["127.0.0.1"],
-                port: address.port,
-                timeoutMs: 3000,
-                autolaunch: true,
-            });
-            expect(result).toEqual(expect.objectContaining({
-                ok: false,
-                error: "host-broker-incompatible",
-                launch: expect.objectContaining({
-                    ok: false,
-                    reused: false,
-                    error: "host-broker-incompatible",
-                    compatibility: expect.objectContaining({
-                        missingCapabilities: [missingCapability],
-                    }),
-                }),
-            }));
-        } finally {
-            await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-        }
-    }, TIMEOUT);
 
     it("does not signal a PID claimed by incompatible MCP runtime metadata", { timeout: TIMEOUT }, async () => {
         const initial = await callInternalBroker(client, { operation: "brokerStatus", arguments: { probe: false, autolaunch: false } });
@@ -1766,8 +1590,8 @@ describe("device-lab MCP", () => {
             pid: expect.any(Number),
             ownerId: expect.stringMatching(/^[a-f0-9]{16}$/),
             logPath: expect.stringContaining("broker-"),
-            command: "ccc",
-            args: ["devices", "broker", "serve", "--host", "127.0.0.1", "--port", String(port)],
+            command: process.execPath,
+            args: [expect.stringContaining("broker-entry.js"), "devices", "broker", "serve", "--host", "127.0.0.1", "--port", String(port)],
         }));
 
         const status = await callInternalBroker(client, { operation: "brokerStatus",
@@ -2075,7 +1899,7 @@ function provisionOwnerSecret(ownerId) {
 }
 const server = http.createServer((req, res) => {
   if (req.url === "/health") return send(res, 200, { ok: true, name: "ccc-device-broker" });
-  if (req.url === "/status") return send(res, 200, { ok: true, broker: { name: "ccc-device-broker", mode: "host-broker-daemon", host, port, process: { pid: process.pid }, startedAt, implemented: ${JSON.stringify(REQUIRED_CCC_HOST_BROKER_CAPABILITIES)} } });
+  if (req.url === "/status") return send(res, 200, { ok: true, broker: { name: "ccc-device-broker", mode: "host-broker-daemon", host, port, process: { pid: process.pid }, startedAt, protocolVersion: ${JSON.stringify(DEVICE_BROKER_PROTOCOL_VERSION)} } });
   if (req.url === "/v1/owner/resolve" && req.method === "POST") {
     const ownerId = ${JSON.stringify(TEST_BROKER_OWNER_ID)};
     provisionOwnerSecret(ownerId);
@@ -2087,9 +1911,13 @@ server.listen(port, host);
 process.on("SIGTERM", () => {});
 `);
         chmodSync(fakeCcc, 0o755);
+        const adapterRoot = join(signalHome, "adapter");
+        cpSync(join(homeDir, "adapter"), adapterRoot, { recursive: true });
+        const entry = join(adapterRoot, "node_modules", "@ccc", "device-lab", "dist", "broker-entry.js");
+        writeFileSync(entry, readFileSync(entry, "utf8").replace(JSON.stringify(join(pathDir, "ccc")), JSON.stringify(fakeCcc)));
         const script = join(signalHome, "launch-broker.mjs");
         writeFileSync(script, `
-import { brokerRpc } from ${JSON.stringify(join(repoRoot, "device-lab-mcp/src/broker.mjs"))};
+import { brokerRpc } from ${JSON.stringify(join(adapterRoot, "src/broker.mjs"))};
 const result = await brokerRpc({ method: "broker.echo", autolaunch: true, hostCandidates: ["127.0.0.1"], port: ${port}, timeoutMs: 300, launchTimeoutMs: 3000 });
 process.stdout.write(JSON.stringify(result.launch.runtime) + "\\n");
 setInterval(() => {}, 1000);
@@ -2144,7 +1972,7 @@ setInterval(() => {}, 1000);
             port: 65530,
             managedBy: "device-lab-mcp",
         }));
-        rmSync(join(pathDir, "ccc"), { force: true });
+        writeFileSync(join(pathDir, "ccc"), "throw new Error('fixture-broker-start-failed');\n");
         const result = await callInternalBroker(client, { operation: "brokerRpc",
             arguments: {
                 method: "broker.echo",
@@ -2152,18 +1980,19 @@ setInterval(() => {}, 1000);
                 hostCandidates: ["127.0.0.1"],
                 port: 65530,
                 timeoutMs: 20,
-                launchTimeoutMs: 50,
+                launchTimeoutMs: 1000,
             },
         });
         expect(result.isError).toBe(true);
         const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ok: boolean;
             error: string;
-            launch: { error: string; attempts: Array<{ reason?: string }> };
+            launch: { error: string; detail: string; attempts: Array<{ reason?: string }> };
         };
         expect(payload.ok).toBe(false);
-        expect(payload.error).toBe("broker-launch-failed");
-        expect(payload.launch.error).toBe("broker-launch-failed");
+        expect(payload.error).toBe("broker-launch-health-timeout");
+        expect(payload.launch.error).toBe("broker-launch-health-timeout");
+        expect(payload.launch.detail).toContain("fixture-broker-start-failed");
         expect(payload.launch.attempts).toEqual(expect.arrayContaining([
             expect.objectContaining({ reason: "runtime-pid-not-alive" }),
         ]));
@@ -2348,7 +2177,7 @@ setInterval(() => {}, 1000);
             }
             if (req.url === "/status") {
                 res.setHeader("content-type", "application/json");
-                res.end(JSON.stringify({ ok: true, broker: { implemented: REQUIRED_CCC_HOST_BROKER_CAPABILITIES } }));
+                res.end(JSON.stringify({ ok: true, broker: { protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION } }));
                 return;
             }
             if (sendTestOwnerResolve(req, res)) return;
@@ -2553,7 +2382,7 @@ setInterval(() => {}, 1000);
             }
             if (req.url === "/status") {
                 res.setHeader("content-type", "application/json");
-                res.end(JSON.stringify({ ok: true, broker: { implemented: REQUIRED_CCC_HOST_BROKER_CAPABILITIES } }));
+                res.end(JSON.stringify({ ok: true, broker: { protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION } }));
                 return;
             }
             if (sendTestOwnerResolve(req, res)) return;
@@ -2700,7 +2529,7 @@ setInterval(() => {}, 1000);
             }
             if (req.url === "/status") {
                 res.setHeader("content-type", "application/json");
-                res.end(JSON.stringify({ ok: true, broker: { implemented: REQUIRED_CCC_HOST_BROKER_CAPABILITIES } }));
+                res.end(JSON.stringify({ ok: true, broker: { protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION } }));
                 return;
             }
             if (sendTestOwnerResolve(req, res)) return;
@@ -2837,7 +2666,8 @@ setInterval(() => {}, 1000);
             hostCandidates: ["127.0.0.1"], port: (server.address() as AddressInfo).port, managedBy: "ccc-host",
         }));
         try {
-            const result = await client.callTool({ name: tool, arguments: {
+            const result = await client.callTool({ name: "devices", arguments: {
+                view: tool === "inventory" ? "available" : "backends",
                 ...(tool === "inventory" ? { backend: "linux-vm" } : {}),
                 ...(rpcTimeoutMs === undefined ? {} : { rpcTimeoutMs }),
             } });
@@ -2877,7 +2707,7 @@ setInterval(() => {}, 1000);
             }
             if (req.url === "/status") {
                 res.writeHead(200, { "content-type": "application/json" });
-                res.end(JSON.stringify({ ok: true, broker: { implemented: REQUIRED_CCC_HOST_BROKER_CAPABILITIES } }));
+                res.end(JSON.stringify({ ok: true, broker: { protocolVersion: DEVICE_BROKER_PROTOCOL_VERSION } }));
                 return;
             }
             if (sendTestOwnerResolve(req, res)) return;
@@ -2935,8 +2765,8 @@ setInterval(() => {}, 1000);
         }));
         try {
             const result = await client.callTool({
-                name: "backends",
-                arguments: {},
+                name: "devices",
+                arguments: { view: "backends",},
             });
             expect(result.isError).not.toBe(true);
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -3005,8 +2835,8 @@ setInterval(() => {}, 1000);
                 routedBy: "device-lifecycle-broker-implicit",
             }));
             const inventory = await client.callTool({
-                name: "inventory",
-                arguments: { backend: "android-device" },
+                name: "devices",
+                arguments: { view: "available", backend: "android-device" },
             });
             expect(JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 ok: false,
@@ -3088,7 +2918,7 @@ setInterval(() => {}, 1000);
                 expect.stringContaining("does not satisfy the required owner-resolve contract"),
             ]));
             expect(payload.remedies).toEqual(expect.arrayContaining([
-                expect.stringContaining("Restart the host ccc device broker"),
+                expect.stringContaining("run ccc devices broker status on the physical host"),
             ]));
             expect(payload.probe.requested).toBe(true);
             expect(payload.probe.available).toBe(true);
@@ -3098,12 +2928,6 @@ setInterval(() => {}, 1000);
                 body: expect.objectContaining({ ok: true, name: "ccc-device-broker" }),
             }));
             expect(payload.probe.attempts).toHaveLength(1);
-            expect(payload.implemented).toContain("broker health probe");
-            expect(payload.implemented).toContain("explicit broker Appium process/session/request routing");
-            expect(payload.implemented).toContain("opt-in high-level mobile broker Appium routing");
-            expect(payload.implemented).toContain("broker desktop device tool result proxying");
-            expect(payload.deferred).not.toContain("broker health probe");
-            expect(payload.deferred).not.toContain("full direct-provider routing parity through broker");
         } finally {
             await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
         }

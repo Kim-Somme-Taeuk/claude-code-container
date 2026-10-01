@@ -15,7 +15,7 @@ errors. Paths are command data, including whitespace, quotes and Unicode.
 Android, Linux/QEMU, macOS, Windows Sandbox and Hyper-V reuse their existing
 owned-device command transports. Required incarnation and physical lease checks
 remain. Listing does not start devices, provision software, or install anything.
-An iOS Simulator call requires `bundleId`; `path` is relative to that app container
+An iOS Simulator call requires `appId`; `path` is relative to that app container
 and must not escape it through traversal or symlinks. Physical iOS/iPadOS currently has no
 Device Lab listing adapter and reports that implementation limitation explicitly.
 This does not mean the platform forbids all file access: apps enabling File

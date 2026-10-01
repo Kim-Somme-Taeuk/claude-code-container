@@ -1,0 +1,3 @@
+# Device Lab request and response consistency
+
+Device Lab keeps its 58 public tools while making their contracts consistent: schemas reject unsupported combinations before dispatch, destructive operations require explicit confirmation, discovery retains supported actions, and known app identifiers use `appId`. Wait responses report `matched`; an unmet wait remains a valid observation but stops a flow. Compact and detailed responses agree on failures, and bounded diagnostics retain recovery and cleanup information. Response validators and real-provider test callers now follow these contracts. Native device execution is separate from the Linux contract and simulated-provider checks.

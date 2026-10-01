@@ -3,8 +3,8 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { runHyperVCreateCompensation } from "../device-lab/broker/hyper-v/vm-create-compensation.js";
-import type { HyperVCreateEffect } from "../hyper-v-windows/lifecycle/index.js";
+import { runHyperVCreateCompensation } from "@ccc/device-lab/device-lab/broker/hyper-v/vm-create-compensation.js";
+import type { HyperVCreateEffect } from "@ccc/hyper-v/lifecycle/index.js";
 
 // Slice 3A wrote the compensation contract and shipped no executor, so none of this had ever
 // run. The equivalent PowerShell assertions are skipIf(platform !== "win32") and have never

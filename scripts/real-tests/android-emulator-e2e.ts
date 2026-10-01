@@ -6,7 +6,7 @@ import { basename, dirname, join, resolve } from "path";
 import {
     androidBackend,
     androidDiscovery,
-} from "../../device-lab-mcp/src/backends/android.mjs";
+} from "#device-lab/providers/backends/android.mjs";
 import { materializeAndroidAppFixture } from "./android-app-fixture.ts";
 import { realProviderTempRoot } from "./helpers.ts";
 import { parseToolPayload, withDeviceLabMcp } from "./device-lab-mcp-client.ts";
@@ -40,7 +40,7 @@ function assertReportedLocalPath(actual, expected, brokerOnly) {
 const DESTRUCTIVE_ANDROID_CAPABILITIES = new Set([
     "power",
     "set_network",
-    "toggle_airplane_mode",
+    "set_network",
 ]);
 
 export function deviceFromPayload(payload, operation) {
@@ -187,7 +187,6 @@ export function androidEmulatorAppSelection(env = process.env) {
 
 export function androidEmulatorCreateRequest({ name, deviceId, systemImage }) {
     return {
-        backend: "android-emulator",
         name,
         deviceId,
         systemImage,
@@ -214,7 +213,7 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
     const appApk = app.path;
     const appPackage = app.packageName;
     const appPermission = app.permission;
-    const advertisedCapabilities = [...new Set<string>(androidBackend().capabilities.map(publicToolName))].filter(name => TOOLS.some(tool => tool.name === name));
+    const advertisedCapabilities = [...new Set<string>(androidBackend().capabilities.map(name => publicToolName(name, "android-emulator")))].filter(name => TOOLS.some(tool => tool.name === name));
     const calledCapabilities = new Set();
     let created = false;
     let stopped = false;
@@ -245,7 +244,7 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
         };
         const direct = { backend: "android-emulator" };
         try {
-            const createdPayload = parsePayload(await callTool("create", { detail: true, ...androidEmulatorCreateRequest({
+            const createdPayload = parsePayload(await callTool("create_android_emulator", { detail: true, ...androidEmulatorCreateRequest({
                 name,
                 deviceId,
                 systemImage: cap.systemImage.package,
@@ -258,7 +257,7 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             assert.ok(Number.isInteger(createdDevice.port));
             assert.strictEqual(createdDevice.provisioned, true);
 
-            const inventory = parsePayload(await callTool("inventory", { detail: true, ...direct }));
+            const inventory = parsePayload(await callTool("devices", { view: "available", detail: true, ...direct }));
             const inventoryDevices = inventory.devices || inventory.result?.devices;
             assert.ok(Array.isArray(inventoryDevices));
             assert.ok(inventoryDevices.some((device) => device.id === deviceId));
@@ -310,11 +309,6 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             const home = parsePayload(await callTool("home", { detail: true, deviceId }));
             assert.strictEqual(home.status, 0);
 
-            const session = parsePayload(await callTool("status", { detail: true, deviceId }));
-            const sessionResult = session.result || session;
-            assert.strictEqual(sessionResult.authority, "host-broker");
-            assert.strictEqual(sessionResult.device.id, deviceId);
-
             const ui = parsePayload(await callTool("ui", { detail: true, deviceId }));
             assertProvider(ui, "adb-uiautomator", "ui");
             assert.ok(typeof ui.source === "string");
@@ -323,7 +317,9 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             const waitedText = parsePayload(await callTool("wait_for_text", { detail: true,
                 deviceId,
                 text: waitText,
-                timeoutMs: 5000,
+                // One UI observation includes both uiautomator dump and ADB read;
+                // cold or loaded emulators can need more than five seconds.
+                timeoutMs: 30000,
                 intervalMs: 250,
             }));
             assertProvider(waitedText, "adb-uiautomator", "wait_for_text");
@@ -333,9 +329,9 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             const tap = parsePayload(await callTool("click", { detail: true, deviceId, x: 20, y: 20 }));
             assert.strictEqual(tap.status, 0);
 
-            const doubleTap = parsePayload(await callTool("double_click", { detail: true, deviceId, x: 30, y: 30 }));
+            const doubleTap = parsePayload(await callTool("click", { count: 2, detail: true, deviceId, x: 30, y: 30 }));
             assert.strictEqual(doubleTap.provider, "adb");
-            assert.deepStrictEqual(doubleTap.doubleTapped, { x: 30, y: 30 });
+            assert.deepStrictEqual(doubleTap.doubleTapped, { x: 30, y: 30 }, `click count=2 expected doubleTapped; response keys=${Object.keys(doubleTap).slice(0, 12).map(key => key.slice(0, 40)).join(",")}`);
 
             const longPress = parsePayload(await callTool("long_press", { detail: true, deviceId, x: 40, y: 40, durationMs: 300 }));
             assert.strictEqual(longPress.provider, "adb");
@@ -412,43 +408,43 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
 
                 const deviceLaunch = parsePayload(await callTool("launch_app", { detail: true,
                     deviceId,
-                    packageName: appPackage,
+                    appId: appPackage,
                 }));
                 assert.strictEqual(deviceLaunch.provider, "adb");
                 assert.strictEqual(deviceLaunch.launched, appPackage);
 
                 const waitForApp = parsePayload(await callTool("wait_for_app", { detail: true,
                     deviceId,
-                    packageName: appPackage,
+                    appId: appPackage,
                     timeoutMs: 10000,
                     intervalMs: 500,
                 }));
                 assert.strictEqual(waitForApp.provider, "adb");
-                assert.strictEqual(waitForApp.packageName, appPackage);
+                assert.strictEqual(waitForApp.appId, appPackage);
                 assert.strictEqual(waitForApp.running, true);
                 assert.match(String(waitForApp.pid), /^\d+$/);
 
                 {
                     const grantPermission = parsePayload(await callTool("permission", { action: "grant", detail: true,
                         deviceId,
-                        packageName: appPackage,
+                        appId: appPackage,
                         permission: appPermission,
                     }));
                     assert.strictEqual(grantPermission.provider, "adb");
                     assert.deepStrictEqual(grantPermission.permission, {
-                        packageName: appPackage,
+                        appId: appPackage,
                         permission: appPermission,
                         action: "grant",
                     });
 
                     const revokePermission = parsePayload(await callTool("permission", { action: "revoke", detail: true,
                         deviceId,
-                        packageName: appPackage,
+                        appId: appPackage,
                         permission: appPermission,
                     }));
                     assert.strictEqual(revokePermission.provider, "adb");
                     assert.deepStrictEqual(revokePermission.permission, {
-                        packageName: appPackage,
+                        appId: appPackage,
                         permission: appPermission,
                         action: "revoke",
                     });
@@ -456,29 +452,29 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
 
                 const mobileStop = parsePayload(await callTool("stop_app", { detail: true,
                     deviceId,
-                    packageName: appPackage,
+                    appId: appPackage,
                 }));
                 assert.strictEqual(mobileStop.provider, "adb");
                 assert.strictEqual(mobileStop.stopped, appPackage);
 
                 const clearAppData = parsePayload(await callTool("clear_app_data", { detail: true,
                     deviceId,
-                    packageName: appPackage,
+                    appId: appPackage,
                     confirmDestructive: true,
                 }));
                 assert.strictEqual(clearAppData.provider, "adb");
-                assert.deepStrictEqual(clearAppData.reset, { packageName: appPackage });
+                assert.deepStrictEqual(clearAppData.reset, { appId: appPackage });
 
                 const mobileLaunch = parsePayload(await callTool("launch_app", { detail: true,
                     deviceId,
-                    packageName: appPackage,
+                    appId: appPackage,
                 }));
                 assert.strictEqual(mobileLaunch.provider, "adb");
                 assert.strictEqual(mobileLaunch.launched, appPackage);
 
                 const mobileUninstall = parsePayload(await callTool("uninstall_app", { detail: true,
                     deviceId,
-                    packageName: appPackage,
+                    appId: appPackage,
                     confirmDestructive: true,
                 }));
                 assert.strictEqual(mobileUninstall.provider, "adb");
@@ -493,7 +489,7 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
 
                 const finalUninstall = parsePayload(await callTool("uninstall_app", { detail: true,
                     deviceId,
-                    packageName: appPackage,
+                    appId: appPackage,
                     confirmDestructive: true,
                 }));
                 assert.strictEqual(finalUninstall.provider, "adb");
@@ -520,23 +516,23 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
                     confirmDestructive: true,
                 }));
                 assert.strictEqual(network.provider, "adb");
-                assert.deepStrictEqual(network.network, { wifi: true, data: true });
+                assert.deepStrictEqual(network.network, { airplaneMode: null, wifi: true, data: true });
 
-                const airplaneOn = parsePayload(await callTool("toggle_airplane_mode", { detail: true,
+                const airplaneOn = parsePayload(await callTool("set_network", { detail: true,
                     deviceId,
-                    enabled: true,
+                    airplaneMode: true,
                     confirmDestructive: true,
                 }));
                 assert.strictEqual(airplaneOn.provider, "adb");
-                assert.strictEqual(airplaneOn.airplaneMode, true);
+                assert.deepStrictEqual(airplaneOn.network, { airplaneMode: true, wifi: null, data: null });
 
-                const airplaneOff = parsePayload(await callTool("toggle_airplane_mode", { detail: true,
+                const airplaneOff = parsePayload(await callTool("set_network", { detail: true,
                     deviceId,
-                    enabled: false,
+                    airplaneMode: false,
                     confirmDestructive: true,
                 }));
                 assert.strictEqual(airplaneOff.provider, "adb");
-                assert.strictEqual(airplaneOff.airplaneMode, false);
+                assert.deepStrictEqual(airplaneOff.network, { airplaneMode: false, wifi: null, data: null });
             }
 
             const recordingPath = join(tempDir, "recording.mp4");

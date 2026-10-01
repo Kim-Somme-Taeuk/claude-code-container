@@ -3,15 +3,15 @@ import { describe, expect, it, vi } from "vitest";
 import {
     executeDeviceLabHyperVVmCreation,
     type DeviceLabHyperVVmCreationOptions,
-} from "../device-lab/broker/hyper-v/vm-create-adapter.js";
-import type { HyperVCreateEffect, HyperVCreateVirtualMachineRequest } from "../hyper-v-windows/lifecycle/index.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/vm-create-adapter.js";
+import type { HyperVCreateEffect, HyperVCreateVirtualMachineRequest } from "@ccc/hyper-v/lifecycle/index.js";
 import {
     parseHyperVMacAddress,
     parseHyperVVirtualMachineId,
     parseHyperVVirtualSwitchId,
     parseHyperVVirtualSwitchName,
     type HyperVVMNetworkAdapter,
-} from "../hyper-v-windows/low-level/index.js";
+} from "@ccc/hyper-v/low-level/index.js";
 
 const VM_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const DISK_PATH = "C:\\ccc\\device-1\\disks\\root.vhdx";

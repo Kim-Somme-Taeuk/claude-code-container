@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { HyperVUbuntuImageCacheInspection } from "../device-lab/broker/hyper-v/image-store.js";
+import type { HyperVUbuntuImageCacheInspection } from "@ccc/device-lab/device-lab/broker/hyper-v/image-store.js";
 import {
     hyperVLinuxImageBlockers,
     hyperVLinuxImageSkipReason,
     hyperVLinuxSmokeImageResult,
-} from "../device-lab/hyper-v-linux-image-readiness.js";
+} from "@ccc/device-lab/device-lab/hyper-v-linux-image-readiness.js";
 
 const globalCache: HyperVUbuntuImageCacheInspection = { state: "valid", source: "global" };
 const ownerCache: HyperVUbuntuImageCacheInspection = { state: "valid", source: "owner" };

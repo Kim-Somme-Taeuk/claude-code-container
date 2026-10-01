@@ -33,7 +33,7 @@ describe("minimal public Device Lab output", () => {
         const value = JSON.parse(result.content[0].text);
         expect(value.backends).toHaveLength(2);
         expect(result.content[0].text).toContain("xcrun");
-        expect(result.content[0].text).not.toContain("device_screenshot");
+        expect(value.backends[0].capabilities).toEqual(["device_screenshot", "device_stop"]);
         expect(value).not.toHaveProperty("hostBackends");
         expect(value).not.toHaveProperty("localBackends");
         expect(result.content[0].text).not.toContain("internal-capability-v1");
@@ -256,13 +256,13 @@ describe("minimal public Device Lab output", () => {
             return { value: JSON.parse(text), text };
         };
         try {
-            const created = await call("create", {
-                backend: "android-emulator", name: "Minimal output fixture",
+            const created = await call("create_android_emulator", {
+                 name: "Minimal output fixture",
                 avdName: "Minimal_Fixture", port: 5580,
             });
             const id = created.value.device.id;
             expect(id).toEqual(expect.any(String));
-            const list = await call("list_devices");
+            const list = await call("devices");
             expect(list.value.some((device: { id: string }) => device.id === id)).toBe(true);
             const compact = await call("status", { deviceId: id });
             const detailed = await call("status", { deviceId: id, detail: true });
@@ -271,9 +271,9 @@ describe("minimal public Device Lab output", () => {
             expect(detailed.value.device).toHaveProperty("targetStatus");
             expect(compact.text.length).toBeLessThan(detailed.text.length);
             expect(compact.text).not.toContain("\n");
-            const compactBackends = await call("backends");
-            const detailedBackends = await call("backends", { detail: true });
-            expect(compactBackends.value.backends.every((backend: Record<string, unknown>) => !("capabilities" in backend))).toBe(true);
+            const compactBackends = await call("devices", { view: "backends" });
+            const detailedBackends = await call("devices", { view: "backends", detail: true });
+            expect(compactBackends.value.backends.some((backend: { capabilities?: string[] }) => backend.capabilities?.includes("screenshot"))).toBe(true);
             expect(detailedBackends.value.backends.some((backend: { capabilities?: string[] }) => backend.capabilities?.includes("screenshot"))).toBe(true);
             const deleted = await call("delete", { deviceId: id, confirmDestructive: true });
             expect(deleted.value.deleted).toBe(id);

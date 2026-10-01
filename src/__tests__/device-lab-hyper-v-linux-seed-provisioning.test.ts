@@ -5,8 +5,8 @@ import {
     inspectDeviceLabHyperVLinuxSeedTarget,
     linuxSeedBootstrapMacAddress,
     linuxSeedFailureCode,
-} from "../device-lab/broker/hyper-v/linux-seed-provisioning.js";
-import type { HyperVProviderCommand } from "../host-control/hyper-v/index.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/linux-seed-provisioning.js";
+import type { HyperVProviderCommand } from "@ccc/device-lab/host-control/hyper-v/index.js";
 
 const vmId = "12345678-1234-1234-1234-123456789abc";
 const vmName = "ccc-owned-linux";

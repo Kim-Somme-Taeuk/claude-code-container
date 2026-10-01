@@ -4,7 +4,9 @@ import { fileURLToPath } from "url";
 import { describe, expect, it } from "vitest";
 
 const projectSourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const sourceRoot = join(projectSourceRoot, "hyper-v-windows");
+const repositoryRoot = resolve(projectSourceRoot, "..");
+const sourceRoot = join(repositoryRoot, "packages", "hyper-v", "src");
+const coreSourceRoot = join(repositoryRoot, "packages", "device-lab", "src");
 
 function sourceFiles(root: string): string[] {
     return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
@@ -59,11 +61,11 @@ describe("Hyper-V Windows package boundary", () => {
     });
 
     it("keeps production consumers on layer entrypoints", () => {
-        for (const path of sourceFiles(projectSourceRoot)) {
+        for (const path of [...sourceFiles(projectSourceRoot), ...sourceFiles(coreSourceRoot)]) {
             const projectPath = relative(projectSourceRoot, path);
             if (projectPath.startsWith("hyper-v-windows/") || projectPath.startsWith("__tests__/")) continue;
             const source = readFileSync(path, "utf8");
-            for (const match of source.matchAll(/hyper-v-windows\/(?:low-level|lifecycle)\/([^"']+)/g)) {
+            for (const match of source.matchAll(/@ccc\/hyper-v\/(?:low-level|lifecycle)\/([^"']+)/g)) {
                 expect(match[1], `${projectPath} deep-imports ${match[0]}`).toBe("index.js");
             }
         }

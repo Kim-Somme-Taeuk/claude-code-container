@@ -14,7 +14,7 @@ import {
     runBuffer,
     runWithInput,
     runWithTimeout,
-} from "../../device-lab-mcp/src/commands.mjs";
+} from "@ccc/device-lab/providers/commands.mjs";
 import { commandPath as realTestCommandPath, hiddenSpawnSync } from "../../scripts/real-tests/helpers.ts";
 
 vi.mock("child_process", () => ({

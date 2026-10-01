@@ -2,9 +2,9 @@ import { lstatSync, readFileSync, realpathSync } from "fs";
 import { basename, dirname, join, relative } from "path";
 import { describe, expect, it } from "vitest";
 
-import { hyperVPowerShellAssetPath, hyperVPowerShellFileCommand } from "../host-control/hyper-v/powershell-assets.js";
-import { hyperVOwnedVmContractV1, hyperVSnapshotCreateContractV1, hyperVSnapshotRepairContractV1 } from "../host-control/hyper-v/powershell-contracts.js";
-import { hyperVVmName } from "../host-control/hyper-v/core.js";
+import { hyperVPowerShellAssetPath, hyperVPowerShellFileCommand } from "@ccc/device-lab/host-control/hyper-v/powershell-assets.js";
+import { hyperVOwnedVmContractV1, hyperVSnapshotCreateContractV1, hyperVSnapshotRepairContractV1 } from "@ccc/device-lab/host-control/hyper-v/powershell-contracts.js";
+import { hyperVVmName } from "@ccc/device-lab/host-control/hyper-v/core.js";
 
 const identityBase = {
     executable: "powershell.exe",

@@ -3,7 +3,7 @@ import {
     androidEmulatorE2ECapability,
     runAndroidEmulatorE2E,
 } from "../../scripts/real-tests/android-emulator-e2e.ts";
-import { androidBackend } from "../../device-lab-mcp/src/backends/android.mjs";
+import { androidBackend } from "@ccc/device-lab/providers/backends/android.mjs";
 
 const level = Number(process.env.CCC_TEST_LEVEL || "0");
 const cap = androidEmulatorE2ECapability(level);

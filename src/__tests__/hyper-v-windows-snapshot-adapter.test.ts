@@ -8,12 +8,12 @@ import {
     repairDeviceLabHyperVSnapshotState,
     resolveOwnedHyperVSnapshot,
     restoreDeviceLabHyperVSnapshot,
-} from "../device-lab/broker/hyper-v/snapshots.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/snapshots.js";
 import type {
     HyperVVirtualMachine,
     HyperVVirtualMachineSnapshot,
     HyperVWindowsClient,
-} from "../hyper-v-windows/index.js";
+} from "@ccc/hyper-v/index.js";
 
 const vmId = "6f9619ff-8b86-d011-b42d-00c04fc964ff";
 const snapshotId = "11111111-2222-3333-4444-555555555555";

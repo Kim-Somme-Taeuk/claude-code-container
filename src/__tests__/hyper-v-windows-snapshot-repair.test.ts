@@ -5,7 +5,7 @@ import {
     createHyperVWindowsClient,
     type HyperVRepairVMSnapshotStateRequest,
     type HyperVWindowsExecutionRequest,
-} from "../hyper-v-windows/low-level/index.js";
+} from "@ccc/hyper-v/low-level/index.js";
 
 const vmId = "12345678-1234-1234-1234-123456789ABC";
 const request: HyperVRepairVMSnapshotStateRequest = {
@@ -94,7 +94,7 @@ describe("typed Hyper-V snapshot journal repair", () => {
     });
 
     it("contains one owner checked policy restore and quarantine sequence", () => {
-        const source = readFileSync(new URL("../../scripts/host-control/hyper-v/Invoke-HyperVWindowsOperation.ps1", import.meta.url), "utf8");
+        const source = readFileSync(new URL("../../packages/hyper-v/powershell/Invoke-HyperVWindowsOperation.ps1", import.meta.url), "utf8");
         const branch = source.split('        "Repair-VMSnapshotState" {')[1]?.split('        "Get-VMSwitch" {')[0] ?? "";
         expect(branch).toContain('if ([string]$VirtualMachine.CheckpointType -ceq "Disabled")');
         expect(branch.match(/if \(\[string\]\$VirtualMachine.CheckpointType -ceq "Disabled"\)/g)).toHaveLength(2);

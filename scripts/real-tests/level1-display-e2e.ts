@@ -7,16 +7,14 @@ export const name = "level 1 current display MCP E2E";
 const scriptedArgumentFacets = [
     "click:button=left",
     "click:button=right",
-    "double_click:button=left",
-    "double_click:button=right",
+    "click:count=2",
     "scroll:direction=down",
     "scroll:direction=left",
     "scroll:direction=right",
     "scroll:direction=up",
     "click:button=left",
     "click:button=right",
-    "double_click:button=left",
-    "double_click:button=right",
+    "click:count=2",
     "scroll:direction=down",
     "scroll:direction=left",
     "scroll:direction=right",
@@ -63,12 +61,12 @@ export async function run() {
         }
         steps.push({ name: "current display available", status: "PASS", detail: `display=${current.display}` });
 
-        const listed = parseToolPayload(await callTool("list_devices", { detail: true }));
+        const listed = parseToolPayload(await callTool("devices", { detail: true }));
         assert.ok(Array.isArray(listed.devices), JSON.stringify(listed));
         assert.ok(listed.devices.some((device) => device.id === "x11-current-display" && device.available === true), JSON.stringify(listed.devices));
-        steps.push({ name: "list_devices includes current display", status: "PASS" });
+        steps.push({ name: "devices includes current display", status: "PASS" });
 
-        const displayDevice = { backend: "x11-current-display", deviceId: "x11-current-display" };
+        const displayDevice = { deviceId: "x11-current-display" };
         const status = parseToolPayload(await callTool("status", { detail: true, deviceId: displayDevice.deviceId }));
         assert.strictEqual(status.id, "x11-current-display", JSON.stringify(status));
         assert.strictEqual(status.kind, "display", JSON.stringify(status));
@@ -113,14 +111,14 @@ export async function run() {
         steps.push({ name: "device_click current display alias buttons", status: "PASS" });
 
         for (const button of ["left", "right"]) {
-            const doubleClick = await callTool("double_click", { detail: true, deviceId: "x11-current-display", x: 1, y: 1, button });
+            const doubleClick = await callTool("click", { count: 2, detail: true, deviceId: "x11-current-display", x: 1, y: 1, button });
             assert.notStrictEqual(doubleClick?.isError, true, `display_double_click ${button}: ${doubleClick?.content?.[0]?.text || ""}`);
             assert.deepStrictEqual(parseToolPayload(doubleClick).doubleClicked, { x: 1, y: 1, button });
         }
         steps.push({ name: "display_double_click buttons", status: "PASS" });
 
         for (const button of ["left", "right"]) {
-            const deviceDoubleClick = await callTool("double_click", { detail: true, deviceId: displayDevice.deviceId, x: 1, y: 1, button });
+            const deviceDoubleClick = await callTool("click", { count: 2, detail: true, deviceId: displayDevice.deviceId, x: 1, y: 1, button });
             assert.notStrictEqual(deviceDoubleClick?.isError, true, `device_double_click ${button}: ${deviceDoubleClick?.content?.[0]?.text || ""}`);
             assert.deepStrictEqual(parseToolPayload(deviceDoubleClick).doubleClicked, { x: 1, y: 1, button });
         }

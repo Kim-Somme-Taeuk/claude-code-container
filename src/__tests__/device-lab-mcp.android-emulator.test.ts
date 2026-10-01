@@ -3,8 +3,8 @@ import { spawn } from "child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { androidWindowsHiddenLauncherScript } from "../../device-lab-mcp/src/backends/android.mjs";
-import { withSharedMutationLockAsync } from "../../device-lab-mcp/src/state/shared-mutation-lock.mjs";
+import { androidWindowsHiddenLauncherScript } from "@ccc/device-lab/providers/backends/android.mjs";
+import { withSharedMutationLockAsync } from "@ccc/device-lab/providers/state/shared-mutation-lock.mjs";
 import { cleanupFakeAndroidMcpContext, createFakeAndroidMcpContext, TIMEOUT, type FakeAndroidMcpContext } from "./helpers/fake-android-mcp-fixture.js";
 
 function parseToolJson(result: { content?: unknown }) {
@@ -47,7 +47,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
     });
 
     it("discovers avdmanager and reports Android host AVD inventory without starting emulators", { timeout: TIMEOUT }, async () => {
-        const backends = await client.callTool({ name: "backends", arguments: {} });
+        const backends = await client.callTool({ name: "devices", arguments: { view: "backends",} });
         const backendPayload = JSON.parse(((backends.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             backends: Array<{
                 name: string;
@@ -64,18 +64,22 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         expect(android?.tools.avdmanager).toBe(join(binDir, "avdmanager"));
 
         const inventory = await client.callTool({
-            name: "inventory",
-            arguments: { backend: "android-emulator" },
+            name: "devices",
+            arguments: { view: "available", backend: "android-emulator" },
         });
         expect(inventory.isError).not.toBe(true);
         const payload = JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
             ownerId: string;
             hostAvds: { available: boolean; avds: string[] };
+            systemImages: string[];
+            deviceProfiles: string[];
             devices: Array<{ id: string }>;
         };
         expect(payload.ownerId).toMatch(/^[a-f0-9]{16}$/);
         expect(payload.hostAvds).toEqual({ available: true, missing: [], avds: ["host_pixel", "ccc-external-other"] });
         expect(payload.devices).toEqual([]);
+        expect(payload.systemImages).toEqual(["system-images;android-35;google_apis;x86_64"]);
+        expect(payload.deviceProfiles).toEqual(["pixel_6"]);
 
         const log = readFileSync(logPath, "utf-8");
         expect(log).toContain("emulator -list-avds");
@@ -85,21 +89,22 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
 
     it("creates and deletes owner-prefixed AVDs through avdmanager without a separate provisioning flag", { timeout: TIMEOUT }, async () => {
         const inventory = await client.callTool({
-            name: "inventory",
-            arguments: { backend: "android-emulator" },
+            name: "devices",
+            arguments: { view: "available", backend: "android-emulator" },
         });
-        const ownerId = (JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as { ownerId: string }).ownerId;
+        const choices = JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}"));
+        const ownerId = choices.ownerId;
         const avdName = `ccc-${ownerId}-pixel-owned`;
 
         const create = await client.callTool({
-            name: "create",
+            name: "create_android_emulator",
             arguments: {
-                backend: "android-emulator",
+
                 name: "Pixel Owned",
                 avdName,
                 port: 5582,
-                systemImage: "system-images;android-35;google_apis;x86_64",
-                deviceProfile: "pixel_6",
+                systemImage: choices.systemImages[0],
+                deviceProfile: choices.deviceProfiles[0],
             },
         });
         expect(create.isError).not.toBe(true);
@@ -157,7 +162,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             expect(execSettled).toBe(false);
             const waitResult = await client.callTool({
                 name: "wait_for_app",
-                arguments: { deviceId: "android-pixel-owned", packageName: "com.example.ready", timeoutMs: 100, intervalMs: 10 },
+                arguments: { deviceId: "android-pixel-owned", appId: "com.example.ready", timeoutMs: 100, intervalMs: 10 },
             });
             expect(waitResult.isError).not.toBe(true);
         } finally {
@@ -179,7 +184,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
 
         const primitiveCalls: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
             ["click", { deviceId: "android-pixel-owned", x: 10, y: 20 }, { provider: "adb", tapped: { x: 10, y: 20 } }],
-            ["double_click", { deviceId: "android-pixel-owned", x: 11, y: 21 }, { provider: "adb", doubleTapped: { x: 11, y: 21 } }],
+            ["click", { count: 2, deviceId: "android-pixel-owned", x: 11, y: 21 }, { provider: "adb", doubleTapped: { x: 11, y: 21 } }],
             ["long_press", { deviceId: "android-pixel-owned", x: 12, y: 22, durationMs: 900 }, { provider: "adb", longPressed: { x: 12, y: 22, durationMs: 900 } }],
             ["swipe", { deviceId: "android-pixel-owned", x1: 1, y1: 2, x2: 30, y2: 40, durationMs: 500 }, { provider: "adb", swiped: { x1: 1, y1: 2, x2: 30, y2: 40, durationMs: 500 } }],
             ["drag", { deviceId: "android-pixel-owned", x1: 3, y1: 4, x2: 50, y2: 60, durationMs: 800 }, { provider: "adb", dragged: { x1: 3, y1: 4, x2: 50, y2: 60, durationMs: 800 } }],
@@ -195,12 +200,12 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             ["set_orientation", { deviceId: "android-pixel-owned", orientation: "landscape" }, { provider: "adb", orientation: "landscape", rotation: "1" }],
             ["set_orientation", { orientation: "reverse-landscape", deviceId: "android-pixel-owned" }, { provider: "adb", orientation: "reverse-landscape", rotation: "3" }],
             ["open_url", { deviceId: "android-pixel-owned", url: "https://example.test/path" }, { provider: "adb", openedUrl: "https://example.test/path" }],
-            ["permission", { action: "grant", deviceId: "android-pixel-owned", packageName: "com.example.mobile", permission: "android.permission.CAMERA" }, { provider: "adb", permission: { packageName: "com.example.mobile", permission: "android.permission.CAMERA", action: "grant" } }],
-            ["permission", { action: "revoke", deviceId: "android-pixel-owned", packageName: "com.example.mobile", permission: "android.permission.CAMERA" }, { provider: "adb", permission: { packageName: "com.example.mobile", permission: "android.permission.CAMERA", action: "revoke" } }],
+            ["permission", { action: "grant", deviceId: "android-pixel-owned", appId: "com.example.mobile", permission: "android.permission.CAMERA" }, { provider: "adb", permission: { appId: "com.example.mobile", permission: "android.permission.CAMERA", action: "grant" } }],
+            ["permission", { action: "revoke", deviceId: "android-pixel-owned", appId: "com.example.mobile", permission: "android.permission.CAMERA" }, { provider: "adb", permission: { appId: "com.example.mobile", permission: "android.permission.CAMERA", action: "revoke" } }],
             ["set_location", { deviceId: "android-pixel-owned", latitude: 37.7749, longitude: -122.4194, altitude: 10 }, { provider: "adb-emulator", location: { latitude: 37.7749, longitude: -122.4194, altitude: 10 } }],
             ["set_battery", { deviceId: "android-pixel-owned", level: 42, charging: true, confirmDestructive: true }, { provider: "adb", battery: { level: 42, status: null, charging: true } }],
-            ["set_network", { deviceId: "android-pixel-owned", wifi: false, data: true, confirmDestructive: true }, { provider: "adb", network: { wifi: false, data: true } }],
-            ["toggle_airplane_mode", { deviceId: "android-pixel-owned", enabled: true, confirmDestructive: true }, { provider: "adb", airplaneMode: true }],
+            ["set_network", { deviceId: "android-pixel-owned", wifi: false, data: true, confirmDestructive: true }, { provider: "adb", network: { airplaneMode: null, wifi: false, data: true } }],
+            ["set_network", { deviceId: "android-pixel-owned", airplaneMode: true, confirmDestructive: true }, { provider: "adb", network: { airplaneMode: true, wifi: null, data: null } }],
             ["clipboard", { deviceId: "android-pixel-owned", text: "clip text" }, { provider: "adb", clipboard: { set: true } }],
             ["clipboard", { deviceId: "android-pixel-owned" }, { provider: "adb", text: "ok\n", status: 0 }],
         ] as const;
@@ -222,7 +227,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
 
         const waitApp = await client.callTool({
             name: "wait_for_app",
-            arguments: { deviceId: "android-pixel-owned", packageName: "com.example.mobile", timeoutMs: 1000, intervalMs: 50 },
+            arguments: { deviceId: "android-pixel-owned", appId: "com.example.mobile", timeoutMs: 1000, intervalMs: 50 },
         });
         expect(waitApp.isError).not.toBe(true);
         const waitAppPayload = JSON.parse(((waitApp.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -564,14 +569,14 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             ["upload", { deviceId: "android-pixel-owned", localPath: localUploadPath, remotePath: "/sdcard/local.txt" }, { provider: "adb", uploaded: { localPath: localUploadPath, remotePath: "/sdcard/local.txt" } }],
             ["download", { deviceId: "android-pixel-owned", remotePath: "/sdcard/remote.txt", localPath: localDownloadPath }, { provider: "adb", downloaded: { remotePath: "/sdcard/remote.txt", localPath: localDownloadPath } }],
             ["install_app", { deviceId: "android-pixel-owned", path: "/tmp/Test.apk" }, { provider: "adb", installed: "/tmp/Test.apk" }],
-            ["launch_app", { deviceId: "android-pixel-owned", packageName: "com.example.test" }, { provider: "adb", launched: "com.example.test" }],
+            ["launch_app", { deviceId: "android-pixel-owned", appId: "com.example.test" }, { provider: "adb", launched: "com.example.test" }],
             ["launch_app", { deviceId: "android-pixel-owned", component: "com.example.test/.MainActivity" }, { provider: "adb", launched: "com.example.test/.MainActivity" }],
-            ["clear_app_data", { deviceId: "android-pixel-owned", packageName: "com.example.test", confirmDestructive: true }, { provider: "adb", reset: { packageName: "com.example.test" } }],
+            ["clear_app_data", { deviceId: "android-pixel-owned", appId: "com.example.test", confirmDestructive: true }, { provider: "adb", reset: { appId: "com.example.test" } }],
             ["install_app", { deviceId: "android-pixel-owned", path: "/tmp/Mobile.apk" }, { provider: "adb", installed: "/tmp/Mobile.apk" }],
-            ["launch_app", { deviceId: "android-pixel-owned", packageName: "com.example.mobile" }, { provider: "adb", launched: "com.example.mobile" }],
-            ["uninstall_app", { deviceId: "android-pixel-owned", packageName: "com.example.mobile", confirmDestructive: true }, { provider: "adb", uninstalled: "com.example.mobile" }],
-            ["stop_app", { deviceId: "android-pixel-owned", packageName: "com.example.mobile" }, { provider: "adb", stopped: "com.example.mobile" }],
-            ["clear_app_data", { deviceId: "android-pixel-owned", packageName: "com.example.mobile", confirmDestructive: true }, { provider: "adb", reset: { packageName: "com.example.mobile" } }],
+            ["launch_app", { deviceId: "android-pixel-owned", appId: "com.example.mobile" }, { provider: "adb", launched: "com.example.mobile" }],
+            ["uninstall_app", { deviceId: "android-pixel-owned", appId: "com.example.mobile", confirmDestructive: true }, { provider: "adb", uninstalled: "com.example.mobile" }],
+            ["stop_app", { deviceId: "android-pixel-owned", appId: "com.example.mobile" }, { provider: "adb", stopped: "com.example.mobile" }],
+            ["clear_app_data", { deviceId: "android-pixel-owned", appId: "com.example.mobile", confirmDestructive: true }, { provider: "adb", reset: { appId: "com.example.mobile" } }],
         ] as const;
         for (const [name, callArgs, expectedPayload] of fileAndAppCalls) {
             const action = await client.callTool({ name, arguments: callArgs });
@@ -721,7 +726,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
     });
 
     it("removes partial owner-scoped AVD artifacts when avdmanager creation fails", { timeout: TIMEOUT }, async () => {
-        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "android-emulator" } });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "android-emulator" } });
         const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
         const deviceId = "android-partial-create-failure";
         const avdName = `ccc-${ownerId}-partial-create-failure`;
@@ -730,9 +735,9 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         writeFileSync(failureMarker, "fail");
         try {
             const created = await client.callTool({
-                name: "create",
+                name: "create_android_emulator",
                 arguments: {
-                    backend: "android-emulator",
+
                     name: "Partial Create Failure",
                     deviceId,
                     avdName,
@@ -750,7 +755,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
     });
 
     it.runIf(process.platform !== "win32")("preserves partial AVD artifacts when a matching emulator process starts during failed creation", { timeout: TIMEOUT }, async () => {
-        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "android-emulator" } });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "android-emulator" } });
         const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
         const deviceId = "android-active-partial-create-failure";
         const avdName = `ccc-${ownerId}-active-partial-create-failure`;
@@ -763,9 +768,9 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
         try {
             const created = await client.callTool({
-                name: "create",
+                name: "create_android_emulator",
                 arguments: {
-                    backend: "android-emulator",
+
                     name: "Active Partial Create Failure",
                     deviceId,
                     avdName,
@@ -785,9 +790,9 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
 
     it("assigns and persists a deterministic direct emulator port when none is requested", { timeout: TIMEOUT }, async () => {
         const create = await client.callTool({
-            name: "create",
+            name: "create_android_emulator",
             arguments: { systemImage: "system-images;android-35;google_apis;x86_64",
-                backend: "android-emulator",
+
                 name: "Auto Port",
                 deviceId: "android-auto-port",
             },
@@ -809,9 +814,9 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
     it("rejects a direct port occupied by a live unmanaged emulator", { timeout: TIMEOUT }, async () => {
         const beforeLog = readFileSync(logPath, "utf8");
         const create = await client.callTool({
-            name: "create",
+            name: "create_android_emulator",
             arguments: {
-                backend: "android-emulator",
+
                 name: "Live Direct Conflict",
                 deviceId: "android-live-direct-conflict",
                 port: 5554,
@@ -831,9 +836,9 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         const beforeLog = readFileSync(logPath, "utf8");
         try {
             const create = await client.callTool({
-                name: "create",
+                name: "create_android_emulator",
                 arguments: {
-                    backend: "android-emulator",
+
                     name: "Unavailable Direct Live Inventory",
                     deviceId: "android-unavailable-direct-live-inventory",
                     systemImage: "system-images;android-35;google_apis;x86_64",
@@ -853,9 +858,9 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         const deviceId = "android-direct-start-port-conflict";
         const port = 5680;
         const create = await client.callTool({
-            name: "create",
+            name: "create_android_emulator",
             arguments: { systemImage: "system-images;android-35;google_apis;x86_64",
-                backend: "android-emulator",
+
                 name: "Direct Start Port Conflict",
                 deviceId,
                 port,
@@ -895,9 +900,9 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         const beforeLog = readFileSync(logPath, "utf8");
         try {
             const create = await client.callTool({
-                name: "create",
+                name: "create_android_emulator",
                 arguments: {
-                    backend: "android-emulator",
+
                     name: "Foreign Port Conflict",
                     deviceId: "android-foreign-port-conflict",
                     port: 5682,
@@ -921,9 +926,9 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         const beforeLog = readFileSync(logPath, "utf8");
         try {
             const create = await client.callTool({
-                name: "create",
+                name: "create_android_emulator",
                 arguments: {
-                    backend: "android-emulator",
+
                     name: "Corrupt Inventory",
                     deviceId: "android-corrupt-inventory",
                     systemImage: "system-images;android-35;google_apis;x86_64",
@@ -939,7 +944,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
     });
 
     it("waits for the broker-compatible global port lock before direct provider and state effects", { timeout: TIMEOUT }, async () => {
-        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "android-emulator" } });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "android-emulator" } });
         const currentOwnerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
         let releaseLock!: () => void;
         let lockEntered!: () => void;
@@ -955,9 +960,9 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         const beforeLog = readFileSync(logPath, "utf8");
         let settled = false;
         const createRequest = client.callTool({
-            name: "create",
+            name: "create_android_emulator",
             arguments: {
-                backend: "android-emulator",
+
                 name: "Global Port Lock",
                 deviceId: "android-global-port-lock",
                 avdName,
@@ -995,8 +1000,8 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
 
     it("rolls back a directly provisioned AVD when an external same-id create wins the state claim", { timeout: TIMEOUT }, async () => {
         const inventory = await client.callTool({
-            name: "inventory",
-            arguments: { backend: "android-emulator" },
+            name: "devices",
+            arguments: { view: "available", backend: "android-emulator" },
         });
         const ownerId = (JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as { ownerId: string }).ownerId;
         const stateRoot = join(homeDir, ".ccc", "devices", "owners", ownerId, "android");
@@ -1016,9 +1021,9 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         const losingAvd = `ccc-${ownerId}-direct-loser`;
         try {
             const create = await client.callTool({
-                name: "create",
+                name: "create_android_emulator",
                 arguments: {
-                    backend: "android-emulator",
+
                     name: "Direct loser",
                     deviceId,
                     avdName: losingAvd,
@@ -1040,17 +1045,17 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
 
     it("rolls back a started emulator when a non-cooperating same-id successor replaces owner state", { timeout: TIMEOUT }, async () => {
         const inventory = await client.callTool({
-            name: "inventory",
-            arguments: { backend: "android-emulator" },
+            name: "devices",
+            arguments: { view: "available", backend: "android-emulator" },
         });
         const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
         const stateRoot = join(homeDir, ".ccc", "devices", "owners", ownerId, "android");
         const statePath = join(stateRoot, "devices.json");
         const deviceId = "android-direct-start-race";
         const create = await client.callTool({
-            name: "create",
+            name: "create_android_emulator",
             arguments: { systemImage: "system-images;android-35;google_apis;x86_64",
-                backend: "android-emulator",
+
                 name: "Direct Start Race",
                 deviceId,
                 port: 5678,
@@ -1068,8 +1073,21 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             status: "stopped",
             generation: "successor",
         };
-        writeFileSync(join(homeDir, "fake-android-start-conflict-state.json"), JSON.stringify({ devices: [successor] }));
-        writeFileSync(join(homeDir, "fake-android-start-conflict-state-path"), statePath);
+        const adbPath = join(binDir, "adb");
+        const originalAdb = readFileSync(adbPath, "utf8");
+        const successorPath = join(homeDir, "fake-android-start-complete-state.json");
+        const targetPath = join(homeDir, "fake-android-start-complete-state-path");
+        writeFileSync(successorPath, JSON.stringify({ devices: [successor] }));
+        writeFileSync(targetPath, statePath);
+        // Boot polling starts after the runtime claim is persisted. Inject the successor here
+        // so process scheduling cannot move the conflict to the earlier start-runtime phase.
+        writeFileSync(adbPath, `#!/bin/sh
+if [ "$1" = "-s" ] && [ "$2" = "emulator-5678" ] && [ "$3" = "shell" ] && [ "$4" = "getprop" ] && [ "$5" = "sys.boot_completed" ]; then
+  state_path="$(/bin/cat "$HOME/fake-android-start-complete-state-path")" || exit 91
+  /bin/cp "$HOME/fake-android-start-complete-state.json" "$state_path.successor" || exit 92
+  /bin/mv "$state_path.successor" "$state_path" || exit 93
+fi
+${originalAdb.replace(/^#![^\n]*\n/, "")}`);
         const beforeLog = readFileSync(logPath, "utf8");
         try {
             const start = await client.callTool({
@@ -1086,8 +1104,10 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             expect(addedLog).toContain("adb -s emulator-5678 emu kill");
         } finally {
             writeFileSync(statePath, JSON.stringify({ devices: [] }));
-            rmSync(join(homeDir, "fake-android-start-conflict-state.json"), { force: true });
-            rmSync(join(homeDir, "fake-android-start-conflict-state-path"), { force: true });
+            writeFileSync(adbPath, originalAdb);
+            rmSync(successorPath, { force: true });
+            rmSync(targetPath, { force: true });
+            rmSync(`${statePath}.successor`, { force: true });
         }
     });
 
@@ -1119,8 +1139,8 @@ exec "${realAdbPath}" "$@"
 
         try {
             const create = await client.callTool({
-                name: "create",
-                arguments: { systemImage: "system-images;android-35;google_apis;x86_64", backend: "android-emulator", name: "Boot Process Exit", deviceId, port: 5664 },
+                name: "create_android_emulator",
+                arguments: { systemImage: "system-images;android-35;google_apis;x86_64",  name: "Boot Process Exit", deviceId, port: 5664 },
             });
             expect(create.isError).not.toBe(true);
 
@@ -1163,8 +1183,8 @@ exec "${realAdbPath}" "$@"
     it("force-deletes a running emulator only after stopping its ADB and owned process runtimes", { timeout: TIMEOUT }, async () => {
         const deviceId = "android-force-delete-running";
         const create = await client.callTool({
-            name: "create",
-            arguments: { systemImage: "system-images;android-35;google_apis;x86_64", backend: "android-emulator", name: "Force Delete Running", deviceId, port: 5666 },
+            name: "create_android_emulator",
+            arguments: { systemImage: "system-images;android-35;google_apis;x86_64",  name: "Force Delete Running", deviceId, port: 5666 },
         });
         expect(create.isError).not.toBe(true);
         const start = await client.callTool({
@@ -1188,8 +1208,8 @@ exec "${realAdbPath}" "$@"
     it("force-deletes stale stopped metadata without signaling an absent emulator", { timeout: TIMEOUT }, async () => {
         const deviceId = "android-force-delete-stale-stopped";
         const create = await client.callTool({
-            name: "create",
-            arguments: { systemImage: "system-images;android-35;google_apis;x86_64", backend: "android-emulator", name: "Force Delete Stale Stopped", deviceId, port: 5670 },
+            name: "create_android_emulator",
+            arguments: { systemImage: "system-images;android-35;google_apis;x86_64",  name: "Force Delete Stale Stopped", deviceId, port: 5670 },
         });
         expect(create.isError).not.toBe(true);
         const beforeLog = readFileSync(logPath, "utf8");
@@ -1206,7 +1226,7 @@ exec "${realAdbPath}" "$@"
     });
 
     it("preserves a stopped-state AVD while ADB still observes its emulator", { timeout: TIMEOUT }, async () => {
-        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "android-emulator" } });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "android-emulator" } });
         const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
         const deviceId = "android-stale-stopped-active-avd";
         const avdName = `ccc-${ownerId}-stale-stopped-active-avd`;
@@ -1218,9 +1238,9 @@ exec "${realAdbPath}" "$@"
         const activeNameMarker = join(homeDir, `fake-adb-avd-name-emulator-${activePort}`);
         const inventoryFailureMarker = join(homeDir, "fake-adb-devices-fail");
         const create = await client.callTool({
-            name: "create",
+            name: "create_android_emulator",
             arguments: {
-                backend: "android-emulator",
+
                 name: "Stale Stopped Active AVD",
                 deviceId,
                 avdName,
@@ -1284,7 +1304,7 @@ exec "${realAdbPath}" "$@"
     });
 
     it("verifies direct AVD deletion identity through the empty console reply retry", { timeout: TIMEOUT }, async () => {
-        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "android-emulator" } });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "android-emulator" } });
         const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
         const deviceId = "android-console-retry";
         const avdName = `ccc-${ownerId}-console-retry`;
@@ -1294,8 +1314,8 @@ exec "${realAdbPath}" "$@"
         const savedAdb = join(binDir, "adb-console-retry-original");
         const replyPath = join(homeDir, "console-retry-response");
         const retriesPath = join(homeDir, "console-retry-calls");
-        const create = await client.callTool({ name: "create", arguments: {
-            backend: "android-emulator", name: "Console Retry", deviceId, avdName, port: 5672,
+        const create = await client.callTool({ name: "create_android_emulator", arguments: {
+             name: "Console Retry", deviceId, avdName, port: 5672,
             systemImage: "system-images;android-35;google_apis;x86_64",
         } });
         expect(create.isError).not.toBe(true);
@@ -1349,15 +1369,15 @@ exec "${savedAdb}" "$@"
     });
 
     it("preserves running state and the AVD when force-delete cannot terminate the owned process", { timeout: TIMEOUT }, async () => {
-        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "android-emulator" } });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "android-emulator" } });
         const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
         const statePath = join(homeDir, ".ccc", "devices", "owners", ownerId, "android", "devices.json");
         const deviceId = "android-force-delete-stop-failure";
         const avdName = `ccc-${ownerId}-force-delete-stop-failure`;
         const create = await client.callTool({
-            name: "create",
+            name: "create_android_emulator",
             arguments: {
-                backend: "android-emulator",
+
                 name: "Force Delete Stop Failure",
                 deviceId,
                 avdName,
@@ -1420,7 +1440,7 @@ exec "${savedAdb}" "$@"
     });
 
     it.runIf(process.platform !== "win32")("force-delete uses identity-fenced storage cleanup without avdmanager deletion", { timeout: TIMEOUT }, async () => {
-        const inventory = await client.callTool({ name: "inventory", arguments: { backend: "android-emulator" } });
+        const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "android-emulator" } });
         const ownerId = (parseToolJson(inventory) as { ownerId: string }).ownerId;
         const deviceId = "android-force-delete-partial-stop";
         const avdName = `ccc-${ownerId}-force-delete-partial-stop`;
@@ -1432,9 +1452,9 @@ exec "${savedAdb}" "$@"
         const originalAvdmanager = readFileSync(avdmanagerPath, "utf8");
 
         const created = await client.callTool({
-            name: "create",
+            name: "create_android_emulator",
             arguments: {
-                backend: "android-emulator",
+
                 name: "Force Delete Partial Stop",
                 deviceId,
                 avdName,
@@ -1497,8 +1517,8 @@ exec "${realAvdmanagerPath}" "$@"
 
     it("rolls back a directly provisioned AVD when concurrent state growth exceeds the file limit", { timeout: TIMEOUT }, async () => {
         const inventory = await client.callTool({
-            name: "inventory",
-            arguments: { backend: "android-emulator" },
+            name: "devices",
+            arguments: { view: "available", backend: "android-emulator" },
         });
         const ownerId = (JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as { ownerId: string }).ownerId;
         const stateRoot = join(homeDir, ".ccc", "devices", "owners", ownerId, "android");
@@ -1513,9 +1533,9 @@ exec "${realAvdmanagerPath}" "$@"
         const losingAvd = `ccc-${ownerId}-direct-state-limit-loser`;
         try {
             await expect(client.callTool({
-                name: "create",
+                name: "create_android_emulator",
                 arguments: {
-                    backend: "android-emulator",
+
                     name: "Direct state limit loser",
                     deviceId: "android-direct-state-limit-loser",
                     avdName: losingAvd,
@@ -1536,16 +1556,16 @@ exec "${realAvdmanagerPath}" "$@"
 
     it("refuses avdmanager create/delete for non-owned Android AVD names", { timeout: TIMEOUT }, async () => {
         const inventory = await client.callTool({
-            name: "inventory",
-            arguments: { backend: "android-emulator" },
+            name: "devices",
+            arguments: { view: "available", backend: "android-emulator" },
         });
         const ownerId = (JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as { ownerId: string }).ownerId;
         const metadataOnlyAvd = `ccc-${ownerId}-metadata-only`;
 
         const metadataWithSystemImage = await client.callTool({
-            name: "create",
+            name: "create_android_emulator",
             arguments: {
-                backend: "android-emulator",
+
                 name: "Metadata System Image",
                 avdName: metadataOnlyAvd,
                 systemImage: "system-images;android-35;google_apis;x86_64",
@@ -1565,9 +1585,9 @@ exec "${realAvdmanagerPath}" "$@"
         expect(metadataSystemImageDeleted.isError).not.toBe(true);
 
         const create = await client.callTool({
-            name: "create",
+            name: "create_android_emulator",
             arguments: {
-                backend: "android-emulator",
+
                 name: "Foreign Create",
                 avdName: "foreign-avd",
                 systemImage: "system-images;android-35;google_apis;x86_64",
@@ -1603,9 +1623,9 @@ exec "${realAvdmanagerPath}" "$@"
         for (const unsafe of unsafeProvisioningCases) {
             const { expected, ...unsafeArguments } = unsafe;
             const rejected = await client.callTool({
-                name: "create",
+                name: "create_android_emulator",
                 arguments: { systemImage: "system-images;android-35;google_apis;x86_64",
-                    backend: "android-emulator",
+
                     ...unsafeArguments,
                 },
             });
@@ -1614,9 +1634,9 @@ exec "${realAvdmanagerPath}" "$@"
         }
 
         const metadataOnly = await client.callTool({
-            name: "create",
+            name: "create_android_emulator",
             arguments: {
-                backend: "android-emulator",
+
                 name: "Foreign Metadata",
                 avdName: "foreign-avd",
             },
@@ -1625,9 +1645,9 @@ exec "${realAvdmanagerPath}" "$@"
 
         const unsafeMetadataAvd = `ccc-${ownerId}-%PATH%`;
         const unsafeMetadata = await client.callTool({
-            name: "create",
+            name: "create_android_emulator",
             arguments: {
-                backend: "android-emulator",
+
                 name: "Unsafe Foreign Metadata",
                 deviceId: "android-unsafe-foreign-metadata",
                 avdName: unsafeMetadataAvd,
@@ -1708,8 +1728,8 @@ exec "${delegatedAdbPath}" "$@"
 
         try {
             const created = await client.callTool({
-                name: "create",
-                arguments: { systemImage: "system-images;android-35;google_apis;x86_64", backend: "android-emulator", name: "ADB Result Validation", deviceId, port: 5676 },
+                name: "create_android_emulator",
+                arguments: { systemImage: "system-images;android-35;google_apis;x86_64",  name: "ADB Result Validation", deviceId, port: 5676 },
             });
             expect(created.isError, (created.content as Array<{ text?: string }>)[0]?.text).not.toBe(true);
             expect((await client.callTool({
@@ -1727,7 +1747,7 @@ exec "${delegatedAdbPath}" "$@"
             expect((timedOutInstall.content as Array<{ text?: string }>)[0]?.text).toMatch(/timed out|ETIMEDOUT/i);
 
             for (const arguments_ of [
-                { deviceId, packageName: "com.example.missing" },
+                { deviceId, appId: "com.example.missing" },
                 { deviceId, component: "com.example.missing/.MainActivity" },
             ]) {
                 const launch = await client.callTool({ name: "launch_app", arguments: arguments_ });

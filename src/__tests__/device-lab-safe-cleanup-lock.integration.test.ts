@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 function cleanupProcess(home: string, target: string, order: string, label: string): Promise<number | null> {
     const script = [
-        `import { quarantineAndRemoveDirectory } from ${JSON.stringify(new URL("../device-lab-safe-cleanup.js", import.meta.url).href.replace("/src/", "/dist/").replace("/__tests__", ""))};`,
+        `import { quarantineAndRemoveDirectory } from ${JSON.stringify(new URL("../../packages/device-lab/dist/device-lab-safe-cleanup.js", import.meta.url).href)};`,
         `import { appendFileSync } from "fs";`,
         `const sleep = new Int32Array(new SharedArrayBuffer(4));`,
         `quarantineAndRemoveDirectory(${JSON.stringify(target)}, () => {}, { beforeRemove() {`,

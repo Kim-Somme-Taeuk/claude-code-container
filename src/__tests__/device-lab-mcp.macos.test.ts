@@ -1,9 +1,9 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { handleMacosTool } from "../../device-lab-mcp/src/backends/macos-vm.mjs";
-import { withOwnerDeviceOperation } from "../../device-lab-mcp/src/state/device-store.mjs";
-import { updateMacosDevice } from "../../device-lab-mcp/src/state/macos-state.mjs";
+import { handleMacosTool } from "@ccc/device-lab/providers/backends/macos-vm.mjs";
+import { withOwnerDeviceOperation } from "@ccc/device-lab/providers/state/device-store.mjs";
+import { updateMacosDevice } from "@ccc/device-lab/providers/state/macos-state.mjs";
 import { cleanupFakeMacosMcpContext, createFakeMacosMcpContext, type FakeMacosMcpContext } from "./helpers/fake-macos-mcp-fixture.js";
 
 describe("macOS VM backend with fake Tart provider", () => {

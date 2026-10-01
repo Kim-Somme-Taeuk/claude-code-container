@@ -3,8 +3,7 @@ import { createInterface } from "node:readline";
 
 // A persistent isolated process preserves broker child ownership between calls.
 // This is an internal API fixture, not an alternate public MCP entry point.
-export function createBrokerApiClient(env: NodeJS.ProcessEnv) {
-    const moduleUrl = new URL("../../device-lab-mcp/src/broker.mjs", import.meta.url).href;
+export function createBrokerApiClient(env: NodeJS.ProcessEnv, moduleUrl = new URL("../../device-lab-mcp/src/broker.mjs", import.meta.url).href) {
     const program = `import * as broker from ${JSON.stringify(moduleUrl)};
 import { createInterface } from 'node:readline';
 const allowed = ['brokerStatus', 'brokerRpc', 'brokerLease', 'brokerPhysical', 'brokerApple', 'brokerCommand', 'brokerAppium', 'brokerShutdown'];

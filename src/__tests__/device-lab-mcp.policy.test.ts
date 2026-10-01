@@ -2,7 +2,7 @@ import { callInternalBroker } from "./helpers/device-lab-mcp-fixture.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES, evaluateDestructivePolicy } from "../../device-lab-mcp/src/policy/destructive.mjs";
 import { TOOLS, publicToolName, toolOperation } from "../../device-lab-mcp/src/tools.mjs";
-import { ownerDeviceOperationTools } from "../../device-lab-mcp/src/state/device-operation-policy.mjs";
+import { ownerDeviceOperationTools } from "@ccc/device-lab/providers/state/device-operation-policy.mjs";
 import {
     cleanupDeviceLabMcpTestContext,
     createDeviceLabMcpTestContext,
@@ -16,6 +16,18 @@ const HIDDEN_DESTRUCTIVE_POLICY_TOOLS = new Set([
     "device_broker_appium",
 ]);
 
+function publicPolicyName(name: string): string {
+    return name === "mobile_toggle_airplane_mode" ? "set_network" : publicToolName(name);
+}
+
+function publicPolicyArguments(name: string, args: Record<string, unknown>): Record<string, unknown> {
+    return Object.fromEntries(Object.entries(args).map(([key, value]) => [
+        key === "packageName" || key === "bundleId" ? "appId"
+            : name === "mobile_toggle_airplane_mode" && key === "enabled" ? "airplaneMode" : key,
+        value,
+    ]));
+}
+
 function textPayload(result: Awaited<ReturnType<DeviceLabMcpTestContext["client"]["callTool"]>>) {
     return (result.content as Array<{ text?: string }>)[0].text ?? "";
 }
@@ -26,7 +38,7 @@ function jsonPayload(result: Awaited<ReturnType<DeviceLabMcpTestContext["client"
 
 describe("device-lab destructive action policy", () => {
     it("exposes the same owner-scoped GUI contract for both Hyper-V guest backends", () => {
-        const guiTools = ["screenshot", "click", "double_click", "key", "type", "scroll", "cursor_position", "move"];
+        const guiTools = ["screenshot", "click", "key", "type", "scroll", "cursor_position", "move"];
         for (const backend of ["windows-vm", "linux-vm"]) {
             const ownerOperations = ownerDeviceOperationTools(backend);
             for (const name of guiTools) {
@@ -97,7 +109,7 @@ describe("device-lab destructive action policy", () => {
             const policy = evaluateDestructivePolicy(name, {});
             const examplePolicy = evaluateDestructivePolicy(name, DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES.find((item) => item.name === name)?.args || {});
             expect(policy.destructive || examplePolicy.destructive).toBe(true);
-            const tool = result.tools.find((item) => item.name === publicToolName(name));
+            const tool = result.tools.find((item) => item.name === publicPolicyName(name));
             expect(tool?.inputSchema).toEqual(expect.objectContaining({
                 properties: expect.objectContaining({
                     confirmDestructive: expect.objectContaining({ type: "boolean" }),
@@ -127,7 +139,7 @@ describe("device-lab destructive action policy", () => {
             .sort();
         const policyTools = [...new Set(DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES.map(({ name }) => name))]
             .filter((name) => !HIDDEN_DESTRUCTIVE_POLICY_TOOLS.has(name))
-            .map(publicToolName).filter((name, index, all) => all.indexOf(name) === index).sort();
+            .map(publicPolicyName).filter((name, index, all) => all.indexOf(name) === index).sort();
 
         expect(schemaTools).toEqual(policyTools);
     });
@@ -166,7 +178,7 @@ describe("device-lab destructive action policy", () => {
     });
 
     it("does not gate non-destructive status tools", { timeout: TIMEOUT }, async () => {
-        const list = await client.callTool({ name: "list_devices", arguments: {} });
+        const list = await client.callTool({ name: "devices", arguments: {} });
         expect(list.isError).not.toBe(true);
         expect(jsonPayload(list)).toEqual(expect.objectContaining({
             ownerId: expect.any(String),
@@ -209,7 +221,7 @@ describe("device-lab destructive action policy", () => {
                 steps: [
                     {
                         tool: "clear_app_data",
-                        arguments: { deviceId: "android-flow-owned", packageName: "com.example.flow" },
+                        arguments: { deviceId: "android-flow-owned", appId: "com.example.flow" },
                     },
                 ],
             },
@@ -242,7 +254,7 @@ describe("device-lab destructive action policy", () => {
                 steps: [
                     {
                         tool: "clear_app_data",
-                        arguments: { deviceId: "android-flow-owned", packageName: "com.example.flow", confirmDestructive: true },
+                        arguments: { deviceId: "android-flow-owned", appId: "com.example.flow", confirmDestructive: true },
                     },
                 ],
             },
@@ -256,7 +268,7 @@ describe("device-lab destructive action policy", () => {
     it("enforces destructive policy for every destructive device_run_flow step", { timeout: TIMEOUT }, async () => {
         const mobileExamples = DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES
             .filter(({ name }) => name.startsWith("mobile_"))
-            .map(({ name, args }) => ({ tool: publicToolName(name), arguments: { deviceId: "android-flow-owned", ...args } }));
+            .map(({ name, args }) => ({ tool: publicPolicyName(name), arguments: { ...publicPolicyArguments(name, args), deviceId: "android-flow-owned" } }));
         const denied = await client.callTool({
             name: "run_flow",
             arguments: {

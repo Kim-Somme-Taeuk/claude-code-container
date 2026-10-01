@@ -13,19 +13,19 @@ function execution(name: string, args: any) {
     fixture.calls.push({ name, args });
     return { content: [{ type: "text", text: JSON.stringify({ stdout: fixture.stdout, stderr: fixture.status ? "permission denied" : "", status: fixture.status }) }] };
 }
-vi.mock("../../device-lab-mcp/src/backends/android.mjs", async original => ({
+vi.mock("@ccc/device-lab/providers/backends/android.mjs", async original => ({
     ...await original<Record<string, unknown>>(), listAndroidDevices: () => [{ id: "phone" }],
     handleAndroidTool: (name: string, args: any) => args.deviceId === "phone" ? execution(name, args) : null,
 }));
-vi.mock("../../device-lab-mcp/src/backends/macos-vm.mjs", async original => ({
+vi.mock("@ccc/device-lab/providers/backends/macos-vm.mjs", async original => ({
     ...await original<Record<string, unknown>>(), listMacosDevices: () => [{ id: "mac" }, ...(fixture.duplicate ? [{ id: "phone" }] : [])],
     handleMacosTool: (name: string, args: any) => args.deviceId === "mac" ? execution(name, args) : null,
 }));
-vi.mock("../../device-lab-mcp/src/backends/windows-sandbox.mjs", async original => ({
+vi.mock("@ccc/device-lab/providers/backends/windows-sandbox.mjs", async original => ({
     ...await original<Record<string, unknown>>(), listWindowsDevices: () => [{ id: "sandbox" }],
     handleWindowsTool: (name: string, args: any) => args.deviceId === "sandbox" ? execution(name, args) : null,
 }));
-vi.mock("../../device-lab-mcp/src/backends/linux-vm.mjs", async original => ({
+vi.mock("@ccc/device-lab/providers/backends/linux-vm.mjs", async original => ({
     ...await original<Record<string, unknown>>(), listLinuxVmDevices: () => [{ id: "qemu", backend: "linux-vm", provider: "container-qemu" }],
     handleLinuxVmManagementTool: () => null,
     handleLinuxVmTool: (name: string, args: any) => args.deviceId === "qemu" && name === "device_exec" ? execution(name, args) : null,
@@ -36,7 +36,7 @@ vi.mock("../../device-lab-mcp/src/broker.mjs", async original => ({
     brokerDeviceTool: async (args: any) => ({ ok: true, result: { mcpResult: execution(args.tool, args) } }),
 }));
 import { startServer } from "../../device-lab-mcp/src/server.mjs";
-import { buildListFilesCommand } from "../../device-lab-mcp/src/file-listing.mjs";
+import { buildListFilesCommand } from "@ccc/device-lab/providers/file-listing.mjs";
 const call = (args: any) => fixture.handlers[1]({ params: { name: "list_files", arguments: args } });
 let root: string;
 let output: string;
@@ -72,7 +72,7 @@ describe("public list_files routing", () => {
         expect(fixture.calls).toHaveLength(0);
     });
     it("reports the missing physical iOS adapter without executing a generic host command", async () => {
-        const result = await call({ deviceId: "iphone", path: "Documents", bundleId: "com.example.test" });
+        const result = await call({ deviceId: "iphone", path: "Documents", appId: "com.example.test" });
         expect(result.isError).toBe(true);
         expect(JSON.stringify(result)).toMatch(/unsupported|not.implemented/);
         expect(fixture.calls).toHaveLength(0);

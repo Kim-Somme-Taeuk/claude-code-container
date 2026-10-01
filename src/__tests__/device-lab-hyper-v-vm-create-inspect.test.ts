@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { hyperVInspectCreateVhdCommand, parseHyperVCreateVhdInspection } from "../host-control/hyper-v/vm-create-inspect.js";
+import { hyperVInspectCreateVhdCommand, parseHyperVCreateVhdInspection } from "@ccc/device-lab/host-control/hyper-v/vm-create-inspect.js";
 
 const BASE = {
     kind: "base" as const,

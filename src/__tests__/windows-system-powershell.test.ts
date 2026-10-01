@@ -10,7 +10,7 @@ import {
     spawnableWindowsExecutablePath,
     terminateWindowsProcessByStartToken,
     windowsHandleBoundTerminationScript,
-} from "../windows-system-powershell.js";
+} from "@ccc/device-lab/windows-system-powershell.js";
 
 describe("canonical Windows PowerShell", () => {
     const roots: string[] = [];

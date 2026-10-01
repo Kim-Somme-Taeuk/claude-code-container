@@ -18,7 +18,7 @@ import {
     HYPER_V_WINDOWS_SOURCE_TRUST_ID,
     HYPER_V_WINDOWS_SOURCE_URL,
     isHyperVWindowsEvaluationReceipt,
-} from "../../src/device-lab/hyper-v-image-contracts.ts";
+} from "#device-lab/device-lab/hyper-v-image-contracts.js";
 
 const targets = {
     all: ["level2-hyper-v-windows-vm.ts", "level2-hyper-v-linux-vm.ts"],

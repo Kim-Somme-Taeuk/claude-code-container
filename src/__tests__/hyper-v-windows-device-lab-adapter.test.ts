@@ -5,13 +5,13 @@ import {
     deviceLabHyperVExpectation,
     deviceLabHyperVOperationIntent,
     reconcileDeviceLabHyperVOperation,
-} from "../device-lab/broker/hyper-v/lifecycle-adapter.js";
-import { hyperVRemainingTimeout } from "../device-lab/broker/hyper-v/deadline.js";
-import type { HyperVOperationJournal } from "../device-lab/broker/hyper-v/operation-journal.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/lifecycle-adapter.js";
+import { hyperVRemainingTimeout } from "@ccc/device-lab/device-lab/broker/hyper-v/deadline.js";
+import type { HyperVOperationJournal } from "@ccc/device-lab/device-lab/broker/hyper-v/operation-journal.js";
 import {
     HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP,
     type HyperVWindowsExecutionRequest,
-} from "../hyper-v-windows/index.js";
+} from "@ccc/hyper-v/index.js";
 
 const ownerId = "0123456789abcdef";
 const deviceId = "adapter-test";

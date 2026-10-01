@@ -4,7 +4,7 @@ import { randomBytes } from "crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { readMacosDevices, writeMacosDevices } from "../../device-lab-mcp/src/state/macos-state.mjs";
+import { readMacosDevices, writeMacosDevices } from "#device-lab/providers/state/macos-state.mjs";
 import { lifecycleDevice, parseContractToolPayload, parseToolPayload, withDeviceLabMcp } from "./device-lab-mcp-client.ts";
 import { providerMcpSessionOptions } from "./provider-mcp-matrix.ts";
 import { discoverTartSourceImage, inspectTartInstance } from "./providers/tart.ts";
@@ -186,24 +186,27 @@ export async function runMacosVmE2E(options: any = {}) {
     return withDeviceLabMcp(async ({ callTool }) => {
         const direct = { backend: "macos-vm" };
         try {
-            const create = await timedStep(timings, "createMs", async () => parsePayload(await callTool("base_image_create", { detail: true,
+            const create = await timedStep(timings, "createMs", async () => parsePayload(await callTool("create_macos_vm", { detail: true,
                 name,
                 deviceId,
-                sourceImage: cap.source,
+                image: cap.source,
                 provider: "tart",
                 ...(ssh.available ? {
-                    sshUser: ssh.sshUser,
-                    sshPort: ssh.sshPort,
-                    ...(ssh.sshHost ? { sshHost: ssh.sshHost } : {}),
-                    ...(ssh.sshKeyPath ? { sshKeyPath: ssh.sshKeyPath } : {}),
+                    ssh: {
+                        user: ssh.sshUser,
+                        port: ssh.sshPort,
+                        ...(ssh.sshHost ? { host: ssh.sshHost } : {}),
+                        ...(ssh.sshKeyPath ? { keyPath: ssh.sshKeyPath } : {}),
+                    },
                 } : {}),
             })));
         created = true;
-        const createdDevice = lifecycleDevice(create, "macOS VM device_base_image_create");
+        const createdDevice = lifecycleDevice(create, "macOS VM create_macos_vm");
         assert.strictEqual(createdDevice.id, deviceId);
         assert.strictEqual(createdDevice.provider, "tart");
         assert.ok(createdDevice.providerInstance);
         managedProviderInstances.push(createdDevice.providerInstance);
+        assert.strictEqual(inspectTartInstance(cap.tart, createdDevice.providerInstance).found, false);
 
             const start = await timedStep(timings, "startMs", async () => parseContractToolPayload("start", await callTool("start", { detail: true,
                 deviceId,
@@ -294,7 +297,7 @@ export async function runMacosVmE2E(options: any = {}) {
                 }
 
                 for (const button of ["left", "right"]) {
-                    const doubleClick = parsePayload(await callTool("double_click", { detail: true, deviceId, x: 30, y: 30, button, timeoutMs }));
+                    const doubleClick = parsePayload(await callTool("click", { count: 2, detail: true, deviceId, x: 30, y: 30, button, timeoutMs }));
                     assert.strictEqual(doubleClick.provider, "ssh-macos-helper");
                     assert.deepStrictEqual(doubleClick.doubleClicked, { x: 30, y: 30, button });
                 }
@@ -364,22 +367,22 @@ export async function runMacosVmE2E(options: any = {}) {
 
         if (typedOptions.imageTools === true) {
             await timedStep(timings, "imageToolsMs", async () => {
-                const createViaBase = parsePayload(await callTool("base_image_create", { detail: true,
+                const createViaBase = parsePayload(await callTool("create_macos_vm", { detail: true,
                     name: `Base create ${suffix}`,
                     deviceId: `${deviceId}-base-create`,
-                    sourceImage: cap.source,
+                    image: cap.source,
                     provider: "tart",
                 }));
-                disposableDeviceIds.push(createViaBase.device.id);
-                managedProviderInstances.push(createViaBase.device.providerInstance);
-                assert.strictEqual(createViaBase.operation, "base-image-create");
-                assert.ok(createViaBase.device.providerInstance);
+                const baseDevice = lifecycleDevice(createViaBase, "macOS VM image creation");
+                disposableDeviceIds.push(baseDevice.id);
+                managedProviderInstances.push(baseDevice.providerInstance);
+                assert.ok(baseDevice.providerInstance);
+                assert.strictEqual(inspectTartInstance(cap.tart, baseDevice.providerInstance).found, false);
 
-                const cloneViaBase = parsePayload(await callTool("base_image_clone", { detail: true,
+                const cloneViaBase = parsePayload(await callTool("create_macos_vm", { detail: true,
                     name: `Base clone ${suffix}`,
                     deviceId: `${deviceId}-base-clone`,
                     sourceDeviceId: deviceId,
-                    provider: "tart",
                 }));
                 disposableDeviceIds.push(cloneViaBase.device.id);
                 managedProviderInstances.push(cloneViaBase.device.providerInstance);
@@ -403,7 +406,7 @@ export async function runMacosVmE2E(options: any = {}) {
         assert.strictEqual(del.deleted, deviceId);
             const tartAfterDelete = inspectTartInstance(cap.tart, createdDevice.providerInstance);
             assert.strictEqual(tartAfterDelete.found, false, `Tart instance survived delete: ${createdDevice.providerInstance}`);
-            const listAfterDelete = await timedStep(timings, "statusAfterDeleteMs", async () => parsePayload(await callTool("list_devices", { detail: true })));
+            const listAfterDelete = await timedStep(timings, "statusAfterDeleteMs", async () => parsePayload(await callTool("devices", { detail: true })));
             assert.strictEqual(listAfterDelete.devices.some((device) => device.id === deviceId), false);
         const timingDetail = Object.entries(timings).map(([key, value]) => `${key}=${value}`).join(" ");
 

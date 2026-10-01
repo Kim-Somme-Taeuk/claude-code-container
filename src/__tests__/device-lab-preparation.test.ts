@@ -2,8 +2,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createLab, handleLinuxVmTool, inspectLab, ownerId, startLab } from "../../device-lab-mcp/src/backends/linux-vm.mjs";
-import { withOwnerDeviceOperation } from "../../device-lab-mcp/src/state/device-store.mjs";
+import { createLab, handleLinuxVmTool, inspectLab, ownerId, startLab } from "@ccc/device-lab/providers/backends/linux-vm.mjs";
+import { withOwnerDeviceOperation } from "@ccc/device-lab/providers/state/device-store.mjs";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });

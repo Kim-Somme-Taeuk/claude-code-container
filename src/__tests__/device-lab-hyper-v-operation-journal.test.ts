@@ -12,8 +12,8 @@ import {
     writeHyperVOperationJournal,
     writeHyperVSnapshotJournal,
     type HyperVJournalPersistenceRuntime,
-} from "../device-lab/broker/hyper-v/operation-journal.js";
-import { hyperVSnapshotName, hyperVVmName } from "../host-control/hyper-v/index.js";
+} from "@ccc/device-lab/device-lab/broker/hyper-v/operation-journal.js";
+import { hyperVSnapshotName, hyperVVmName } from "@ccc/device-lab/host-control/hyper-v/index.js";
 
 const OWNER_ID = "0123456789abcdef";
 const DEVICE_ID = "journal-test";
@@ -271,7 +271,7 @@ describe("Hyper-V operation journal persistence", () => {
     it("does not import the broker composition root", () => {
         const source = readFileSync(
             new URL(
-                "../device-lab/broker/hyper-v/operation-journal.ts",
+                "../../packages/device-lab/src/device-lab/broker/hyper-v/operation-journal.ts",
                 import.meta.url,
             ),
             "utf8",
