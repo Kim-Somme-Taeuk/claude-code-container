@@ -28,3 +28,17 @@ During parallel implementation, run focused Vitest commands directly; the
 coordinator owns shared generated builds. For final verification, run `npm test`,
 which builds before the suite. Do not run another build or full suite concurrently
 against the same generated output tree.
+
+Bundled MCP dispatch smoke tests control child PATH, display variables, user-home
+and Android SDK roots using temporary fixtures. Launch the bundled Node server
+with the absolute Node executable; keep all advertised schema and tool dispatch
+assertions, including structured unavailable-provider responses. Inheriting host
+PATH can repeatedly scan slow mounted Windows directories or discover real host
+tools. These fixtures reduce host dependence; they are not a security sandbox.
+Real device/provider validation remains in the dedicated integration suites.
+
+For CLI integration tests, allow the outer test deadline to cover the sum of
+sequential child-process deadlines plus overhead. For example, a 60-second setup
+followed by a 30-second removal needs more than 90 seconds. Keep bounded child
+timeouts and assert setup and command exit codes; a failed setup must not make a
+later cleanup assertion look successful.
