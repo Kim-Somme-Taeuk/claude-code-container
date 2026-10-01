@@ -6,6 +6,22 @@ import { pathToFileURL } from "url";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = join(__dirname, "../..");
+
+// Dispatch smoke checks exercise unavailable providers without searching host tools.
+function dispatchSmokeEnv(homeDir: string): Record<string, string> {
+    return {
+        HOME: homeDir,
+        USERPROFILE: homeDir,
+        LOCALAPPDATA: homeDir,
+        APPDATA: homeDir,
+        PATH: homeDir,
+        DISPLAY: "",
+        WAYLAND_DISPLAY: "",
+        ANDROID_HOME: homeDir,
+        ANDROID_SDK_ROOT: homeDir,
+    };
+}
+
 const HIDDEN_LEGACY_TRANSPORT_KEYS = new Set([
     "broker",
     "viaBroker",
@@ -605,10 +621,7 @@ describe("npm package contents", () => {
             }, {
                 name: "ccc-device-lab-dist-smoke",
                 serverPath: join(repoRoot, "dist", "device-lab-mcp", "server.mjs"),
-                env: {
-                    HOME: homeDir,
-                    PATH: process.env.PATH || "",
-                },
+                env: dispatchSmokeEnv(homeDir),
             });
         } finally {
             rmSync(homeDir, { recursive: true, force: true });
@@ -629,10 +642,7 @@ describe("npm package contents", () => {
             const result = await runInstalledMcpSmoke({
                 name: "ccc-device-lab-installed-smoke-package-test",
                 serverPath: join(repoRoot, "dist", "device-lab-mcp", "server.mjs"),
-                env: {
-                    HOME: homeDir,
-                    PATH: process.env.PATH || "",
-                },
+                env: dispatchSmokeEnv(homeDir),
             });
             expect(result.status).toBe("PASS");
             expect(result.publicDispatchTools).toBe(result.tools);

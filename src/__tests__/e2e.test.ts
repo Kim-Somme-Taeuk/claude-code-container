@@ -123,13 +123,15 @@ describe.skipIf(!isDockerAvailable())('E2E: Docker Integration', () => {
     })
 
     describe('ccc status', () => {
-        it('shows image status', { timeout: 10000 }, () => {
+        it('shows image status', { timeout: 65000 }, () => {
             const result = runCcc(['status'], { cwd: testProjectDir })
+            expect(result.status).toBe(0)
             expect(result.stdout).toContain('Image:')
         })
 
-        it('shows containers section', { timeout: 10000 }, () => {
+        it('shows containers section', { timeout: 65000 }, () => {
             const result = runCcc(['status'], { cwd: testProjectDir })
+            expect(result.status).toBe(0)
             expect(result.stdout).toContain('Containers:')
         })
     })
@@ -173,11 +175,14 @@ describe.skipIf(!isDockerAvailable())('E2E: Docker Integration', () => {
             expect(result.stdout).toContain('Container stopped')
         })
 
-        it('ccc rm removes the container', { timeout: 30000 }, () => {
+        // Two sequential children can use 60s + 30s, plus test overhead.
+        it('ccc rm removes the container', { timeout: 95000 }, () => {
             // First ensure container exists
-            runCcc(['echo', 'setup'], { cwd: testProjectDir, timeout: 60000 })
+            const setup = runCcc(['echo', 'setup'], { cwd: testProjectDir, timeout: 60000 })
+            expect(setup.status).toBe(0)
             // Then remove it
             const result = runCcc(['rm'], { cwd: testProjectDir, timeout: 30000 })
+            expect(result.status).toBe(0)
             expect(result.stdout).toContain('Container removed')
         })
     })
