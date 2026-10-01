@@ -42,3 +42,9 @@ sequential child-process deadlines plus overhead. For example, a 60-second setup
 followed by a 30-second removal needs more than 90 seconds. Keep bounded child
 timeouts and assert setup and command exit codes; a failed setup must not make a
 later cleanup assertion look successful.
+
+Before taking a command-log baseline to prove a rejected operation has no side
+effects, observe any asynchronous command from the preceding successful action.
+For the Windows singleton fixture, wait for that sandbox's initial `wsb connect`
+entry and assert it was observed before checking duplicate-start log equality.
+Otherwise a late initial connection can look like a side effect of the rejection.
