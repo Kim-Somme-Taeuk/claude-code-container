@@ -1196,7 +1196,10 @@ exit 0
         });
         expect(firstStart.isError).not.toBe(true);
         const firstLock = readFileSync(staleLockPath, "utf-8");
-        const logBeforeDuplicateStart = readFileSync(logPath, { encoding: "utf-8", flag: "a+" });
+        const firstSandboxId = (JSON.parse(firstLock) as { sandboxId: string }).sandboxId;
+        const initialConnect = `wsb connect --id ${firstSandboxId}`;
+        const logBeforeDuplicateStart = await waitForLog(logPath, new RegExp(`${initialConnect}(?:\\s|$)`));
+        expect(logBeforeDuplicateStart).toContain(initialConnect);
         const duplicateFirstStart = await client.callTool({
             name: "device_start",
             arguments: { deviceId: "windows-singleton-one" },
