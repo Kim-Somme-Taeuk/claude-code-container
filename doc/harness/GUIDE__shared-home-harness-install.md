@@ -23,6 +23,11 @@ Keep the shared directory's owner, mode and ACL unchanged. Do not use `--force`
 to suppress an unsafe-ancestor refusal. Existing loaded MCP processes can keep
 old Python modules until a new Codex session starts.
 
+The readiness probe recognizes the canonical `PYTHONDONTWRITEBYTECODE=1`
+prefix before checking the hook executable and script. Hook trust hashes still
+cover the original complete command, including that prefix. Unknown prefixes
+remain invalid.
+
 The default upstream bootstrap pin does not include this local compatibility
 option. Preserve the reviewed local source checkout for subsequent deployment;
 an upstream reinstall can replace the local fix.

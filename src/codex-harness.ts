@@ -81,6 +81,8 @@ def probe():
             for hook_index, hook in enumerate(group.get("hooks", [])):
                 if hook.get("type") == "command":
                     command = shlex.split(hook.get("command", ""))
+                    if command and command[0] == "PYTHONDONTWRITEBYTECODE=1":
+                        command = command[1:]
                     if len(command) < 2 or not shutil.which(command[0]) or not Path(command[1]).is_file():
                         raise RuntimeError("existing Harness hook command or payload is unavailable; preserved")
                     if event not in events:

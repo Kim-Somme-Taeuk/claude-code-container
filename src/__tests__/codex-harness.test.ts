@@ -16,7 +16,7 @@ const { spawnSync: realSpawn } = await vi.importActual<typeof import("child_proc
 const temporary: string[] = [];
 const pin = "90a7afe02a9377d9e20cedd62e2c0d88e426d814";
 
-function fixture() {
+function fixture(hookPrefix = "") {
     const home = mkdtempSync(join(tmpdir(), "ccc-harness-test-"));
     temporary.push(home);
     mkdirSync(join(home, ".codex"));
@@ -28,7 +28,7 @@ function fixture() {
     const source = join(home, ".codex/harness");
     const root = join(source, "plugins/harness");
     const cache = join(home, ".codex/plugins/cache/harness/harness/2.3.0");
-    const hookCommand = `/usr/bin/python3 ${join(cache, "scripts/session-start.py")}`;
+    const hookCommand = `${hookPrefix}/usr/bin/python3 ${join(cache, "scripts/session-start.py")}`;
     // Keys ordered as the official installer's canonical JSON representation.
     const trustHash = "sha256:" + createHash("sha256").update(JSON.stringify({
         event_name: "session_start",
@@ -66,8 +66,8 @@ afterEach(() => {
 });
 
 describe("Harness bootstrap script", () => {
-    it("installs the pinned source once and reuses real registration without a download", () => {
-        const f = fixture();
+    it.each(["", "PYTHONDONTWRITEBYTECODE=1 "])("installs once and reuses registration with hook prefix %s", (prefix) => {
+        const f = fixture(prefix);
         const first = f.run();
         expect(first.status, first.stderr).toBe(0);
         expect(first.stdout).toContain("Installing Harness");
@@ -78,6 +78,12 @@ describe("Harness bootstrap script", () => {
         expect(second.status, second.stderr).toBe(0);
         expect(second.stdout).toBe("");
         expect(readFileSync(join(f.home, "git-calls"), "utf8")).toBe(gitCalls);
+    });
+    it("rejects an unsupported hook environment prefix", () => {
+        const f = fixture("UNKNOWN=1 ");
+        const result = f.run();
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("hook command or payload is unavailable");
     });
     it.each([
         '[plugins."harness@harness"]\nenabled = false',
