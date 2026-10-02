@@ -9,16 +9,50 @@ import {
     windowsDiscovery,
 } from "#device-lab/providers/backends/windows-sandbox.mjs";
 import { ownerId } from "#device-lab/providers/context.mjs";
-import { parseToolPayload, withDeviceLabMcp } from "./device-lab-mcp-client.ts";
+import { formatBrokerToolFailure, parseToolPayload, withDeviceLabMcp } from "./device-lab-mcp-client.ts";
 import { providerMcpSessionOptions } from "./provider-mcp-matrix.ts";
 
 const WSB_LIST_TIMEOUT_MS = 10000;
 const WSB_STOP_TIMEOUT_MS = 60000;
 
+// Only messages constructed here may flow verbatim into the one-line test report.
+// Provider errors can contain command output, credentials, or host paths.
+class WindowsSandboxE2EFailure extends Error {}
+
+function failureDetail(error) {
+    if (error instanceof WindowsSandboxE2EFailure) return error.message.slice(0, 768);
+    if (error?.brokerPayload) {
+        const detail = formatBrokerToolFailure(error.brokerPayload, "windows-sandbox-operation-failed");
+        const artifact = typeof error.message === "string"
+            ? error.message.slice(0, 2048).match(/Diagnostics: (results\/device-lab-real\/mcp-error-[a-f0-9-]{36}\.json)\b/i)?.[1]
+            : null;
+        return artifact ? `${detail} Diagnostics: ${artifact}` : detail;
+    }
+    if (typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)) return error.code;
+    return ["TypeError", "SyntaxError", "RangeError", "ReferenceError"].includes(error?.name)
+        ? error.name
+        : "unclassified-error";
+}
+
+function rejectedBeforeWindowsSandboxStart(error, deviceId) {
+    const payload = error?.brokerPayload;
+    const body = payload?.body && typeof payload.body === "object" ? payload.body : payload;
+    const device = body?.plan?.device;
+    // This exact broker refusal happens before provider invocation. Do not infer
+    // runtime absence from a failed start or a stale stopped status alone.
+    return body?.error === "windows-sandbox-host-busy"
+        && device?.id === deviceId
+        && device?.backend === "windows-sandbox"
+        && device?.status === "stopped"
+        && !device?.sandboxId;
+}
+
 function parsePayload(result) {
     const payload = parseToolPayload(result);
     if (payload?.ok === false) {
-        throw new Error([payload.error, payload.detail].filter(Boolean).join(": ") || "Windows Sandbox broker operation failed");
+        const error = new Error(formatBrokerToolFailure(payload, "windows-sandbox-operation-failed"));
+        Object.defineProperty(error, "brokerPayload", { value: payload });
+        throw error;
     }
     return payload;
 }
@@ -187,28 +221,27 @@ function writeWindowsStateDevices(homeDir, owner, devices) {
 }
 
 function cleanupFailure(operation, deviceId, error) {
-    const detail = error?.message || String(error);
-    return new Error(`Windows Sandbox ${operation} failed for ${deviceId}; ownership evidence was preserved: ${detail}`, { cause: error });
+    return new WindowsSandboxE2EFailure(`Windows Sandbox ${operation} failed for ${deviceId}; ownership evidence was preserved: ${failureDetail(error)}`, { cause: error });
 }
 
 function assertStoppedCleanupResult(result, deviceId) {
     const payload = parsePayload(result);
     if (payload?.device?.deviceId !== deviceId || payload?.device?.status !== "stopped") {
-        throw new Error(`device_stop did not verify stopped state: ${JSON.stringify(payload)}`);
+        throw new WindowsSandboxE2EFailure("device_stop did not verify stopped state", { cause: payload });
     }
 }
 
 function assertDeletedCleanupResult(result, deviceId) {
     const payload = parsePayload(result);
     if (payload?.deleted !== deviceId) {
-        throw new Error(`device_delete did not verify deletion: ${JSON.stringify(payload)}`);
+        throw new WindowsSandboxE2EFailure("device_delete did not verify deletion", { cause: payload });
     }
 }
 
 function assertRecordingStoppedCleanupResult(result) {
     const payload = windowsRecordingPayload(parsePayload(result));
     if (payload?.stopped !== true && payload?.recording?.active !== false) {
-        throw new Error(`device_record_video_stop did not verify recorder exit: ${JSON.stringify(payload)}`);
+        throw new WindowsSandboxE2EFailure("device_record_video_stop did not verify recorder exit", { cause: payload });
     }
 }
 
@@ -228,18 +261,18 @@ function removeVerifiedWindowsSandboxE2EEvidence(homeDir, owner, deviceId) {
         try {
             lock = JSON.parse(readFileSync(lockPath, "utf-8"));
         } catch (error) {
-            throw new Error(`Windows Sandbox ownership evidence is malformed at ${lockPath}: ${error?.message || error}`);
+            throw new WindowsSandboxE2EFailure(`Windows Sandbox ownership evidence is malformed: ${failureDetail(error)}`, { cause: error });
         }
         if (lock?.ownerId === owner && lock?.deviceId === deviceId) {
             if (!verifiedInterruptedWindowsSandboxLock(lock, owner, deviceId)) {
-                throw new Error(`Windows Sandbox ownership evidence does not match the current host generation: ${lockPath}`);
+                throw new WindowsSandboxE2EFailure("Windows Sandbox ownership evidence does not match the current host generation");
             }
             rmSync(lockPath, { force: true });
         }
     }
     const removed = tryRemoveTree(windowsDeviceDir(homeDir, owner, deviceId));
     if (!removed.ok) {
-        throw new Error(`verified provider cleanup succeeded but device evidence removal failed for ${deviceId}: ${removed.error}`);
+        throw new WindowsSandboxE2EFailure(`verified provider cleanup succeeded but device evidence removal failed for ${deviceId}: ${failureDetail(removed)}`);
     }
     const stateFile = windowsStateFile(homeDir, owner);
     if (existsSync(stateFile)) {
@@ -318,7 +351,7 @@ export async function cleanupPreviousWindowsSandboxE2E(options: any = {}) {
                         verifiedSessionIds: [sandboxId],
                     });
                     if (!stopped.ok) {
-                        throw new Error(`verified stale Windows Sandbox runtime stop failed for ${device.id}: ${stopped.error || JSON.stringify(stopped.failed || [])}`);
+                        throw new WindowsSandboxE2EFailure(`verified stale Windows Sandbox runtime stop failed for ${device.id}`, { cause: stopped });
                     }
                 }
             }
@@ -347,21 +380,22 @@ export async function cleanupPreviousWindowsSandboxE2E(options: any = {}) {
                     // Absence is expected after a verified provider deletion.
                 }
                 if (lock?.deviceId === entry) {
-                    failures.push(new Error(`Windows Sandbox orphan evidence still has a host lock: ${join(windowsRoot, entry)}`));
+                    failures.push(new WindowsSandboxE2EFailure(`Windows Sandbox orphan evidence still has a host lock: ${entry}`));
                     continue;
                 }
                 sessions ||= (options.listRunningSessions || listRunningWindowsSandboxSessions)(options.sessionOptions || {});
                 if (!sessions.ok || sessions.ids.length > 0) {
-                    failures.push(new Error(`Windows Sandbox orphan evidence cannot be removed while runtime absence is unverified: ${join(windowsRoot, entry)} (${sessions.error || sessions.ids.join(", ")})`));
+                    failures.push(new WindowsSandboxE2EFailure(`Windows Sandbox orphan evidence cannot be removed while runtime absence is unverified: ${entry}`, { cause: sessions }));
                     continue;
                 }
                 const removed = tryRemoveTree(join(windowsRoot, entry));
-                if (!removed.ok) failures.push(new Error(`Windows Sandbox orphan evidence removal failed for ${entry}: ${removed.error}`));
+                if (!removed.ok) failures.push(new WindowsSandboxE2EFailure(`Windows Sandbox orphan evidence removal failed for ${entry}: ${failureDetail(removed)}`));
             }
         }
     }
     if (failures.length > 0) {
-        const detail = failures.map((error) => error?.message || String(error)).join("; ");
+        const detail = failures.slice(0, 3).map(failureDetail).join("; ")
+            + (failures.length > 3 ? `; ${failures.length - 3} more cleanup failures` : "");
         throw new AggregateError(failures, `Previous Windows Sandbox E2E cleanup was not verified: ${detail}`);
     }
 }
@@ -438,6 +472,7 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             created = true;
             assert.strictEqual(createResult.device.deviceId, deviceId);
             assert.strictEqual(createResult.device.status, "stopped");
+            stopped = true;
 
             currentStep = "inventory created device";
             const inventory = parsePayload(await callTool("devices", { view: "available", detail: true, ...direct }));
@@ -446,6 +481,7 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             assert.ok(inventoryDevices.some((device) => device.deviceId === deviceId));
 
             currentStep = "start device";
+            stopped = false;
             const started = await startWindowsSandboxE2EDevice(callTool, deviceId);
             assert.strictEqual(started.device.status, "running");
             assert.ok(String(started.device.configPath || "").includes(`${deviceId}.wsb`));
@@ -640,7 +676,8 @@ export async function runWindowsSandboxE2E(options: any = {}) {
 
             passResult = { status: "PASS", deviceId, sandboxId: started.device.sandboxId, verifiedCapabilities: [...calledCapabilities].sort() };
         } catch (error) {
-            primaryFailure = new Error(`${currentStep}: ${error?.message || String(error)}`, { cause: error });
+            if (currentStep === "start device" && rejectedBeforeWindowsSandboxStart(error, deviceId)) stopped = true;
+            primaryFailure = new WindowsSandboxE2EFailure(`${currentStep}: ${failureDetail(error)}`, { cause: error });
         } finally {
             let cleanupFailureError = null;
             if (created && !deleted) {
@@ -658,7 +695,11 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             rmSync(tempDir, { recursive: true, force: true });
             if (cleanupFailureError) {
                 const errors = primaryFailure ? [primaryFailure, cleanupFailureError] : [cleanupFailureError];
-                throw new AggregateError(errors, `Windows Sandbox E2E cleanup failed for ${deviceId}; ownership evidence was preserved`);
+                const detail = [
+                    primaryFailure ? `primary: ${failureDetail(primaryFailure)}` : null,
+                    `cleanup: ${failureDetail(cleanupFailureError)}`,
+                ].filter(Boolean).join("; ");
+                throw new AggregateError(errors, `Windows Sandbox E2E cleanup failed for ${deviceId}; ownership evidence was preserved; ${detail}`);
             }
         }
         if (primaryFailure) throw primaryFailure;

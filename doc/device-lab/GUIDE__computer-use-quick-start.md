@@ -226,6 +226,13 @@ state. If saving fails, the original failure still appears. A broker process
 verification failure points to `node dist/index.js devices broker status
 --verbose`; it does not authorize killing an unverified process.
 
+Windows Sandbox E2E reports the failed step and bounded primary and cleanup
+causes together. A structured `windows-sandbox-host-busy` refusal permits
+deleting the new, never-started definition only when its returned device ID,
+backend, stopped state, and absent runtime ID match. Ambiguous start failures
+still require verified stop; foreign locks and unverified ownership evidence
+remain preserved.
+
 Windows Hyper-V E2E validates the VM address, prefix, and gateway against the
 configured managed network. Normal hosts use `172.29.0.0/24`; nested hosts
 (`CCC_HYPER_V_NESTED_HOST=1`) use `172.30.0.0/24`. The test rejects mismatched
