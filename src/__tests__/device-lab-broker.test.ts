@@ -193,6 +193,37 @@ describe("device-lab host broker daemon", () => {
         expect(parseWindowsBrokerNetstatListenerForTest(output, 17374)).toBeNull();
     });
 
+    it.each([
+        ["unrelated saved runtime", {}, true],
+        ["same port, different process", { savedPort: 17373 }, false],
+        ["same process, different port", { savedPid: 5212 }, false],
+        ["invalid saved port", { savedPort: 0 }, false],
+        ["different status generation", { statusToken: "windows:successor" }, false],
+        ["missing status generation", { statusToken: "" }, false],
+        ["different status PID", { statusPid: 50928 }, false],
+        ["missing command line", { commandLine: "" }, false],
+        ["untrusted entry", { commandLine: "node C:/foreign/broker-entry.js devices broker serve --port 17373" }, false],
+    ] as const)("checks port ownership independently of %s", (_label, overrides, accepted) => {
+        const changed = overrides as { savedPort?: number; savedPid?: number; statusToken?: string; statusPid?: number; commandLine?: string };
+        const cliPath = "C:/ccc/packages/device-lab/dist/broker-entry.js";
+        const listener = fakeBrokerPortProcess(5212, changed.commandLine ?? `node ${cliPath} devices broker serve --port 17373`);
+        const verified = hostBrokerRuntimeFromPortProcessForTest(
+            "1111111111111111", 17373, {}, "win32", () => listener,
+            {
+                name: "ccc-device-broker", managedBy: "ccc-host",
+                pid: changed.savedPid ?? 50928, port: changed.savedPort ?? 64792,
+                processStartToken: "windows:stale-other-broker",
+            },
+            {
+                name: "ccc-device-broker", managedBy: "ccc-host-status",
+                pid: changed.statusPid ?? listener.pid, port: 17373,
+                processStartToken: changed.statusToken ?? listener.processStartToken,
+            }, cliPath,
+        );
+        if (accepted) expect(verified).toMatchObject({ pid: 5212, port: 17373, processIdentity: listener.processIdentity });
+        else expect(verified).toBeNull();
+    });
+
     beforeEach(() => {
         fixtureHome = mkdtempSync(join(tmpdir(), "ccc-device-broker-test-home-"));
         originalHomeRestore = isolateDeviceLabTestEnvironment(fixtureHome);
@@ -2001,12 +2032,13 @@ describe("device-lab host broker daemon", () => {
         }
     });
 
-    it("repairs a stale Windows broker when CIM hides its command line but port, runtime, and status PIDs agree", async () => {
+    it.each(["hidden command line", "unrelated saved runtime"])("repairs an older broker with %s", async (scenario) => {
+        const unrelatedRuntime = scenario === "unrelated saved runtime";
         const ownerId = "edededededededed";
         const stalePid = 22335;
         const staleStartedAt = "2026-07-27T00:00:00.000Z";
         const staleProcessStartToken = `test:${stalePid}`;
-        const protocolVersion = 0;
+        const protocolVersion = DEVICE_BROKER_PROTOCOL_VERSION - 1;
         let port = 0;
         const incompatible = createServer((req, res) => {
             res.writeHead(200, { "content-type": "application/json" });
@@ -2068,6 +2100,7 @@ describe("device-lab host broker daemon", () => {
             port,
             startedAt: staleStartedAt,
             processStartToken: staleProcessStartToken,
+            ...(unrelatedRuntime ? { pid: 50928, port: port === 64792 ? 64793 : 64792, processStartToken: "test:50928" } : {}),
         }));
 
         let stopped = false;
@@ -2103,7 +2136,7 @@ describe("device-lab host broker daemon", () => {
                 startupTimeoutMs: 3000,
                 spawnImpl: spawnImpl as any,
                 portProcessResolver: () => stopped ? spawnedProcess : {
-                    ...fakeBrokerPortProcess(stalePid, null),
+                    ...fakeBrokerPortProcess(stalePid, unrelatedRuntime ? `node /opt/ccc/dist/index.js devices broker serve --port ${port}` : null),
                     processStartToken: staleProcessStartToken,
                 },
                 processIdentityReader: (pid) => pid === child.pid ? spawnedProcess.processIdentity : null,
@@ -2116,8 +2149,9 @@ describe("device-lab host broker daemon", () => {
 
             expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({ ok: true, launched: true, reused: false, port }));
             expect(killSpy).toHaveBeenCalledWith(stalePid, "SIGTERM");
-            expect(JSON.stringify(result.attempts)).toContain("ccc-host-port-metadata");
-            expect(JSON.stringify(result.attempts)).toContain("port-pid-plus-runtime-and-status");
+            expect(killSpy.mock.calls.filter(([, signal]) => signal === "SIGTERM" || signal === "SIGKILL")).toEqual([[stalePid, "SIGTERM"]]);
+            expect(JSON.stringify(result.attempts)).toContain(unrelatedRuntime ? "port-command-line" : "port-pid-plus-runtime-and-status");
+            expect(JSON.parse(readFileSync(runtimeFile, "utf8"))).toMatchObject({ pid: child.pid, port });
         } finally {
             killSpy.mockRestore();
             await new Promise<void>((resolve) => incompatible.listening ? incompatible.close(() => resolve()) : resolve());

@@ -2103,8 +2103,19 @@ function hostBrokerRuntimeFromPortProcess(
     const legacyStatusWithoutToken = (!statusRuntime || statusMetadataMatches)
         && !statusStartToken;
     const legacyPersistedCommandContinuity = !persistedRuntime || persistedMetadataMatches;
+    // A second broker can leave the shared runtime file pointing at another port.
+    // That record is neither evidence for nor a veto on this listener. Recovery
+    // still requires the trusted command and matching OS/status generation;
+    // same-port or same-PID conflicts keep their original fail-closed behavior.
+    const persistedOtherPort = persistedRuntime?.name === DEVICE_BROKER_NAME
+        && persistedRuntime.managedBy === "ccc-host"
+        && Number.isInteger(persistedRuntime.port)
+        && Number(persistedRuntime.port) > 0 && Number(persistedRuntime.port) <= 65535
+        && Number(persistedRuntime.port) !== port
+        && Number.isInteger(persistedRuntime.pid) && Number(persistedRuntime.pid) > 0
+        && Number(persistedRuntime.pid) !== process.pid;
     const commandLineTrusted = commandLineVerified
-        && persistedContinuity
+        && (persistedContinuity || (persistedOtherPort && statusIdentityVerified))
         && (statusIdentityVerified || (legacyPersistedCommandContinuity && legacyStatusWithoutToken));
     const metadataVerified = commandLine.length === 0
         && Boolean(persistedRuntime)
