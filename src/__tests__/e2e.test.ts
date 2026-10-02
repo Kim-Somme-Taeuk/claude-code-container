@@ -145,9 +145,12 @@ describe.skipIf(!isDockerAvailable())('E2E: Docker Integration', () => {
     })
 
     describe('Container Lifecycle', () => {
-        it('creates container on command execution', { timeout: 120000 }, () => {
-            // Run a simple command that creates container
-            const result = runCcc(['echo', 'hello'], { cwd: testProjectDir, timeout: 120000 })
+        it('creates container on command execution', { timeout: 310000 }, () => {
+            // A cold start also builds the identity image. Keep the outer
+            // deadline above the child deadline so command failures are reported.
+            const result = runCcc(['echo', 'hello'], { cwd: testProjectDir, timeout: 300000 })
+            expect(result.status, result.stdout + result.stderr).toBe(0)
+            expect(result.stdout).toContain('hello')
             // Container should be created (check with docker ps)
             const ps = spawnSync('docker', ['ps', '-a', '--filter', 'name=^ccc-ccc-test-', '--format', '{{.Names}}'], { encoding: 'utf-8' })
             expect(ps.stdout?.trim()).toMatch(/^ccc-ccc-test-/)
