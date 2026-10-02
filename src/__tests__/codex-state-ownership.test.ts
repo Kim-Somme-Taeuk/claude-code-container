@@ -101,9 +101,9 @@ describe.skipIf(process.platform !== "linux" || realSpawn("python3", ["--version
         writeFileSync(join(path, "private", "daemon.lock"), "preserve", { mode: 0o600 });
         return path;
     }
-    function execute(path: string) {
+    function execute(path: string, script = codexStateMigrationScript) {
         const stat = realLstat(path);
-        return realSpawn("python3", ["-c", codexStateMigrationScript, path, "65431", "65432", String(stat.uid), String(stat.gid)], { encoding: "utf-8" });
+        return realSpawn("python3", ["-c", script, path, "65431", "65432", String(stat.uid), String(stat.gid)], { encoding: "utf-8" });
     }
     it("traverses private state while preserving external and dangling symlinks", () => {
         const path = fixture();
@@ -133,6 +133,35 @@ describe.skipIf(process.platform !== "linux" || realSpawn("python3", ["--version
         expect(result.stderr).toContain("Set-ID");
         expect(realLstat(join(path, "private", "daemon.lock")).mode & 0o7777).toBe(0o4600);
     });
+    it.each(["late.jsonl", "private/late.jsonl"])("rejects concurrent addition %s before ownership writes", relative => {
+        const path = fixture();
+        const script = codexStateMigrationScript.replace(
+            "    # A second complete validation",
+            `    open(os.path.join(root, ${JSON.stringify(relative)}), 'w').close()\n    # A second complete validation`,
+        );
+        const result = execute(path, script);
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain("directory membership changed");
+        expect(result.stdout).not.toContain("Migrated");
+    });
+    it("detects additions after traversal in final verification", () => {
+        const path = fixture();
+        const marker = "    validate_memberships()\n    for fd, parent_fd, name, before, path in entries:\n        uid";
+        const script = codexStateMigrationScript.replace(marker,
+            "    open(os.path.join(root, 'late.jsonl'), 'w').close()\n" + marker);
+        const result = execute(path, script);
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain("directory membership changed");
+    });
+    it("detects changed modes during final verification", () => {
+        const path = fixture();
+        const marker = "    validate_memberships()\n    for fd, parent_fd, name, before, path in entries:\n        uid";
+        const script = codexStateMigrationScript.replace(marker,
+            "    os.chmod(os.path.join(root, 'private', 'daemon.lock'), 0o640)\n" + marker);
+        const result = execute(path, script);
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain("changed before final verification");
+    });
     it.skipIf(process.getuid?.() === 0)("access guard detects an unreadable retained lock before launching Codex", () => {
         const path = fixture();
         mkdirSync(join(path, "app-server-daemon"), { mode: 0o700 });
@@ -141,5 +170,25 @@ describe.skipIf(process.platform !== "linux" || realSpawn("python3", ["--version
         const result = realSpawn("python3", ["-c", script], { encoding: "utf-8" });
         expect(result.status).not.toBe(0);
         expect(result.stderr).toContain("Unreadable Codex state file");
+    });
+    it.skipIf(process.getuid?.() === 0).each(["history.jsonl", "auth.json", "config.toml", "state.sqlite-wal", "sessions/record.jsonl"])("rejects readable but unwritable runtime state %s", relative => {
+        const path = fixture();
+        mkdirSync(join(path, "sessions"));
+        writeFileSync(join(path, relative), "retained", { mode: 0o444 });
+        const script = codexStateAccessScript.replace("root = '/home/ccc/.codex'", `root = ${JSON.stringify(path)}`);
+        const result = realSpawn("python3", ["-c", script], { encoding: "utf-8" });
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain("Unwritable Codex runtime state file");
+    });
+    it("permits read-only plugin assets and Harness git objects", () => {
+        const path = fixture();
+        mkdirSync(join(path, "plugins", "cache"), { recursive: true });
+        mkdirSync(join(path, "harness", ".git", "objects"), { recursive: true });
+        writeFileSync(join(path, "plugins", "cache", "asset.json"), "asset", { mode: 0o444 });
+        writeFileSync(join(path, "harness", ".git", "objects", "object"), "object", { mode: 0o444 });
+        const script = codexStateAccessScript.replace("root = '/home/ccc/.codex'", `root = ${JSON.stringify(path)}`);
+        const result = realSpawn("python3", ["-c", script], { encoding: "utf-8" });
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe("");
     });
 });

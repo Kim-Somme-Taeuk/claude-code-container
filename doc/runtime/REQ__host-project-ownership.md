@@ -77,14 +77,21 @@ Preserve content, ordinary modes, symlink targets and unrelated owners.
 Serialize all host project startup through a shared lock outside Codex state,
 covering inspection, migration and container creation/start. Refuse migration
 when any running container has an overlapping bind mount, inspection fails,
-the root or its parent is unsafe, or the tree contains hardlinks or nested mount
-boundaries. Preflight the complete tree and use descriptor-relative nofollow
-ownership changes. Unsupported mappings must not receive native host-ID repair.
+the root or an ancestor is unsafe, or the tree contains hardlinks, nested mount
+boundaries, set-ID entries or unsupported special files. Detect changed tree
+membership and metadata before and after descriptor-relative nofollow ownership
+changes. Unsupported mappings must not receive native host-ID repair.
 A failed migration retains the old container for diagnosis and retry.
 
-If the old container has already been replaced and private Codex state remains
-inaccessible, stop before launching Harness or Codex with a diagnostic naming
-the CCC state directory and requiring verified, offline recovery. Never extend
+Every Codex startup checks traversed directories for read/write/traverse access
+and regular files for readability. Top-level files and mutable runtime subtrees
+(`app-server-daemon`, `tmp`, `sessions`, `archived_sessions`, `log`, `logs`,
+`shell_snapshots`, `sqlite`, `memories`) also require file write access. Files
+and directories under `app-server-daemon` and `tmp` must belong to the runtime
+UID, except symlinks. Packaged plugin/Harness files may remain read-only.
+If these checks fail, including after the old container has already been
+replaced, stop before launching Harness or Codex with a diagnostic naming the
+CCC state directory and requiring verified, offline recovery. Never extend
 this repair to the user's actual `~/.codex`, project files or other credentials.
 
 ### Known ceiling
@@ -117,3 +124,11 @@ image-upgrade nor mount-contract drift stops a running legacy container.
 Also verify that a compatible running container defers an image-only update,
 that mount drift and command-execution failures preserve running work, and that
 lab-volume migration failures retain data and provide a repair diagnostic.
+
+For Codex state, use disposable 0700 directories and 0600 files owned by a
+verified old UID/GID. Verify target-user reads/writes after migration, independent
+UID/GID filtering, unchanged content/modes/inodes, and untouched symlink targets
+and unrelated owners. Prove unsafe preflight leaves all ownership unchanged,
+detected concurrent additions reject migration, failures preserve the previous
+container, and already-replaced unreadable or unwritable state is rejected
+before Harness/Codex launch. Read-only packaged files must still pass.

@@ -37,8 +37,11 @@ root_stat = os.fstat(root_fd)
 if root_stat.st_uid != new_uid or root_stat.st_gid != new_gid or root_stat.st_mode & 0o002:
     fail('Codex state root is not a trusted host-owned directory')
 entries = []
+memberships = []
 def visit(directory_fd, relative):
-    for name in os.listdir(directory_fd):
+    names = sorted(os.listdir(directory_fd))
+    memberships.append((directory_fd, relative, names))
+    for name in names:
         fd = os.open(name, os.O_PATH | os.O_NOFOLLOW, dir_fd=directory_fd)
         s = os.fstat(fd)
         path = relative + '/' + name
@@ -56,9 +59,16 @@ def visit(directory_fd, relative):
             directory_fds.append(child_fd)
             visit(child_fd, path)
 directory_fds = [root_fd]
+def validate_memberships():
+    if signature(os.lstat(root)) != signature(root_stat) or signature(os.fstat(root_fd)) != signature(root_stat):
+        fail('Codex state root changed during migration')
+    for fd, path, names in memberships:
+        if sorted(os.listdir(fd)) != names:
+            fail('Codex state directory membership changed: ' + path)
 try:
     visit(root_fd, root)
     # A second complete validation still precedes every ownership write.
+    validate_memberships()
     for fd, parent_fd, name, before, path in entries:
         if signature(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) != signature(before):
             fail('Codex state changed during preflight: ' + path)
@@ -81,6 +91,13 @@ try:
         if after.st_mode != before.st_mode or (after.st_uid, after.st_gid) != (uid, gid):
             fail('Codex state metadata verification failed: ' + path)
         changed += 1
+    validate_memberships()
+    for fd, parent_fd, name, before, path in entries:
+        uid = new_uid if before.st_uid == old_uid else before.st_uid
+        gid = new_gid if before.st_gid == old_gid else before.st_gid
+        expected = (before.st_dev, before.st_ino, before.st_mode, uid, gid, before.st_nlink)
+        if signature(os.fstat(fd)) != expected or signature(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) != expected:
+            fail('Codex state changed before final verification: ' + path)
     print('Migrated %d Codex state entries' % changed)
 finally:
     for fd, *_ in entries:
@@ -167,7 +184,11 @@ for directory, dirs, files in os.walk(root, followlinks=False, onerror=walk_erro
     if not os.access(directory, os.R_OK | os.W_OK | os.X_OK):
         fail('Inaccessible Codex state directory: ' + directory)
     relative = os.path.relpath(directory, root)
-    private = relative.split('/')[0] in ('app-server-daemon', 'tmp')
+    top = relative.split('/')[0]
+    private = top in ('app-server-daemon', 'tmp')
+    # Runtime records are updated in place. Plugin and Harness repository files
+    # may legitimately be read-only (notably .git objects and packaged assets).
+    mutable = relative == '.' or top in ('app-server-daemon', 'tmp', 'sessions', 'archived_sessions', 'log', 'logs', 'shell_snapshots', 'sqlite', 'memories')
     if private and os.lstat(directory).st_uid != uid:
         fail('Codex private directory belongs to another user: ' + directory)
     for name in files:
@@ -175,6 +196,8 @@ for directory, dirs, files in os.walk(root, followlinks=False, onerror=walk_erro
         info = os.lstat(path)
         if stat.S_ISREG(info.st_mode) and not os.access(path, os.R_OK):
             fail('Unreadable Codex state file: ' + path)
+        if mutable and stat.S_ISREG(info.st_mode) and not os.access(path, os.W_OK):
+            fail('Unwritable Codex runtime state file: ' + path)
         if private and not stat.S_ISLNK(info.st_mode) and info.st_uid != uid:
             fail('Codex private file belongs to another user: ' + path)
 `;
