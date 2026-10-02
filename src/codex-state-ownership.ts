@@ -19,7 +19,7 @@ function checked(args: string[], input?: string): string {
 /** All descriptors are pinned before the first ownership write, including symlinks. */
 export const codexStateMigrationScript = String.raw`
 import ctypes, os, stat, sys
-root, old_uid, old_gid, new_uid, new_gid = sys.argv[1:]
+root, old_uid, old_gid, new_uid, new_gid, expected_dev, expected_ino = sys.argv[1:]
 old_uid, old_gid, new_uid, new_gid = map(int, (old_uid, old_gid, new_uid, new_gid))
 def fail(message):
     raise RuntimeError(message)
@@ -34,7 +34,9 @@ with open('/proc/self/mountinfo') as mounts:
         fail('Nested mount in Codex state; stop and unmount it before retrying')
 root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 root_stat = os.fstat(root_fd)
-if root_stat.st_uid != new_uid or root_stat.st_gid != new_gid or root_stat.st_mode & 0o002:
+if (root_stat.st_dev, root_stat.st_ino) != (int(expected_dev), int(expected_ino)):
+    fail('Codex state root identity changed before helper startup')
+if root_stat.st_uid != new_uid or root_stat.st_gid != new_gid or root_stat.st_mode & 0o022:
     fail('Codex state root is not a trusted host-owned directory')
 entries = []
 memberships = []
@@ -106,19 +108,24 @@ finally:
         os.close(fd)
 `;
 
-function assertTrustedRoot(uid: number, gid: number): void {
+function assertTrustedRoot(uid: number, gid: number): { dev: string; ino: string } {
+    let identity: { dev: string; ino: string } | undefined;
     // Inspect every ancestor: realpath alone would silently follow a substituted symlink.
     for (let path = CODEX_DIR; ; path = dirname(path)) {
-        const s = lstatSync(path);
-        if (!s.isDirectory() || s.isSymbolicLink() || (s.mode & 0o002) ||
-            (s.uid !== uid && s.uid !== 0) || ((s.mode & 0o020) && s.gid !== gid)) {
+        const s = lstatSync(path, { bigint: true });
+        if (s.mode & 0o022n) {
+            throw new Error(`Unsafe Codex state directory: ${path}. Remove group/other write permissions on this directory before retrying.`);
+        }
+        if (!s.isDirectory() || s.isSymbolicLink() || (s.uid !== BigInt(uid) && s.uid !== 0n)) {
             throw new Error(`Unsafe Codex state directory or ancestor: ${path}`);
         }
-        if ((path === CODEX_DIR || path === dirname(CODEX_DIR)) && (s.uid !== uid || s.gid !== gid)) {
+        if ((path === CODEX_DIR || path === dirname(CODEX_DIR)) && (s.uid !== BigInt(uid) || s.gid !== BigInt(gid))) {
             throw new Error(`Codex state directory must belong to the host user: ${path}`);
         }
+        if (path === CODEX_DIR) identity = { dev: String(s.dev), ino: String(s.ino) };
         if (dirname(path) === path) break;
     }
+    return identity!;
 }
 
 function assertNoActiveUsers(): void {
@@ -163,11 +170,15 @@ export function prepareCodexStateOwnership(previous: PreviousContainer, imageId:
     }
     const [oldUid, oldGid] = match.slice(1).map(Number);
     if (oldUid === identity.uid && oldGid === identity.gid) return;
-    assertTrustedRoot(identity.uid, identity.gid);
+    const rootIdentity = assertTrustedRoot(identity.uid, identity.gid);
     assertNoActiveUsers();
+    const rechecked = assertTrustedRoot(identity.uid, identity.gid);
+    if (rechecked.dev !== rootIdentity.dev || rechecked.ino !== rootIdentity.ino) {
+        throw new Error("Codex state root changed before helper startup. Retry after stopping its writers.");
+    }
     checked(["run", "--rm", "--network", "none", "--user", "root", "--mount", `type=bind,src=${CODEX_DIR},dst=/state`,
         "--entrypoint", "python3", normalizeImageId(imageId), "-c", codexStateMigrationScript,
-        "/state", String(oldUid), String(oldGid), String(identity.uid), String(identity.gid)]);
+        "/state", String(oldUid), String(oldGid), String(identity.uid), String(identity.gid), rootIdentity.dev, rootIdentity.ino]);
 }
 
 export const codexStateAccessScript = String.raw`

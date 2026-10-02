@@ -77,10 +77,15 @@ Preserve content, ordinary modes, symlink targets and unrelated owners.
 Serialize all host project startup through a shared lock outside Codex state,
 covering inspection, migration and container creation/start. Refuse migration
 when any running container has an overlapping bind mount, inspection fails,
-the root or an ancestor is unsafe, or the tree contains hardlinks, nested mount
+the root or any ancestor is symlinked or writable by group/others, or the tree contains hardlinks, nested mount
 boundaries, set-ID entries or unsupported special files. Detect changed tree
 membership and metadata before and after descriptor-relative nofollow ownership
 changes. Unsupported mappings must not receive native host-ID repair.
+Match the mounted root's device/inode against the validated host root before
+traversal. Refuse mismatches rather than assuming a runtime's path translation
+preserves identity. Unsafe directory modes produce a diagnostic naming the
+directory whose group/other write permission must be removed before retrying;
+CCC must not silently change directory modes to enable migration.
 A failed migration retains the old container for diagnosis and retry.
 
 Every Codex startup checks traversed directories for read/write/traverse access

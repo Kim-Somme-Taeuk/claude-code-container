@@ -27,7 +27,7 @@ beforeEach(() => {
         if (args[0] === "run" && args.includes(previousImage)) return success("1001:1001");
         return success();
     });
-    mocks.lstat.mockReset().mockReturnValue({ uid: 1000, gid: 1000, mode: 0o40775, isDirectory: () => true, isSymbolicLink: () => false });
+    mocks.lstat.mockReset().mockReturnValue({ uid: 1000n, gid: 1000n, mode: 0o40755n, dev: 2096n, ino: 85186n, isDirectory: () => true, isSymbolicLink: () => false });
     mocks.realpath.mockReset().mockImplementation((path: string) => path);
 });
 afterEach(() => {
@@ -47,7 +47,7 @@ describe.skipIf(process.platform !== "linux")("proven retained Codex state migra
         expect(calls[2]).toContain(`type=bind,src=${root},dst=/state`);
         expect(calls[2].filter(arg => arg.startsWith("type=bind"))).toHaveLength(1);
         expect(calls[2]).toContain(currentImage);
-        expect(calls[2].slice(-5)).toEqual(["/state", "1001", "1001", "1000", "1000"]);
+        expect(calls[2].slice(-7)).toEqual(["/state", "1001", "1001", "1000", "1000", "2096", "85186"]);
         expect(calls[2].slice(2, 6)).toEqual(["--network", "none", "--user", "root"]);
     });
     it("does not migrate absent stores, non-host mappings, or already-matched IDs", () => {
@@ -70,9 +70,20 @@ describe.skipIf(process.platform !== "linux")("proven retained Codex state migra
     });
     it("refuses a different previous store and symlinked ancestor", () => {
         expect(() => prepareCodexStateOwnership({ ...previous, Mounts: [{ ...previous.Mounts[0], Source: "/home/test/.codex" }] }, currentImage, identity)).toThrow(/exact CCC/);
-        mocks.lstat.mockImplementation((path: string) => ({ uid: 1000, gid: 1000, mode: 0o40755, isDirectory: () => true, isSymbolicLink: () => path === "/home/test" }));
+        mocks.lstat.mockImplementation((path: string) => ({ uid: 1000n, gid: 1000n, mode: 0o40755n, dev: 2096n, ino: 85186n, isDirectory: () => true, isSymbolicLink: () => path === "/home/test" }));
         expect(() => prepareCodexStateOwnership(previous, currentImage, identity)).toThrow(/ancestor/);
         expect(mocks.spawn).toHaveBeenCalledTimes(1);
+    });
+    it.each([root, "/home/test/.ccc", "/home/test"])("rejects group-writable trusted-owner directory %s", unsafe => {
+        mocks.lstat.mockImplementation((path: string) => ({ uid: 1000n, gid: 1000n, mode: path === unsafe ? 0o40775n : 0o40755n, dev: 2096n, ino: 85186n, isDirectory: () => true, isSymbolicLink: () => false }));
+        expect(() => prepareCodexStateOwnership(previous, currentImage, identity)).toThrow(/Remove group\/other write permissions/);
+        expect(mocks.spawn.mock.calls.filter(call => call[1].includes("--mount"))).toHaveLength(0);
+    });
+    it("rejects root replacement between host validation and helper launch", () => {
+        let rootReads = 0;
+        mocks.lstat.mockImplementation((path: string) => ({ uid: 1000n, gid: 1000n, mode: 0o40755n, dev: 2096n, ino: path === root && ++rootReads > 1 ? 90000n : 85186n, isDirectory: () => true, isSymbolicLink: () => false }));
+        expect(() => prepareCodexStateOwnership(previous, currentImage, identity)).toThrow(/root changed/);
+        expect(mocks.spawn.mock.calls.filter(call => call[1].includes("--mount"))).toHaveLength(0);
     });
     it.each([root, "/home/test/.ccc", `${root}/tmp`, "/"])("blocks active overlapping source %s", Source => {
         mocks.spawn.mockImplementation((_cli: string, args: string[]) => args[0] === "run" ? success("1001:1001") :
@@ -103,7 +114,7 @@ describe.skipIf(process.platform !== "linux" || realSpawn("python3", ["--version
     }
     function execute(path: string, script = codexStateMigrationScript) {
         const stat = realLstat(path);
-        return realSpawn("python3", ["-c", script, path, "65431", "65432", String(stat.uid), String(stat.gid)], { encoding: "utf-8" });
+        return realSpawn("python3", ["-c", script, path, "65431", "65432", String(stat.uid), String(stat.gid), String(stat.dev), String(stat.ino)], { encoding: "utf-8" });
     }
     it("traverses private state while preserving external and dangling symlinks", () => {
         const path = fixture();
@@ -124,6 +135,14 @@ describe.skipIf(process.platform !== "linux" || realSpawn("python3", ["--version
         expect(result.status).not.toBe(0);
         expect(result.stderr).toContain("Multiply linked");
         expect(readFileSync(join(path, "hardlink"), "utf-8")).toBe("preserve");
+    });
+    it("rejects substituted root identity before traversing its contents", () => {
+        const path = fixture();
+        const script = codexStateMigrationScript.replace("root_stat = os.fstat(root_fd)", "expected_ino = str(int(expected_ino) + 1)\nroot_stat = os.fstat(root_fd)");
+        const result = execute(path, script);
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain("root identity changed");
+        expect(readFileSync(join(path, "private", "daemon.lock"), "utf-8")).toBe("preserve");
     });
     it("rejects set-ID entries instead of silently clearing their modes", () => {
         const path = fixture();
