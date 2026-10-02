@@ -41,9 +41,9 @@ beforeAll(() => startServer());
 beforeEach(() => { fixture.calls.length = 0; });
 
 describe("focused management tools", () => {
-    it("advertises 58 unique tools without removed preparation or redundant management tools", () => {
-        expect(TOOLS).toHaveLength(58);
-        expect(new Set(TOOLS.map(t => t.name)).size).toBe(58);
+    it("advertises 59 unique tools without removed preparation or redundant management tools", () => {
+        expect(TOOLS).toHaveLength(59);
+        expect(new Set(TOOLS.map(t => t.name)).size).toBe(59);
         expect(TOOLS.filter(t => t.name.startsWith("create_")).map(t => t.name).sort()).toEqual([
             "create_android_emulator", "create_ios_simulator", "create_linux_vm",
             "create_macos_vm", "create_windows_sandbox", "create_windows_vm",
@@ -63,7 +63,7 @@ describe("focused management tools", () => {
         expect(fixture.calls).toEqual([]);
     });
     it.each(["list", "create", "restore", "delete"])("routes snapshot %s to its exact operation", async (action) => {
-        const result = await call("snapshot", { deviceId: "vm", action, snapshotName: "before", confirmDestructive: true });
+        const result = await call("snapshot", { deviceId: "vm", action, ...(action !== "list" ? { snapshotName: "before" } : {}), ...(["restore", "delete"].includes(action) ? { confirmDestructive: true } : {}) });
         expect(result.isError).not.toBe(true);
         expect(fixture.calls.at(-1)?.name).toBe(`device_snapshot_${action}`);
     });

@@ -62,11 +62,12 @@ describe("macOS VM recorder start rollback", () => {
         expect(started?.isError).not.toBe(true);
 
         recorderPidPath = join(context.homeDir, "recorder.pid");
-        writeFileSync(join(context.binDir, "ssh"), `#!/bin/sh
-case "$*" in
-  *screencapture*"-v"*) echo $$ > "$RECORDER_PID_PATH"; exec /bin/sleep 20 ;;
-  *) exit 0 ;;
-esac
+        writeFileSync(join(context.binDir, "ssh"), `#!${process.execPath}
+const command = process.argv.slice(2).join(" ");
+if (command.includes("screencapture") && command.includes("-v")) {
+    require("node:fs").writeFileSync(process.env.RECORDER_PID_PATH, String(process.pid));
+    setTimeout(() => {}, 20000);
+}
 `);
         chmodSync(join(context.binDir, "ssh"), 0o755);
         process.env.RECORDER_PID_PATH = recorderPidPath;

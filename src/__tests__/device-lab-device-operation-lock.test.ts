@@ -1,3 +1,4 @@
+import { isolateDeviceLabTestEnvironment } from "./helpers/device-lab-test-environment.js";
 import { randomUUID } from "crypto";
 import { mkdtempSync, rmdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
@@ -11,13 +12,13 @@ import {
 
 describe("owner device operation lock", () => {
     const backends: string[] = [];
-    let originalHome: string | undefined;
+    let originalHomeRestore: (() => void) | undefined;
     let testHome: string;
 
     beforeEach(() => {
-        originalHome = process.env.HOME;
+
         testHome = mkdtempSync(join(tmpdir(), "ccc-operation-lock-home-"));
-        process.env.HOME = testHome;
+        originalHomeRestore = isolateDeviceLabTestEnvironment(testHome);
     });
 
     afterEach(() => {
@@ -31,8 +32,7 @@ describe("owner device operation lock", () => {
             }
         }
         rmSync(testHome, { recursive: true, force: true });
-        if (originalHome === undefined) delete process.env.HOME;
-        else process.env.HOME = originalHome;
+        originalHomeRestore?.();
     });
 
     function target() {

@@ -12,6 +12,8 @@ const BROKER_DEVICE_TOOL_ROUTABLE_TOOLS = new Set([
     "scroll",
     "cursor_position",
     "window_list",
+    "focus_window",
+    "move",
     "ui",
     "record_video",
     "record_video",
@@ -59,6 +61,7 @@ const BROKER_DEVICE_TOOL_ROUTABLE_TOOLS = new Set([
 ]);
 
 const BROKER_ROUTE_ONLY_PROPERTIES = new Set([
+    "region", // MCP-only screenshot transformation.
     "count", // Public selector consumed before provider dispatch.
     "detail", // Presentation-only: stripped before provider dispatch.
     "broker",

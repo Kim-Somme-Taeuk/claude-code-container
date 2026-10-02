@@ -22,7 +22,8 @@
   },
   "dependencies": {
     "@ccc/device-lab": "1.1.90",
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "pngjs": "^7.0.0"
   },
   "engines": {
     "node": ">=20.19.0"

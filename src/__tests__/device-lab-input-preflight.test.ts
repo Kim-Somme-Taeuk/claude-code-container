@@ -91,7 +91,7 @@ require('module').syncBuiltinESMExports();`);
                  name: "Preflight", avdName: "Preflight", port: 5582,
             } });
             expect(created.isError).not.toBe(true);
-            const deviceId = json(created).device.id;
+            const deviceId = json(created).device.deviceId;
             for (const [args, expected] of [
                 [{ keyCode: 0 }, 0], [{ key: "KEYCODE_ENTER" }, "KEYCODE_ENTER"],
             ] as const) {
@@ -112,7 +112,7 @@ require('module').syncBuiltinESMExports();`);
         } finally { await cleanupFakeAndroidMcpContext(context); }
     });
 
-    it("rejects Android keyCode on iOS and preserves supported keys", { timeout: 30000 }, async () => {
+    it.skipIf(process.platform === "win32")("rejects Android keyCode on iOS and preserves supported keys (POSIX fixture)", { timeout: 30000 }, async () => {
         const context = await createFakeIosMcpContext();
         try {
             const created = await context.client.callTool({ name: "create_ios_simulator", arguments: {

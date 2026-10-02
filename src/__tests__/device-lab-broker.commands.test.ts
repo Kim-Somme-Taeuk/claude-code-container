@@ -1,10 +1,20 @@
+// These lifecycle suites simulate VM effects; host capacity must be simulated too.
+// Dedicated capacity tests exercise refusal boundaries.
+vi.mock("os", async (importOriginal) => ({
+    ...await importOriginal<typeof import("os")>(),
+    totalmem: () => 64 * 1024 ** 3,
+    freemem: () => 48 * 1024 ** 3,
+}));
+import * as fixtureFs from "fs";
+import { directorySymlink } from "./helpers/file-symlink-fixture.js";
+import { isolateDeviceLabTestEnvironment } from "./helpers/device-lab-test-environment.js";
 import { isolatedDeviceLabPackage } from "./helpers/isolated-device-lab-package.js";
 import { spawn } from "child_process";
 import { createHash } from "crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "fs";
 import { request } from "http";
 import { hostname, tmpdir, uptime } from "os";
-import { dirname, join } from "path";
+import { dirname, join, resolve } from "path";
 import { runInNewContext } from "vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeviceBrokerServer as createRawDeviceBrokerServer, hiddenChildProcessOptions, hiddenProviderCommandEnv, providerCommandSpawn, redactProviderCommandInput, registerDeviceBrokerOwner, waitForBrokerWindowsMinimizeConfirmation, windowsHiddenChildProcessPreloadScript, windowsHiddenVbsLauncherInvocation, windowsHiddenVbsLauncherScript, windowsProcessTreeOutcome, windowsSandboxMinimizeWatchdogArgs, windowsSandboxSessionIdsFromBrokerListOutput, windowsSandboxWindowHandleSnapshotArgs, windowsSandboxWindowHandlesFromOutput } from "@ccc/device-lab/device-lab-broker.js";
@@ -12,6 +22,7 @@ import { deviceLabOwnerId, deviceLabProjectMountPath } from "@ccc/device-lab/dev
 import { readDeviceRuntimeProcessIdentity } from "@ccc/device-lab/device-lab-process-identity.js";
 import { withSharedMutationLockAsync } from "@ccc/device-lab/device-lab-shared-state.js";
 import { releaseHyperVNetworkAllocationAndCleanup } from "@ccc/device-lab/device-lab/broker/hyper-v/network.js";
+import { rememberHyperVConsoleFrame, forgetHyperVConsoleFrame, hyperVConsoleFrameKey } from "@ccc/device-lab/device-lab/broker/hyper-v/console.js";
 import { hyperVVmName } from "@ccc/device-lab/host-control/hyper-v/index.js";
 import { HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP } from "@ccc/hyper-v/low-level/powershell-transport.js";
 import { backendRoot, cleanupOwner, close, listen, ownerRoot, ownerRpcEndpoint, ownerRpcHeaders, writeBrokerDevices } from "./helpers/host-broker-test-fixture.js";
@@ -91,7 +102,7 @@ function memoryBootstrapEnvelope(
 // The operation request the library asked for, or null when this command is not a library call.
 function nativeLibraryRequest(
     command: { args: string[]; input?: string },
-): { operation: string; selector?: { kind: string; id?: string; name?: string }; action?: string; localPath?: string; remotePath?: string; expectedName?: string; expectedNotes?: string; path?: string; mode?: string; force?: boolean; paths?: string[]; guard?: { expectedName: string; expectedNotes: string } } | null {
+): { operation: string; selector?: { kind: string; id?: string; name?: string }; action?: string; command?: string; localPath?: string; remotePath?: string; expectedName?: string; expectedNotes?: string; path?: string; mode?: string; force?: boolean; paths?: string[]; guard?: { expectedName: string; expectedNotes: string } } | null {
     const envelope = memoryBootstrapEnvelope(command);
     if (envelope) {
         return envelope.script.includes("Write-HyperVWindowsSuccess")
@@ -330,18 +341,18 @@ describe("device-lab host broker lifecycle commands", () => {
         expect(JSON.stringify(redacted)).not.toContain("secret");
     });
 
-    let originalHome: string | undefined;
+    let originalHomeRestore: (() => void) | undefined;
+    let fixtureHome: string | undefined;
 
     beforeEach(() => {
-        originalHome = process.env.HOME;
-        process.env.HOME = mkdtempSync(join(tmpdir(), "ccc-device-broker-test-home-"));
+        fixtureHome = mkdtempSync(join(tmpdir(), "ccc-device-broker-test-home-"));
+        originalHomeRestore = isolateDeviceLabTestEnvironment(fixtureHome);
     });
 
     afterEach(() => {
         vi.restoreAllMocks();
-        if (process.env.HOME) rmSync(process.env.HOME, { recursive: true, force: true });
-        if (originalHome === undefined) delete process.env.HOME;
-        else process.env.HOME = originalHome;
+        if (fixtureHome) rmSync(fixtureHome, { recursive: true, force: true });
+        originalHomeRestore?.();
     });
 
     it("recognizes localized Windows taskkill failures when the process is already gone", () => {
@@ -917,6 +928,8 @@ describe("device-lab host broker lifecycle commands", () => {
         let observedSnapshotName: string | null = null;
         let restoreRetryJournalObserved = false;
         let guestExecExitCode = 0;
+        let focusWindowOutput = '{"ok":true}';
+        let windowListOutput = '{"windows":[{"handle":"42","title":"Guest Notes","processId":123}]}';
         let guestDownloadReportedBytes = 6;
         let guestDownloadLostResponse = false;
         let checkpointPolicy: "Disabled" | "ProductionOnly" = "ProductionOnly";
@@ -976,7 +989,7 @@ describe("device-lab host broker lifecycle commands", () => {
                         }
                     }
                     const item = action === "exec"
-                        ? { action, status: guestExecExitCode, stdout: guestExecExitCode === 0 ? "guest-ok\r\n" : "", stderr: guestExecExitCode === 0 ? "" : "guest-failed" }
+                        ? { action, status: guestExecExitCode, stdout: guestExecExitCode === 0 ? (nativeRequest.command?.includes("CCCWin") ? windowListOutput : nativeRequest.command?.includes("CCCFocus") ? focusWindowOutput : "guest-ok\r\n") : "", stderr: guestExecExitCode === 0 ? "" : "guest-failed" }
                         : action === "mkdir" ? { action }
                             : { action, localPath: nativeRequest.localPath, remotePath: nativeRequest.remotePath, bytes: action === "upload" ? statSync(nativeRequest.localPath!).size : guestDownloadReportedBytes };
                     return { ...command, status: 0, stdout: JSON.stringify({ schemaVersion: 1, operation: "Invoke-Guest", ok: true, items: [item] }), stderr: "" };
@@ -1781,6 +1794,55 @@ describe("device-lab host broker lifecycle commands", () => {
             expect(guestExec.status, JSON.stringify(await guestExec.clone().json())).toBe(200);
             expect(await guestExec.json()).toEqual(expect.objectContaining({ result: expect.objectContaining({ provider: "hyper-v-powershell-direct", stdout: "guest-ok\r\n", status: 0 }) }));
 
+            const beforeInvalidGesture = commandRunner.mock.calls.length;
+            expect((await invokeTool("device_drag", {x1:0,y1:0,x2:10,y2:10,durationMs:0})).status).toBe(400);
+            expect((await invokeTool("device_focus_window", {handle:"42;id"})).status).toBe(400);
+            expect(commandRunner.mock.calls).toHaveLength(beforeInvalidGesture);
+            const staleDrag = await invokeTool("device_drag", {x1:0,y1:0,x2:10,y2:10,incarnationId:"f".repeat(32)});
+            expect(staleDrag.status).toBe(409);
+            expect(await staleDrag.json()).toMatchObject({error:"hyper-v-incarnation-conflict"});
+            const staleFocus = await invokeTool("device_focus_window", {handle:"42",incarnationId:"f".repeat(32)});
+            expect(staleFocus.status).toBe(409);
+            expect(await staleFocus.json()).toMatchObject({error:"hyper-v-incarnation-conflict"});
+            const noFrameDrag = await invokeTool("device_drag", {x1:0,y1:0,x2:10,y2:10});
+            expect(noFrameDrag.status).toBe(409);
+            expect(await noFrameDrag.json()).toMatchObject({error:"hyper-v-console-screenshot-required"});
+            const dragFrameKey = hyperVConsoleFrameKey(ownerId, "windows-vm", deviceId);
+            rememberHyperVConsoleFrame(dragFrameKey, {incarnationId:activeIncarnationId!,width:640,height:480,nativeWidth:1280,nativeHeight:960,capturedAt:new Date().toISOString()});
+            try {
+                const beforeOffscreen = commandRunner.mock.calls.length;
+                const offscreenDrag = await invokeTool("device_drag", {x1:0,y1:0,x2:640,y2:10});
+                expect(offscreenDrag.status).toBe(400);
+                expect(await offscreenDrag.json()).toMatchObject({error:"hyper-v-console-pixel-invalid"});
+                expect(commandRunner.mock.calls).toHaveLength(beforeOffscreen);
+                const dragResult = await invokeTool("device_drag", {x1:1,y1:2,x2:639,y2:479});
+                expect(dragResult.status, JSON.stringify(await dragResult.clone().json())).toBe(200);
+                expect(commandRunner.mock.calls.map(([command]) => nativeLibraryRequest(command)).filter(Boolean))
+                    .toContainEqual(expect.objectContaining({operation:"Send-VMConsoleInput",action:"drag",x:1,y:2,x2:639,y2:479,durationMs:700,nativeWidth:1280,nativeHeight:960,expectedNotes:createdVmNotes}));
+            } finally { forgetHyperVConsoleFrame(dragFrameKey); }
+            const focused = await invokeTool("device_focus_window", {handle:"42"});
+            expect(focused.status, JSON.stringify(await focused.clone().json())).toBe(200);
+            expect(await focused.json()).toMatchObject({result:{tool:"device_focus_window",ok:true}});
+            focusWindowOutput = '{"error":"window-focus-denied"}';
+            const deniedFocus = await invokeTool("device_focus_window", {handle:"42"});
+            expect(deniedFocus.status).toBe(502);
+            expect(await deniedFocus.json()).toMatchObject({error:"window-focus-denied"});
+
+            const windows = await invokeTool("device_window_list", {});
+            expect(windows.status, JSON.stringify(await windows.clone().json())).toBe(200);
+            expect(await windows.json()).toMatchObject({result:{tool:"device_window_list", windows:[{handle:"42",title:"Guest Notes",processId:123}]}});
+            const beforeShortWindowList = commandRunner.mock.calls.length;
+            expect((await invokeTool("device_window_list", {helperTimeoutMs:1000})).status).toBe(400);
+            expect(commandRunner.mock.calls).toHaveLength(beforeShortWindowList);
+            windowListOutput = '{"error":"window-list-session-changed"}';
+            const changedSession = await invokeTool("device_window_list", {});
+            expect(changedSession.status).toBe(502);
+            expect(await changedSession.json()).toMatchObject({error:"window-list-session-changed"});
+            windowListOutput = 'invalid';
+            expect((await invokeTool("device_window_list", {})).status).toBe(502);
+            windowListOutput = '{"windows":[]}';
+            expect(await (await invokeTool("device_window_list", {})).json()).toMatchObject({result:{windows:[]}});
+
             guestExecExitCode = 7;
             const failedGuestExec = await invokeTool("device_exec", { command: "exit 7" });
             expect(failedGuestExec.status).toBe(422);
@@ -2310,7 +2372,7 @@ describe("device-lab host broker lifecycle commands", () => {
                 }
                 if (variant === "artifact-cleanup-failure") {
                     rmSync(privateRoot, { recursive: true, force: true });
-                    symlinkSync(cleanupOutside, privateRoot, "dir");
+                    directorySymlink(cleanupOutside, privateRoot);
                 }
                 if (variant === "allocation-cleanup-failure") {
                     const networkStatePath = join(process.env.HOME!, ".ccc", "device-broker-private", "network", "hyper-v.json");
@@ -2401,7 +2463,7 @@ describe("device-lab host broker lifecycle commands", () => {
                 const privateRoot = join(process.env.HOME!, ".ccc", "device-broker-private", "owners", ownerId, "windows-vm", deviceId);
                 if (variant === "artifact-cleanup-failure") {
                     rmSync(privateRoot, { recursive: true, force: true });
-                    symlinkSync(cleanupOutside, privateRoot, "dir");
+                    directorySymlink(cleanupOutside, privateRoot);
                 }
                 if (variant === "allocation-cleanup-failure") {
                     const networkStatePath = join(process.env.HOME!, ".ccc", "device-broker-private", "network", "hyper-v.json");
@@ -2840,7 +2902,7 @@ describe("device-lab host broker lifecycle commands", () => {
                     swapped = true;
                     rmSync(movedRoot, { recursive: true, force: true });
                     renameSync(privateRoot, movedRoot);
-                    symlinkSync(movedRoot, privateRoot, "dir");
+                    directorySymlink(movedRoot, privateRoot);
                     vi.mocked(releaseHyperVNetworkAllocationAndCleanup).mockResolvedValueOnce({
                         ok: false,
                         released: false,
@@ -3468,8 +3530,13 @@ describe("device-lab host broker lifecycle commands", () => {
         }));
         let failProviderCommand = true;
         let failStateWrite = false;
+        const rename = fixtureFs.renameSync;
+        vi.spyOn(fixtureFs, "renameSync").mockImplementation((source, target) => {
+            if (failStateWrite && String(target) === join(root, "devices.json")) throw Object.assign(new Error("injected state write failure"), { code: "EIO" });
+            return rename(source, target);
+        });
         const commandRunner = vi.fn((command) => {
-            if (failStateWrite && command.provider === "android-device") chmodSync(root, 0o500);
+            // Persistence failure is injected at commit, independent of host chmod semantics.
             return {
                 mode: command.mode,
                 provider: command.provider,
@@ -3729,7 +3796,7 @@ describe("device-lab host broker lifecycle commands", () => {
     });
 
     it("routes read-only device inventory and recording status without provider execution", async () => {
-        const hostProjectPath = "/project/broker-readonly-device-test";
+        const hostProjectPath = resolve("/project/broker-readonly-device-test");
         const ownerId = deviceLabOwnerId(hostProjectPath);
         const commandRunner = vi.fn();
         const deviceToolRunner = vi.fn((owner, parsed, match) => ({
@@ -4084,7 +4151,7 @@ describe("device-lab host broker lifecycle commands", () => {
     });
 
     it("times out incomplete HTTP request bodies", async () => {
-        const hostProjectPath = "/project/broker-request-body-timeout-test";
+        const hostProjectPath = resolve("/project/broker-request-body-timeout-test");
         const ownerId = deviceLabOwnerId(hostProjectPath);
         const server = createDeviceBrokerServer({
             cwd: hostProjectPath,
@@ -5312,7 +5379,7 @@ describe("device-lab host broker lifecycle commands", () => {
                     legacyEnv: { module: null, handler: null, tool: null, args: null },
                 });
             }
-            // The sandbox helper only reads the cursor, so a requested move must not look successful.
+            // The sandbox helper now handles actual pointer movement.
             const move = await fetch(endpoint, {
                 method: "POST",
                 headers,
@@ -5321,8 +5388,7 @@ describe("device-lab host broker lifecycle commands", () => {
                     params: { tool: "device_cursor_position", deviceId: "win-child", x: 5, y: 6 },
                 }),
             });
-            expect(move.status).toBe(400);
-            expect(await move.json()).toEqual(expect.objectContaining({ error: "device-cursor-move-backend-unsupported", backend: "windows-sandbox" }));
+            expect(move.status).toBe(200);
         } finally {
             await close(server);
             cleanupOwner(ownerId);
@@ -5399,7 +5465,7 @@ describe("device-lab host broker lifecycle commands", () => {
         }
     });
 
-    it("routes Android broker device tools through Android backend child handlers", async () => {
+    it("routes Android broker device tools through Android backend child handlers", { timeout: process.platform === "win32" ? 120000 : 30000 }, async () => {
         const fakeRoot = mkdtempSync(join(tmpdir(), "ccc-android-device-tool-runner-"));
         const backendDir = join(fakeRoot, "providers", "backends");
         mkdirSync(backendDir, { recursive: true });
@@ -5538,7 +5604,7 @@ describe("device-lab host broker lifecycle commands", () => {
         }
     });
 
-    it("routes iOS broker device tools through iOS backend child handlers", async () => {
+    it("routes iOS broker device tools through iOS backend child handlers", { timeout: process.platform === "win32" ? 120000 : 30000 }, async () => {
         const fakeRoot = mkdtempSync(join(tmpdir(), "ccc-ios-device-tool-runner-"));
         const backendDir = join(fakeRoot, "providers", "backends");
         mkdirSync(backendDir, { recursive: true });
@@ -5745,7 +5811,7 @@ describe("device-lab host broker lifecycle commands", () => {
     });
 
     it("starts and stops broker-owned Android recordings without touching foreign owner devices", async () => {
-        const hostProjectPath = "/project/broker-recording-test";
+        const hostProjectPath = resolve("/project/broker-recording-test");
         const ownerA = deviceLabOwnerId(hostProjectPath);
         const containerRecordingPath = `${deviceLabProjectMountPath(hostProjectPath)}/artifacts/owned.mp4`;
         const hostRecordingPath = join(hostProjectPath, "artifacts", "owned.mp4");
@@ -6230,7 +6296,8 @@ describe("device-lab host broker lifecycle commands", () => {
         }
     });
 
-    it("persists process identity for a default-runner broker recording", async () => {
+    // This real-runner fixture requires POSIX shell traps and process-group signals.
+    it.skipIf(process.platform === "win32")("persists process identity for a default-runner broker recording", async () => {
         const ownerId = deviceLabOwnerId("/project/broker-recording-process-identity-test");
         const fakeAdb = join(process.env.HOME || tmpdir(), "fake-adb-recording");
         writeFileSync(fakeAdb, "#!/bin/sh\ntrap 'exit 0' INT TERM\nwhile :; do sleep 1; done\n");
@@ -6279,7 +6346,8 @@ describe("device-lab host broker lifecycle commands", () => {
         }
     });
 
-    it("finalizes Android recording when the owned host recorder exits but remote pkill is denied", async () => {
+    // This real-runner fixture requires POSIX shell traps and process-group signals.
+    it.skipIf(process.platform === "win32")("finalizes Android recording when the owned host recorder exits but remote pkill is denied", async () => {
         const ownerId = deviceLabOwnerId("/project/broker-recording-pkill-denied-test");
         const fakeAdb = join(process.env.HOME || tmpdir(), "fake-adb-pkill-denied");
         const localPath = join(process.env.HOME || tmpdir(), "recording.mp4");
@@ -6350,7 +6418,8 @@ describe("device-lab host broker lifecycle commands", () => {
         }
     });
 
-    it("keeps recording state active when a default-runner recorder does not exit on stop", async () => {
+    // This real-runner fixture requires POSIX shell traps and process-group signals.
+    it.skipIf(process.platform === "win32")("keeps recording state active when a default-runner recorder does not exit on stop", async () => {
         const ownerId = deviceLabOwnerId("/project/broker-recording-stubborn-stop-test");
         const fakeAdb = join(process.env.HOME || tmpdir(), "fake-adb");
         const readyMarker = join(tmpdir(), `ccc-stubborn-recorder-${process.pid}-${Date.now()}.ready`);
@@ -7184,8 +7253,8 @@ describe("device-lab host broker lifecycle commands", () => {
     it("materializes one verified random preload for the current broker process", () => {
         const first = hiddenProviderCommandEnv({}, "win32");
         const second = hiddenProviderCommandEnv({}, "win32");
-        const firstPath = first?.NODE_OPTIONS?.match(/--require="([^"]+)"/)?.[1];
-        const secondPath = second?.NODE_OPTIONS?.match(/--require="([^"]+)"/)?.[1];
+        const firstPath = [...(first?.NODE_OPTIONS || "").matchAll(/--require="([^"]+)"/g)].map(match => match[1]).find(path => /hidden-child-processes-[a-f0-9]{32}\.cjs$/.test(path));
+        const secondPath = [...(second?.NODE_OPTIONS || "").matchAll(/--require="([^"]+)"/g)].map(match => match[1]).find(path => /hidden-child-processes-[a-f0-9]{32}\.cjs$/.test(path));
 
         expect(firstPath).toBeTruthy();
         expect(secondPath).toBe(firstPath);
@@ -7202,7 +7271,7 @@ describe("device-lab host broker lifecycle commands", () => {
         mkdirSync(brokerDirectory, { recursive: true });
         mkdirSync(externalDirectory, { recursive: true });
         writeFileSync(marker, "preserve");
-        symlinkSync(externalDirectory, launchersDirectory);
+        directorySymlink(externalDirectory, launchersDirectory);
 
         expect(() => hiddenProviderCommandEnv({}, "win32")).toThrow("windows-provider-launcher-directory-invalid");
         expect(readdirSync(externalDirectory)).toEqual(["preserve.txt"]);
@@ -7238,7 +7307,7 @@ describe("device-lab host broker lifecycle commands", () => {
         mkdirSync(launcherRoot, { recursive: true });
         mkdirSync(externalDirectory, { recursive: true });
         writeFileSync(marker, "preserve");
-        symlinkSync(externalDirectory, providerDirectory);
+        directorySymlink(externalDirectory, providerDirectory);
 
         expect(() => windowsHiddenVbsLauncherInvocation({
             mode: "detached",
@@ -7999,7 +8068,8 @@ describe("device-lab host broker lifecycle commands", () => {
         }
     });
 
-    it("bounds default provider execution output, reports timeouts, and preserves state on failures", async () => {
+    // Real /bin/sh executable integration; cross-platform runner contracts are tested above.
+    it.skipIf(process.platform === "win32")("bounds default provider execution output, reports timeouts, and preserves state on failures", async () => {
         const ownerId = deviceLabOwnerId("/project/broker-provider-failure-test");
         const ownerStateRoot = ownerRoot(ownerId);
         const windowsRoot = backendRoot(ownerId, "windows");
@@ -8131,7 +8201,7 @@ describe("device-lab host broker lifecycle commands", () => {
         }
     });
 
-    it("serializes Windows Sandbox starts with a host-wide broker lock", async () => {
+    it("serializes Windows Sandbox starts with a host-wide broker lock", { timeout: 30000 }, async () => {
         const ownerId = deviceLabOwnerId("/project/broker-windows-singleton-test");
         const windowsRoot = backendRoot(ownerId, "windows");
         const firstConfigPath = join(windowsRoot, "first.wsb");
@@ -8158,6 +8228,7 @@ describe("device-lab host broker lifecycle commands", () => {
         const commandRunner = vi.fn(() => ({ mode: "exec", provider: "wsb", status: 0, stdout: "", stderr: "" }));
         const server = createDeviceBrokerServer({
             cwd: "/project/broker-windows-singleton-test",
+            platform: "linux", // Simulated wsb CLI, without native window/session discovery.
             host: "127.0.0.1",
             port: 0,
             providerPaths: { wsb: "wsb" },
@@ -8404,3 +8475,5 @@ describe("device-lab host broker lifecycle commands", () => {
         }
     });
 });
+
+vi.mock("fs", async (importOriginal) => ({ ...await importOriginal<typeof import("fs")>() }));

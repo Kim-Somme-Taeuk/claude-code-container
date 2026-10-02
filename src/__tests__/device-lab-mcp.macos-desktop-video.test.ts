@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
+import { tmpdir } from "os";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { handleMacosTool } from "@ccc/device-lab/providers/backends/macos-vm.mjs";
 import { cleanupFakeMacosMcpContext, createFakeMacosMcpContext, type FakeMacosMcpContext } from "./helpers/fake-macos-mcp-fixture.js";
@@ -46,7 +47,7 @@ describe("macOS VM desktop helper and video tools with fake Tart provider", () =
             remoteScriptPath: "/tmp/ccc-macos-fake-tart-guest-helper.sh",
         }));
         const hostHelperScript = readFileSync(started.device.helper.hostHelperScript, "utf-8");
-        expect(hostHelperScript).toContain("window_list)");
+        expect(hostHelperScript).toContain("window_list|focus_window)");
         expect(hostHelperScript).toContain("accessibility_snapshot)");
 
         const exec = await handleMacosTool("device_exec", { deviceId: "macos-fake-tart", command: "whoami" });
@@ -91,8 +92,9 @@ describe("macOS VM desktop helper and video tools with fake Tart provider", () =
         });
         expect(readFileSync(downloadTarget, "utf-8")).toBe("fakepng");
         const transferLog = readFileSync(logPath, "utf-8");
-        const uploadStagePath = transferLog.match(/scp .* (\/tmp\/ccc-device-upload-\S+\/payload) ccc@127\.0\.0\.1:\/tmp\/mac-upload\.txt/)?.[1];
-        const downloadStagePath = transferLog.match(/ccc@127\.0\.0\.1:\/tmp\/mac-download\.txt (\/tmp\/ccc-device-download-\S+\/payload)/)?.[1];
+        const escapedTempRoot = tmpdir().replace(/[.*+?^$\{\}()|[\]\\]/g, "\\$&");
+        const uploadStagePath = transferLog.match(new RegExp("(" + escapedTempRoot + "[\\\\/]ccc-device-upload-[^\r\n]*[\\\\/]payload) ccc@127\\.0\\.0\\.1:/tmp/mac-upload\\.txt"))?.[1];
+        const downloadStagePath = transferLog.match(new RegExp("ccc@127\\.0\\.0\\.1:/tmp/mac-download\\.txt (" + escapedTempRoot + "[\\\\/]ccc-device-download-[^\r\n]*[\\\\/]payload)"))?.[1];
         expect(uploadStagePath).toBeTruthy();
         expect(downloadStagePath).toBeTruthy();
         expect(existsSync(uploadStagePath || "")).toBe(false);
@@ -353,7 +355,10 @@ describe("macOS VM desktop helper and video tools with fake Tart provider", () =
         expect(log).toContain("scp -P 2222 -o BatchMode=yes -o StrictHostKeyChecking=no");
         expect(log).toContain("ccc-guest-helper.sh ccc@127.0.0.1:/tmp/ccc-macos-fake-tart-guest-helper.sh");
         expect(log).toContain("chmod 700 '/tmp/ccc-macos-fake-tart-guest-helper.sh'");
-        expect(log).toMatch(/screencapture -x '\/tmp\/ccc-macos-fake-tart-[0-9a-f-]+-screenshot\.png'/);
+        expect(log).toMatch(/capture_path='\/tmp\/ccc-macos-fake-tart-[0-9a-f-]+-screenshot\.png'/);
+        expect(log).toContain('screencapture -x -m -t png "$capture_path"');
+        expect(log).toContain('sips --resampleHeightWidth "$height" "$width" "$capture_path"');
+        expect(log).toContain('sips -g pixelWidth -g pixelHeight "$capture_path"');
         expect(log).toMatch(/rm -f -- '\/tmp\/ccc-macos-fake-tart-[0-9a-f-]+-screenshot\.png'/);
         expect(log).toContain("'/tmp/ccc-macos-fake-tart-guest-helper.sh' click '22' '33' 'right'");
         expect(log).toContain("'/tmp/ccc-macos-fake-tart-guest-helper.sh' double_click '44' '55' 'left'");
@@ -366,7 +371,7 @@ describe("macOS VM desktop helper and video tools with fake Tart provider", () =
         expect(log).toContain("'/tmp/ccc-macos-fake-tart-guest-helper.sh' accessibility_snapshot '0' '1'");
         expect(log).toContain("screencapture -v '/tmp/custom-macos-recording.mov'");
         expect(log).toContain("pkill -INT -f");
-        expect(log).toMatch(/ccc@127\.0\.0\.1:\/tmp\/custom-macos-recording\.mov \/tmp\/ccc-device-download-\S+\/payload/);
-        expect(log.match(/ccc@127\.0\.0\.1:\/tmp\/fail-once-recording-copy\.mov \/tmp\/ccc-device-download-\S+\/payload/g)).toHaveLength(2);
+        expect(log).toMatch(new RegExp("ccc@127\\.0\\.0\\.1:/tmp/custom-macos-recording\\.mov " + escapedTempRoot + "[\\\\/]ccc-device-download-[^\r\n]*[\\\\/]payload"));
+        expect(log.match(new RegExp("ccc@127\\.0\\.0\\.1:/tmp/fail-once-recording-copy\\.mov " + escapedTempRoot + "[\\\\/]ccc-device-download-[^\r\n]*[\\\\/]payload", "g"))).toHaveLength(2);
     });
 });

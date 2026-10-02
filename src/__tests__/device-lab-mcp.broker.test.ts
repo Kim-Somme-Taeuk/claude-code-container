@@ -1,3 +1,6 @@
+import { pathToFileURL } from "node:url";
+import { directorySymlink } from "./helpers/file-symlink-fixture.js";
+import { deviceLabTestHomeEnvironment } from "./helpers/device-lab-test-environment.js";
 import { DEVICE_BROKER_PROTOCOL_VERSION } from "@ccc/device-lab/providers/contracts/broker-protocol.mjs";
 import { callInternalBroker } from "./helpers/device-lab-mcp-fixture.js";
 import { spawn } from "child_process";
@@ -475,17 +478,17 @@ describe("device-lab MCP", () => {
         }));
         expect(payload.persistence.ownerScoped.ownerRoot).toBe(payload.state.ownerRoot);
         expect(payload.persistence.ownerScoped.deviceDefinitions).toEqual(expect.objectContaining({
-            android: expect.stringContaining("/android/devices.json"),
-            "android-device": expect.stringContaining("/android-device/devices.json"),
-            ios: expect.stringContaining("/ios/devices.json"),
-            "ios-device": expect.stringContaining("/ios-device/devices.json"),
-            windows: expect.stringContaining("/windows/devices.json"),
-            macos: expect.stringContaining("/macos/devices.json"),
+            android: expect.stringContaining(join("android", "devices.json")),
+            "android-device": expect.stringContaining(join("android-device", "devices.json")),
+            ios: expect.stringContaining(join("ios", "devices.json")),
+            "ios-device": expect.stringContaining(join("ios-device", "devices.json")),
+            windows: expect.stringContaining(join("windows", "devices.json")),
+            macos: expect.stringContaining(join("macos", "devices.json")),
         }));
         expect(payload.persistence.ownerScoped.recordings).toEqual(expect.objectContaining({
-            android: expect.stringContaining("/android/<device-id>/recordings"),
-            windows: expect.stringContaining("/windows/<device-id>/recordings"),
-            macos: expect.stringContaining("/macos/<device-id>/recordings"),
+            android: expect.stringContaining(join("android", "<device-id>", "recordings")),
+            windows: expect.stringContaining(join("windows", "<device-id>", "recordings")),
+            macos: expect.stringContaining(join("macos", "<device-id>", "recordings")),
         }));
         expect(payload.persistence.ownerScoped.images.macosVm).toContain("provider-owned VM instances");
         expect(payload.persistence.ownerScoped.snapshots.macosVm).toContain("provider clones");
@@ -499,7 +502,7 @@ describe("device-lab MCP", () => {
         }));
         expect(payload.persistence.cleanupBoundary.ownerCleanupMayMutate).toEqual(expect.arrayContaining([payload.state.ownerRoot]));
         expect(payload.persistence.cleanupBoundary.ownerCleanupPreserves).toEqual(expect.arrayContaining([
-            expect.stringContaining("/owners/<foreign-owner-id>"),
+            expect.stringContaining(join("owners", "<foreign-owner-id>")),
             "host toolchains and shared/base VM images",
         ]));
         expect(payload.persistence.cleanupBoundary.staleMetadataPolicy).toContain("without deleting shared toolchain caches");
@@ -559,7 +562,7 @@ describe("device-lab MCP", () => {
                 if (kind === "symlink") {
                     writeFileSync(linked, credential("b"));
                     rmSync(isolated);
-                    symlinkSync(linked, isolated);
+                    directorySymlink(linked, isolated);
                 }
                 if (kind === "hardlink") linkSync(isolated, linked);
                 if (kind === "missing-all") { rmSync(isolated); rmSync(legacy); }
@@ -697,7 +700,7 @@ describe("device-lab MCP", () => {
         mkdirSync(externalRoot);
         writeFileSync(join(externalRoot, `${ownerId}.json`), JSON.stringify({ ownerId, secret: "e".repeat(64), version: 1 }));
         rmSync(authRoot, { recursive: true, force: true });
-        symlinkSync(externalRoot, authRoot);
+        directorySymlink(externalRoot, authRoot);
         let rpcRequests = 0;
         const server = createServer((req, res) => {
             res.setHeader("content-type", "application/json");
@@ -1501,7 +1504,7 @@ describe("device-lab MCP", () => {
         rmSync(initialPayload.state.logsRoot, { recursive: true, force: true });
         mkdirSync(externalDirectory, { recursive: true });
         writeFileSync(marker, "preserve");
-        symlinkSync(externalDirectory, initialPayload.state.logsRoot);
+        directorySymlink(externalDirectory, initialPayload.state.logsRoot);
         const port = await freePort();
         const launchLog = join(homeDir, "linked-log-launch-attempt.log");
         installFakeCccBroker(pathDir, launchLog);
@@ -1718,10 +1721,12 @@ describe("device-lab MCP", () => {
             routedBy: "device-lifecycle-broker-implicit",
         }));
 
+        // This fixture verifies transport routing; its static inventory never boots a guest.
         const lifecycleStart = await client.callTool({
             name: "start",
             arguments: {
                 deviceId: "win-autolaunch",
+                waitForBoot: false,
                 autolaunch: true,
                 hostCandidates: ["127.0.0.1"],
                 port,
@@ -1754,7 +1759,7 @@ describe("device-lab MCP", () => {
         rmSync(join(homeDir, ".ccc/devices/owners", firstPayload.launch.runtime.ownerId, "windows"), { recursive: true, force: true });
     });
 
-    it("preserves runtime metadata when explicit broker shutdown times out", { timeout: TIMEOUT }, async () => {
+    it.skipIf(process.platform === "win32")("preserves runtime metadata when explicit broker shutdown times out", { timeout: TIMEOUT }, async () => {
         const port = await freePort();
         const logPath = join(homeDir, "fake-ccc-broker-ignore.log");
         installIgnoringCccBroker(pathDir, logPath);
@@ -1872,7 +1877,7 @@ describe("device-lab MCP", () => {
         expect(brokerLog).toContain(`cleanup-owner ${launchedPayload.launch.runtime.ownerId}`);
     });
 
-    it("cleans an MCP-owned broker child on MCP process SIGTERM", { timeout: TIMEOUT }, async () => {
+    it.skipIf(process.platform === "win32")("cleans an MCP-owned broker child on MCP process SIGTERM", { timeout: TIMEOUT }, async () => {
         const signalHome = mkdtempSync(join(tmpdir(), "ccc-device-lab-signal-"));
         const signalBin = join(signalHome, "bin");
         mkdirSync(signalBin, { recursive: true });
@@ -1917,14 +1922,14 @@ process.on("SIGTERM", () => {});
         writeFileSync(entry, readFileSync(entry, "utf8").replace(JSON.stringify(join(pathDir, "ccc")), JSON.stringify(fakeCcc)));
         const script = join(signalHome, "launch-broker.mjs");
         writeFileSync(script, `
-import { brokerRpc } from ${JSON.stringify(join(adapterRoot, "src/broker.mjs"))};
+import { brokerRpc } from ${JSON.stringify(pathToFileURL(join(adapterRoot, "src/broker.mjs")).href)};
 const result = await brokerRpc({ method: "broker.echo", autolaunch: true, hostCandidates: ["127.0.0.1"], port: ${port}, timeoutMs: 300, launchTimeoutMs: 3000 });
 process.stdout.write(JSON.stringify(result.launch.runtime) + "\\n");
 setInterval(() => {}, 1000);
 `);
         const child = spawn(process.execPath, [script], {
             cwd: repoRoot,
-            env: { ...process.env, HOME: signalHome, PATH: signalBin },
+            env: { ...process.env, ...deviceLabTestHomeEnvironment(signalHome), PATH: signalBin },
             stdio: ["ignore", "pipe", "pipe"],
         });
         try {
@@ -2249,12 +2254,12 @@ setInterval(() => {}, 1000);
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
                 routedBy: string;
                 deviceId: string;
-                device: { id: string };
+                device: { deviceId: string };
             };
             expect(payload).toEqual(expect.objectContaining({
                 routedBy: "device-lifecycle-broker-implicit",
                 deviceId: "win-host-runtime",
-                device: expect.objectContaining({ id: "win-host-runtime" }),
+                device: expect.objectContaining({ deviceId: "win-host-runtime" }),
             }));
             expect(methods).toEqual(["broker.inventory", "broker.command.invoke"]);
         } finally {

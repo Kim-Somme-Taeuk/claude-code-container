@@ -15,6 +15,8 @@ import {
 import { deviceLabContainerName, deviceLabOwnerFromProjectMountPath, deviceLabProjectMountPath } from "@ccc/device-lab/device-lab-owner.js";
 import { createDeviceLabAdminTestFixture } from "./helpers/device-lab-admin-fixture.js";
 
+vi.mock("child_process", async (importOriginal) => ({ ...await importOriginal<typeof import("child_process")>() }));
+
 describe("device-lab admin CLI formatters", () => {
     const fixture = createDeviceLabAdminTestFixture();
 
@@ -199,13 +201,13 @@ describe("device-lab admin CLI formatters", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "tart", "echo tart 2.24.0; exit 0");
+        fixture.writeNodeTool(binDir, "tart", "console.log(\"tart 2.24.0\"); process.exit(0);");
 
         const backends = formatDevicesBackends(cwd);
         const macosSection = backends.slice(backends.indexOf("macos-vm:"));
 
         expect(macosSection).toContain("status: available");
-        expect(macosSection).toContain(`tart: ${join(binDir, "tart")}`);
+        expect(macosSection).toContain(`tart: ${join(binDir, "tart.mjs")}`);
         expect(macosSection).toContain("vz: missing");
         expect(macosSection).toContain("utmctl: missing");
     });
@@ -216,8 +218,8 @@ describe("device-lab admin CLI formatters", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", "echo 'List of devices attached'; echo 'R5CREAL123 device product:pixel'; echo 'R5CREAL456 device product:pixel'; exit 0");
-        fixture.writeTool(binDir, "xcrun", "echo 'Real iPhone (17.5) (REAL-IOS-UDID)'; exit 0");
+        fixture.writeNodeTool(binDir, "adb", "console.log(\"List of devices attached\"); console.log(\"R5CREAL123 device product:pixel\"); console.log(\"R5CREAL456 device product:pixel\"); process.exit(0);");
+        fixture.writeNodeTool(binDir, "xcrun", "console.log(\"Real iPhone (17.5) (REAL-IOS-UDID)\"); process.exit(0);");
 
         const health = deviceLabBenchHealth(cwd);
         const doctor = formatDevicesDoctor(cwd);
@@ -276,8 +278,8 @@ describe("device-lab admin CLI formatters", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", "echo 'R5CREAL123 device'; echo 'NOLEASE device'; echo 'EXPIRED device'; echo 'FOREIGN device'; echo 'MISMATCH device'; echo 'UNOWNED-SERIAL device'; exit 0");
-        fixture.writeTool(binDir, "xcrun", "echo 'Real iPhone (17.5) (REAL-IOS-UDID)'; echo 'Other iPhone (IOS-NOT-LISTED-SUFFIX)'; exit 0");
+        fixture.writeNodeTool(binDir, "adb", "console.log(\"R5CREAL123 device\"); console.log(\"NOLEASE device\"); console.log(\"EXPIRED device\"); console.log(\"FOREIGN device\"); console.log(\"MISMATCH device\"); console.log(\"UNOWNED-SERIAL device\"); process.exit(0);");
+        fixture.writeNodeTool(binDir, "xcrun", "console.log(\"Real iPhone (17.5) (REAL-IOS-UDID)\"); console.log(\"Other iPhone (IOS-NOT-LISTED-SUFFIX)\"); process.exit(0);");
 
         const health = deviceLabBenchHealth(cwd);
         const allChecks = health.backends.flatMap((backend) => backend.devices);
@@ -310,7 +312,7 @@ describe("device-lab admin CLI formatters", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", "echo 'UNOWNED-SERIAL device'; echo adb-broken-secret >&2; exit 7");
+        fixture.writeNodeTool(binDir, "adb", "console.log(\"UNOWNED-SERIAL device\"); console.error(\"adb-broken-secret\"); process.exit(7);");
 
         const health = deviceLabBenchHealth(cwd);
         const healthJson = JSON.stringify(health);

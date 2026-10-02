@@ -32,10 +32,10 @@ describe("device-lab MCP backend definitions", () => {
         expect(create.isError).not.toBe(true);
 
         const created = JSON.parse(((create.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; avdName: string; serial: string; status: string };
+            device: { deviceId: string; avdName: string; serial: string; status: string };
         };
         expect(created.device).toEqual(expect.objectContaining({
-            id: "android-pixel-test",
+            deviceId: "android-pixel-test",
             avdName: "Pixel_Test_API_35",
             serial: "emulator-5580",
             status: "stopped",
@@ -43,10 +43,10 @@ describe("device-lab MCP backend definitions", () => {
 
         const list = await client.callTool({ name: "devices", arguments: {} });
         const listed = JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            devices: Array<{ id: string; backend?: string }>;
+            devices: Array<{ deviceId: string; backend?: string }>;
         };
         expect(listed.devices).toEqual(expect.arrayContaining([
-            expect.objectContaining({ id: "android-pixel-test", backend: "android-emulator" }),
+            expect.objectContaining({ deviceId: "android-pixel-test", backend: "android-emulator" }),
         ]));
 
         const status = await client.callTool({
@@ -55,10 +55,10 @@ describe("device-lab MCP backend definitions", () => {
         });
         expect(status.isError).not.toBe(true);
         const inspected = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; targetKind: string; runtimeState: string; targetStatus: { readiness: { state: string }; leaseState: { state: string }; sessionState: { state: string } } };
+            device: { deviceId: string; targetKind: string; runtimeState: string; targetStatus: { readiness: { state: string }; leaseState: { state: string }; sessionState: { state: string } } };
             backend: { status: string; missing: string[] };
         };
-        expect(inspected.device.id).toBe("android-pixel-test");
+        expect(inspected.device.deviceId).toBe("android-pixel-test");
         expect(inspected.device).toEqual(expect.objectContaining({
             targetKind: "virtual-device",
             runtimeState: "stopped",
@@ -129,9 +129,9 @@ describe("device-lab MCP backend definitions", () => {
 
         const afterDelete = await client.callTool({ name: "devices", arguments: {} });
         const finalList = JSON.parse(((afterDelete.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            devices: Array<{ id: string }>;
+            devices: Array<{ deviceId: string }>;
         };
-        expect(finalList.devices.map((device) => device.id)).not.toContain("android-pixel-test");
+        expect(finalList.devices.map((device) => device.deviceId)).not.toContain("android-pixel-test");
     });
 
     it("creates, lists, inspects, starts with diagnostics, and deletes owner-scoped iOS definitions", { timeout: TIMEOUT }, async () => {
@@ -147,10 +147,10 @@ describe("device-lab MCP backend definitions", () => {
         expect(create.isError).not.toBe(true);
 
         const created = JSON.parse(((create.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; simulatorName: string; status: string; platform: string };
+            device: { deviceId: string; simulatorName: string; status: string; platform: string };
         };
         expect(created.device).toEqual(expect.objectContaining({
-            id: "ios-iphone-test",
+            deviceId: "ios-iphone-test",
             simulatorName: "iPhone 15",
             status: "stopped",
             platform: "ios",
@@ -158,10 +158,10 @@ describe("device-lab MCP backend definitions", () => {
 
         const list = await client.callTool({ name: "devices", arguments: {} });
         const listed = JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            devices: Array<{ id: string; backend?: string }>;
+            devices: Array<{ deviceId: string; backend?: string }>;
         };
         expect(listed.devices).toEqual(expect.arrayContaining([
-            expect.objectContaining({ id: "ios-iphone-test", backend: "ios-simulator" }),
+            expect.objectContaining({ deviceId: "ios-iphone-test", backend: "ios-simulator" }),
         ]));
 
         const status = await client.callTool({
@@ -170,10 +170,10 @@ describe("device-lab MCP backend definitions", () => {
         });
         expect(status.isError).not.toBe(true);
         const inspected = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; targetStatus: { runtimeState: string; readiness: { state: string } } };
+            device: { deviceId: string; targetStatus: { runtimeState: string; readiness: { state: string } } };
             backend: { status: string; missing: string[] };
         };
-        expect(inspected.device.id).toBe("ios-iphone-test");
+        expect(inspected.device.deviceId).toBe("ios-iphone-test");
         expect(inspected.device.targetStatus).toEqual(expect.objectContaining({
             targetKind: "virtual-device",
             creatable: true,
@@ -264,10 +264,10 @@ describe("device-lab MCP backend definitions", () => {
         expect(create.isError).not.toBe(true);
 
         const created = JSON.parse(((create.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; status: string; platform: string; networking: boolean; helper: { status: string; guestScratchDir: string } };
+            device: { deviceId: string; status: string; platform: string; networking: boolean; helper: { status: string; guestScratchDir: string } };
         };
         expect(created.device).toEqual(expect.objectContaining({
-            id: "windows-win-test",
+            deviceId: "windows-win-test",
             status: "stopped",
             platform: "windows",
             networking: false,
@@ -279,10 +279,10 @@ describe("device-lab MCP backend definitions", () => {
 
         const list = await client.callTool({ name: "devices", arguments: {} });
         const listed = JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            devices: Array<{ id: string; backend?: string }>;
+            devices: Array<{ deviceId: string; backend?: string }>;
         };
         expect(listed.devices).toEqual(expect.arrayContaining([
-            expect.objectContaining({ id: "windows-win-test", backend: "windows-sandbox" }),
+            expect.objectContaining({ deviceId: "windows-win-test", backend: "windows-sandbox" }),
         ]));
 
         const status = await client.callTool({
@@ -291,10 +291,10 @@ describe("device-lab MCP backend definitions", () => {
         });
         expect(status.isError).not.toBe(true);
         const inspected = JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; targetStatus: { targetKind: string; runtimeState: string } };
+            device: { deviceId: string; targetStatus: { targetKind: string; runtimeState: string } };
             backend: { status: string; missing: string[] };
         };
-        expect(inspected.device.id).toBe("windows-win-test");
+        expect(inspected.device.deviceId).toBe("windows-win-test");
         expect(inspected.device.targetStatus).toEqual(expect.objectContaining({
             targetKind: "virtual-device",
             creatable: true,
@@ -312,7 +312,7 @@ describe("device-lab MCP backend definitions", () => {
         });
         expect(inventory.isError).not.toBe(true);
         const inventoryPayload = JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            devices: Array<{ id: string; helper: { status: string }; configPath: string; targetStatus: { runtimeState: string } }>;
+            devices: Array<{ deviceId: string; helper: { status: string }; configPath: string; targetStatus: { runtimeState: string } }>;
             discovery: { available: boolean; missing: string[] };
             hostSandboxes: { lazy: boolean; missing: string[] };
         };
@@ -320,7 +320,7 @@ describe("device-lab MCP backend definitions", () => {
         expect(inventoryPayload.hostSandboxes).toEqual(expect.objectContaining({ lazy: true, missing: ["wsb"] }));
         expect(inventoryPayload.devices).toEqual(expect.arrayContaining([
             expect.objectContaining({
-                id: "windows-win-test",
+                deviceId: "windows-win-test",
                 helper: expect.objectContaining({ status: "file-channel" }),
                 configPath: expect.stringContaining("windows-win-test.wsb"),
                 targetStatus: expect.objectContaining({
@@ -368,7 +368,7 @@ describe("device-lab MCP backend definitions", () => {
 
         const list = await client.callTool({ name: "devices", arguments: {} });
         const listed = JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}"));
-        expect(listed.devices.some((device: { id: string }) => device.id === "macos-mac-test")).toBe(false);
+        expect(listed.devices.some((device: { deviceId: string }) => device.deviceId === "macos-mac-test")).toBe(false);
 
         const inventory = await client.callTool({ name: "devices", arguments: { view: "available", backend: "macos-vm" } });
         expect(inventory.isError).not.toBe(true);

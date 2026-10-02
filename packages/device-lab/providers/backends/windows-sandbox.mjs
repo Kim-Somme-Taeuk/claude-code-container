@@ -1,3 +1,4 @@
+import { desktopPointValid, desktopDragValid } from "../display/desktop-input.mjs";
 import { randomUUID } from "crypto";
 import { spawn } from "child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
@@ -289,6 +290,8 @@ export function windowsBackend() {
             "device_scroll",
             "device_cursor_position",
             "device_window_list",
+            "device_drag",
+            "device_focus_window",
             "device_accessibility_snapshot",
             "device_record_video_start",
             "device_record_video_stop",
@@ -375,7 +378,7 @@ function windowsHelperMetadata(device) {
         minimizeWatchdogCancelPath: join(downloadsDir, "ccc-minimize-watchdog.cancel"),
         minimizeWatchdogResultPath: join(downloadsDir, "ccc-minimize-watchdog.result.txt"),
         status: "file-channel",
-        requiredFor: ["device_exec", "device_screenshot", "device_click", "device_double_click", "device_key", "device_type", "device_scroll", "device_cursor_position", "device_window_list", "device_accessibility_snapshot", "device_record_video_start", "device_record_video_stop", "device_upload", "device_download"],
+        requiredFor: ["device_drag", "device_focus_window", "device_exec", "device_screenshot", "device_click", "device_double_click", "device_key", "device_type", "device_scroll", "device_cursor_position", "device_window_list", "device_accessibility_snapshot", "device_record_video_start", "device_record_video_stop", "device_upload", "device_download"],
     };
 }
 
@@ -597,8 +600,49 @@ export function windowsHelperScript(helper) {
         "          [CccMouse]::mouse_event($WheelFlag, 0, 0, $WheelData, 0)",
         "          $Response.scrolled = @{ x = [int]$Request.x; y = [int]$Request.y; direction = $Direction; amount = $Amount }",
         "        }",
+        "        'drag' {",
+        "          Add-Type -AssemblyName System.Windows.Forms",
+        "          Add-Type -AssemblyName System.Drawing",
+        "          $Bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds",
+        "          foreach ($Key in @('x1','y1','x2','y2','durationMs')) {",
+        "            $Value = $Request.$Key",
+        "            if ($null -eq $Value -or $Value -is [string] -or [double]$Value -ne [Math]::Truncate([double]$Value) -or [double]$Value -lt 0 -or [double]$Value -gt 2147483647) { throw 'invalid-drag-arguments' }",
+        "          }",
+        "          if ($Request.durationMs -lt 1 -or $Request.durationMs -gt 10000) { throw 'invalid-drag-duration' }",
+        "          if (-not $Bounds.Contains([int]$Request.x1, [int]$Request.y1) -or -not $Bounds.Contains([int]$Request.x2, [int]$Request.y2)) { throw 'drag-outside-display' }",
+        "          if (-not ([System.Management.Automation.PSTypeName]'CccMouse').Type) { Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class CccMouse { [DllImport(\"user32.dll\")] public static extern void mouse_event(int flags, int dx, int dy, int data, int extraInfo); }' }",
+        "          [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point([int]$Request.x1, [int]$Request.y1)",
+        "          try {",
+        "            [CccMouse]::mouse_event(2, 0, 0, 0, 0)",
+        "            for ($Step = 1; $Step -le 20; $Step++) {",
+        "              Start-Sleep -Milliseconds ([Math]::Max(1, [int]($Request.durationMs / 20)))",
+        "              $X = [int]($Request.x1 + ($Request.x2 - $Request.x1) * $Step / 20)",
+        "              $Y = [int]($Request.y1 + ($Request.y2 - $Request.y1) * $Step / 20)",
+        "              [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point($X, $Y)",
+        "            }",
+        "          } finally { [CccMouse]::mouse_event(4, 0, 0, 0, 0) }",
+        "        }",
+        "        'focus_window' {",
+        "          if ([string]$Request.handle -notmatch '^[1-9][0-9]{0,18}$') { throw 'invalid-window-handle' }",
+        "          if (-not ([System.Management.Automation.PSTypeName]'CccFocus').Type) { Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class CccFocus { [DllImport(\"user32.dll\")] public static extern bool IsWindow(IntPtr h); [DllImport(\"user32.dll\")] public static extern bool ShowWindowAsync(IntPtr h, int n); [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow(); }' }",
+        "          $Handle = [IntPtr]([long]$Request.handle)",
+        "          if (-not [CccFocus]::IsWindow($Handle)) { throw 'window-not-found' }",
+        "          [CccFocus]::ShowWindowAsync($Handle, 9) | Out-Null",
+        "          [CccFocus]::SetForegroundWindow($Handle) | Out-Null",
+        "          Start-Sleep -Milliseconds 100",
+        "          if ([CccFocus]::GetForegroundWindow() -ne $Handle) { throw 'window-focus-denied' }",
+        "        }",
         "        'cursor_position' {",
         "          Add-Type -AssemblyName System.Windows.Forms",
+        "          if ($null -ne $Request.x -or $null -ne $Request.y) {",
+        "            Add-Type -AssemblyName System.Drawing",
+        "            foreach ($Key in @('x','y')) {",
+        "              $Value = $Request.$Key",
+        "              if ($null -eq $Value -or $Value -is [string] -or [double]$Value -ne [Math]::Truncate([double]$Value) -or [double]$Value -lt 0 -or [double]$Value -gt 2147483647) { throw 'invalid-pointer-coordinates' }",
+        "            }",
+        "            if (-not [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Contains([int]$Request.x, [int]$Request.y)) { throw 'pointer-outside-display' }",
+        "            [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point([int]$Request.x, [int]$Request.y)",
+        "          }",
         "          $Position = [System.Windows.Forms.Cursor]::Position",
         "          $Response.cursor = @{ x = $Position.X; y = $Position.Y }",
         "        }",
@@ -2032,11 +2076,25 @@ async function handleWindowsToolUnlocked(name, args) {
             return jsonResult({ provider: "windows-helper", scrolled: result.response.scrolled || { x: Number(x), y: Number(y), direction, amount: Number(amount) || 1 }, response: result.response });
         }
 
+        case "device_drag":
+        case "device_focus_window": {
+            const device = findWindowsDevice(args.deviceId);
+            if (!device) return undefined;
+            if (name === "device_drag" && !desktopDragValid(args)) return textResult(false, "invalid-drag-arguments");
+            if (name === "device_focus_window" && (typeof args.handle !== "string" || !/^[1-9][0-9]{0,18}$/.test(args.handle))) return textResult(false, "invalid-window-handle");
+            const type = name === "device_drag" ? "drag" : "focus_window";
+            const payload = name === "device_drag" ? { x1: args.x1, y1: args.y1, x2: args.x2, y2: args.y2, durationMs: args.durationMs ?? 700 } : { handle: args.handle };
+            const result = await windowsHelperRequest(device, type, payload, args.helperTimeoutMs);
+            if (result.error) return textResult(false, result.error);
+            return result.response.ok ? jsonResult({ ok: true }) : textResult(false, result.response.error || "desktop-control-failed");
+        }
         case "device_cursor_position": {
             const { deviceId, helperTimeoutMs } = args;
             const device = findWindowsDevice(deviceId);
             if (!device) return undefined;
-            const result = await windowsHelperRequest(device, "cursor_position", {}, helperTimeoutMs);
+            const moving = args.x !== undefined || args.y !== undefined;
+            if (moving && !desktopPointValid(args.x, args.y)) return textResult(false, "invalid-pointer-coordinates");
+            const result = await windowsHelperRequest(device, "cursor_position", moving ? { x: args.x, y: args.y } : {}, helperTimeoutMs);
             if (result.error) return textResult(false, result.error);
             if (!result.response.ok) return textResult(false, result.response.error || "Windows helper cursor position failed");
             return jsonResult({ provider: "windows-helper", cursor: result.response.cursor || null, response: result.response });

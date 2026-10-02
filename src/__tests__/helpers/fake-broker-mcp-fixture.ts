@@ -1,3 +1,4 @@
+import { canonicalWindowsPowerShellPath, windowsStartTokenExpression } from "@ccc/device-lab/windows-system-powershell.js";
 import { chmodSync, writeFileSync } from "fs";
 import { createServer } from "http";
 import { AddressInfo } from "net";
@@ -55,6 +56,13 @@ const host = args[args.indexOf("--host") + 1] || "127.0.0.1";
 const port = Number(args[args.indexOf("--port") + 1] || 17373);
 const startedAt = new Date().toISOString();
 function processStartToken() {
+  if (process.platform === "win32") {
+    const executable = ${JSON.stringify(canonicalWindowsPowerShellPath())};
+    if (!executable) return null;
+    const script = "$P = Get-Process -Id " + process.pid + "; [Console]::Out.Write(" + ${JSON.stringify(windowsStartTokenExpression("$P"))} + ")";
+    const result = require("child_process").spawnSync(executable, ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: 5000, windowsHide: true });
+    return result.status === 0 && result.stdout.trim() ? "windows:" + result.stdout.trim() : null;
+  }
   try {
     const stat = fs.readFileSync("/proc/" + process.pid + "/stat", "utf8");
     const close = stat.lastIndexOf(")");
@@ -64,6 +72,7 @@ function processStartToken() {
     return null;
   }
 }
+const stableStartToken = processStartToken();
 function send(res, status, body) {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
@@ -107,7 +116,7 @@ function expectedOwnerToken(ownerId) {
 }
 const server = http.createServer((req, res) => {
   if (req.url === "/health") return send(res, 200, { ok: true, name: "ccc-device-broker", mode: "host-broker-daemon" });
-  if (req.url === "/status") return send(res, 200, { ok: true, broker: { name: "ccc-device-broker", mode: "host-broker-daemon", host, port, process: { pid: process.pid, startToken: processStartToken() }, startedAt, protocolVersion: ${JSON.stringify(FAKE_BROKER_PROTOCOL_VERSION)} } });
+  if (req.url === "/status") return send(res, 200, { ok: true, broker: { name: "ccc-device-broker", mode: "host-broker-daemon", host, port, process: { pid: process.pid, startToken: stableStartToken }, startedAt, protocolVersion: ${JSON.stringify(FAKE_BROKER_PROTOCOL_VERSION)} } });
   if (req.url === "/v1/owner/resolve" && req.method === "POST") {
     let raw = "";
     req.on("data", (chunk) => { raw += chunk; });
@@ -175,6 +184,13 @@ const host = args[args.indexOf("--host") + 1] || "127.0.0.1";
 const port = Number(args[args.indexOf("--port") + 1] || 17373);
 const startedAt = new Date().toISOString();
 function processStartToken() {
+  if (process.platform === "win32") {
+    const executable = ${JSON.stringify(canonicalWindowsPowerShellPath())};
+    if (!executable) return null;
+    const script = "$P = Get-Process -Id " + process.pid + "; [Console]::Out.Write(" + ${JSON.stringify(windowsStartTokenExpression("$P"))} + ")";
+    const result = require("child_process").spawnSync(executable, ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: 5000, windowsHide: true });
+    return result.status === 0 && result.stdout.trim() ? "windows:" + result.stdout.trim() : null;
+  }
   try {
     const stat = fs.readFileSync("/proc/" + process.pid + "/stat", "utf8");
     const close = stat.lastIndexOf(")");
@@ -184,6 +200,7 @@ function processStartToken() {
     return null;
   }
 }
+const stableStartToken = processStartToken();
 function send(res, status, body) {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
@@ -206,7 +223,7 @@ function ownerIdForRequestBody(body) {
 }
 const server = http.createServer((req, res) => {
   if (req.url === "/health") return send(res, 200, { ok: true, name: "ccc-device-broker" });
-  if (req.url === "/status") return send(res, 200, { ok: true, broker: { name: "ccc-device-broker", mode: "host-broker-daemon", host, port, process: { pid: process.pid, startToken: processStartToken() }, startedAt, protocolVersion: ${JSON.stringify(FAKE_BROKER_PROTOCOL_VERSION)} } });
+  if (req.url === "/status") return send(res, 200, { ok: true, broker: { name: "ccc-device-broker", mode: "host-broker-daemon", host, port, process: { pid: process.pid, startToken: stableStartToken }, startedAt, protocolVersion: ${JSON.stringify(FAKE_BROKER_PROTOCOL_VERSION)} } });
   if (req.url === "/v1/owner/resolve" && req.method === "POST") {
     let raw = "";
     req.on("data", (chunk) => { raw += chunk; });

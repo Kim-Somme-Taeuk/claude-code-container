@@ -1,8 +1,17 @@
+// These lifecycle suites simulate VM effects; host capacity must be simulated too.
+// Dedicated capacity tests exercise refusal boundaries.
+vi.mock("os", async (importOriginal) => ({
+    ...await importOriginal<typeof import("os")>(),
+    totalmem: () => 64 * 1024 ** 3,
+    freemem: () => 48 * 1024 ** 3,
+}));
+import { directorySymlink } from "./helpers/file-symlink-fixture.js";
+import { isolateDeviceLabTestEnvironment } from "./helpers/device-lab-test-environment.js";
 import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
 import { deflateSync } from "zlib";
 import { tmpdir } from "os";
-import { dirname, join } from "path";
+import { dirname, join, sep } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     compareHyperVLinuxEd25519HostKeyFingerprint,
@@ -130,8 +139,8 @@ function automaticUbuntuVhdOperation(command: { args?: string[]; input?: string 
         return hyperVWindowsOperationSuccess(request.operation);
     }
     const ownersRoot = join(process.env.HOME!, ".ccc", "device-broker-private", "owners");
-    const ownerId = typeof request.path === "string" && request.path.startsWith(`${ownersRoot}/`)
-        ? request.path.slice(ownersRoot.length + 1).split("/")[0] : null;
+    const ownerId = typeof request.path === "string" && request.path.startsWith(`${ownersRoot}${sep}`)
+        ? request.path.slice(ownersRoot.length + 1).split(sep)[0] : null;
     const ownerImageManifest = ownerId && join(ownersRoot, ownerId, "images", "hyper-v", "ubuntu-lts", "manifest.json");
     const automaticLinuxClone = request.operation === "Get-VHD"
         && typeof request.path === "string"
@@ -374,18 +383,18 @@ describe("device-lab Hyper-V broker", () => {
             elapsedMs: DEVICE_BROKER_HYPER_V_GUEST_SIGNAL_TIMEOUT_MS,
         }, "hyper-v-guest-boot-signal-timeout")).toBe(diagnosticCode);
     });
-    let originalHome: string | undefined;
+    let originalHomeRestore: (() => void) | undefined;
+    let fixtureHome: string | undefined;
 
     beforeEach(() => {
-        originalHome = process.env.HOME;
-        process.env.HOME = mkdtempSync(join(tmpdir(), "ccc-hyper-v-linux-test-home-"));
+        fixtureHome = mkdtempSync(join(tmpdir(), "ccc-hyper-v-linux-test-home-"));
+        originalHomeRestore = isolateDeviceLabTestEnvironment(fixtureHome);
     });
 
     afterEach(() => {
         vi.restoreAllMocks();
-        if (process.env.HOME) rmSync(process.env.HOME, { recursive: true, force: true });
-        if (originalHome === undefined) delete process.env.HOME;
-        else process.env.HOME = originalHome;
+        if (fixtureHome) rmSync(fixtureHome, { recursive: true, force: true });
+        originalHomeRestore?.();
     });
 
     it("routes a screenshot and screenshot pixels only to the exact owned Hyper-V VM", async () => {
@@ -2258,7 +2267,8 @@ describe("device-lab Hyper-V broker", () => {
                     || (download && scpFailure === "download")) {
                     return { ...command, status: 255, stdout: "", stderr: "ssh failed" };
                 }
-                return { ...command, status: 0, stdout: ready ? "ccc-hyper-v-linux-ready\n" : download ? Buffer.from("output").toString("base64") : "linux-exec-ok\n", stderr: "" };
+                const windowList = guestCommand.includes("XAUTHORITY=/home/ccc-desktop/.Xauthority bash");
+                return { ...command, status: 0, stdout: guestCommand.includes("xdotool windowactivate --sync") ? '{"ok":true}' : windowList ? "42\t123\tR3Vlc3QgTm90ZXM=\n" : ready ? "ccc-hyper-v-linux-ready\n" : download ? Buffer.from("output").toString("base64") : "linux-exec-ok\n", stderr: "" };
             }
             if (command.provider === "hyper-v-scp") {
                 const destination = command.args?.at(-1) || "";
@@ -2937,6 +2947,20 @@ describe("device-lab Hyper-V broker", () => {
             expect(failedExecBody.execution).not.toHaveProperty("stderr");
             sshFailure = false;
             expect((await tool("device_exec", { command: "uname -a" })).status).toBe(200);
+            const focus = await tool("device_focus_window", {handle:"42"});
+            expect(focus.status, JSON.stringify(await focus.clone().json())).toBe(200);
+            expect(await focus.json()).toMatchObject({result:{tool:"device_focus_window",ok:true}});
+            const windows = await tool("device_window_list", {});
+            expect(windows.status, JSON.stringify(await windows.clone().json())).toBe(200);
+            expect(await windows.json()).toMatchObject({result:{tool:"device_window_list",windows:[{handle:"42",title:"Guest Notes",processId:123}]}});
+            sshFailure = true;
+            const unavailableFocus = await tool("device_focus_window", {handle:"42"});
+            expect(unavailableFocus.status).toBe(502);
+            expect(await unavailableFocus.json()).toMatchObject({ok:false,tool:"device_focus_window"});
+            const unavailableWindows = await tool("device_window_list", {});
+            expect(unavailableWindows.status).toBe(502);
+            expect(await unavailableWindows.json()).toMatchObject({ok:false,tool:"device_window_list"});
+            sshFailure = false;
             const beforeGuiType = commandRunner.mock.calls.length;
             const guiType = await tool("device_type", { text: "touch /tmp/ccc-gui-input" });
             expect(guiType.status, JSON.stringify(await guiType.clone().json())).toBe(200);
@@ -3013,7 +3037,7 @@ describe("device-lab Hyper-V broker", () => {
             expect(readdirSync(transferRoot)).toEqual([]);
             const externalDownloadRoot = mkdtempSync(join(tmpdir(), "ccc-hyper-v-linux-external-"));
             const linkedDownloadRoot = join(cwd, "linked-download");
-            symlinkSync(externalDownloadRoot, linkedDownloadRoot, "dir");
+            directorySymlink(externalDownloadRoot, linkedDownloadRoot);
             const rejectedDownload = await tool("device_download", {
                 remotePath: "/tmp/rejected.txt",
                 localPath: join(linkedDownloadRoot, "escaped.txt"),
@@ -3082,7 +3106,8 @@ describe("device-lab Hyper-V broker", () => {
             guiFailure = true;
             const guiFailedStart = await invoke({ backend: "linux-vm", command: "device_start", deviceId, incarnationId: activeIncarnationId, waitForBoot: true });
             expect(guiFailedStart.status).toBe(502);
-            expect(await guiFailedStart.json()).toEqual(expect.objectContaining({
+            const guiFailurePayload = await guiFailedStart.json();
+            expect(guiFailurePayload, JSON.stringify(guiFailurePayload)).toEqual(expect.objectContaining({
                 detail: "hyper-v-linux-gui-apt-install-failed",
                 result: expect.objectContaining({
                     device: expect.objectContaining({ bootReady: false }),

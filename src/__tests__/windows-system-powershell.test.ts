@@ -181,7 +181,7 @@ describe("canonical Windows PowerShell", () => {
         const script = windowsHandleBoundTerminationScript();
         expect(script).toContain("[Diagnostics.Process]::GetProcessById($RootPid)");
         expect(script).toContain("Select-Object ProcessId, ParentProcessId, CreationDate");
-        expect(script).toContain("$ObservedToken -eq $SnapshotToken");
+        expect(script).toContain("($ObservedTicks - ($ObservedTicks % 10)) -eq $SnapshotTicks");
         expect(script).toContain("$Descendants.Add($Child)");
         expect(script).toContain("$Descendants[$Index].Kill()");
         expect(script).toContain("$Root.Kill()");

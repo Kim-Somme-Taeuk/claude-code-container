@@ -118,9 +118,10 @@ export function windowsHandleBoundTerminationScript(): string {
         "  try {",
         "    $ChildPid = [int]$Row.ProcessId",
         "    $Child = [Diagnostics.Process]::GetProcessById($ChildPid)",
-        "    $SnapshotToken = 'windows:' + $Row.CreationDate.ToUniversalTime().ToString('o')",
-        `    $ObservedToken = 'windows:' + ${windowsStartTokenExpression("$Child")}`,
-        "    if ($ObservedToken -eq $SnapshotToken) { $Descendants.Add($Child) }",
+        // CIM CreationDate has microsecond precision; process handles retain 100ns ticks.
+        "    $SnapshotTicks = $Row.CreationDate.ToUniversalTime().Ticks",
+        "    $ObservedTicks = $Child.StartTime.ToUniversalTime().Ticks",
+        "    if (($ObservedTicks - ($ObservedTicks % 10)) -eq $SnapshotTicks) { $Descendants.Add($Child) }",
         "  } catch { }",
         "}",
         "for ($Index = $Descendants.Count - 1; $Index -ge 0; $Index--) {",

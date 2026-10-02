@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, 
 import { createServer } from "http";
 import type { AddressInfo } from "net";
 import { dirname, join } from "path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fetchIosAppiumJson, IOS_APPIUM_HTTP_MAX_TIMEOUT_MS, IOS_APPIUM_RESPONSE_LIMIT_BYTES, normalizeIosAppiumHttpTimeoutMs } from "@ccc/device-lab/providers/backends/ios-simulator.mjs";
 import { exerciseStaleExternalIosSession, cleanupFakeIosMcpContext, createFakeIosMcpContext, TIMEOUT, type FakeIosMcpContext } from "./helpers/fake-ios-mcp-fixture.js";
 
@@ -113,7 +113,8 @@ describe("direct iOS Appium HTTP transport", () => {
     });
 });
 
-describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
+// This fixture executes POSIX shell scripts; portable transport/contract tests remain active on Windows.
+describe.skipIf(process.platform === "win32")("device-lab MCP iOS simulator lifecycle with fake simctl (POSIX fixture)", () => {
     let context: FakeIosMcpContext;
     let client: FakeIosMcpContext["client"];
     let homeDir: string;
@@ -137,7 +138,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         }
     }
 
-    beforeAll(async () => {
+    beforeEach(async () => {
         context = await createFakeIosMcpContext();
         client = context.client;
         homeDir = context.homeDir;
@@ -145,7 +146,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         logPath = context.logPath;
     }, TIMEOUT);
 
-    afterAll(async () => {
+    afterEach(async () => {
         await cleanupFakeIosMcpContext(context);
     }, TIMEOUT);
 
@@ -202,10 +203,10 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         });
         expect(create.isError).not.toBe(true);
         const created = JSON.parse(((create.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; simulatorName: string; udid: string; provisioning: string; status: string };
+            device: { deviceId: string; simulatorName: string; udid: string; provisioning: string; status: string };
         };
         expect(created.device).toEqual(expect.objectContaining({
-            id: ownedDeviceId,
+            deviceId: ownedDeviceId,
             simulatorName,
             udid: "CREATED-IOS-UDID",
             provisioning: "created",
@@ -1069,7 +1070,7 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         expect(failedStop.isError).toBe(true);
         const status = await client.callTool({ name: "status", arguments: { deviceId } });
         expect(parseToolJson(status).device).toEqual(expect.objectContaining({
-            id: deviceId,
+            deviceId: deviceId,
             status: "booted",
         }));
         expect((parseToolJson(status).device as Record<string, unknown>).lifecycle).toEqual(startedLifecycle);
@@ -1146,7 +1147,8 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
             },
         })).isError).not.toBe(true);
         expect((await client.callTool({ name: "start", arguments: { deviceId, bootTimeoutMs: 1000 } })).isError).not.toBe(true);
-        expect((await client.callTool({ name: "ui", arguments: { deviceId } })).isError).not.toBe(true);
+        const uiResult = await client.callTool({ name: "ui", arguments: { deviceId } });
+        expect(uiResult.isError, JSON.stringify(uiResult)).not.toBe(true);
         expect((await client.callTool({
             name: "record_video",
             arguments: { action: "start", deviceId, localPath: join(homeDir, "stop-partial-cleanup.mp4") },
@@ -1210,7 +1212,8 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
         });
         expect(create.isError).not.toBe(true);
         expect((await client.callTool({ name: "start", arguments: { deviceId, bootTimeoutMs: 1000 } })).isError).not.toBe(true);
-        expect((await client.callTool({ name: "ui", arguments: { deviceId } })).isError).not.toBe(true);
+        const uiResult = await client.callTool({ name: "ui", arguments: { deviceId } });
+        expect(uiResult.isError, JSON.stringify(uiResult)).not.toBe(true);
 
         const statePath = iosStatePath();
         const originalState = readFileSync(statePath, "utf8");
@@ -1263,7 +1266,8 @@ describe("device-lab MCP iOS simulator lifecycle with fake simctl", () => {
             },
         })).isError).not.toBe(true);
         expect((await client.callTool({ name: "start", arguments: { deviceId, bootTimeoutMs: 1000 } })).isError).not.toBe(true);
-        expect((await client.callTool({ name: "ui", arguments: { deviceId } })).isError).not.toBe(true);
+        const uiResult = await client.callTool({ name: "ui", arguments: { deviceId } });
+        expect(uiResult.isError, JSON.stringify(uiResult)).not.toBe(true);
         const recordStart = await client.callTool({
             name: "record_video",
             arguments: { action: "start", deviceId, localPath: join(homeDir, "delete-partial-simctl.mp4") },

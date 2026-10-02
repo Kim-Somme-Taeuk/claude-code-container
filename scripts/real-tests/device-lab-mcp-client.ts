@@ -228,7 +228,7 @@ export function createTargetBackendEvidence() {
     const remember = (device: any, inherited?: string) => {
         if (!device || typeof device !== "object" || Array.isArray(device) || device.ok === false || device.error) return;
         const backend = validBackend(device.backend) || inherited;
-        const id = device.id || device.deviceId;
+        const id = device.deviceId;
         if (typeof id !== "string" || !id || !backend) return;
         const known = identities.get(id) || new Set<string>();
         known.add(backend);
@@ -900,7 +900,7 @@ export function parseContractToolPayload<K extends keyof DeviceLabToolOutputMap>
 
 export function lifecycleDevice(payload: any, operation: string): DeviceRecord {
     const device = payload?.device || payload?.result?.device;
-    if (device && typeof device === "object" && !Array.isArray(device)) return device;
+    if (device && typeof device === "object" && !Array.isArray(device) && typeof device.deviceId === "string" && device.deviceId) return device;
     throw new Error(`${operation} returned no device: ${JSON.stringify(payload)}`);
 }
 

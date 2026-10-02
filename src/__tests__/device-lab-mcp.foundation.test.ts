@@ -1,7 +1,7 @@
 import { DEVICE_BROKER_PROTOCOL_VERSION } from "@ccc/device-lab/providers/contracts/broker-protocol.mjs";
 import { TOOLS, SINGLE_BACKEND_TOOL_DEFAULTS, publicToolName, DEVICE_FLOW_TOOL_NAMES, CREATE_TOOL_BACKENDS, createToolName } from "../../device-lab-mcp/src/tools.mjs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mkdirSync } from "fs";
+import { existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import {
     cleanupDeviceLabMcpTestContext,
@@ -38,6 +38,7 @@ const BROKER_CAPABLE_DEVICE_TOOLS = [
     "screenshot",
     "cursor_position",
     "window_list",
+    "focus_window",
     "ui",
     "record_video",
     "record_video",
@@ -592,7 +593,7 @@ describe("device-lab MCP foundation and definitions", () => {
             capabilities?: string[];
         };
         expect(displayStatusPayload).toEqual(expect.objectContaining({
-            id: "x11-current-display",
+            deviceId: "x11-current-display",
             kind: "display",
             backend: "x11",
         }));
@@ -620,7 +621,7 @@ describe("device-lab MCP foundation and definitions", () => {
         expect(payload.ok).toBe(true);
         expect(payload.results.map((result) => result.label)).toEqual(["current display", "devices"]);
         expect(payload.results[0].content[0].value).toEqual(expect.objectContaining({
-            id: "x11-current-display",
+            deviceId: "x11-current-display",
             backend: "x11",
         }));
         expect(payload.results[1].content[0].value).toEqual(expect.objectContaining({ backend: "windows-sandbox" }));
@@ -671,7 +672,7 @@ describe("device-lab MCP foundation and definitions", () => {
             isError: true,
             error: "device_run_flow does not allow step tool: upload",
         }));
-        expect(continuedPayload.results[1].content?.[0].value).toEqual(expect.objectContaining({ id: "x11-current-display" }));
+        expect(continuedPayload.results[1].content?.[0].value).toEqual(expect.objectContaining({ deviceId: "x11-current-display" }));
 
         const recordingStatus = await client.callTool({
             name: "run_flow",
@@ -926,8 +927,8 @@ describe("device-lab MCP foundation and definitions", () => {
             environmentRequired: false,
         }));
         expect(payload.state.ownerRoot).toContain(payload.ownerId);
-        expect(payload.state.locksRoot).toContain(".ccc/devices/broker/locks");
-        expect(payload.state).toEqual(expect.objectContaining({ runtimeFile: expect.stringContaining(".ccc/devices/broker/runtime.json") }));
+        expect(payload.state.locksRoot).toContain(join(".ccc", "devices", "broker", "locks"));
+        expect(payload.state).toEqual(expect.objectContaining({ runtimeFile: expect.stringContaining(join(".ccc", "devices", "broker", "runtime.json")) }));
         expect(payload.state.rootExists).toBe(false);
         expect(payload.containerContract).toEqual(expect.objectContaining({
             incomplete: true,
@@ -1014,12 +1015,15 @@ describe("device-lab MCP foundation and definitions", () => {
 
         const content = result.content as Array<{ type: string; text?: string }>;
         const payload = JSON.parse(content[0].text ?? "{}") as {
-            devices?: Array<{ id: string; kind: string; creatable: boolean; lifecycle: string; targetStatus: { targetKind: string; runtimeState: string; readiness: { state: string }; leaseState: { state: string }; sessionState: { state: string } } }>;
+            devices?: Array<{ deviceId: string; kind: string; creatable: boolean; lifecycle: string; targetStatus: { targetKind: string; runtimeState: string; readiness: { state: string }; leaseState: { state: string }; sessionState: { state: string } } }>;
         };
+
+        const hasDisplayTools = ["xdotool", "scrot"].every(tool =>
+            existsSync(`/usr/bin/${tool}`) || existsSync(`/bin/${tool}`));
 
         expect(payload.devices).toEqual([
             expect.objectContaining({
-                id: "x11-current-display",
+                deviceId: "x11-current-display",
                 kind: "display",
                 creatable: false,
                 lifecycle: "current",
@@ -1030,7 +1034,9 @@ describe("device-lab MCP foundation and definitions", () => {
                     creatable: false,
                     attachable: false,
                     runtimeState: "current",
-                    readiness: { state: "ready" },
+                    readiness: hasDisplayTools
+                        ? { state: "ready" }
+                        : { state: "unavailable", reason: "missing-prerequisites" },
                     leaseState: { state: "not-required" },
                     sessionState: expect.objectContaining({ state: "none" }),
                 }),
@@ -1120,6 +1126,7 @@ describe("device-lab MCP foundation and definitions", () => {
             run_flow: { steps: [{ tool: "status", arguments: { ...direct, deviceId: androidId } }] },
         };
 
+        samples.focus_window = { ...direct, deviceId: windowsId, handle: "123", timeoutMs: 1 };
         samples.move = { deviceId: "x11-current-display", x: 0, y: 0 };
         expect(Object.keys(samples).sort()).toEqual(toolNames);
         const missingRequiredSamples = listed.tools.flatMap((tool) => {

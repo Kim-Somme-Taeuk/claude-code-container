@@ -7,8 +7,8 @@ import { handleAndroidRealTool } from "../../packages/device-lab/providers/backe
 const schema = (name: string) => TOOLS.find((tool: any) => tool.name === name)!.inputSchema;
 
 describe("AX follow-up executable input contracts", () => {
-    it("retains 58 tools and publishes even Android console port bounds", () => {
-        expect(TOOLS).toHaveLength(58);
+    it("retains 59 tools and publishes even Android console port bounds", () => {
+        expect(TOOLS).toHaveLength(59);
         expect(schema("create_android_emulator").properties.port).toMatchObject({ type: "integer", minimum: 5554, maximum: 5682, multipleOf: 2 });
     });
     it.each([5553, 5555, 5683, 5684, 5554.5, "5554", null])("rejects Android console port %s before dispatch", (port) => {

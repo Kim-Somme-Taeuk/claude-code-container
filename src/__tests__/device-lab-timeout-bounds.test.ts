@@ -135,6 +135,8 @@ describe("device-lab public timeout bounds", () => {
     });
 
     it("allows ordinary provider lifecycle operations to exceed 30 seconds", () => {
+        expect(brokerLifecycleExecutionTimeout({ backend: "macos-vm", command: "device_start", waitForBoot: true })).toEqual({ rpcTimeoutMs: 315000 });
+        expect(brokerLifecycleExecutionTimeout({ backend: "android-emulator", command: "device_start", waitForBoot: true })).toEqual({ rpcTimeoutMs: 75000 });
         expect(brokerLifecycleExecutionTimeout({ backend: "windows-sandbox" })).toEqual({
             rpcTimeoutMs: 120000,
         });

@@ -76,13 +76,16 @@ export const DEVICE_LAB_OUTPUT_CONTRACTS = Object.freeze(Object.fromEntries(
 
 const requiredFieldsByContract = {
     "file-list-v1": ["entries"],
+    "window-list-v1": ["windows"],
+    "app-install-v1": ["installed"],
+    "app-launch-v1": ["launched"],
     "device-list-v1": ["devices"],
     "vm-image-list-v1": ["images"],
     "vm-image-import-v1": ["image"],
     "vm-target-list-v1": ["targets"],
     "vm-readiness-v1": ["readiness"],
     "vm-session-v1": ["session"],
-    "display-target-v1": ["id"],
+    "display-target-v1": ["deviceId"],
     "cursor-position-v1": [], // validateObservation handles compact and diagnostic forms.
     "lifecycle-device-v1": ["device"],
     "physical-attach-v1": ["device"],
@@ -106,15 +109,55 @@ const requiredFieldsByContract = {
 };
 
 const deviceObjectContracts = new Set(["lifecycle-device-v1", "physical-attach-v1", "base-image-device-v1", "snapshot-restore-v1"]);
-const arrayFields = new Set(["devices", "images", "results", "targets", "entries"]);
+const arrayFields = new Set(["devices", "images", "results", "targets", "entries", "windows", "snapshots"]);
+
+function validateInventory(tool, value, depth = 0) {
+    const reject = (detail) => { throw contractError(tool, detail, value); };
+    const nonempty = (item) => typeof item === "string" && item.trim().length > 0;
+    if (!objectValue(value) || depth > 8) reject("inventory requires an object with devices or backends");
+    if (value.ok === false || value.isError === true || value.error) reject("inventory operation failed");
+    // Host broker inventory is wrapped in result; direct providers and the
+    // aggregate discovery operation return their inventory at the top level.
+    if (!("devices" in value) && !("backends" in value) && objectValue(value.result)) {
+        validateInventory(tool, value.result, depth + 1);
+        return;
+    }
+    if (!("devices" in value) && !("backends" in value)) reject("inventory requires devices or backends");
+    if ("devices" in value && (!nonempty(value.backend) || !Array.isArray(value.devices)
+        || value.devices.some(device => !objectValue(device) || !nonempty(device.deviceId)))) {
+        reject("focused inventory requires backend and devices with nonempty deviceId");
+    }
+    if ("backends" in value) {
+        if (!Array.isArray(value.backends)) reject("inventory backends must be an array");
+        for (const entry of value.backends) {
+            if (!objectValue(entry) || !nonempty(entry.backend)) reject("inventory entries require backend identity");
+            // Unavailable backends remain useful aggregate observations.
+            if (nonempty(entry.error)) continue;
+            validateInventory(tool, entry, depth + 1);
+        }
+    }
+    if (value.partial !== undefined && typeof value.partial !== "boolean") reject("inventory partial must be a boolean");
+}
 
 function validateObservation(tool, value, args) {
     const reject = (detail) => { throw contractError(tool, detail, value); };
     const nonempty = (item) => typeof item === "string" && item.trim().length > 0;
     if (tool === "devices" && toolOperation(tool, args) === "device_list") {
         const devices = Array.isArray(value) ? value : value.devices;
-        if (!Array.isArray(devices) || devices.some(device => !objectValue(device) || !nonempty(device.id))) reject("devices must contain objects with nonempty id");
+        if (!Array.isArray(devices) || devices.some(device => !objectValue(device) || !nonempty(device.deviceId))) reject("devices must contain objects with nonempty deviceId");
     }
+    if (tool === "devices" && toolOperation(tool, args) === "device_inventory") validateInventory(tool, value);
+    if (tool === "window_list") {
+        if (!Array.isArray(value.windows) || value.windows.some(window => !objectValue(window)
+            || typeof window.title !== "string"
+            || (window.handle !== undefined && !nonempty(window.handle))
+            || (window.processId !== undefined && (!Number.isSafeInteger(window.processId) || window.processId <= 0)))) {
+            reject("windows require a string title, optional nonempty handle and positive integer processId");
+        }
+        if (value.truncated !== undefined && typeof value.truncated !== "boolean") reject("truncated must be a boolean");
+    }
+    if (tool === "install_app" && !nonempty(value.installed)) reject("installed must identify the installed app path");
+    if (tool === "launch_app" && !nonempty(value.launched)) reject("launched must identify the app or component");
     if (tool === "cursor_position") {
         const cursor = objectValue(value.cursor) || value;
         if (![cursor.x, cursor.y].every(coordinate => typeof coordinate === "number" && Number.isFinite(coordinate))) reject("cursor x and y must be finite numbers");
@@ -162,7 +205,7 @@ export function validateDeviceLabToolOutput(tool, payload, args = {}) {
         validateObservation(tool, payload, args);
         return payload;
     }
-    if (tool === "status" && typeof payload?.id === "string" && payload.kind === "display") return payload;
+    if (tool === "status" && typeof payload?.deviceId === "string" && payload.kind === "display") return payload;
     if (contract === "image-content-v1") {
         if (Array.isArray(payload?.content) && payload.content.some((item) => item?.type === "image"
             && typeof item.data === "string" && item.data.length > 0
@@ -187,7 +230,7 @@ export function validateDeviceLabToolOutput(tool, payload, args = {}) {
     if (deviceObjectContracts.has(contract)) {
         const device = objectValue(value.device);
         if (!device) throw contractError(tool, "required device object is missing", payload);
-        if (typeof device.id !== "string" || !device.id) throw contractError(tool, "required device.id string is missing", payload);
+        if (typeof device.deviceId !== "string" || !device.deviceId) throw contractError(tool, "required device.deviceId string is missing", payload);
     }
     return value;
 }

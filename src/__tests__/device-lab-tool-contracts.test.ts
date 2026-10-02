@@ -34,7 +34,7 @@ describe("device-lab public output contracts", () => {
     });
 
     it.each([
-        ["devices", [{ id: "phone", backend: "android-device" }], {}],
+        ["devices", [{ deviceId: "phone", backend: "android-device" }], {}],
         ["devices", [], {}],
         ["cursor_position", { x: 0, y: -2 }, {}],
         ["cursor_position", { cursor: { x: 0, y: -2 }, provider: "windows-helper" }, { detail: true }],
@@ -85,15 +85,15 @@ describe("device-lab public output contracts", () => {
 
     it("returns typed lifecycle and session payloads", () => {
         const lifecycle = validateDeviceLabToolOutput("start", {
-            device: { id: "ios-contract", status: "running" },
+            device: { deviceId: "ios-contract", status: "running" },
         });
         const session = validateDeviceLabToolOutput("status", {
-            device: { id: "ios-contract" },
+            device: { deviceId: "ios-contract" },
             automation: { session: null },
         });
 
-        expect(lifecycle.device.id).toBe("ios-contract");
-        expect(session.device.id).toBe("ios-contract");
+        expect(lifecycle.device.deviceId).toBe("ios-contract");
+        expect(session.device.deviceId).toBe("ios-contract");
     });
 
     it("reports the tool and missing field instead of leaking undefined access errors", () => {

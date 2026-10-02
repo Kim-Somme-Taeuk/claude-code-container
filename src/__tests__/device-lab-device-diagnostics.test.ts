@@ -24,9 +24,16 @@ async function fixture() {
         const preload = join(home, "trace.cjs");
         writeFileSync(preload, `const fs=require('fs'),cp=require('child_process');
 const record=(kind,args)=>fs.appendFileSync(${JSON.stringify(trace)},JSON.stringify({kind,args})+'\\n');
-for(const key of ['spawn','spawnSync','exec','execSync','execFile','execFileSync']){const original=cp[key];cp[key]=function(...args){record(key,args.slice(0,2));return original.apply(this,args)}}
+// Async state locks observe only their own process identity on Windows.
+const ownIdentityScript = "$P = Get-CimInstance Win32_Process -Filter 'ProcessId = " + process.pid + "' -ErrorAction SilentlyContinue; $H = Get-Process -Id " + process.pid + " -ErrorAction SilentlyContinue; if ($P -and $H) { [pscustomobject]@{ startToken = $H.StartTime.ToUniversalTime().ToString('o'); commandLine = [string]$P.CommandLine } | ConvertTo-Json -Compress }";
+const ownIdentityArgs = ['-WindowStyle','Hidden','-NoProfile','-NonInteractive','-Command',ownIdentityScript];
+for(const key of ['spawn','spawnSync','exec','execSync','execFile','execFileSync']){const original=cp[key];cp[key]=function(...args){
+const ownIdentity = process.platform === 'win32' && ['execFile','spawn'].includes(key)
+    && require('path').basename(String(args[0])).toLowerCase() === 'powershell.exe'
+    && JSON.stringify(args[1]) === JSON.stringify(ownIdentityArgs);
+record(ownIdentity ? 'own-process-identity' : key,args.slice(0,2));return original.apply(this,args)}}
 globalThis.fetch=async()=>{record('fetch',[]);throw new Error('diagnostic fixture network unavailable')};
-const open=fs.openSync;fs.openSync=function(file,...args){if(String(file).endsWith('/devices.json'))record('state',[String(file)]);return open.call(this,file,...args)};
+const open=fs.openSync;fs.openSync=function(file,...args){if(require('path').basename(String(file))==='devices.json')record('state',[String(file)]);return open.call(this,file,...args)};
 require('module').syncBuiltinESMExports();`);
         env.NODE_OPTIONS = `--require=${JSON.stringify(join(home, "isolate-broker-auth.cjs"))} --require=${JSON.stringify(preload)}`;
     } });
@@ -50,7 +57,7 @@ describe("public MCP terminal device diagnostics", () => {
                 expect(absent.isError).toBe(true);
                 expect(json(absent)).toMatchObject({ error: "device-not-found", deviceId: "absent-target", detail: expect.stringContaining("devices") });
             }
-            expect(ctx.activity().filter((entry) => entry.kind !== "state")).toEqual([]);
+            expect(ctx.activity().filter((entry) => entry.kind !== "state"), JSON.stringify(ctx.activity())).toEqual([]);
         } finally { await cleanupDeviceLabMcpTestContext(ctx); }
     });
 
@@ -67,7 +74,7 @@ describe("public MCP terminal device diagnostics", () => {
                 const result = await ctx.client.callTool({ name: "wait_for_text", arguments: { deviceId, text: "Ready", detail: false } });
                 expect(result.isError, text(result)).toBe(true);
                 expect(json(result)).toMatchObject({ error: "device-tool-unsupported", tool: "mobile_wait_for_text", deviceId, backend });
-                expect(ctx.activity().filter((entry) => entry.kind !== "state")).toEqual([]);
+                expect(ctx.activity().filter((entry) => !["state", "own-process-identity"].includes(entry.kind)), JSON.stringify(ctx.activity())).toEqual([]);
             }
         } finally { await cleanupDeviceLabMcpTestContext(ctx); }
     });
@@ -132,7 +139,7 @@ describe("public MCP terminal device diagnostics", () => {
         try {
             writeFileSync(store(ctx.homeDir, "windows-vm", []), "{broken");
             for (const [name, args, message] of [
-                ["key", { deviceId: "missing" }, "key requires key or keyCode"],
+                ["key", { deviceId: "missing" }, "key requires exactly one of key or keyCode"],
                 ["wait_for_text", { deviceId: "missing" }, "wait_for_text requires text"],
                 ["uninstall_app", { deviceId: "missing", appId: "app" }, "destructive-action-confirmation-required"],
             ] as const) {

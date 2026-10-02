@@ -139,9 +139,9 @@ describe("public MCP user journeys", () => {
     }
     async function create(backend = "windows-vm", extra: Record<string, unknown> = {}) {
         const created = await value(createToolName(backend), { name: "Journey", ...extra });
-        expect(created.device.id).toEqual(expect.any(String));
+        expect(created.device.deviceId).toEqual(expect.any(String));
         expect(created.device.incarnationId).toMatch(/^[a-f0-9]{32}$/);
-        return { deviceId: created.device.id as string, incarnationId: created.device.incarnationId as string };
+        return { deviceId: created.device.deviceId as string, incarnationId: created.device.incarnationId as string };
     }
     async function screenshotTarget(target: { deviceId: string }) {
         const result = await call("screenshot", target);
@@ -155,7 +155,7 @@ describe("public MCP user journeys", () => {
     it("uses returned IDs through create, start, screenshot, input, transfer and deletion", async () => {
         let target = await create("windows-vm", { nestedVirtualization: true });
         expect(requests.find(r => r.params.command === "device_create")?.params).toMatchObject({ backend: "windows-vm", nestedVirtualization: true });
-        expect(await value("devices")).toEqual(expect.arrayContaining([expect.objectContaining({ id: target.deviceId, state: "stopped" })]));
+        expect(await value("devices")).toEqual(expect.arrayContaining([expect.objectContaining({ deviceId: target.deviceId, state: "stopped" })]));
         await value("start", target);
         expect((await value("status", target)).device.status).toBe("running");
         target = await screenshotTarget(target);
@@ -172,7 +172,7 @@ describe("public MCP user journeys", () => {
         expect(readFileSync(outputPath)).toEqual(bytes);
         await call("stop", target);
         await call("delete", { ...target, confirmDestructive: true });
-        expect(await value("devices")).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: target.deviceId })]));
+        expect(await value("devices")).not.toEqual(expect.arrayContaining([expect.objectContaining({ deviceId: target.deviceId })]));
         expect(requests.filter(r => r.method === "broker.command.invoke").map(r => r.params.command)).toEqual(["device_create", "device_start", "device_status", "device_stop", "device_delete"]);
     });
 

@@ -1,3 +1,4 @@
+import { deviceLabTestHomeEnvironment } from "./helpers/device-lab-test-environment.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
@@ -21,7 +22,7 @@ describe("device-lab Linux VM foundation", () => {
             command: process.execPath,
             args: [join(repoRoot, "device-lab-mcp/server.mjs")],
             env: {
-                HOME: homeDir,
+                ...deviceLabTestHomeEnvironment(homeDir),
                 NODE_ENV: "test",
                 CCC_LAB_STATE_DIR: stateRoot,
                 CCC_PROFILE: "lab-mcp-test",
@@ -99,7 +100,7 @@ describe("device-lab Linux VM foundation", () => {
         const createPayload = JSON.parse(((created.content as Array<{ text?: string }>)[0].text ?? "{}"));
         expect(createPayload).toEqual(expect.objectContaining({
             ok: true,
-            device: expect.objectContaining({ id: "mcp-lab", deviceId: "mcp-lab", backend: "linux-vm", runtimeState: "stopped" }),
+            device: expect.objectContaining({ deviceId: "mcp-lab", backend: "linux-vm", runtimeState: "stopped" }),
         }));
 
         const start = await client.callTool({ name: "start", arguments: { detail: true, deviceId: "mcp-lab" } });
@@ -157,7 +158,7 @@ describe("device-lab Linux VM foundation", () => {
         expect(createdPayload).toEqual(expect.objectContaining({
             ok: true,
             device: expect.objectContaining({
-                id: "mcp-image-lab",
+                deviceId: "mcp-image-lab",
                 image: expect.objectContaining({ baseImageId: "mcp-base" }),
             }),
         }));

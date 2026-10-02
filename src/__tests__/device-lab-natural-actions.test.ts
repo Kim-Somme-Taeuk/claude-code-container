@@ -42,6 +42,11 @@ beforeAll(() => startServer());
 beforeEach(() => { fixture.calls = []; fixture.failure = false; });
 
 describe("natural action variants", () => {
+    it("keeps mobile drag routed to the mobile handler", async () => {
+        const response = await call("drag", { deviceId: "phone", x1: 0, y1: 0, x2: 20, y2: 30 });
+        expect(response.isError).not.toBe(true);
+        expect(fixture.calls[0].name).toBe("mobile_drag");
+    });
     it.each([undefined, 1, 2])("dispatches click count %s without leaking the selector", async count => {
         const response = await call("click", { deviceId: "phone", x: 10, y: 20, ...(count === undefined ? {} : { count }) });
         expect(response.isError).not.toBe(true);
@@ -92,10 +97,10 @@ describe("natural action variants", () => {
         expect(parse(response).error).toBe("source-lifecycle-conflict");
         expect(fixture.calls[0].name).toBe("device_base_image_clone");
     });
-    it("keeps58 unique tools and rejects retired names in direct calls and flows", async () => {
+    it("keeps59 unique tools and rejects retired names in direct calls and flows", async () => {
         const names = TOOLS.map(t => t.name);
-        expect(names).toHaveLength(58);
-        expect(new Set(names).size).toBe(58);
+        expect(names).toHaveLength(59);
+        expect(new Set(names).size).toBe(59);
         for (const name of ["long_press", "home", "back", "forward", "recents", "list_images", "import_image"]) expect(names).toContain(name);
         for (const name of ["double_click", "clone_macos_vm"]) {
             expect(names).not.toContain(name);

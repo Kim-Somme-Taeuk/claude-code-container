@@ -154,16 +154,24 @@ describe("known VM provider output", () => {
         };
         try {
             const created = await call("create_linux_vm", {  deviceId: "compact-lab", name: "Compact lab", sourceImage: "incoming/base.qcow2", detail: true });
-            const detailed = await call("status", { deviceId: created.device.id, detail: true });
-            const compact = await call("status", { deviceId: created.device.id, detail: false });
-            const { ok: _statusOk, ...expectedStatus } = compactToolValue("device_status", detailed);
+            const detailed = await call("status", { deviceId: created.device.deviceId, detail: true });
+            const compact = await call("status", { deviceId: created.device.deviceId, detail: false });
+            const { ok: _statusOk, ...expectedStatus } = compactToolValue("device_status", structuredClone(detailed));
+            delete expectedStatus.device.paths.labDir;
+            delete expectedStatus.device.paths.snapshotsDir;
+            delete expectedStatus.device.fileOperations;
             expect(compact).toEqual(expectedStatus);
             expect(compact.device.paths).not.toHaveProperty("labDir");
             expect(compact.device.paths.artifactsDir).toBe(detailed.device.paths.artifactsDir);
-            expect(await call("status", { deviceId: created.device.id, detail: true })).toEqual(detailed);
+            expect(await call("status", { deviceId: created.device.deviceId, detail: true })).toEqual(detailed);
             const rawInventory = await call("devices", { view: "available", backend: "linux-vm", detail: true });
             const inventory = await call("devices", { view: "available", backend: "linux-vm", detail: false });
-            const { ok: _inventoryOk, ...expectedInventory } = compactToolValue("device_inventory", rawInventory);
+            const { ok: _inventoryOk, ...expectedInventory } = compactToolValue("device_inventory", structuredClone(rawInventory));
+            for (const device of expectedInventory.devices) {
+                delete device.paths.labDir;
+                delete device.paths.snapshotsDir;
+                delete device.fileOperations;
+            }
             expect(inventory).toEqual(expectedInventory);
             expect(inventory.discovery).not.toHaveProperty("qemu");
             expect(inventory.discovery).not.toHaveProperty("stateRoot");

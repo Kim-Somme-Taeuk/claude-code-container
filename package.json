@@ -33,7 +33,7 @@
     "bundle:hyper-v:windows:library-test": "node node_modules/esbuild-wasm/bin/esbuild scripts/real-tests/hyper-v-windows-library.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/real-tests/hyper-v-windows-library.mjs",
     "bundle:hyper-v:windows:library-privileged-test": "node node_modules/esbuild-wasm/bin/esbuild scripts/real-tests/hyper-v-windows-library-privileged.ts --bundle --platform=node --format=esm --target=node20 --loader:.ps1=text --outfile=dist/real-tests/hyper-v-windows-library-privileged.mjs",
     "bundle:hyper-v:windows:network-host-test": "node node_modules/esbuild-wasm/bin/esbuild scripts/real-tests/hyper-v-windows-network-host.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/real-tests/hyper-v-windows-network-host.mjs",
-    "build:device-lab-mcp": "node node_modules/esbuild-wasm/bin/esbuild device-lab-mcp/server.mjs --bundle --platform=node --format=esm --outfile=dist/device-lab-mcp/server.mjs --banner:js=\"// device-lab-mcp-version: 1\"",
+    "build:device-lab-mcp": "node node_modules/esbuild-wasm/bin/esbuild device-lab-mcp/server.mjs --bundle --platform=node --format=esm --outfile=dist/device-lab-mcp/server.mjs --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url); // device-lab-mcp-version: 1\"",
     "test": "node scripts/run-vitest.mjs run",
     "test:level0": "node scripts/test-level.js 0",
     "test:level1": "node scripts/test-level.js 1",

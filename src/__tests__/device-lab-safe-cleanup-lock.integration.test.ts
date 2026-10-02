@@ -1,3 +1,4 @@
+import { deviceLabTestHomeEnvironment } from "./helpers/device-lab-test-environment.js";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -17,7 +18,7 @@ function cleanupProcess(home: string, target: string, order: string, label: stri
     ].join("\n");
     return new Promise((resolve, reject) => {
         const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
-            env: { ...process.env, HOME: home },
+            env: { ...process.env, ...deviceLabTestHomeEnvironment(home) },
             stdio: "ignore",
         });
         child.once("error", reject);

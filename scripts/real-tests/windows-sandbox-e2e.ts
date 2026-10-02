@@ -159,7 +159,7 @@ function verifiedInterruptedWindowsSandboxLock(lock, owner, deviceId) {
 
 export function verifiedWindowsSandboxSessionId(statusPayload, deviceId) {
     const device = statusPayload?.device || statusPayload?.result?.device;
-    if (device?.id !== deviceId) return null;
+    if (device?.deviceId !== deviceId) return null;
     return typeof device.sandboxId === "string" && device.sandboxId ? device.sandboxId : null;
 }
 
@@ -193,7 +193,7 @@ function cleanupFailure(operation, deviceId, error) {
 
 function assertStoppedCleanupResult(result, deviceId) {
     const payload = parsePayload(result);
-    if (payload?.device?.id !== deviceId || payload?.device?.status !== "stopped") {
+    if (payload?.device?.deviceId !== deviceId || payload?.device?.status !== "stopped") {
         throw new Error(`device_stop did not verify stopped state: ${JSON.stringify(payload)}`);
     }
 }
@@ -436,14 +436,14 @@ export async function runWindowsSandboxE2E(options: any = {}) {
                 memoryMb: 2048,
             }));
             created = true;
-            assert.strictEqual(createResult.device.id, deviceId);
+            assert.strictEqual(createResult.device.deviceId, deviceId);
             assert.strictEqual(createResult.device.status, "stopped");
 
             currentStep = "inventory created device";
             const inventory = parsePayload(await callTool("devices", { view: "available", detail: true, ...direct }));
             const inventoryDevices = inventory.devices || inventory.result?.devices;
             assert.ok(Array.isArray(inventoryDevices));
-            assert.ok(inventoryDevices.some((device) => device.id === deviceId));
+            assert.ok(inventoryDevices.some((device) => device.deviceId === deviceId));
 
             currentStep = "start device";
             const started = await startWindowsSandboxE2EDevice(callTool, deviceId);
@@ -452,7 +452,7 @@ export async function runWindowsSandboxE2E(options: any = {}) {
 
             currentStep = "read running status";
             const status = parsePayload(await callTool("status", { detail: true, deviceId }));
-            assert.strictEqual(status.device.id, deviceId);
+            assert.strictEqual(status.device.deviceId, deviceId);
             assert.strictEqual(status.device.status, "running");
             assert.strictEqual(status.device.sandboxId, started.device.sandboxId);
 
@@ -483,6 +483,14 @@ export async function runWindowsSandboxE2E(options: any = {}) {
                 assert.strictEqual(doubleClick.provider, "windows-helper");
                 assert.deepStrictEqual(doubleClick.doubleClicked, { x: 30, y: 30, button }, `click count=2 expected doubleClicked; response keys=${Object.keys(doubleClick).slice(0, 12).map(key => key.slice(0, 40)).join(",")}`);
             }
+
+            currentStep = "move and drag controls";
+            parsePayload(await callTool("move", { detail: true, deviceId, x: 50, y: 50, timeoutMs }));
+            const moved = parsePayload(await callTool("cursor_position", { detail: true, deviceId, timeoutMs }));
+            assert.deepStrictEqual(moved.cursor, { x: 50, y: 50 });
+            parsePayload(await callTool("drag", { detail: true, deviceId, x1: 50, y1: 50, x2: 80, y2: 80, durationMs: 200, timeoutMs }));
+            const dragged = parsePayload(await callTool("cursor_position", { detail: true, deviceId, timeoutMs }));
+            assert.deepStrictEqual(dragged.cursor, { x: 80, y: 80 });
 
             currentStep = "keyboard control";
             const key = parsePayload(await callTool("key", { detail: true, deviceId, key: "Escape", timeoutMs }));
@@ -547,10 +555,28 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             assertReportedLocalPath(download.downloaded.localPath, downloadTarget, options.brokerOnly);
             assert.match(readFileSync(downloadTarget, "utf-8"), /ccc-download-ok/);
 
-            currentStep = "list windows";
-            const windows = parsePayload(await callTool("window_list", { detail: true, deviceId, timeoutMs }));
-            assert.strictEqual(windows.provider, "windows-process-main-window");
-            assert.ok(Array.isArray(windows.windows));
+            currentStep = "open test window";
+            const opened = parsePayload(await callTool("exec", { detail: true, deviceId,
+                command: `Start-Process notepad.exe -ArgumentList '${uploadRemote}'`, timeoutMs }));
+            assert.strictEqual(opened.status, 0, "could not open the uploaded test file in Notepad");
+
+            currentStep = "list and focus test window";
+            let targetWindow: { handle: string } | undefined;
+            const windowDeadline = Date.now() + 15_000;
+            do {
+                const windows = parsePayload(await callTool("window_list", { detail: true, deviceId, timeoutMs }));
+                assert.strictEqual(windows.provider, "windows-process-main-window");
+                assert.ok(Array.isArray(windows.windows));
+                targetWindow = windows.windows.find((window: any) =>
+                    String(window.processName).toLowerCase() === "notepad"
+                    && String(window.title).includes("ccc-upload")
+                    && /^[1-9][0-9]*$/.test(String(window.handle)));
+                if (!targetWindow) await new Promise(resolve => setTimeout(resolve, 250));
+            } while (!targetWindow && Date.now() < windowDeadline);
+            assert.ok(targetWindow, "uploaded test file did not appear in window_list");
+            // The helper verifies that this handle actually becomes the foreground window.
+            parsePayload(await callTool("focus_window", { detail: true, deviceId, handle: String(targetWindow.handle), timeoutMs }));
+            // This scenario owns the Sandbox; its existing finally cleanup closes this test window.
 
             currentStep = "read cursor position";
             const cursor = parsePayload(await callTool("cursor_position", { detail: true, deviceId, timeoutMs }));
@@ -596,7 +622,7 @@ export async function runWindowsSandboxE2E(options: any = {}) {
 
             currentStep = "stop device";
             const stoppedPayload = parsePayload(await callTool("stop", { detail: true, deviceId }));
-            assert.strictEqual(stoppedPayload.device.id, deviceId);
+            assert.strictEqual(stoppedPayload.device.deviceId, deviceId);
             assert.strictEqual(stoppedPayload.device.status, "stopped");
             stopped = true;
 

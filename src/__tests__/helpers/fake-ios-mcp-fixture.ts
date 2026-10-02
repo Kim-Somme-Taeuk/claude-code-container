@@ -1,3 +1,4 @@
+import { deviceLabTestHomeEnvironment } from "./device-lab-test-environment.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
@@ -262,7 +263,7 @@ exit 0
             command: process.execPath,
             args: [join(repoRoot, "device-lab-mcp/server.mjs")],
             env: {
-                HOME: homeDir,
+                ...deviceLabTestHomeEnvironment(homeDir),
                 PATH: binDir,
                 NODE_ENV: "test",
                 CCC_PROFILE: `test-${homeDir.split(/[\\/]/).pop()}`,

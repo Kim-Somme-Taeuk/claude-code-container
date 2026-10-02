@@ -1,5 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "fs";
 import { spawnSync } from "child_process";
+import { createHash } from "crypto";
+import { runInNewContext } from "vm";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -105,7 +107,7 @@ function terminateTestProcess(pid: number) {
 }
 
 afterEach(() => {
-    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 
 describe("device broker timed-out process tree cleanup", () => {
@@ -117,6 +119,28 @@ describe("device broker timed-out process tree cleanup", () => {
         expect(script).not.toContain("child.kill(");
         expect(script).not.toContain("taskkill");
         expect(runBrokerBackendChild.toString()).not.toContain("child.kill(");
+    });
+
+    it("captures the exact handle start token used by Windows cleanup, not rounded CIM time", () => {
+        const script = boundedProviderCommandRunnerScript();
+        const identityFunction = script.slice(script.indexOf("function processIdentity(pid)"), script.indexOf("function publishIdentity"));
+        const handleToken = "2026-10-02T02:11:08.7160248Z";
+        const cimToken = "2026-10-02T02:11:08.7160240Z";
+        const commandLine = "node provider.js";
+        const observed = runInNewContext(`${identityFunction}; processIdentity(42)`, {
+            process: { platform: "win32" },
+            payload: { windowsPowerShellPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" },
+            createHash,
+            spawnSync: (_file: string, args: string[]) => ({
+                status: 0,
+                stdout: JSON.stringify({
+                    startToken: args.at(-1)?.includes("$H.StartTime.ToUniversalTime().ToString('o')") ? handleToken : cimToken,
+                    commandLine,
+                }),
+            }),
+        });
+        expect(observed).toEqual({ pid: 42, startToken: `windows:${handleToken}`, commandHash: createHash("sha256").update(commandLine).digest("hex") });
+        expect(script).toContain('CCC_WINDOWS_TERMINATE_TIMEOUT_MS: "10000"');
     });
 
     it("rejects percent expansion and line breaks in Windows command-shell arguments", () => {
@@ -202,7 +226,7 @@ describe("device broker timed-out process tree cleanup", () => {
             outputLimit: 1024,
         });
 
-        expect(result).toMatchObject({ timedOut: true, cleanup: { attempted: true, ok: true } });
+        expect(result, JSON.stringify(result)).toMatchObject({ timedOut: true, cleanup: { attempted: true, ok: true } });
         await expectProcessTreeExit(readyFile);
     });
 
@@ -228,7 +252,7 @@ describe("device broker timed-out process tree cleanup", () => {
         let descendantPid = 0;
         try {
             expect(Date.now() - startedAt).toBeLessThan(5000);
-            expect(result).toMatchObject({
+            expect(result, JSON.stringify(result)).toMatchObject({
                 timedOut: true,
                 status: null,
                 cleanup: { attempted: true, ok: false, error: "injected-tree-kill-failure" },
@@ -237,7 +261,7 @@ describe("device broker timed-out process tree cleanup", () => {
             expect(existsSync(readyFile)).toBe(true);
             descendantPid = Number(readFileSync(readyFile, "utf8"));
         } finally {
-            if (Number.isInteger(parentPid) && parentPid > 0) terminateBrokerSpawnedProcessTree(parentPid);
+            if (Number.isInteger(parentPid) && parentPid > 0) terminateTestProcess(parentPid);
             if (Number.isInteger(descendantPid) && descendantPid > 0) terminateTestProcess(descendantPid);
         }
     });
@@ -253,7 +277,7 @@ describe("device broker timed-out process tree cleanup", () => {
             cwd: root,
         }, { timeoutMs: 3000, outputLimit: 1024 });
 
-        expect(result).toMatchObject({ timedOut: true, cleanup: { attempted: true, ok: true } });
+        expect(result, JSON.stringify(result)).toMatchObject({ timedOut: true, cleanup: { attempted: true, ok: true } });
         await expectProcessTreeExit(readyFile);
     });
 
@@ -272,7 +296,7 @@ describe("device broker timed-out process tree cleanup", () => {
             outputLimit: 1024,
         });
 
-        expect(result).toMatchObject({
+        expect(result, JSON.stringify(result)).toMatchObject({
             timedOut: true,
             error: "device-lab provider wrapper timed out after 3000ms",
             cleanup: { attempted: true, ok: true },
@@ -295,7 +319,7 @@ describe("device broker timed-out process tree cleanup", () => {
             outputLimit: 1024,
         });
 
-        expect(result).toMatchObject({
+        expect(result, JSON.stringify(result)).toMatchObject({
             timedOut: true,
             error: "device-lab provider wrapper timed out after 3000ms",
             cleanup: { attempted: true, ok: true },
@@ -314,7 +338,7 @@ describe("device broker timed-out process tree cleanup", () => {
             cwd: root,
         }, { timeoutMs: 10000, outputLimit: 1024 });
 
-        expect(result).toMatchObject({
+        expect(result, JSON.stringify(result)).toMatchObject({
             timedOut: false,
             cleanup: { attempted: true, ok: true },
         });
@@ -332,7 +356,7 @@ describe("device broker timed-out process tree cleanup", () => {
             args: ["-e", `process.stdout.write('\\u0000'.repeat(${outputBytes}))`],
         }, { timeoutMs: 10000, outputLimit: outputBytes });
 
-        expect(result).toMatchObject({ status: 0, timedOut: false });
+        expect(result, JSON.stringify(result)).toMatchObject({ status: 0, timedOut: false });
         expect(result.error).toBeUndefined();
         expect(Buffer.byteLength(result.stdout || "")).toBe(outputBytes);
         expect(result.stdout).toBe("\u0000".repeat(outputBytes));

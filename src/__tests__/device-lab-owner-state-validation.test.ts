@@ -1,3 +1,5 @@
+import { fileSymlinkOrSkip } from "./helpers/file-symlink-fixture.js";
+import { isolateDeviceLabTestEnvironment } from "./helpers/device-lab-test-environment.js";
 import { existsSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
@@ -19,18 +21,17 @@ import {
 
 describe("owner device state validation", () => {
     let homeDir: string;
-    let originalHome: string | undefined;
+    let originalHomeRestore: (() => void) | undefined;
 
     beforeEach(() => {
-        originalHome = process.env.HOME;
+
         homeDir = join(tmpdir(), `ccc-owner-state-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-        process.env.HOME = homeDir;
+        originalHomeRestore = isolateDeviceLabTestEnvironment(homeDir);
     });
 
     afterEach(() => {
         rmSync(homeDir, { recursive: true, force: true });
-        if (originalHome === undefined) delete process.env.HOME;
-        else process.env.HOME = originalHome;
+        originalHomeRestore?.();
     });
 
     function expectStateError(operation: () => unknown, code: string) {
@@ -84,7 +85,7 @@ describe("owner device state validation", () => {
             const deviceId = tool.inputSchema?.properties?.deviceId;
             return deviceId ? [{ tool: tool.name, deviceId }] : [];
         });
-        expect(properties).toHaveLength(58);
+        expect(properties).toHaveLength(55);
         for (const { tool, deviceId } of properties) {
             expect(deviceId, tool).toEqual(expect.objectContaining({
                 type: "string",
@@ -137,15 +138,15 @@ describe("owner device state validation", () => {
         expect(readOwnerDevices("android")).toEqual([{ ...successor, status: "stopped" }]);
     });
 
-    it("rejects symbolic and hard-linked state files without touching their targets", () => {
+    it.for(["symbolic", "hard"] as const)("rejects %s state files without touching their targets", (kind, context) => {
         const target = join(homeDir, "external.json");
         const contents = JSON.stringify({ devices: [{ id: "external" }] });
         mkdirSync(homeDir, { recursive: true });
         writeFileSync(target, contents);
-        for (const kind of ["symbolic", "hard"] as const) {
+        {
             const file = join(homeDir, kind, "devices.json");
             mkdirSync(dirname(file), { recursive: true });
-            if (kind === "symbolic") symlinkSync(target, file);
+            if (kind === "symbolic") fileSymlinkOrSkip(context, target, file);
             else linkSync(target, file);
             expectStateError(() => readOwnerDeviceStateFile(file), "owner-devices-state-invalid");
             expect(readFileSync(target, "utf8")).toBe(contents);

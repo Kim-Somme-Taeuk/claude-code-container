@@ -135,11 +135,11 @@ export async function run(options: any = {}) {
                 serial: cap.serial,
             }));
             attached = true;
-            assert.strictEqual(attach.device.id, deviceId);
+            assert.strictEqual(attach.device.deviceId, deviceId);
             assert.strictEqual(attach.device.serial, cap.serial);
 
             const status = parsePayload(await callTool("status", { detail: true, deviceId }));
-            assert.strictEqual(status.device.id, deviceId);
+            assert.strictEqual(status.device.deviceId, deviceId);
             assert.strictEqual(status.device.serial, cap.serial);
             const statusCommand = androidDeviceStatusCommand(status);
             assert.strictEqual(statusCommand?.status, 0);

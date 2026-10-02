@@ -1,3 +1,4 @@
+import { directorySymlink } from "./helpers/file-symlink-fixture.js";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,8 +16,9 @@ function execute(path: string, extra = {}) {
     return { raw: result.stdout, value: parseListFilesOutput(result.stdout) };
 }
 
+// Generated POSIX commands require a POSIX host; parser/schema cases remain portable.
 describe("bounded device directory commands", () => {
-    it("preserves hidden, Unicode, quoted and newline names with file sizes and link types", () => {
+    it.skipIf(process.platform === "win32")("preserves hidden, Unicode, quoted and newline names with file sizes and link types", () => {
         const root = directory();
         const names = ["ordinary.txt", ".hidden", "한글 🎈", "quote'\";$(echo nope)", "line\nbreak\tname", "back\\slash"];
         for (const name of names) writeFileSync(join(root, name), "abc");
@@ -33,7 +35,7 @@ describe("bounded device directory commands", () => {
         expect(value.entries).toContainEqual({ name: "directory-link", type: "symlink" });
         expect(JSON.stringify(value)).not.toContain("nested.txt");
     });
-    it("treats the selected directory path as data", () => {
+    it.skipIf(process.platform === "win32")("treats the selected directory path as data", () => {
         const root = directory();
         const path = join(root, "x'; touch PWN; printf '");
         mkdirSync(path); writeFileSync(join(path, "kept"), "x");
@@ -41,7 +43,7 @@ describe("bounded device directory commands", () => {
         expect(existsSync(join(path, "PWN"))).toBe(false);
         expect(existsSync(join(root, "PWN"))).toBe(false);
     });
-    it("distinguishes an empty directory from missing or non-directory paths", () => {
+    it.skipIf(process.platform === "win32")("distinguishes an empty directory from missing or non-directory paths", () => {
         const root = directory();
         expect(execute(root).value).toEqual({ entries: [] });
         writeFileSync(join(root, "file"), "x");
@@ -51,7 +53,7 @@ describe("bounded device directory commands", () => {
             expect(result.status).not.toBe(0);
         }
     });
-    it("reports truncation only when entries were omitted", () => {
+    it.skipIf(process.platform === "win32")("reports truncation only when entries were omitted", () => {
         const root = directory();
         for (const name of ["a", "b", "c"]) writeFileSync(join(root, name), "");
         expect(execute(root, { limit: 3 }).value.truncated).toBeUndefined();
@@ -59,7 +61,7 @@ describe("bounded device directory commands", () => {
         expect(limited.entries).toHaveLength(2);
         expect(limited.truncated).toBe(true);
     });
-    it("bounds produced bytes even below the requested entry limit", () => {
+    it.skipIf(process.platform === "win32")("bounds produced bytes even below the requested entry limit", () => {
         const root = directory();
         for (let i = 0; i < 150; i++) writeFileSync(join(root, `${String(i).padStart(3, "0")}-${"x".repeat(180)}`), "");
         const { raw, value } = execute(root, { limit: 500 });
@@ -92,7 +94,7 @@ describe("simulator app-container directory boundary", () => {
         const root = directory(), outside = directory();
         writeFileSync(join(root, ".hidden"), "x");
         writeFileSync(join(outside, "private-name"), "not exposed");
-        symlinkSync(outside, join(root, "link"));
+        directorySymlink(outside, join(root, "link"));
         mkdirSync(join(root, "Documents"));
         expect(listContainedDirectory(root, ".")).toEqual({ entries: expect.arrayContaining([
             expect.objectContaining({ name: ".hidden", type: "file" }), { name: "link", type: "symlink" }, { name: "Documents", type: "directory" },

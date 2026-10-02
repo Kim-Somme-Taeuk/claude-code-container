@@ -1,8 +1,8 @@
-import { spawnSync } from "child_process";
+import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from "child_process";
 import { createHash } from "crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { join, resolve } from "path";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import {
     HYPER_V_FIRST_LOGON_COMMAND_LINE_LIMIT,
@@ -61,7 +61,7 @@ import {
     parseHyperVVmObservation,
 } from "@ccc/device-lab/host-control/hyper-v/index.js";
 import { hyperVProviderDiagnosticCode } from "@ccc/device-lab/device-lab/broker/hyper-v/public-response.js";
-import { isoWriterLines } from "@ccc/device-lab/host-control/hyper-v/core.js";
+import { isoWriterLines, jsonScript } from "@ccc/device-lab/host-control/hyper-v/core.js";
 import { HYPER_V_QEMU_IMG_SIGNATURE_STATUSES } from "@ccc/device-lab/host-control/hyper-v/contracts.js";
 import { hyperVPowerShellAssetPath } from "@ccc/device-lab/host-control/hyper-v/powershell-assets.js";
 
@@ -88,6 +88,22 @@ function scriptOf(command: { args: string[]; input?: string }): string {
     return decoded;
 }
 
+// Generated probes exceed Windows' command-line limit; execute an owned script file.
+function spawnPowerShell(args: string[], options: SpawnSyncOptionsWithStringEncoding) {
+    // A child Windows PowerShell must not inherit another PowerShell edition's modules.
+    const env = { ...(options.env ?? process.env) };
+    for (const key of Object.keys(env)) if (key.toLowerCase() === "psmodulepath") delete env[key];
+    options = { ...options, env };
+    const index = args.indexOf("-EncodedCommand");
+    if (index < 0) return spawnSync("powershell.exe", args, options);
+    const root = mkdtempSync(join(tmpdir(), "ccc-powershell-probe-"));
+    const script = join(root, "probe.ps1");
+    try {
+        writeFileSync(script, "\ufeff" + Buffer.from(args[index + 1], "base64").toString("utf16le"));
+        return spawnSync("powershell.exe", [...args.slice(0, index), "-File", script], options);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
 // Parses a generated program with the host's Windows PowerShell 5.1 parser, without running it.
 function parseWithWindowsPowerShell(program: string) {
     const parser = [
@@ -97,7 +113,7 @@ function parseWithWindowsPowerShell(program: string) {
         "[Management.Automation.Language.Parser]::ParseInput($Program, [ref]$Tokens, [ref]$Errors) | Out-Null",
         "if (@($Errors).Count -gt 0) { [Console]::Error.WriteLine((@($Errors | ForEach-Object { $_.Message }) -join [Environment]::NewLine)); exit 1 }",
     ].join("\n");
-    return spawnSync("powershell.exe", [
+    return spawnPowerShell([
         "-WindowStyle",
         "Hidden",
         "-NoLogo",
@@ -128,6 +144,14 @@ const WINDOWS_POWERSHELL_UNSUPPORTED_ACCELERATOR = /\[(?:ulong|uint|ushort|sbyte
 describe("Hyper-V provider adapter", () => {
     it("restricts provisioning media filesystem masks at compile time", () => {
         expectTypeOf<Parameters<typeof isoWriterLines>[0]>().toEqualTypeOf<3 | 7 | undefined>();
+    });
+    it("compiles the generated ISO diagnostic expression and preserves nested failure codes", () => {
+        const line = isoWriterLines().find(line => line.includes("$CauseMessage -match"))!;
+        const pattern = line.match(/-match '([^']+)'/)?.[1];
+        expect(pattern).toBeTruthy();
+        const expression = new RegExp(pattern!);
+        expect(expression.exec("wrapper: hyper-v-provisioning-media-copy-incomplete")?.[0]).toBe("hyper-v-provisioning-media-copy-incomplete");
+        expect(expression.test("other failure")).toBe(false);
     });
     it("hides every host PowerShell adapter process", () => {
         const command = hyperVReadinessCommand("powershell.exe");
@@ -172,7 +196,7 @@ describe("Hyper-V provider adapter", () => {
             const sourceRoot = join(root, "private", "probe.source").replace(/'/g, "''");
             const probeScript = [
                 "$ErrorActionPreference = 'Stop'",
-                generated.slice(assertStart, assertEnd),
+                jsonScript([], undefined, true).slice(jsonScript([], undefined, true).indexOf("function Assert-NoReparsePath")),
                 generated.slice(typeStart, typeEnd),
                 generated.slice(writerStart, writerEnd),
                 `$IsoPath = '${isoPath}'`,
@@ -190,7 +214,7 @@ describe("Hyper-V provider adapter", () => {
                 "  Remove-Item -LiteralPath $IsoPath -Force -ErrorAction SilentlyContinue",
                 "}",
             ].join("\n");
-            const result = spawnSync("powershell.exe", [
+            const result = spawnPowerShell([
                 "-WindowStyle",
                 "Hidden",
                 "-NoLogo",
@@ -217,7 +241,7 @@ describe("Hyper-V provider adapter", () => {
             const primarySourceRoot = join(root, "private", "primary-failure.source").replace(/'/g, "''");
             const cleanupFailureScript = [
                 "$ErrorActionPreference = 'Stop'",
-                generated.slice(assertStart, assertEnd),
+                jsonScript([], undefined, true).slice(jsonScript([], undefined, true).indexOf("function Assert-NoReparsePath")),
                 generated.slice(typeStart, typeEnd),
                 generated.slice(writerStart, writerEnd),
                 "$OriginalRemoveCccIsoSourceRoot = ${function:Remove-CccIsoSourceRoot}",
@@ -248,7 +272,7 @@ describe("Hyper-V provider adapter", () => {
                 "$InvalidFiles = [ordered]@{ '../bad' = [Text.Encoding]::UTF8.GetBytes('primary-failure') }",
                 "Invoke-CccCleanupFailureCase $PrimaryIsoPath $PrimarySourceRoot $InvalidFiles 'hyper-v-provisioning-media-source-entry-invalid'",
             ].join("\n");
-            const cleanupFailureResult = spawnSync("powershell.exe", [
+            const cleanupFailureResult = spawnPowerShell([
                 "-WindowStyle",
                 "Hidden",
                 "-NoLogo",
@@ -454,7 +478,7 @@ describe("Hyper-V provider adapter", () => {
                 "$Handle = [IO.File]::Open($Archive, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)",
                 "try { & tar.exe -tf $Archive; if ($LASTEXITCODE -ne 0) { throw 'tar-read-failed' } } finally { $Handle.Dispose() }",
             ].join("\n");
-            const result = spawnSync("powershell.exe", [
+            const result = spawnPowerShell([
                 "-WindowStyle",
                 "Hidden",
                 "-NoLogo",
@@ -515,7 +539,7 @@ describe("Hyper-V provider adapter", () => {
                 `$Status = New-CccSshKey $SshKeygen 'ccc-device-lab-${vmId}' '${escapedPath}'`,
                 "if ($Status -ne 0) { throw 'hyper-v-linux-ssh-keygen-probe-failed' }",
             ].join("\n");
-            const created = spawnSync("powershell.exe", [
+            const created = spawnPowerShell([
                 "-WindowStyle",
                 "Hidden",
                 "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -1308,7 +1332,10 @@ describe("Hyper-V provider adapter", () => {
             const aclStart = generated.indexOf("function Set-CccPrivateDirectoryAcl");
             const aclEnd = generated.indexOf("\nSet-CccVmCreateStage 'hyper-v-host-capacity-inspection-failed'", aclStart);
             expect(Math.min(aclStart, aclEnd)).toBeGreaterThanOrEqual(0);
-            const aclFunction = generated.slice(aclStart, aclEnd);
+            const aclFunction = generated.slice(aclStart, aclEnd).replace(
+                "} catch { throw 'hyper-v-device-root-acl-failed' }",
+                "} catch { [Console]::Error.WriteLine($_.Exception.ToString()); throw 'hyper-v-device-root-acl-failed' }",
+            );
             const quotedDiskPath = diskPath.replaceAll("'", "''");
             const quotedRoot = root.replaceAll("'", "''");
             const quotedDiskDirectory = diskDirectory.replaceAll("'", "''");
@@ -1323,6 +1350,9 @@ describe("Hyper-V provider adapter", () => {
                 `Set-CccPrivateDirectoryAcl '${quotedDiskDirectory}'`,
                 `$BaseImage = '${quotedBasePath}'`,
                 `$DiskPath = '${quotedSuccessfulDiskPath}'`,
+                "$DiskRoot = [IO.Path]::GetPathRoot($DiskPath)",
+                "$DiskDriveName = $DiskRoot.TrimEnd('\\').TrimEnd(':')",
+                "$DiskReserveBytes = 0", // Tiny fixture payload; real reserve boundary has dedicated coverage.
                 `$ExpectedBaseImageHash = '${expectedHash}'`,
                 "$DiskCopySource = $null",
                 "$DiskCopyOutput = $null",
@@ -1359,7 +1389,7 @@ describe("Hyper-V provider adapter", () => {
                 "foreach ($ExpectedEvent in $ExpectedEvents) { if ($script:CleanupEvents -notcontains $ExpectedEvent) { throw ('cleanup-not-attempted:' + $ExpectedEvent) } }",
                 "[ordered]@{ ok = $true; events = @($script:CleanupEvents) } | ConvertTo-Json -Compress",
             ].join("\n");
-            const result = spawnSync("powershell.exe", [
+            const result = spawnPowerShell([
                 "-WindowStyle",
                 "Hidden",
                 "-NoLogo",
@@ -1645,7 +1675,7 @@ describe("Hyper-V provider adapter", () => {
         }));
         expect(deleteScript).toContain("$ExpectedDisks");
         expect(deleteScript).toContain("$ExpectedDiskPaths -notcontains $_");
-        expect(deleteScript).toContain(seedDiskPath);
+        expect(deleteScript).toContain(resolve(seedDiskPath));
         expect(deleteScript).toContain("Assert-NoReparsePath $OwnedPath");
 
         const recoverScript = scriptOf(hyperVRecoverOrphanCommand({
@@ -1973,7 +2003,7 @@ describe("Hyper-V provider adapter", () => {
     });
 
     it.skipIf(process.platform !== "win32")("computes IPv4 prefix masks on Windows PowerShell 5.1 without signed overflow", () => {
-        const result = spawnSync("powershell.exe", [
+        const result = spawnPowerShell([
             "-WindowStyle",
             "Hidden",
             "-NoProfile",
@@ -2063,7 +2093,7 @@ describe("Hyper-V provider adapter", () => {
         }));
         expect(deleteScript).toContain("hyper-v-vm-disk-ownership-mismatch");
         expect(deleteScript).toContain("hyper-v-vm-media-ownership-mismatch");
-        expect(deleteScript).toContain("$ExpectedMedia = @('/state/autounattend.iso')");
+        expect(deleteScript).toContain(`$ExpectedMedia = @('${resolve("/state/autounattend.iso")}')`);
         // Disk/media ownership comparison must normalize both sides (mirrors hyperVRecoverOrphanCommand),
         // otherwise a slash-format difference between the journal path and Get-VM*.Path throws a false mismatch.
         expect(deleteScript).toContain("$ExpectedDiskPaths = @($ExpectedDisks | ForEach-Object { [IO.Path]::GetFullPath([string]$_) })");

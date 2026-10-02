@@ -73,6 +73,6 @@ describe("preparation-free public contract", () => {
         expect(normalizePublicToolArgs("create_android_emulator", {  name: "Existing", avdName: "existing" })).toMatchObject({ createAvd: false });
         expect(normalizePublicToolArgs("create_ios_simulator", {  name: "Existing", udid: "existing" })).toMatchObject({ createSimulator: false });
         expect(toolInputError("create_windows_sandbox", {  name: "Win", systemImage: "android" })).toBeTruthy();
-        expect(toolInputError("create_linux_vm", {  provider: "container-qemu", name: "QEMU", dryRun: true })).toContain("does not support dryRun");
+        expect(toolInputError("create_linux_vm", {  provider: "container-qemu", name: "QEMU", sourceImage: "/tmp/base.qcow2", dryRun: true })).toContain("does not support dryRun");
     });
 });

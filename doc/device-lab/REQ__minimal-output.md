@@ -308,7 +308,7 @@ existing timeout defaults.
 
 ## AX contract consistency
 
-The 58 public tool identities remain stable during this repair. Advertised input
+The public tool identities remain stable during this repair; the subsequent desktop-control extension adds only focus_window (59 tools total). Advertised input
 requirements must match runtime preflight, including destructive confirmation,
 exclusive selectors, integer inputs and provider/action-specific requirements.
 The runtime destructive policy remains authoritative.
@@ -338,3 +338,30 @@ Public boolean options reject nonboolean values before dispatch, including destr
 `create_macos_vm` with an image provisions a managed Tart VM before returning a device. A source device selects the existing owned clone path. Missing source information and unsupported image providers fail before saving a device definition. Failed provisioning retains the existing rollback and ownership guarantees.
 
 Compact simple-action failures retain nonempty command stdout diagnostics, including failures signalled by the MCP error flag. Battery-setting command warnings remain visible instead of becoming plain `ok`. Diagnostics remain bounded; arbitrary exec and UI payloads are not interpreted as operation diagnostics. Tool names and per-operation device selection remain unchanged.
+
+Owned device records returned by public tools use `deviceId`, including detailed output. Native candidate serial/udid and snapshot/image IDs keep their domain names. Guest exec and UI payloads remain opaque.
+
+## Argument and diagnostic integrity
+Public tool schemas reject unknown argument names. Runtime validation rejects unknown names before provider dispatch, including flow steps; internal routing controls remain a separate unadvertised compatibility seam for broker transports and test isolation. A misspelled clipboard write must never become a read.
+Compact errors retain the target and actionable recovery context. Owned-device summaries retain negative readiness and containment evidence rather than implying a running VM is usable. Normal action successes remain concise; meaningful provider diagnostics must not disappear during the final presentation pass.
+
+Mock provider tests must isolate both HOME and USERPROFILE plus derived application-data directories and inherited provider state overrides. They must never reuse the developer's real Device Lab state. OS-specific executable and privileged-link fixtures must report an explicit unsupported-host condition; portable parsing and state-fencing tests remain active.
+
+Windows fixture verification must not depend on POSIX shebang execution or `/` as the host path separator. Mock executables used for platform-independent lifecycle and ownership tests run as real Node subprocesses with bounded execution. Discovery fixtures cover both `where` and `command -v`; they resolve only fixture-owned tools. Tests requiring POSIX process-group signals are host-specific. Directory-link boundaries use Windows junctions; permission-dependent file-symlink cases are separate tests so ordinary validation and hard-link checks still run without elevation. Asynchronous filesystem tests await all operations before deleting their temporary directories and inject mutation at deterministic operation boundaries.
+
+Physical-device identifiers stay unchanged on the wire; test fixture filenames derived from them must encode characters such as the colon in Wi-Fi ADB addresses. Fake provider subprocesses may model a specific transport platform explicitly (for example, the Sandbox `wsb` CLI rather than native `.wsb` association), but such coverage must never be reported as native host runtime verification.
+
+Fixture MCP lifetimes are isolated per test where cases mutate shared leases or provider programs; a failed child must not invalidate later cases. Asynchronous provider spawn errors must return through normal failure/rollback handling without terminating the MCP server. Parameterized permission-dependent tests use a runner API that supplies an actual test context. Windows native process identity and termination checks remain enabled; synthetic POSIX signals and permission bits are identified explicitly. Large generated PowerShell test probes run from temporary script files to avoid Windows command-line limits. A passing Linux fixture suite is not native Windows validation.
+
+Windows provider workers and their termination path must use the same handle-derived process start token. CIM timestamps are lower precision and may only be compared at their precision when discovering descendants; root identity checks retain the complete token and termination uses acquired process handles. Fake VM lifecycle tests must supply deterministic host capacity instead of depending on available developer RAM. Platform simulation must not change the OS used to verify real fixture child processes. Observation-budget tests isolate the budget clock rather than freezing native lock deadlines. Timers and MCP sessions belong to individual tests and are cleaned up even on assertion failure. Generated PowerShell probes must include complete helper definitions and avoid inheriting another PowerShell edition's module search path.
+
+
+Fixture regressions must traverse the provider command wrapper, including injected Windows launch arguments. Native termination races and persistence failures are injected at the exact termination or atomic-write boundary, preserving identity and successor-state assertions. Startup-exit tests deliver the exit during the readiness window deterministically rather than relying on host subprocess startup speed. Generated diagnostic regexes are compiled in portable tests; PowerShell block probes initialize the variables required by those blocks. A no-provider-discovery assertion distinguishes the current process identity lookup used for state locks from actual provider discovery.
+
+Routing-only tests use explicit provider wire fixtures for POSIX and Windows responses rather than invoking a host shell during setup. Lock-bypass tests retain the held-lock assertion while allowing native fixture startup within an ordinary observation budget; deadline-boundary behavior belongs to dedicated timing tests.
+
+Recording fixtures keep local destinations inside their per-test home using native path joining, including retry and cleanup scenarios. Guest Android `/sdcard` paths remain POSIX paths; local file assertions must not assume the host uses `/tmp`.
+
+Natural recorder exit fixtures wait for an explicit test release after public start succeeds, keeping real native identity capture enabled. Tests observe the inactive state with a bounded poll instead of assuming fixed startup/exit timing; fixture children have a bounded fallback lifetime and release on assertion failure.
+
+Smoke CLI timeout parsing is asserted at the provider spawn boundary with deterministic responses. Success/readiness cases use a normal bounded budget for real fixture children; dedicated timeout cases continue to exercise actual timeout enforcement and classification.

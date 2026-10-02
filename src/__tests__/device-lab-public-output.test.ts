@@ -260,13 +260,13 @@ describe("minimal public Device Lab output", () => {
                  name: "Minimal output fixture",
                 avdName: "Minimal_Fixture", port: 5580,
             });
-            const id = created.value.device.id;
+            const id = created.value.device.deviceId;
             expect(id).toEqual(expect.any(String));
             const list = await call("devices");
-            expect(list.value.some((device: { id: string }) => device.id === id)).toBe(true);
+            expect(list.value.some((device: { deviceId: string }) => device.deviceId === id)).toBe(true);
             const compact = await call("status", { deviceId: id });
             const detailed = await call("status", { deviceId: id, detail: true });
-            expect(compact.value.device.id).toBe(id);
+            expect(compact.value.device.deviceId).toBe(id);
             expect(compact.value.device).not.toHaveProperty("targetStatus");
             expect(detailed.value.device).toHaveProperty("targetStatus");
             expect(compact.text.length).toBeLessThan(detailed.text.length);

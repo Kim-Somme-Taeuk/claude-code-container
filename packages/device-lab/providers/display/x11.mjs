@@ -6,6 +6,9 @@ import { DISPLAY, ownerId } from "../context.mjs";
 import { fail, jsonResult, textResult } from "../responses.mjs";
 import { screenshotFileResult } from "../screenshot-file.mjs";
 import { withTargetStatus } from "../status.mjs";
+import { X11_WINDOW_LIST_COMMAND, parseX11WindowList } from "./window-list.mjs";
+
+import { desktopPointValid, desktopDragValid, X11_DRAG_COMMAND } from "./desktop-input.mjs";
 
 export function x11Available() {
     if (!existsSync("/usr/bin/xdotool") && !existsSync("/bin/xdotool")) return false;
@@ -31,6 +34,9 @@ export function currentDisplayTarget() {
             "device_type",
             "device_scroll",
             "device_cursor_position",
+            "device_window_list",
+            "device_drag",
+            "device_focus_window",
             "display_screenshot",
             "display_click",
             "display_double_click",
@@ -59,7 +65,27 @@ function cursorPositionPayload(stdout) {
 
 export async function handleDisplayTool(name, args) {
     switch (name) {
+        case "display_window_list": {
+            const result = runWithTimeout("bash", ["-c", X11_WINDOW_LIST_COMMAND], Math.min(args.helperTimeoutMs || 30000, 30000), { maxBuffer: 1024 * 1024 });
+            if (result.status !== 0) return fail(result);
+            try { return jsonResult(parseX11WindowList(result.stdout)); }
+            catch { return textResult(false, "window-list-invalid-result"); }
+        }
+        case "display_drag": {
+            if (!desktopDragValid(args)) return textResult(false, "invalid-drag-arguments");
+            const r = runWithTimeout("bash", ["-c", X11_DRAG_COMMAND, "ccc-drag", ...[args.x1, args.y1, args.x2, args.y2, args.durationMs ?? 700].map(String)], 15000);
+            return r.status === 0 ? jsonResult({ ok: true }) : fail(r);
+        }
+        case "display_focus_window": {
+            if (typeof args.handle !== "string" || !/^[1-9][0-9]{0,19}$/.test(args.handle)) return textResult(false, "invalid-window-handle");
+            const r = runWithTimeout("xdotool", ["windowactivate", "--sync", args.handle], 5000);
+            if (r.status !== 0) return fail(r);
+            const active = runWithTimeout("xdotool", ["getactivewindow"], 5000);
+            if (active.status !== 0) return fail(active);
+            return active.stdout.trim() === args.handle ? jsonResult({ ok: true }) : textResult(false, "window-focus-denied");
+        }
         case "display_move": {
+            if (!desktopPointValid(args.x, args.y)) return textResult(false, "invalid-pointer-coordinates");
             const r = run("xdotool", ["mousemove", String(args.x), String(args.y)]);
             return r.status === 0 ? jsonResult({ ok: true }) : fail(r);
         }

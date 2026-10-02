@@ -62,7 +62,7 @@ describe("device-lab transfer file boundaries", () => {
         stage.cleanup();
     });
 
-    it("rejects a replaced final destination link without changing its target", () => {
+    it("rejects a replaced final destination link without changing its target", (context) => {
         const root = tempRoot();
         const external = join(root, "external.bin");
         const destination = join(root, "download.bin");
@@ -74,7 +74,14 @@ describe("device-lab transfer file boundaries", () => {
         if (!stage.ok) return;
         const populated = populateLocalOutputStage(source, stage);
         expect(populated.ok).toBe(true);
-        symlinkSync(external, destination);
+        try { symlinkSync(external, destination); }
+        catch (error) {
+            stage.cleanup();
+            if (process.platform === "win32" && ["EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code || "")) {
+                context.skip(true, "Windows file symlinks require Developer Mode or privilege"); return;
+            }
+            throw error;
+        }
 
         expect(commitLocalOutputStage(stage)).toEqual(expect.objectContaining({ ok: false, error: "download-local-path-symlink-rejected" }));
         expect(readFileSync(external, "utf8")).toBe("external");

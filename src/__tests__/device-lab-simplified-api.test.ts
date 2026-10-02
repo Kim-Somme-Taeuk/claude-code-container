@@ -46,7 +46,7 @@ beforeEach(() => { fixture.calls = []; fixture.rpc = []; fixture.broken = false;
 describe("simplified public Device Lab API", () => {
     it("lists owned IDs in one inventory call and supports filtering without another probe", async () => {
         const result = await call("devices", { backend: "android-emulator" });
-        expect(parse(result)).toEqual([expect.objectContaining({ id: "phone" })]);
+        expect(parse(result)).toEqual([expect.objectContaining({ deviceId: "phone" })]);
         expect(fixture.rpc).toEqual(["broker.inventory"]);
         expect(validateDeviceLabToolOutput("devices", parse(result))).toEqual(parse(result));
     });
@@ -54,8 +54,9 @@ describe("simplified public Device Lab API", () => {
         const backends = await call("devices", { view: "backends", backend: "ios-simulator" });
         expect(parse(backends).backends).toEqual([expect.objectContaining({ name: "ios-simulator" })]);
         expect(fixture.rpc).toEqual(["broker.backends"]);
-        expect((await call("devices", { view: "available" })).isError).toBe(true);
-        expect(fixture.calls).toEqual([]);
+        const available = await call("devices", { view: "available" });
+        expect(available.isError).not.toBe(true);
+        expect(parse(available).backends).toHaveLength(8);
         await call("devices", { view: "available", backend: "android-emulator" });
         expect(fixture.calls.at(-1)).toMatchObject({ name: "device_inventory", args: { backend: "android-emulator" } });
     });
@@ -120,8 +121,8 @@ describe("simplified public Device Lab API", () => {
     });
     it("advertises the reduced unique catalog without removed aliases", () => {
         const names = TOOLS.map(tool => tool.name);
-        expect(names).toHaveLength(58);
-        expect(new Set(names).size).toBe(58);
+        expect(names).toHaveLength(59);
+        expect(new Set(names).size).toBe(59);
         for (const name of ["list_devices", "inventory", "backends", "base_image_create", "base_image_clone", "image_list", "image_import", "toggle_airplane_mode"]) {
             expect(names).not.toContain(name);
             expect(toolInputError(name, {})).toContain("Unknown tool");

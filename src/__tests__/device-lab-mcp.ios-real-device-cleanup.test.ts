@@ -17,11 +17,11 @@ function parseToolJson(result: { content?: unknown }) {
     return JSON.parse((((result.content as Array<{ text?: string }> | undefined) ?? [])[0]?.text ?? "{}")) as Record<string, unknown>;
 }
 
-function statePathFor(homeDir: string, device: DeviceRecord) {
+function statePathFor(homeDir: string, device: { ownerId: string }) {
     return join(homeDir, ".ccc", "devices", "owners", device.ownerId, "ios-device", "devices.json");
 }
 
-function leasePathFor(homeDir: string, device: DeviceRecord) {
+function leasePathFor(homeDir: string, device: { udid: string }) {
     return join(homeDir, ".ccc", "devices", "physical-leases", "ios-device", "locks", `${encodeURIComponent(device.udid)}.json`);
 }
 
@@ -44,10 +44,11 @@ async function attach(context: FakeIosMcpContext, deviceId: string, udid = "0000
         arguments: { backend: "ios-device", deviceId, name: deviceId, udid },
     });
     expect(result.isError, (result.content as Array<{ text?: string }>)[0]?.text).not.toBe(true);
-    return parseToolJson(result).device as DeviceRecord;
+    return parseToolJson(result).device as { deviceId: string; ownerId: string; udid: string };
 }
 
-describe("iOS physical runtime cleanup fencing", () => {
+// This fixture executes POSIX shell scripts; portable transport/contract tests remain active on Windows.
+describe.skipIf(process.platform === "win32")("iOS physical runtime cleanup fencing (POSIX fixture)", () => {
     let context: FakeIosMcpContext | undefined;
     let child: ChildProcess | undefined;
 
@@ -80,7 +81,7 @@ describe("iOS physical runtime cleanup fencing", () => {
         });
         const processIdentity = await waitForProcessIdentity(child.pid, 1000);
         expect(processIdentity).toBeTruthy();
-        const original = readDevice(statePath, attached.id).device;
+        const original = readDevice(statePath, attached.deviceId).device;
         const recording = {
             active: true,
             runtimeId: "ios-physical-recording-runtime",
@@ -93,12 +94,12 @@ describe("iOS physical runtime cleanup fencing", () => {
 
         const detached = await context.client.callTool({
             name: "detach",
-            arguments: { deviceId: attached.id },
+            arguments: { deviceId: attached.deviceId },
         });
         expect(detached.isError).toBe(true);
         expect((detached.content as Array<{ text?: string }>)[0]?.text).toContain("did not exit within 3000ms");
 
-        const preserved = readDevice(statePath, attached.id).device;
+        const preserved = readDevice(statePath, attached.deviceId).device;
         expect(preserved.recording).toEqual(recording);
         expect(preserved.lifecycle).toBeUndefined();
         expect(existsSync(leasePath)).toBe(true);
@@ -114,7 +115,7 @@ describe("iOS physical runtime cleanup fencing", () => {
         child = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore", windowsHide: true });
         const processIdentity = await waitForProcessIdentity(child.pid, 1000);
         expect(processIdentity).toBeTruthy();
-        const original = readDevice(statePath, attached.id).device;
+        const original = readDevice(statePath, attached.deviceId).device;
         const appium = {
             runtimeId: "ios-physical-appium-runtime",
             processOwner: "device-lab-mcp",
@@ -128,12 +129,12 @@ describe("iOS physical runtime cleanup fencing", () => {
 
         const stopped = await context.client.callTool({
             name: "stop",
-            arguments: { deviceId: attached.id },
+            arguments: { deviceId: attached.deviceId },
         });
         expect(stopped.isError).toBe(true);
         expect((stopped.content as Array<{ text?: string }>)[0]?.text).toContain("Appium metadata and physical lease were preserved for retry");
 
-        const preserved = readDevice(statePath, attached.id).device;
+        const preserved = readDevice(statePath, attached.deviceId).device;
         expect(preserved.appium).toEqual(appium);
         expect(preserved.lifecycle).toBeUndefined();
         expect(existsSync(leasePath)).toBe(true);
@@ -145,13 +146,13 @@ describe("iOS physical runtime cleanup fencing", () => {
         const attached = await attach(context, "ios-partial-cleanup");
         const statePath = statePathFor(context.homeDir, attached);
         const leasePath = leasePathFor(context.homeDir, attached);
-        const session = await context.client.callTool({ name: "ui", arguments: { deviceId: attached.id } });
+        const session = await context.client.callTool({ name: "ui", arguments: { deviceId: attached.deviceId } });
         expect(session.isError, (session.content as Array<{ text?: string }>)[0]?.text).not.toBe(true);
 
         child = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore", windowsHide: true });
         const recordingIdentity = await waitForProcessIdentity(child.pid, 1000);
         expect(recordingIdentity).toBeTruthy();
-        const original = readDevice(statePath, attached.id).device;
+        const original = readDevice(statePath, attached.deviceId).device;
         const appium = original.appium as Record<string, any>;
         const forgedAppium = {
             ...appium,
@@ -169,12 +170,12 @@ describe("iOS physical runtime cleanup fencing", () => {
 
         const stopped = await context.client.callTool({
             name: "stop",
-            arguments: { deviceId: attached.id },
+            arguments: { deviceId: attached.deviceId },
         });
         expect(stopped.isError).toBe(true);
         expect((stopped.content as Array<{ text?: string }>)[0]?.text).toContain("Appium metadata and physical lease were preserved for retry");
 
-        const preserved = readDevice(statePath, attached.id).device;
+        const preserved = readDevice(statePath, attached.deviceId).device;
         expect(preserved.status).toBe(original.status);
         expect(preserved.recording).toEqual(expect.objectContaining({
             ...recording,
@@ -192,10 +193,10 @@ describe("iOS physical runtime cleanup fencing", () => {
         const attached = await attach(context, "ios-cleanup-successor", "00008111-001C195E0E91801F");
         const statePath = statePathFor(context.homeDir, attached);
         const leasePath = leasePathFor(context.homeDir, attached);
-        const session = await context.client.callTool({ name: "ui", arguments: { deviceId: attached.id } });
+        const session = await context.client.callTool({ name: "ui", arguments: { deviceId: attached.deviceId } });
         expect(session.isError, (session.content as Array<{ text?: string }>)[0]?.text).not.toBe(true);
 
-        const currentState = readDevice(statePath, attached.id);
+        const currentState = readDevice(statePath, attached.deviceId);
         const successor = {
             ...currentState.device,
             name: "Concurrent successor",
@@ -204,17 +205,17 @@ describe("iOS physical runtime cleanup fencing", () => {
             updatedAt: new Date().toISOString(),
         };
         writeFileSync(join(context.homeDir, "fake-ios-real-state-conflict.json"), `${JSON.stringify({
-            devices: currentState.state.devices.map((item) => item.id === attached.id ? successor : item),
+            devices: currentState.state.devices.map((item) => item.id === attached.deviceId ? successor : item),
         }, null, 2)}\n`);
         writeFileSync(join(context.homeDir, "fake-ios-real-state-conflict-path"), statePath);
 
         const stopped = await context.client.callTool({
             name: "stop",
-            arguments: { deviceId: attached.id },
+            arguments: { deviceId: attached.deviceId },
         });
         expect(stopped.isError).toBe(true);
         expect((stopped.content as Array<{ text?: string }>)[0]?.text).toContain("owner-device-state-conflict");
-        expect(readDevice(statePath, attached.id).device).toEqual(successor);
+        expect(readDevice(statePath, attached.deviceId).device).toEqual(successor);
         expect(existsSync(leasePath)).toBe(true);
     });
 });

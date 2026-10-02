@@ -132,7 +132,8 @@ export function assertHyperVWindowsNetwork(device: any, expected = {
 export function assertHyperVWindowsDeleted(inventoryResponse: any, deleteResponse: any, deviceId: string): void {
     const inventory = resultValue(payload(inventoryResponse));
     assert.ok(Array.isArray(inventory?.devices), "post-delete inventory must contain devices");
-    assert.ok(!inventory.devices.some((device: any) => device?.id === deviceId), "deleted VM remains in inventory");
+    assert.ok(inventory.devices.every((device: any) => typeof device?.deviceId === "string" && device.deviceId), "post-delete inventory must identify every device");
+    assert.ok(!inventory.devices.some((device: any) => device?.deviceId === deviceId), "deleted VM remains in inventory");
     // This call deliberately exercises the public missing-device error contract.
     const missing = parseToolPayload({ ...deleteResponse, isError: false });
     assert.strictEqual(missing?.ok, false);
@@ -396,21 +397,21 @@ export async function cleanupPrevious(callTool: (tool: string, args: any) => Pro
     const inventory = resultValue(payload(await callTool("devices", { view: "available", detail: true, backend: "windows-vm" })));
     assert.ok(Array.isArray(inventory?.devices), "cleanup inventory must contain devices");
     const devices = inventory.devices;
-    for (const device of devices.filter((candidate: any) => String(candidate?.id || "").startsWith(DEVICE_PREFIX))) {
+    for (const device of devices.filter((candidate: any) => String(candidate?.deviceId || "").startsWith(DEVICE_PREFIX))) {
         try {
-            await callTool("stop", { detail: true, deviceId: device.id, incarnationId: device.incarnationId, force: true });
+            await callTool("stop", { detail: true, deviceId: device.deviceId, incarnationId: device.incarnationId, force: true });
         } catch {
             // Deletion is still attempted against the exact owner-scoped VM identity.
         }
         const deleted = await callTool("delete", { detail: true,
-            deviceId: device.id,
+            deviceId: device.deviceId,
             incarnationId: device.incarnationId,
             ...HYPER_V_WINDOWS_E2E_DELETE_OPTIONS,
         });
         const observed = parseToolPayload({ ...deleted, isError: false });
-        if (observed?.ok === false && observed.error === "device-not-found" && observed.deviceId === device.id) {
+        if (observed?.ok === false && observed.error === "device-not-found" && observed.deviceId === device.deviceId) {
             const freshInventory = await callTool("devices", { view: "available", detail: true, backend: "windows-vm" });
-            assertHyperVWindowsDeleted(freshInventory, deleted, device.id);
+            assertHyperVWindowsDeleted(freshInventory, deleted, device.deviceId);
         } else {
             payload(deleted);
         }
@@ -466,7 +467,7 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
             direct.incarnationId = createdDevice.incarnationId;
             createdVmId = String(createdDevice.vmId || "");
             created = true;
-            assert.strictEqual(createdDevice.id, deviceId);
+            assert.strictEqual(createdDevice.deviceId, deviceId);
             assert.strictEqual(createdDevice.guestProvisioned, true);
             assert.strictEqual(createdDevice.switchName, "CCC Device Lab");
             const networkAddress = assertHyperVWindowsNetwork(createdDevice);
@@ -477,7 +478,7 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
 
             currentStep = "inventory VM";
             const inventory = resultValue(payload(await callTool("devices", { view: "available", detail: true, backend: "windows-vm" })));
-            assert.ok(Array.isArray(inventory.devices) && inventory.devices.some((device: any) => device.id === deviceId));
+            assert.ok(Array.isArray(inventory.devices) && inventory.devices.some((device: any) => device.deviceId === deviceId));
 
             currentStep = "start and wait for PowerShell Direct";
             const stopConsoleTimeline = scheduleHyperVWindowsConsoleTimeline({
@@ -517,7 +518,7 @@ export async function runHyperVWindowsVmE2E(options: any = {}) {
 
             currentStep = "read VM status";
             const status = lifecycleDevice(payload(await callTool("status", { detail: true, ...direct })), "status");
-            assert.strictEqual(status.id, deviceId);
+            assert.strictEqual(status.deviceId, deviceId);
             assert.strictEqual(status.status, "running");
 
             currentStep = "execute guest command";

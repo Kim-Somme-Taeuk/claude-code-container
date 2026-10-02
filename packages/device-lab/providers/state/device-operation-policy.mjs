@@ -62,7 +62,7 @@ const OPERATION_TOOLS = new Map([
     ["windows", new Set([
         "device_create", "device_delete", "device_start", "device_stop",
         "device_exec", "device_screenshot", "device_click", "device_double_click",
-        "device_key", "device_type", "device_scroll", "device_cursor_position",
+        "device_key", "device_type", "device_scroll", "device_cursor_position", "device_drag", "device_focus_window",
         "device_window_list", "device_accessibility_snapshot",
         "device_record_video_start", "device_record_video_stop", "device_upload", "device_download",
     ])],
@@ -70,14 +70,14 @@ const OPERATION_TOOLS = new Map([
         "device_create", "device_delete", "device_start", "device_stop", "device_reboot",
         "device_exec", "device_upload", "device_download",
         "device_screenshot", "device_click", "device_double_click", "device_key",
-        "device_type", "device_scroll", "device_cursor_position",
+        "device_type", "device_scroll", "device_cursor_position", "device_drag", "device_focus_window",
         "device_snapshot_list", "device_snapshot_create", "device_snapshot_restore", "device_snapshot_delete",
     ])],
     ["linux-vm", new Set([
         "device_create", "device_delete", "device_start", "device_stop", "device_reboot",
         "device_exec", "device_upload", "device_download",
         "device_screenshot", "device_click", "device_double_click", "device_key",
-        "device_type", "device_scroll", "device_cursor_position",
+        "device_type", "device_scroll", "device_cursor_position", "device_drag", "device_focus_window",
         "device_snapshot_list", "device_snapshot_create", "device_snapshot_restore", "device_snapshot_delete",
     ])],
     ["macos", new Set([
@@ -86,7 +86,7 @@ const OPERATION_TOOLS = new Map([
         "device_snapshot_create", "device_snapshot_restore", "device_snapshot_delete",
         "device_exec", "device_upload", "device_download", "device_screenshot",
         "device_click", "device_double_click", "device_key", "device_type", "device_scroll",
-        "device_cursor_position", "device_window_list", "device_accessibility_snapshot",
+        "device_cursor_position", "device_drag", "device_focus_window", "device_window_list", "device_accessibility_snapshot",
         "device_record_video_start", "device_record_video_stop",
     ])],
 ]);

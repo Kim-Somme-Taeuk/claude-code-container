@@ -18,10 +18,11 @@ describe("public Device Lab tool guidance", () => {
     afterAll(async () => { await cleanupDeviceLabMcpTestContext(context); });
 
     it("advertises unique unprefixed names within the catalog byte budget", () => {
-        expect(tools).toHaveLength(58);
+        expect(tools).toHaveLength(59);
         expect(new Set(tools.map(tool => tool.name)).size).toBe(tools.length);
         expect(tools.every(tool => !/^(device_|mobile_|display_)/.test(tool.name))).toBe(true);
-        expect(Buffer.byteLength(JSON.stringify(tools), "utf8")).toBeLessThan(45579);
+        // Includes explicit closed-object schemas on every public tool.
+        expect(Buffer.byteLength(JSON.stringify(tools), "utf8")).toBeLessThan(52000);
     });
 
     it("distinguishes owned targets, backend readiness, and candidates through view", () => {
@@ -29,7 +30,7 @@ describe("public Device Lab tool guidance", () => {
         expect(description("devices")).toMatch(/available.*backend/);
         expect(description("devices")).toMatch(/backend readiness/);
         expect((tool("devices").inputSchema as any).properties.view.enum).toEqual(["owned", "available", "backends"]);
-        expect((tool("devices").inputSchema as any).allOf[0].then.required).toEqual(["backend"]);
+        expect((tool("devices").inputSchema as any).allOf[0].then.required).toBeUndefined();
     });
 
     it("separates definition creation, startup, and physical attachment", () => {
@@ -46,10 +47,11 @@ describe("public Device Lab tool guidance", () => {
     it("identifies creation platforms, mobile app IDs, permissions and battery controls", () => {
         const guidance = (name: string, field: string) => {
             const schema = tool(name).inputSchema as any;
-            const properties = Object.assign({}, schema.properties, ...(schema.oneOf || []).map((branch: any) => branch.properties));
+            const properties = structuredClone(schema.properties);
+            for (const branch of schema.oneOf || []) for (const [key, value] of Object.entries(branch.properties || {})) properties[key] = { ...properties[key], ...(value as object) };
             return (properties[field].description || "").toLowerCase();
         };
-        expect(guidance("create_macos_vm", "image")).toMatch(/macos.*ssh/);
+        expect(guidance("create_macos_vm", "image")).toMatch(/(?:macos|tart).*ssh/);
         expect(guidance("create_linux_vm", "sourceImage")).toMatch(/hyper-v.*qemu/);
         expect(guidance("create_windows_vm", "sourceImage")).not.toMatch(/macos|qemu/);
         for (const name of ["launch_app", "uninstall_app", "stop_app", "wait_for_app"]) {
@@ -87,16 +89,17 @@ describe("public Device Lab tool guidance", () => {
         expect(description("status")).toMatch(/optional|not required|not needed|do not require/);
     });
 
-    it.each(["start", "reboot"])("%s explains waitForBoot polarity without claiming a universal default", (name) => {
+    it.each(["start", "reboot"])("%s explains waitForBoot polarity and default readiness", (name) => {
         const schema = tool(name).inputSchema as any;
-            const properties = Object.assign({}, schema.properties, ...(schema.oneOf || []).map((branch: any) => branch.properties));
+            const properties = structuredClone(schema.properties);
+            for (const branch of schema.oneOf || []) for (const [key, value] of Object.entries(branch.properties || {})) properties[key] = { ...properties[key], ...(value as object) };
         const guidance = properties.waitForBoot.description!.toLowerCase();
         expect(guidance).toMatch(/false[^.;]*(skip|disable)|(?:skip|disable)[^.;]*false/);
         expect(guidance).toMatch(/linux-vm/);
         expect(guidance).toMatch(/windows-vm/);
         expect(guidance).toMatch(/reject|require|must/);
         expect(guidance).not.toMatch(/^skip the boot-readiness wait/);
-        expect(guidance).not.toMatch(/defaults? to true[.;]|defaults? to false[.;]/);
+        expect(guidance).toMatch(/defaults? to true[.;]/);
     });
 
     it.each(["run_flow"])("%s explains static arguments, viewable images, and unmet waits", (name) => {

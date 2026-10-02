@@ -44,7 +44,7 @@ describe("flow output before diagnostic bounds", () => {
             const created = value(await context.client.callTool({ name: "create_android_emulator", arguments: {
                  name: "Flow images", avdName: "Flow", port: 5582,
             } }));
-            const screenshot = { tool: "screenshot", arguments: { deviceId: created.device.id, implicitBroker: false } };
+            const screenshot = { tool: "screenshot", arguments: { deviceId: created.device.deviceId, implicitBroker: false } };
             for (const detail of [false, true]) {
                 const response: any = await context.client.callTool({ name, arguments: { detail, steps: [screenshot, screenshot] } });
                 expect(response.isError).toBe(false);
@@ -97,13 +97,15 @@ describe("flow output before diagnostic bounds", () => {
         const context = await createFakeAndroidMcpContext();
         try {
             const adb = join(context.binDir, "adb");
-            writeFileSync(adb, readFileSync(adb, "utf8").replaceAll(
-                "printf '%s\\n' '<hierarchy><node text=\"Hello\" resource-id=\"com.example:id/title\"/></hierarchy>'",
-                '/bin/cat "$HOME/flow-ui.xml"'));
+            const original = readFileSync(adb, "utf8");
+            const observation = "console.log('<hierarchy><node text=\"Hello\" resource-id=\"com.example:id/title\"/></hierarchy>')";
+            expect(original).toContain(observation);
+            writeFileSync(adb, original.replaceAll(observation,
+                "process.stdout.write(fs.readFileSync(path.join(process.env.HOME, 'flow-ui.xml'), 'utf8'))"));
             const created = value(await context.client.callTool({ name: "create_android_emulator", arguments: {
                  name: "Flow", avdName: "Flow", port: 5582,
             } }));
-            const deviceId = created.device.id;
+            const deviceId = created.device.deviceId;
             const steps = [
                 { tool: "wait_for_text", label: "large observation", arguments: { deviceId, text: "Hello", implicitBroker: false, timeoutMs: 1000 } },
                 { tool: "key", label: "actual failure", arguments: { deviceId, implicitBroker: false } },
@@ -266,7 +268,7 @@ describe.each(["run_flow"])("%s native observations", (name) => {
 
     it("omits native references for text-only results and marks an unmet wait as a flow error", async () => {
         nativeFixture.result = { isError: false, content: [{ type: "text", text: '{"found":false}' }] };
-        const result = await nativeCall(name, { steps: [{ tool: "wait_for_text", arguments: { ...nativeStep.arguments, text: "needle" } }, nativeStep] });
+        const result = await nativeCall(name, { steps: [{ tool: "wait_for_text", arguments: { deviceId: "native-flow", implicitBroker: false, text: "needle" } }, nativeStep] });
         expect(result.isError).toBe(true);
         expect(result.content).toHaveLength(1);
         expect(value(result).results[0]).not.toHaveProperty("contentIndex");

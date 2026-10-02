@@ -1,6 +1,7 @@
+import { fileSymlinkOrSkip } from "./helpers/file-symlink-fixture.js";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
-import { dirname, join } from "path";
+import { basename, dirname, join, resolve } from "path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
     createLab,
@@ -40,7 +41,7 @@ describe("device-lab Linux VM container-QEMU provider", () => {
     it("refuses lab creation and image import where the container cannot run nested VMs", () => {
         const root = tempRoot();
         const env = { CCC_LAB_RUNNER: "1", CCC_LAB_RUNNER_STATUS: "unsupported", CCC_LAB_RUNNER_UNSUPPORTED_REASON: "no nested VMs here" };
-        const source = join(root, "..", `${root.split("/").pop()}-source.qcow2`);
+        const source = join(root, "..", `${basename(root)}-source.qcow2`);
         writeFileSync(source, "QFI\xfb");
         roots.push(source);
 
@@ -236,15 +237,10 @@ describe("device-lab Linux VM container-QEMU provider", () => {
             ok: false,
             error: "source-image-ancestor-not-directory",
         }));
-        symlinkSync(raw, join(root, "incoming", "link.qcow2"));
-        expect(importImage({ name: "Link", sourcePath: "incoming/link.qcow2" }, { env, stateRoot: root })).toEqual(expect.objectContaining({
-            ok: false,
-            error: "source-image-symlink-rejected",
-        }));
         const outsideDir = mkdtempSync(join(tmpdir(), "ccc-lab-outside-images-"));
         roots.push(outsideDir);
         writeFileSync(join(outsideDir, "parent-link.qcow2"), "outside");
-        symlinkSync(outsideDir, join(root, "incoming", "outside-link"));
+        symlinkSync(outsideDir, join(root, "incoming", "outside-link"), process.platform === "win32" ? "junction" : "dir");
         expect(importImage({ name: "Parent Link", sourcePath: "incoming/outside-link/parent-link.qcow2" }, { env, stateRoot: root })).toEqual(expect.objectContaining({
             ok: false,
             error: "source-image-symlink-ancestor-rejected",
@@ -304,6 +300,33 @@ describe("device-lab Linux VM container-QEMU provider", () => {
         });
     });
 
+    it("rejects a linked image source", (context) => {
+        const root = tempRoot(), env = { CCC_PROFILE: "image-link" };
+        mkdirSync(join(root, "incoming"), { recursive: true });
+        const raw = join(root, "incoming", "disk.raw");
+        writeFileSync(raw, "raw-image");
+        fileSymlinkOrSkip(context, raw, join(root, "incoming", "link.qcow2"));
+        expect(importImage({ name: "Link", sourcePath: "incoming/link.qcow2" }, { env, stateRoot: root })).toEqual(expect.objectContaining({
+            ok: false,
+            error: "source-image-symlink-rejected",
+        }));
+    });
+
+    it("rejects a catalog backing file replaced with a link", (context) => {
+        const root = tempRoot(), env = { CCC_PROFILE: "image-revalidate-link" };
+        mkdirSync(join(root, "incoming"), { recursive: true });
+        const source = join(root, "incoming", "base.qcow2");
+        writeFileSync(source, "base");
+        expect(importImage({ name: "Base", sourcePath: "incoming/base.qcow2", copy: false }, { env, stateRoot: root }).ok).toBe(true);
+        rmSync(source);
+        fileSymlinkOrSkip(context, join(root, "outside.qcow2"), source);
+        expect(createLab({ name: "From Stale Base", baseImageId: "base" }, { env, stateRoot: root })).toEqual(expect.objectContaining({
+            ok: false,
+            error: "base-image-symlink-rejected",
+        }));
+        rmSync(source);
+    });
+
     it("revalidates catalog backing files before creating labs from base images", () => {
         const root = tempRoot();
         const env = { CCC_PROFILE: "image-revalidate" };
@@ -313,12 +336,6 @@ describe("device-lab Linux VM container-QEMU provider", () => {
         const imported = importImage({ name: "Base", sourcePath: "incoming/base.qcow2", copy: false }, { env, stateRoot: root });
         expect(imported.ok).toBe(true);
 
-        rmSync(source);
-        symlinkSync("/tmp/outside.qcow2", source);
-        expect(createLab({ name: "From Stale Base", baseImageId: "base" }, { env, stateRoot: root })).toEqual(expect.objectContaining({
-            ok: false,
-            error: "base-image-symlink-rejected",
-        }));
         rmSync(source);
         rmSync(join(root, "incoming"), { recursive: true, force: true });
         expect(createLab({ name: "From Missing Parent", baseImageId: "base" }, { env, stateRoot: root })).toEqual(expect.objectContaining({
@@ -629,6 +646,46 @@ describe("device-lab Linux VM container-QEMU provider", () => {
         });
     });
 
+    it("rejects final disk links before start or snapshot", (context) => {
+        const root = tempRoot();
+        const env = {
+            CCC_PROFILE: "materialize-symlink",
+            CCC_LAB_RUNNER: "1",
+            CCC_LAB_RUNNER_STATUS: "ready",
+        };
+        mkdirSync(join(root, "images"), { recursive: true });
+        writeFileSync(join(root, "images", "base.qcow2"), "base");
+        const created = createLab({ name: "Materialize Symlink VM", sourceImage: "images/base.qcow2" }, { env, stateRoot: root });
+        expect(created.ok).toBe(true);
+        const outsideDir = mkdtempSync(join(tmpdir(), "ccc-lab-outside-disks-"));
+        roots.push(outsideDir);
+        rmSync(dirname(created.lab.image.diskImage), { recursive: true, force: true });
+        mkdirSync(dirname(created.lab.image.diskImage), { recursive: true });
+        fileSymlinkOrSkip(context, join(outsideDir, "root.qcow2"), created.lab.image.diskImage);
+        const expectedFinal = {
+            ok: false,
+            error: "disk-image-symlink-rejected",
+            diskImage: created.lab.image.diskImage,
+        };
+        expect(startLab({ labId: "materialize-symlink-vm" }, {
+            env,
+            stateRoot: root,
+            qemuImgPath: "/usr/bin/qemu-img",
+            qemuPath: "/usr/bin/qemu-system-x86_64",
+            kvmAvailable: true,
+            commandRunner: () => ({ ok: true, pid: 1234 }),
+        })).toEqual(expectedFinal);
+        expect(snapshotLab("create", { labId: "materialize-symlink-vm", snapshotName: "unsafe" }, {
+            env,
+            stateRoot: root,
+            qemuImgPath: "/usr/bin/qemu-img",
+        })).toEqual({
+            ok: false,
+            error: "qemu-img-snapshot-failed",
+            result: expectedFinal,
+        });
+    });
+
     it("rejects disk symlink escapes before materialize, start, or snapshot", () => {
         const root = tempRoot();
         const env = {
@@ -643,7 +700,7 @@ describe("device-lab Linux VM container-QEMU provider", () => {
         const outsideDir = mkdtempSync(join(tmpdir(), "ccc-lab-outside-disks-"));
         roots.push(outsideDir);
         rmSync(dirname(created.lab.image.diskImage), { recursive: true, force: true });
-        symlinkSync(outsideDir, dirname(created.lab.image.diskImage));
+        symlinkSync(outsideDir, dirname(created.lab.image.diskImage), process.platform === "win32" ? "junction" : "dir");
 
         const expectedAncestor = {
             ok: false,
@@ -667,31 +724,7 @@ describe("device-lab Linux VM container-QEMU provider", () => {
             commandRunner: () => ({ ok: true, pid: 1234 }),
         })).toEqual(expectedAncestor);
 
-        rmSync(dirname(created.lab.image.diskImage), { force: true });
-        mkdirSync(dirname(created.lab.image.diskImage), { recursive: true });
-        symlinkSync(join(outsideDir, "root.qcow2"), created.lab.image.diskImage);
-        const expectedFinal = {
-            ok: false,
-            error: "disk-image-symlink-rejected",
-            diskImage: created.lab.image.diskImage,
-        };
-        expect(startLab({ labId: "materialize-symlink-vm" }, {
-            env,
-            stateRoot: root,
-            qemuImgPath: "/usr/bin/qemu-img",
-            qemuPath: "/usr/bin/qemu-system-x86_64",
-            kvmAvailable: true,
-            commandRunner: () => ({ ok: true, pid: 1234 }),
-        })).toEqual(expectedFinal);
-        expect(snapshotLab("create", { labId: "materialize-symlink-vm", snapshotName: "unsafe" }, {
-            env,
-            stateRoot: root,
-            qemuImgPath: "/usr/bin/qemu-img",
-        })).toEqual({
-            ok: false,
-            error: "qemu-img-snapshot-failed",
-            result: expectedFinal,
-        });
+
     });
 
     it("sanitizes provider runner failure details before returning start errors", () => {
@@ -1944,6 +1977,19 @@ describe("device-lab Linux VM container-QEMU provider", () => {
         expect(JSON.stringify(tampered)).not.toContain(otherKeyPath);
     });
 
+    it("rejects a linked guest SSH key", (context) => {
+        const root = tempRoot(), env = { CCC_PROFILE: "ssh-key-link" };
+        const ownerRoot = join(root, "owners", ownerId(env));
+        mkdirSync(join(ownerRoot, "keys"), { recursive: true });
+        const keyPath = join(ownerRoot, "keys", "id_ed25519");
+        writeFileSync(keyPath, "private-key");
+        fileSymlinkOrSkip(context, keyPath, join(ownerRoot, "keys", "linked"));
+        expect(createLab({ name: "Link Key", guestSshHost: "127.0.0.1", guestSshUser: "ccc", guestSshKeyPath: join(ownerRoot, "keys", "linked") }, { env, stateRoot: root })).toEqual(expect.objectContaining({
+            ok: false,
+            error: "guest-ssh-key-symlink-rejected",
+        }));
+    });
+
     it("validates bounded guest SSH metadata before creating labs", () => {
         const root = tempRoot();
         const env = { CCC_PROFILE: "ssh-policy" };
@@ -1951,7 +1997,6 @@ describe("device-lab Linux VM container-QEMU provider", () => {
         mkdirSync(join(ownerRoot, "keys"), { recursive: true });
         const keyPath = join(ownerRoot, "keys", "id_ed25519");
         writeFileSync(keyPath, "private-key");
-        symlinkSync(keyPath, join(ownerRoot, "keys", "linked"));
         const otherEnv = { CCC_PROFILE: "ssh-other" };
         const otherOwnerRoot = join(root, "owners", ownerId(otherEnv));
         mkdirSync(join(otherOwnerRoot, "keys"), { recursive: true });
@@ -1990,10 +2035,6 @@ describe("device-lab Linux VM container-QEMU provider", () => {
             ok: false,
             error: "guest-ssh-key-path-outside-owner-scope",
         });
-        expect(createLab({ name: "Link Key", guestSshHost: "127.0.0.1", guestSshUser: "ccc", guestSshKeyPath: join(ownerRoot, "keys", "linked") }, { env, stateRoot: root })).toEqual(expect.objectContaining({
-            ok: false,
-            error: "guest-ssh-key-symlink-rejected",
-        }));
         const missing = createLab({ name: "Missing Key", guestSshHost: "127.0.0.1", guestSshUser: "ccc", guestSshKeyPath: join(ownerRoot, "keys", "missing") }, { env, stateRoot: root });
         expect(missing).toEqual({ ok: false, error: "guest-ssh-key-not-found" });
         expect(JSON.stringify(missing)).not.toContain(ownerRoot);
@@ -2517,7 +2558,7 @@ describe("device-lab Linux VM container-QEMU provider", () => {
         })).toEqual(expect.objectContaining({
             ok: false,
             error: "guest-pull-destination-outside-artifacts",
-            destinationPath: "/tmp/export",
+            destinationPath: resolve("/tmp/export"),
         }));
 
         const failedPush = guestPush({ labId: "guest-policy-vm", sourcePath: workspace, guestPath: "/workspace/fail" }, {
@@ -2571,7 +2612,7 @@ describe("device-lab Linux VM container-QEMU provider", () => {
         const outside = mkdtempSync(join(tmpdir(), "ccc-lab-guest-pull-outside-"));
         roots.push(outside);
         mkdirSync(join(started.lab.paths.artifactsDir), { recursive: true });
-        symlinkSync(outside, join(started.lab.paths.artifactsDir, "link"));
+        symlinkSync(outside, join(started.lab.paths.artifactsDir, "link"), process.platform === "win32" ? "junction" : "dir");
         expect(guestPull({ labId: "guest-policy-vm", guestPath: "/artifacts/run", destinationPath: "link/out" }, {
             env,
             stateRoot: root,
@@ -2659,7 +2700,23 @@ describe("device-lab Linux VM container-QEMU provider", () => {
         }));
     });
 
-    it("rejects symlinks and secret-looking filenames before workspace sync", () => {
+    it("rejects file symlinks before workspace sync", (context) => {
+        const root = tempRoot();
+        const workspace = mkdtempSync(join(tmpdir(), "ccc-lab-linked-workspace-"));
+        roots.push(workspace);
+        const env = { CCC_PROFILE: "secret" };
+        createLab({ name: "Secret VM" }, { env, stateRoot: root });
+        writeFileSync(join(workspace, "target.txt"), "target");
+        fileSymlinkOrSkip(context, join(workspace, "target.txt"), join(workspace, "link.txt"));
+        const link = syncWorkspace({ labId: "secret-vm", sourcePath: workspace }, {
+            env,
+            stateRoot: root,
+            allowedWorkspaceRoots: [workspace],
+        });
+        expect(link).toEqual(expect.objectContaining({ ok: false, error: "copy-source-symlink-rejected", path: "link.txt" }));
+    });
+
+    it("rejects secret-looking filenames before workspace sync", () => {
         const root = tempRoot();
         const workspace = mkdtempSync(join(tmpdir(), "ccc-lab-secret-workspace-"));
         roots.push(workspace);
@@ -2674,15 +2731,7 @@ describe("device-lab Linux VM container-QEMU provider", () => {
         });
         expect(secret).toEqual(expect.objectContaining({ ok: false, error: "copy-source-secret-looking-file", path: ".env" }));
 
-        rmSync(join(workspace, ".env"));
-        writeFileSync(join(workspace, "target.txt"), "target");
-        symlinkSync(join(workspace, "target.txt"), join(workspace, "link.txt"));
-        const link = syncWorkspace({ labId: "secret-vm", sourcePath: workspace }, {
-            env,
-            stateRoot: root,
-            allowedWorkspaceRoots: [workspace],
-        });
-        expect(link).toEqual(expect.objectContaining({ ok: false, error: "copy-source-symlink-rejected", path: "link.txt" }));
+
     });
 
     it("rejects secret content before workspace sync and guest push", () => {
@@ -2824,7 +2873,7 @@ describe("device-lab Linux VM container-QEMU provider", () => {
         expect(destination).toEqual(expect.objectContaining({
             ok: false,
             error: "artifact-destination-outside-allowed-roots",
-            destinationPath: "/tmp/export",
+            destinationPath: resolve("/tmp/export"),
         }));
 
         const otherOwner = join(root, "owners", "other-owner", "exports", "artifact-policy-vm");

@@ -1,8 +1,4 @@
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 const fixture = vi.hoisted(() => ({ handlers: [] as any[], calls: [] as any[], stdout: "", status: 0, duplicate: false, inventoryCalls: 0 }));
 vi.mock("@modelcontextprotocol/sdk/server/index.js", () => ({ Server: class {
     setRequestHandler(_schema: unknown, handler: unknown) { fixture.handlers.push(handler); }
@@ -36,21 +32,14 @@ vi.mock("../../device-lab-mcp/src/broker.mjs", async original => ({
     brokerDeviceTool: async (args: any) => ({ ok: true, result: { mcpResult: execution(args.tool, args) } }),
 }));
 import { startServer } from "../../device-lab-mcp/src/server.mjs";
-import { buildListFilesCommand } from "@ccc/device-lab/providers/file-listing.mjs";
 const call = (args: any) => fixture.handlers[1]({ params: { name: "list_files", arguments: args } });
-let root: string;
-let output: string;
-beforeAll(async () => {
-    root = mkdtempSync(join(tmpdir(), "ccc-list-files-route-"));
-    writeFileSync(join(root, "hello.txt"), "hello");
-    const result = spawnSync("/bin/sh", ["-c", buildListFilesCommand("linux-vm", { deviceId: "qemu", path: root })], { encoding: "utf8", timeout: 5000 });
-    expect(result.status, result.stderr).toBe(0); output = result.stdout;
-    await startServer();
-});
-afterAll(() => rmSync(root, { recursive: true, force: true }));
+// Routing consumes provider output; command execution is covered by list-files.test.ts.
+const output = ["CCC-LIST-V1", "file", "5", "hello.txt", "END", "0", ""].join("\0");
+beforeAll(async () => { await startServer(); });
 beforeEach(() => { fixture.calls.length = 0; fixture.stdout = output; fixture.status = 0; fixture.duplicate = false; fixture.inventoryCalls = 0; });
 describe("public list_files routing", () => {
     it.each(["phone", "mac", "sandbox", "qemu"])("uses owned %s transport and returns only directory data", async deviceId => {
+        if (deviceId === "sandbox") fixture.stdout = JSON.stringify({ entries: [{ name: "hello.txt", type: "file", size: 5 }] });
         const result = await call({ deviceId, path: deviceId === "sandbox" ? "C:\\work" : "/work", implicitBroker: false });
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         expect(JSON.parse(result.content[0].text)).toEqual({ entries: [{ name: "hello.txt", type: "file", size: 5 }] });

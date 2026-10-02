@@ -1,3 +1,5 @@
+import { canonicalWindowsPowerShellPath } from "@ccc/device-lab/windows-system-powershell.js";
+import { directorySymlink } from "./helpers/file-symlink-fixture.js";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -689,19 +691,26 @@ describe("Hyper-V host setup CLI", () => {
         const fakePowerShell = join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
         mkdirSync(join(root, "System32", "WindowsPowerShell", "v1.0"), { recursive: true });
         writeFileSync(fakePowerShell, "repository-controlled fake");
+        const trustedPowerShell = canonicalWindowsPowerShellPath();
         const originalSystemRoot = process.env.SystemRoot;
         const originalWindir = process.env.WINDIR;
         process.env.SystemRoot = root;
         process.env.WINDIR = root;
-        const runner = vi.fn();
+        const runner = vi.fn(() => ({ command: trustedPowerShell || "", status: 1, stdout: "", stderr: "fixture refuses execution" }));
         try {
             const result = await setupHyperVHost(true, {
                 platform: "win32",
                 stateRoot: join(root, "state"),
                 commandRunner: runner,
             });
-            expect(result).toEqual({ ok: false, text: "CCC Hyper-V setup failed: PowerShell was not found." });
-            expect(runner).not.toHaveBeenCalled();
+            expect(result.ok).toBe(false);
+            if (trustedPowerShell) {
+                expect(runner).toHaveBeenCalledWith(trustedPowerShell, expect.any(Array), expect.any(Number), expect.any(String));
+                expect(trustedPowerShell).not.toBe(fakePowerShell);
+            } else {
+                expect(result).toEqual({ ok: false, text: "CCC Hyper-V setup failed: PowerShell was not found." });
+                expect(runner).not.toHaveBeenCalled();
+            }
         } finally {
             if (originalSystemRoot === undefined) delete process.env.SystemRoot;
             else process.env.SystemRoot = originalSystemRoot;
@@ -716,7 +725,7 @@ describe("Hyper-V host setup CLI", () => {
         const linked = join(parent, "linked");
         roots.push(parent);
         mkdirSync(target, { recursive: true });
-        symlinkSync(target, linked, "dir");
+        directorySymlink(target, linked);
         const runner = vi.fn();
 
         const result = await setupHyperVHost(true, { platform: "win32", powershell: "powershell.exe", stateRoot: linked, commandRunner: runner });

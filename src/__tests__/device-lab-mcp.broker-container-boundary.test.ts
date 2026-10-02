@@ -301,6 +301,7 @@ describe("authenticated RPC generation check for a loopback-forwarded broker", (
     });
 });
 
+// Linux /proc descriptor-link fixtures require POSIX link targets and permissions.
 describe("container loopback listener inspection", () => {
     const LISTEN_17373_V4 = "   1: 0100007F:43DD 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 55555 1 0000000000000000 100 0 0 10 0";
     const ESTABLISHED_17373_V4 = "   2: 0100007F:43DD 0100007F:9C40 01 00000000:00000000 00:00000000 00000000  1001        0 66666 1 0000000000000000 100 0 0 10 0";
@@ -338,13 +339,13 @@ describe("container loopback listener inspection", () => {
 
     const inspect = (port = 17373) => inspectLocalLoopbackListenerForTest(port, { platform: "linux", procRoot });
 
-    it("reports no listener when only other ports or non-LISTEN sockets use the port", () => {
+    it.skipIf(process.platform === "win32")("reports no listener when only other ports or non-LISTEN sockets use the port", () => {
         writeTable("tcp", [LISTEN_OTHER_V4, ESTABLISHED_17373_V4]);
         addProcess(100, ["44444", "66666"]);
         expect(inspect()).toEqual({ state: "absent", port: 17373 });
     });
 
-    it("finds the visible process that holds the listening socket, over IPv4 or IPv6", () => {
+    it.skipIf(process.platform === "win32")("finds the visible process that holds the listening socket, over IPv4 or IPv6", () => {
         writeTable("tcp", [LISTEN_17373_V4]);
         addProcess(100, ["12345"]);
         addProcess(101, ["55555"]);
@@ -356,13 +357,13 @@ describe("container loopback listener inspection", () => {
         expect(inspect()).toEqual(expect.objectContaining({ state: "visible-owner", pid: 102 }));
     });
 
-    it("places a listener nobody here holds outside the PID namespace", () => {
+    it.skipIf(process.platform === "win32")("places a listener nobody here holds outside the PID namespace", () => {
         writeTable("tcp", [LISTEN_17373_V4]);
         addProcess(100, ["12345"]);
         expect(inspect()).toEqual({ state: "outside-pid-namespace", port: 17373, inodes: ["55555"] });
     });
 
-    it.skipIf(process.getuid?.() === 0)("stays indeterminate when a live process's descriptors cannot be read", () => {
+    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("stays indeterminate when a live process's descriptors cannot be read", () => {
         writeTable("tcp", [LISTEN_17373_V4]);
         addProcess(100, ["12345"]);
         addProcess(200, []);
@@ -370,21 +371,21 @@ describe("container loopback listener inspection", () => {
         expect(inspect()).toEqual({ state: "indeterminate", port: 17373, inodes: ["55555"], uninspectablePids: [200] });
     });
 
-    it.skipIf(process.getuid?.() === 0)("ignores zombies, which keep a /proc entry but hold no descriptors", () => {
+    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("ignores zombies, which keep a /proc entry but hold no descriptors", () => {
         writeTable("tcp", [LISTEN_17373_V4]);
         addProcess(300, [], "Z");
         chmodSync(join(procRoot, "300", "fd"), 0);
         expect(inspect()).toEqual({ state: "outside-pid-namespace", port: 17373, inodes: ["55555"] });
     });
 
-    it.skipIf(process.getuid?.() === 0)("does not skip a Z leader whose other threads still run and hold its descriptors", () => {
+    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("does not skip a Z leader whose other threads still run and hold its descriptors", () => {
         writeTable("tcp", [LISTEN_17373_V4]);
         addProcess(310, ["55555"], "Z", [310, 311]);
         chmodSync(join(procRoot, "310", "fd"), 0);
         expect(inspect()).toEqual({ state: "indeterminate", port: 17373, inodes: ["55555"], uninspectablePids: [310] });
     });
 
-    it.skipIf(process.getuid?.() === 0)("stays indeterminate when a descriptor link cannot be read", () => {
+    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("stays indeterminate when a descriptor link cannot be read", () => {
         writeTable("tcp", [LISTEN_17373_V4]);
         addProcess(400, ["55555"]);
         // Listing works without search permission, but resolving a link inside it does not.
@@ -392,7 +393,7 @@ describe("container loopback listener inspection", () => {
         expect(inspect()).toEqual({ state: "indeterminate", port: 17373, inodes: ["55555"], uninspectablePids: [400] });
     });
 
-    it("finds a socket held only in a non-leader thread's private fd table", () => {
+    it.skipIf(process.platform === "win32")("finds a socket held only in a non-leader thread's private fd table", () => {
         writeTable("tcp", [LISTEN_17373_V4]);
         addProcess(500, ["12345"], "S", [500, 501]);
         const threadFds = join(procRoot, "500", "task", "501", "fd");
@@ -401,7 +402,7 @@ describe("container loopback listener inspection", () => {
         expect(inspect()).toEqual({ state: "visible-owner", port: 17373, pid: 500, inodes: ["55555"] });
     });
 
-    it("re-lists /proc so a holder that appears after the first listing is still found", () => {
+    it.skipIf(process.platform === "win32")("re-lists /proc so a holder that appears after the first listing is still found", () => {
         writeTable("tcp", [LISTEN_17373_V4]);
         addProcess(100, ["12345"]);
         addProcess(600, ["55555"]);

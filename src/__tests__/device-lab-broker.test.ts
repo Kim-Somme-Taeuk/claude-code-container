@@ -1,3 +1,5 @@
+import { directorySymlink } from "./helpers/file-symlink-fixture.js";
+import { isolateDeviceLabTestEnvironment } from "./helpers/device-lab-test-environment.js";
 import { DEVICE_BROKER_PROTOCOL_VERSION } from "@ccc/device-lab/providers/contracts/broker-protocol.mjs";
 import { createHash, createHmac } from "crypto";
 import { spawn } from "child_process";
@@ -5,7 +7,7 @@ import { EventEmitter } from "events";
 import { chmodSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "fs";
 import { createServer } from "http";
 import { homedir, tmpdir } from "os";
-import { join } from "path";
+import { join, resolve } from "path";
 import { pathToFileURL } from "url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -39,6 +41,13 @@ import { DEVICE_LAB_VERSION } from "@ccc/device-lab/version.js";
 import { cleanupOwner, close, listen, ownerRpcHeaders, writeBrokerDevices } from "./helpers/host-broker-test-fixture.js";
 import { TOOLS as DEVICE_LAB_MCP_TOOLS } from "../../device-lab-mcp/src/operation-tools.mjs";
 
+// Synthetic broker PIDs must never reach native CIM/taskkill on a Windows test host.
+function terminateSyntheticBroker(pid: number) {
+    if (!vi.isMockFunction(process.kill)) throw new Error("synthetic broker termination requires a signal mock");
+    process.kill(pid, "SIGTERM");
+    return { ok: true };
+}
+
 function fakeBrokerPortProcess(pid: number, commandLine: string | null) {
     const processStartToken = pid === process.pid
         ? readDeviceRuntimeProcessStartToken(pid) || `test:${pid}`
@@ -56,7 +65,8 @@ function fakeBrokerPortProcess(pid: number, commandLine: string | null) {
 }
 
 describe("device-lab host broker daemon", () => {
-    let originalHome: string | undefined;
+    let originalHomeRestore: (() => void) | undefined;
+    let fixtureHome: string | undefined;
 
     it("advertises one shared protocol without feature version lists", () => {
         const status = deviceBrokerStatus({ ownerId: "1111111111111111" });
@@ -184,15 +194,14 @@ describe("device-lab host broker daemon", () => {
     });
 
     beforeEach(() => {
-        originalHome = process.env.HOME;
-        process.env.HOME = mkdtempSync(join(tmpdir(), "ccc-device-broker-test-home-"));
+        fixtureHome = mkdtempSync(join(tmpdir(), "ccc-device-broker-test-home-"));
+        originalHomeRestore = isolateDeviceLabTestEnvironment(fixtureHome);
     });
 
     afterEach(() => {
         vi.restoreAllMocks();
-        if (process.env.HOME) rmSync(process.env.HOME, { recursive: true, force: true });
-        if (originalHome === undefined) delete process.env.HOME;
-        else process.env.HOME = originalHome;
+        if (fixtureHome) rmSync(fixtureHome, { recursive: true, force: true });
+        originalHomeRestore?.();
     });
 
     it("validates canonical host project paths using their native path flavor", () => {
@@ -208,7 +217,8 @@ describe("device-lab host broker daemon", () => {
     });
 
 
-    it("preserves a registered host path when the same owner registers from its container mount", () => {
+    // Container mount registration runs inside the Linux container; native Windows resolves /project as a host path.
+    it.skipIf(process.platform === "win32")("preserves a registered host path when the same owner registers from its container mount", () => {
         const hostProjectPath = "C:\\Users\\Example\\Project\\ccc";
         const projectMountPath = deviceBrokerHostProjectMountPath(hostProjectPath)!;
         const identity = deviceLabOwnerFromProjectMountPath(projectMountPath)!;
@@ -259,7 +269,7 @@ describe("device-lab host broker daemon", () => {
         try {
             const response = await fetch(`http://127.0.0.1:${port}/health`, { redirect: "manual" });
             const result = await readHostBrokerHttpJson(response, DEVICE_BROKER_CONTROL_RESPONSE_LIMIT_BYTES);
-            expect(result).toEqual(expect.objectContaining({ ok: false, error: "invalid-broker-json" }));
+            expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({ ok: false, error: "invalid-broker-json" }));
             expect(Buffer.byteLength(String(result.body?.raw || ""), "utf8")).toBeLessThanOrEqual(32 * 1024);
         } finally {
             await close(server);
@@ -294,7 +304,7 @@ describe("device-lab host broker daemon", () => {
                 cliPath: "/opt/ccc/dist/index.js",
                 spawnImpl: vi.fn(() => child) as any,
             });
-            expect(result).toEqual(expect.objectContaining({ ok: false, error: "host-broker-incompatible" }));
+            expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({ ok: false, error: "host-broker-incompatible" }));
             expect(JSON.stringify(result.attempts)).toContain("broker-redirect-disallowed");
             expect(JSON.stringify(result.attempts)).toContain("unverified-broker-port-process");
             expect(redirectTargetRequests).toBe(0);
@@ -360,18 +370,18 @@ describe("device-lab host broker daemon", () => {
         expect(status.persistence).toEqual(expect.objectContaining({
             durableAcrossContainerRecreation: true,
             environmentVariablesRequired: false,
-            root: expect.stringContaining(".ccc/devices"),
+            root: expect.stringContaining(join(".ccc", "devices")),
             ownerScoped: expect.objectContaining({
                 ownerRoot: expect.stringContaining(status.ownerId),
                 deviceDefinitions: expect.objectContaining({
-                    android: expect.stringContaining(`/owners/${status.ownerId}/android/devices.json`),
-                    "ios-device": expect.stringContaining(`/owners/${status.ownerId}/ios-device/devices.json`),
-                    macos: expect.stringContaining(`/owners/${status.ownerId}/macos/devices.json`),
+                    android: expect.stringContaining(join("owners", status.ownerId, "android", "devices.json")),
+                    "ios-device": expect.stringContaining(join("owners", status.ownerId, "ios-device", "devices.json")),
+                    macos: expect.stringContaining(join("owners", status.ownerId, "macos", "devices.json")),
                 }),
                 appiumMetadata: expect.stringContaining("owner device records"),
                 recordings: expect.objectContaining({
-                    android: expect.stringContaining(`/owners/${status.ownerId}/android/<device-id>/recordings`),
-                    windows: expect.stringContaining(`/owners/${status.ownerId}/windows/<device-id>/recordings`),
+                    android: expect.stringContaining(join("owners", status.ownerId, "android", "<device-id>", "recordings")),
+                    windows: expect.stringContaining(join("owners", status.ownerId, "windows", "<device-id>", "recordings")),
                 }),
                 images: expect.objectContaining({
                     macosVm: expect.stringContaining("provider-owned VM instances"),
@@ -381,8 +391,8 @@ describe("device-lab host broker daemon", () => {
                 }),
             }),
             brokerScoped: expect.objectContaining({
-                logsRoot: expect.stringContaining(".ccc/devices/broker/logs"),
-                runtimeFile: expect.stringContaining(".ccc/devices/broker/runtime.json"),
+                logsRoot: expect.stringContaining(join(".ccc", "devices", "broker", "logs")),
+                runtimeFile: expect.stringContaining(join(".ccc", "devices", "broker", "runtime.json")),
             }),
             hostToolchains: expect.objectContaining({
                 ownership: "host-owned",
@@ -391,10 +401,10 @@ describe("device-lab host broker daemon", () => {
                 xcode: expect.stringContaining("not deleted by owner cleanup"),
             }),
             cleanupBoundary: expect.objectContaining({
-                ownerCleanupMayMutate: expect.arrayContaining([expect.stringContaining(`/owners/${status.ownerId}`)]),
+                ownerCleanupMayMutate: expect.arrayContaining([expect.stringContaining(join("owners", status.ownerId))]),
                 ownerCleanupPreserves: expect.arrayContaining([
-                    expect.stringContaining("/owners/<foreign-owner-id>"),
-                    expect.stringContaining(".ccc/devices/broker/auth"),
+                    expect.stringContaining(join("owners", "<foreign-owner-id>")),
+                    expect.stringContaining(join(".ccc", "devices", "broker", "auth")),
                     "host SDKs, Appium packages, Xcode, Windows Sandbox, and VM provider installations",
                 ]),
                 staleMetadataPolicy: expect.stringContaining("without deleting shared toolchain caches"),
@@ -402,7 +412,7 @@ describe("device-lab host broker daemon", () => {
         }));
         expect(status.ownerId).toMatch(/^[a-f0-9]{16}$/);
         expect(status.state.ownerRoot).toContain(status.ownerId);
-        expect(status.state.locksRoot).toContain(".ccc/devices/broker/locks");
+        expect(status.state.locksRoot).toContain(join(".ccc", "devices", "broker", "locks"));
     });
 
     it.runIf(process.platform !== "win32")("rejects linked and oversized broker runtime metadata", () => {
@@ -434,7 +444,7 @@ describe("device-lab host broker daemon", () => {
         expect(token).toMatch(/^[a-f0-9]{64}$/);
         expect(existsSync(secretFile)).toBe(true);
         const stat = statSync(secretFile);
-        expect(stat.mode & 0o777).toBe(0o600);
+        if (process.platform !== "win32") expect(stat.mode & 0o777).toBe(0o600);
         const firstSecret = JSON.parse(readFileSync(secretFile, "utf8")) as { ownerId: string; secret: string; version: number };
         expect(firstSecret).toEqual(expect.objectContaining({
             ownerId,
@@ -446,7 +456,7 @@ describe("device-lab host broker daemon", () => {
 
         chmodSync(secretFile, 0o644);
         expect(deviceBrokerOwnerToken(ownerId)).toBe(token);
-        expect(statSync(secretFile).mode & 0o777).toBe(0o600);
+        if (process.platform !== "win32") expect(statSync(secretFile).mode & 0o777).toBe(0o600);
     });
 
     it("atomically replaces owner-mismatched auth metadata", () => {
@@ -529,7 +539,7 @@ describe("device-lab host broker daemon", () => {
         const externalDirectory = join(process.env.HOME!, "external-auth-directory");
         mkdirSync(brokerDirectory, { recursive: true });
         mkdirSync(externalDirectory);
-        symlinkSync(externalDirectory, authDirectory);
+        directorySymlink(externalDirectory, authDirectory);
 
         expect(() => deviceBrokerOwnerToken(ownerId)).toThrow("device-broker-auth-directory-invalid");
         expect(readdirSync(externalDirectory)).toEqual([]);
@@ -708,7 +718,7 @@ describe("device-lab host broker daemon", () => {
             }));
             // Internal host diagnostics also expose native provider operation names.
             const acceptedToolNames = new Set([...DEVICE_LAB_MCP_TOOLS.map((tool) => tool.name),
-                "mobile_install_app", "mobile_launch_app", "mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right"]);
+                "device_drag", "mobile_install_app", "mobile_launch_app", "mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right"]);
             for (const backend of body.result.backends) {
                 expect((backend.capabilities || []).filter((capability) => !acceptedToolNames.has(capability))).toEqual([]);
             }
@@ -1175,6 +1185,7 @@ describe("device-lab host broker daemon", () => {
             const port = Number(new URL(baseUrl).port);
             const spawnImpl = vi.fn();
             const result = await ensureHostDeviceBroker({
+                timeoutMs: 10000,
                 cwd: "/project/broker-auto-reuse-test",
                 bindHost: "127.0.0.1",
                 probeHost: "127.0.0.1",
@@ -1184,7 +1195,7 @@ describe("device-lab host broker daemon", () => {
                 spawnImpl: spawnImpl as any,
             });
 
-            expect(result).toEqual(expect.objectContaining({
+            expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({
                 ok: true,
                 launched: false,
                 reused: true,
@@ -1205,6 +1216,8 @@ describe("device-lab host broker daemon", () => {
         const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
         try {
             const result = await ensureHostDeviceBroker({
+                timeoutMs: 10000,
+                terminateProcess: terminateSyntheticBroker,
                 cwd,
                 bindHost: "127.0.0.1",
                 probeHost: "127.0.0.1",
@@ -1215,7 +1228,7 @@ describe("device-lab host broker daemon", () => {
                 portProcessResolver: () => fakeBrokerPortProcess(process.pid, `evil.exe node /opt/ccc/dist/index.js devices broker serve --port ${port}`),
             });
 
-            expect(result).toEqual(expect.objectContaining({ ok: false, error: "host-broker-incompatible", reused: false }));
+            expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({ ok: false, error: "host-broker-incompatible", reused: false }));
             expect(JSON.stringify(result)).toContain("compatible-broker-process-unverified");
             expect(killSpy).not.toHaveBeenCalledWith(process.pid, "SIGTERM");
         } finally {
@@ -1248,6 +1261,7 @@ describe("device-lab host broker daemon", () => {
         try {
             const spawnImpl = vi.fn();
             const result = await ensureHostDeviceBroker({
+                timeoutMs: 10000,
                 cwd,
                 bindHost: "127.0.0.1",
                 probeHost: "127.0.0.1",
@@ -1256,7 +1270,7 @@ describe("device-lab host broker daemon", () => {
                 spawnImpl: spawnImpl as any,
             });
 
-            expect(result).toEqual(expect.objectContaining({
+            expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({
                 ok: true,
                 launched: false,
                 reused: true,
@@ -1321,19 +1335,20 @@ describe("device-lab host broker daemon", () => {
 
         try {
             const result = await ensureHostDeviceBroker({
+                terminateProcess: terminateSyntheticBroker,
                 ownerId,
                 cwd,
                 bindHost: "0.0.0.0",
                 probeHost: "127.0.0.1",
                 port,
                 cliPath: "/opt/ccc/dist/index.js",
-                timeoutMs: 500,
+                timeoutMs: 10000,
                 startupTimeoutMs: 1,
                 spawnImpl: spawnImpl as any,
                 portProcessResolver: () => fakeBrokerPortProcess(existingPid, `node /opt/ccc/dist/index.js devices broker serve --host 127.0.0.1 --port ${port}`),
             });
 
-            expect(result).toEqual(expect.objectContaining({
+            expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({
                 ok: false,
                 launched: true,
                 reused: false,
@@ -1453,6 +1468,7 @@ describe("device-lab host broker daemon", () => {
         const spawnedProcess = fakeBrokerPortProcess(child.pid, `node /opt/ccc/dist/index.js devices broker serve --host 0.0.0.0 --port ${port}`);
         try {
             const result = await ensureHostDeviceBroker({
+                terminateProcess: terminateSyntheticBroker,
                 ownerId,
                 cwd: "/project/broker-auto-upgrade-test",
                 bindHost: "0.0.0.0",
@@ -1478,7 +1494,7 @@ describe("device-lab host broker daemon", () => {
                         : null,
             });
 
-            expect(result).toEqual(expect.objectContaining({
+            expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({
                 ok: true,
                 launched: true,
                 reused: false,
@@ -1606,6 +1622,7 @@ describe("device-lab host broker daemon", () => {
         const spawnedProcess = fakeBrokerPortProcess(child.pid, `node /opt/ccc/dist/index.js devices broker serve --host 0.0.0.0 --port ${port}`);
         try {
             const result = await ensureHostDeviceBroker({
+                terminateProcess: terminateSyntheticBroker,
                 ownerId,
                 cwd: "/project/broker-auto-owner-resolve-test",
                 bindHost: "0.0.0.0",
@@ -1631,7 +1648,7 @@ describe("device-lab host broker daemon", () => {
                         : null,
             });
 
-            expect(result).toEqual(expect.objectContaining({
+            expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({
                 ok: true,
                 launched: true,
                 reused: false,
@@ -1750,6 +1767,7 @@ describe("device-lab host broker daemon", () => {
         const spawnedProcess = fakeBrokerPortProcess(child.pid, `node /opt/ccc/dist/index.js devices broker serve --host 0.0.0.0 --port ${port}`);
         try {
             const result = await ensureHostDeviceBroker({
+                terminateProcess: terminateSyntheticBroker,
                 ownerId,
                 cwd: "/project/broker-owner-mismatch-test",
                 bindHost: "0.0.0.0",
@@ -1775,7 +1793,7 @@ describe("device-lab host broker daemon", () => {
                         : null,
             });
 
-            expect(result).toEqual(expect.objectContaining({
+            expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({
                 ok: true,
                 launched: true,
                 reused: false,
@@ -1830,7 +1848,7 @@ describe("device-lab host broker daemon", () => {
                 spawnImpl: spawnImpl as any,
             });
 
-            expect(result).toEqual(expect.objectContaining({
+            expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({
                 ok: false,
                 launched: false,
                 reused: false,
@@ -1943,6 +1961,7 @@ describe("device-lab host broker daemon", () => {
         ));
         try {
             const result = await ensureHostDeviceBroker({
+                terminateProcess: terminateSyntheticBroker,
                 ownerId,
                 cwd: "/project/broker-port-pid-repair-test",
                 bindHost: "0.0.0.0",
@@ -1959,12 +1978,12 @@ describe("device-lab host broker daemon", () => {
             });
 
             if (!allowed) {
-                expect(result).toEqual(expect.objectContaining({ ok: false, launched: false, error: "host-broker-incompatible" }));
+                expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({ ok: false, launched: false, error: "host-broker-incompatible" }));
                 expect(killSpy.mock.calls.some(([, signal]) => signal === "SIGTERM" || signal === "SIGKILL")).toBe(false);
                 expect(spawnImpl).not.toHaveBeenCalled();
                 return;
             }
-            expect(result).toEqual(expect.objectContaining({
+            expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({
                 ok: true,
                 launched: true,
                 reused: false,
@@ -2073,6 +2092,7 @@ describe("device-lab host broker daemon", () => {
         const spawnedProcess = fakeBrokerPortProcess(child.pid, `node /opt/ccc/dist/index.js devices broker serve --host 0.0.0.0 --port ${port}`);
         try {
             const result = await ensureHostDeviceBroker({
+                terminateProcess: terminateSyntheticBroker,
                 ownerId,
                 cwd: "/project/broker-cim-redacted-repair-test",
                 bindHost: "0.0.0.0",
@@ -2094,7 +2114,7 @@ describe("device-lab host broker daemon", () => {
                         : null,
             });
 
-            expect(result).toEqual(expect.objectContaining({ ok: true, launched: true, reused: false, port }));
+            expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({ ok: true, launched: true, reused: false, port }));
             expect(killSpy).toHaveBeenCalledWith(stalePid, "SIGTERM");
             expect(JSON.stringify(result.attempts)).toContain("ccc-host-port-metadata");
             expect(JSON.stringify(result.attempts)).toContain("port-pid-plus-runtime-and-status");
@@ -2138,6 +2158,7 @@ describe("device-lab host broker daemon", () => {
         const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
         try {
             const result = await ensureHostDeviceBroker({
+                terminateProcess: terminateSyntheticBroker,
                 ownerId,
                 cwd: "/project/broker-unrelated-port-process-test",
                 bindHost: "0.0.0.0",
@@ -2150,7 +2171,7 @@ describe("device-lab host broker daemon", () => {
                 portProcessResolver: () => fakeBrokerPortProcess(77889, `evil.exe node /opt/ccc/dist/index.js devices broker serve --port ${port}`),
             });
 
-            expect(result).toEqual(expect.objectContaining({
+            expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({
                 ok: false,
                 launched: false,
                 reused: false,
@@ -2260,6 +2281,7 @@ describe("device-lab host broker daemon", () => {
         const spawnedProcess = fakeBrokerPortProcess(child.pid, `node /opt/ccc/dist/index.js devices broker serve --host 0.0.0.0 --port ${port}`);
         try {
             const result = await ensureHostDeviceBroker({
+                terminateProcess: terminateSyntheticBroker,
                 ownerId,
                 cwd: "/project/broker-status-pid-repair-test",
                 bindHost: "0.0.0.0",
@@ -2274,7 +2296,7 @@ describe("device-lab host broker daemon", () => {
                 processStartTokenReader: (pid) => pid === child.pid ? spawnedProcess.processStartToken : null,
             });
 
-            expect(result).toEqual(expect.objectContaining({
+            expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({
                 ok: true,
                 launched: true,
                 reused: false,
@@ -2357,7 +2379,7 @@ describe("device-lab host broker daemon", () => {
                 portProcessResolver: () => fakeBrokerPortProcess(hostPid, `node C:\\repo\\dist\\index.js devices broker serve --host 127.0.0.1 --port ${port}`),
             });
 
-            expect(result).toEqual(expect.objectContaining({
+            expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({
                 ok: false,
                 error: "host-broker-incompatible",
                 diagnostics: expect.arrayContaining([expect.stringContaining("must be restarted by host CCC")]),
@@ -2396,7 +2418,7 @@ describe("device-lab host broker daemon", () => {
             spawnImpl: spawnImpl as any,
         });
 
-        expect(result).toEqual(expect.objectContaining({
+        expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({
             ok: false,
             launched: true,
             error: "host-broker-health-timeout",
@@ -2413,7 +2435,7 @@ describe("device-lab host broker daemon", () => {
             }),
         );
         expect(child.unref).toHaveBeenCalled();
-        expect(result).toEqual(expect.objectContaining({
+        expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({
             startupCleanup: expect.objectContaining({ attempted: false }),
         }));
         expect(killSpy.mock.calls.some(([pid, signal]) => pid === child.pid && signal === "SIGTERM")).toBe(false);
@@ -2447,9 +2469,9 @@ describe("device-lab host broker daemon", () => {
             args: ["-e", "process.stdout.write('x'.repeat(2048))"],
         }, { timeoutMs: 1000, outputLimit: 128 });
 
-        expect(result).toEqual(expect.objectContaining({
+        expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({
             outputLimitExceeded: true,
-            error: "spawn ENOBUFS: device-lab provider output exceeded limit",
+            error: expect.stringContaining("spawn ENOBUFS: device-lab provider output exceeded limit"),
         }));
         expect(Buffer.byteLength(result.stdout || "", "utf8")).toBeLessThanOrEqual(128);
     });
@@ -2478,6 +2500,7 @@ describe("device-lab host broker daemon", () => {
         }) as typeof process.kill);
 
         const result = await ensureHostDeviceBroker({
+            terminateProcess: terminateSyntheticBroker,
             cwd: "/project/broker-unresponsive-port-test",
             platform: "linux",
             port: 65531,
@@ -2488,7 +2511,7 @@ describe("device-lab host broker daemon", () => {
             spawnImpl: spawnImpl as any,
         });
 
-        expect(result).toEqual(expect.objectContaining({ ok: false, launched: true, error: "host-broker-health-timeout" }));
+        expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({ ok: false, launched: true, error: "host-broker-health-timeout" }));
         expect(killSpy).toHaveBeenCalledWith(stalePid, "SIGTERM");
         expect(spawnImpl).toHaveBeenCalledOnce();
         expect(JSON.stringify(result.attempts)).toContain("unhealthy-broker-port-owner");
@@ -2509,7 +2532,9 @@ describe("device-lab host broker daemon", () => {
             return process;
         };
 
+        const terminateProcess = vi.fn(terminateSyntheticBroker);
         const result = await ensureHostDeviceBroker({
+            terminateProcess,
             cwd: "/project/broker-reused-pid-test",
             platform: "linux",
             port: 65530,
@@ -2520,8 +2545,9 @@ describe("device-lab host broker daemon", () => {
             spawnImpl: vi.fn() as any,
         });
 
-        expect(result).toEqual(expect.objectContaining({ ok: false, launched: false, error: "host-broker-incompatible" }));
+        expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({ ok: false, launched: false, error: "host-broker-incompatible" }));
         expect(JSON.stringify(result.attempts)).toContain("runtime-process-identity-mismatch");
+        expect(terminateProcess).not.toHaveBeenCalled();
         expect(killSpy.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
     });
 
@@ -2533,7 +2559,7 @@ describe("device-lab host broker daemon", () => {
         mkdirSync(brokerDirectory, { recursive: true });
         mkdirSync(externalDirectory, { recursive: true });
         writeFileSync(marker, "preserve");
-        symlinkSync(externalDirectory, logsDirectory);
+        directorySymlink(externalDirectory, logsDirectory);
         const spawnImpl = vi.fn();
 
         const result = await ensureHostDeviceBroker({
@@ -2546,7 +2572,7 @@ describe("device-lab host broker daemon", () => {
             spawnImpl: spawnImpl as any,
         });
 
-        expect(result).toEqual(expect.objectContaining({
+        expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({
             ok: false,
             launched: false,
             error: "host-broker-launch-failed",
@@ -2771,7 +2797,7 @@ describe("device-lab host broker daemon", () => {
                 secret: expect.stringMatching(/^[a-f0-9]{64}$/),
                 version: 1,
             }));
-            expect(statSync(secretFile).mode & 0o777).toBe(0o600);
+            if (process.platform !== "win32") expect(statSync(secretFile).mode & 0o777).toBe(0o600);
 
             const rpc = await fetch(`${baseUrl}/v1/owners/${ownerId}/rpc`, {
                 method: "POST",
@@ -2789,7 +2815,7 @@ describe("device-lab host broker daemon", () => {
 
     it("resolves multiple canonical project owners through one shared broker", async () => {
         const brokerCwd = "/host/projects/broker-launch-project";
-        const foreignCwd = "/host/projects/foreign-project";
+        const foreignCwd = resolve("/host/projects/foreign-project");
         const foreignMountPath = deviceLabProjectMountPath(foreignCwd);
         const foreignOwnerId = deviceLabOwnerId(foreignCwd, "work");
         const secretFile = deviceBrokerAuthSecretFile(foreignOwnerId);
@@ -2872,7 +2898,7 @@ describe("device-lab host broker daemon", () => {
 
     it("uses each registered owner's host project path for device tool file translation", async () => {
         const brokerCwd = "/host/projects/broker-launch-project";
-        const foreignCwd = "/host/projects/foreign-project";
+        const foreignCwd = resolve("/host/projects/foreign-project");
         const foreignMountPath = deviceLabProjectMountPath(foreignCwd);
         const foreignOwnerId = deviceLabOwnerId(foreignCwd);
         registerDeviceBrokerOwner(foreignCwd, undefined, foreignOwnerId);
@@ -2913,7 +2939,7 @@ describe("device-lab host broker daemon", () => {
             });
             expect(response.status).toBe(200);
             expect(rpcCwd).toBe(foreignCwd);
-            expect(translatedLocalPath).toBe(`${foreignCwd}/fixtures/app.apk`);
+            expect(translatedLocalPath).toBe(join(foreignCwd, "fixtures", "app.apk"));
         } finally {
             await close(server);
             cleanupOwner(foreignOwnerId);
@@ -3004,7 +3030,7 @@ describe("device-lab host broker daemon", () => {
                 secret: expect.stringMatching(/^[a-f0-9]{64}$/),
                 version: 1,
             }));
-            expect(statSync(secretFile).mode & 0o777).toBe(0o600);
+            if (process.platform !== "win32") expect(statSync(secretFile).mode & 0o777).toBe(0o600);
             expect(existsSync(`${secretFile}.lock`)).toBe(false);
         } finally {
             await Promise.allSettled(clients);

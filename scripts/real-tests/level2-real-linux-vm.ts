@@ -37,7 +37,7 @@ export async function run() {
                 cpus: 1,
             }));
             assert.strictEqual(created.ok, true, JSON.stringify(created));
-            assert.strictEqual(lifecycleDevice(created, "create").id, labId);
+            assert.strictEqual(lifecycleDevice(created, "create").deviceId, labId);
 
             await callTool("list_images", { detail: true,});
             markExpectedToolError(await callTool("import_image", { detail: true,

@@ -1,3 +1,4 @@
+import { isolateDeviceLabTestEnvironment } from "./helpers/device-lab-test-environment.js";
 import { createHash } from "crypto";
 import { mkdtempSync, rmSync } from "fs";
 import { createServer } from "http";
@@ -30,18 +31,18 @@ describe("one broker protocol", () => {
 });
 
 describe("host CLI protocol reuse", () => {
-    let originalHome: string | undefined;
+    let originalHomeRestore: (() => void) | undefined;
+    let fixtureHome: string | undefined;
 
     beforeEach(() => {
-        originalHome = process.env.HOME;
-        process.env.HOME = mkdtempSync(join(tmpdir(), "ccc-broker-capabilities-home-"));
+        fixtureHome = mkdtempSync(join(tmpdir(), "ccc-broker-capabilities-home-"));
+        originalHomeRestore = isolateDeviceLabTestEnvironment(fixtureHome);
     });
 
     afterEach(() => {
         vi.restoreAllMocks();
-        if (process.env.HOME) rmSync(process.env.HOME, { recursive: true, force: true });
-        if (originalHome === undefined) delete process.env.HOME;
-        else process.env.HOME = originalHome;
+        if (fixtureHome) rmSync(fixtureHome, { recursive: true, force: true });
+        originalHomeRestore?.();
     });
 
     it.each([DEVICE_BROKER_PROTOCOL_VERSION, DEVICE_BROKER_PROTOCOL_VERSION + 1])("reuses matching protocol and never downgrades newer protocol %s", async (protocolVersion) => {
@@ -65,7 +66,10 @@ describe("host CLI protocol reuse", () => {
         const processStartToken = readDeviceRuntimeProcessStartToken(process.pid) || `test:${process.pid}`;
         try {
             const spawnImpl = vi.fn();
+            const terminateProcess = vi.fn(() => { throw new Error("compatible/newer broker must not be terminated"); });
             const result = await ensureHostDeviceBroker({
+                terminateProcess,
+                timeoutMs: 10000,
                 cwd,
                 bindHost: "127.0.0.1",
                 probeHost: "127.0.0.1",
@@ -85,11 +89,12 @@ describe("host CLI protocol reuse", () => {
             });
 
             if (protocolVersion === DEVICE_BROKER_PROTOCOL_VERSION) {
-                expect(result).toEqual(expect.objectContaining({ ok: true, launched: false, reused: true, port }));
+                expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({ ok: true, launched: false, reused: true, port }));
                 expect(result).toHaveProperty("verifiedProtocolVersion", DEVICE_BROKER_PROTOCOL_VERSION);
             } else {
-                expect(result).toEqual(expect.objectContaining({ ok: false, error: "host-broker-incompatible" }));
+                expect(result, JSON.stringify(result)).toEqual(expect.objectContaining({ ok: false, error: "host-broker-incompatible" }));
             }
+            expect(terminateProcess).not.toHaveBeenCalled();
             expect(spawnImpl).not.toHaveBeenCalled();
             expect(killSpy).not.toHaveBeenCalledWith(process.pid, "SIGTERM");
         } finally {

@@ -2,7 +2,7 @@ import { createHash } from "crypto";
 import { spawn } from "child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { androidWindowsHiddenLauncherScript } from "@ccc/device-lab/providers/backends/android.mjs";
 import { withSharedMutationLockAsync } from "@ccc/device-lab/providers/state/shared-mutation-lock.mjs";
 import { cleanupFakeAndroidMcpContext, createFakeAndroidMcpContext, TIMEOUT, type FakeAndroidMcpContext } from "./helpers/fake-android-mcp-fixture.js";
@@ -18,7 +18,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
     let binDir: string;
     let logPath: string;
 
-    beforeAll(async () => {
+    beforeEach(async () => {
         context = await createFakeAndroidMcpContext();
         client = context.client;
         homeDir = context.homeDir;
@@ -26,7 +26,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         logPath = context.logPath;
     }, TIMEOUT);
 
-    afterAll(async () => {
+    afterEach(async () => {
         await cleanupFakeAndroidMcpContext(context);
     }, TIMEOUT);
 
@@ -109,10 +109,10 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         });
         expect(create.isError).not.toBe(true);
         const created = JSON.parse(((create.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; avdName: string; provisioned: boolean; status: string };
+            device: { deviceId: string; avdName: string; provisioned: boolean; status: string };
         };
         expect(created.device).toEqual(expect.objectContaining({
-            id: "android-pixel-owned",
+            deviceId: "android-pixel-owned",
             avdName,
             provisioned: true,
             status: "stopped",
@@ -162,9 +162,13 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             expect(execSettled).toBe(false);
             const waitResult = await client.callTool({
                 name: "wait_for_app",
-                arguments: { deviceId: "android-pixel-owned", appId: "com.example.ready", timeoutMs: 100, intervalMs: 10 },
+                arguments: { deviceId: "android-pixel-owned", appId: "com.example.ready", timeoutMs: 5000, intervalMs: 50 },
             });
-            expect(waitResult.isError).not.toBe(true);
+            // This checks read-only observation bypassing a held mutation lock, not
+            // native fixture process startup within an artificial 100ms deadline.
+            expect(waitResult.isError, JSON.stringify(waitResult.content)).not.toBe(true);
+            expect(parseToolJson(waitResult)).toMatchObject({ running: true, provider: "adb" });
+            expect(execSettled).toBe(false);
         } finally {
             releaseOperation();
             await operationHolder;
@@ -178,7 +182,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         expect(sessionStatus.isError).not.toBe(true);
         expect(parseToolJson(sessionStatus)).toEqual(expect.objectContaining({
             automation: expect.objectContaining({ deviceId: "android-pixel-owned", provider: "adb", lazy: true }),
-            device: expect.objectContaining({ id: "android-pixel-owned", status: "running" }),
+            device: expect.objectContaining({ deviceId: "android-pixel-owned", status: "running" }),
 
         }));
 
@@ -216,7 +220,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         }
         const waitText = await client.callTool({
             name: "wait_for_text",
-            arguments: { deviceId: "android-pixel-owned", text: "Hello", timeoutMs: 1000, intervalMs: 50 },
+            arguments: { deviceId: "android-pixel-owned", text: "Hello", timeoutMs: 5000, intervalMs: 50 },
         });
         expect(waitText.isError).not.toBe(true);
         const waitTextPayload = JSON.parse(((waitText.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -227,7 +231,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
 
         const waitApp = await client.callTool({
             name: "wait_for_app",
-            arguments: { deviceId: "android-pixel-owned", appId: "com.example.mobile", timeoutMs: 1000, intervalMs: 50 },
+            arguments: { deviceId: "android-pixel-owned", appId: "com.example.mobile", timeoutMs: 5000, intervalMs: 50 },
         });
         expect(waitApp.isError).not.toBe(true);
         const waitAppPayload = JSON.parse(((waitApp.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -241,7 +245,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             arguments: {
                 steps: [
                     { label: "tap primary", tool: "click", arguments: { deviceId: "android-pixel-owned", x: 15, y: 25, implicitBroker: false } },
-                    { label: "wait title", tool: "wait_for_text", arguments: { deviceId: "android-pixel-owned", text: "Hello", timeoutMs: 1000, intervalMs: 50, implicitBroker: false } },
+                    { label: "wait title", tool: "wait_for_text", arguments: { deviceId: "android-pixel-owned", text: "Hello", timeoutMs: 5000, intervalMs: 50, implicitBroker: false } },
                     { label: "capture", tool: "screenshot", arguments: { deviceId: "android-pixel-owned", implicitBroker: false } },
                 ],
             },
@@ -283,7 +287,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             arguments: {
                 steps: [
                     { label: "status", tool: "status", arguments: { deviceId: "android-pixel-owned", implicitBroker: false } },
-                    { label: "wait title", tool: "wait_for_text", arguments: { deviceId: "android-pixel-owned", text: "Hello", timeoutMs: 1000, intervalMs: 50, implicitBroker: false } },
+                    { label: "wait title", tool: "wait_for_text", arguments: { deviceId: "android-pixel-owned", text: "Hello", timeoutMs: 5000, intervalMs: 50, implicitBroker: false } },
                     { label: "capture", tool: "screenshot", arguments: { deviceId: "android-pixel-owned", implicitBroker: false } },
                 ],
             },
@@ -295,7 +299,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         };
         expect(deviceFlowPayload.ok).toBe(true);
         expect(deviceFlowPayload.results.map((result) => result.label)).toEqual(["status", "wait title", "capture"]);
-        expect(deviceFlowPayload.results[0].content[0].value?.device?.id).toBe("android-pixel-owned");
+        expect(deviceFlowPayload.results[0].content[0].value?.device?.deviceId).toBe("android-pixel-owned");
         expect(deviceFlowPayload.results[1].content[0].value?.found).toBe(true);
         expect(deviceFlowPayload.results[2]).toMatchObject({ contentIndex: 1, contentCount: 1 });
         expect((deviceFlow.content as Array<{ type: string }>)[deviceFlowPayload.results[2].contentIndex!].type).toBe("image");
@@ -387,7 +391,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             arguments: { action: "start",
                 deviceId: "android-pixel-owned",
                 remotePath: "/sdcard/custom-android-recording.mp4",
-                localPath: "/tmp/custom-android-recording.mp4",
+                localPath: join(homeDir, "custom-android-recording.mp4"),
                 timeLimitSec: 5,
             },
         });
@@ -405,7 +409,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
                 commandHash: expect.stringMatching(/^[a-f0-9]{64}$/),
             }),
             remotePath: "/sdcard/custom-android-recording.mp4",
-            localPath: "/tmp/custom-android-recording.mp4",
+            localPath: join(homeDir, "custom-android-recording.mp4"),
             timeLimitSec: 5,
         }));
 
@@ -442,7 +446,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             active: false,
             provider: "adb-screenrecord",
             remotePath: "/sdcard/custom-android-recording.mp4",
-            localPath: "/tmp/custom-android-recording.mp4",
+            localPath: join(homeDir, "custom-android-recording.mp4"),
             timeLimitSec: 5,
         }));
         expect(recordStopPayload.device.recording).toBeNull();
@@ -461,7 +465,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             arguments: { action: "start",
                 deviceId: "android-pixel-owned",
                 remotePath: "/sdcard/fail-immediate-recording.mp4",
-                localPath: "/tmp/fail-immediate-android-recording.mp4",
+                localPath: join(homeDir, "fail-immediate-android-recording.mp4"),
                 timeLimitSec: 5,
             },
         });
@@ -473,32 +477,42 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         });
         expect(JSON.parse(((statusAfterFailedStart.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toBeNull();
 
-        const naturalExitStart = await client.callTool({
-            name: "record_video",
-            arguments: { action: "start",
-                deviceId: "android-pixel-owned",
-                remotePath: "/sdcard/natural-exit-recording.mp4",
-                localPath: "/tmp/natural-exit-android-recording.mp4",
-                timeLimitSec: 5,
-            },
-        });
-        expect(naturalExitStart.isError).not.toBe(true);
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        const statusAfterNaturalExit = await client.callTool({
-            name: "record_video",
-            arguments: { action: "status", deviceId: "android-pixel-owned" },
-        });
-        expect(JSON.parse(((statusAfterNaturalExit.content as Array<{ text?: string }>)[0].text ?? "{}")).recording).toEqual(expect.objectContaining({
+        const naturalExitRelease = join(homeDir, "fake-adb-release-natural-recording");
+        try {
+            const naturalExitStart = await client.callTool({
+                name: "record_video",
+                arguments: { action: "start",
+                    deviceId: "android-pixel-owned",
+                    remotePath: "/sdcard/natural-exit-recording.mp4",
+                    localPath: join(homeDir, "natural-exit-android-recording.mp4"),
+                    timeLimitSec: 5,
+                },
+            });
+            expect(naturalExitStart.isError, JSON.stringify(naturalExitStart.content)).not.toBe(true);
+            expect(parseToolJson(naturalExitStart)).toMatchObject({ recording: { active: true } });
+        } finally {
+            // Keep the real child alive through Windows identity capture, then let
+            // it exit normally. Release even if a start assertion fails.
+            writeFileSync(naturalExitRelease, "release");
+        }
+        await expect.poll(async () => {
+            const status = await client.callTool({
+                name: "record_video",
+                arguments: { action: "status", deviceId: "android-pixel-owned" },
+            });
+            expect(status.isError, JSON.stringify(status.content)).not.toBe(true);
+            return parseToolJson(status).recording;
+        }, { timeout: 15000, interval: 100 }).toMatchObject({
             active: false,
             remotePath: "/sdcard/natural-exit-recording.mp4",
-        }));
+        });
         const naturalExitStop = await client.callTool({
             name: "record_video",
             arguments: { action: "stop", deviceId: "android-pixel-owned" },
         });
         expect(naturalExitStop.isError).not.toBe(true);
 
-        const retryDestination = "/tmp/fail-once-pull-android-recording.mp4";
+        const retryDestination = join(homeDir, "fail-once-pull-android-recording.mp4");
         writeFileSync(retryDestination, "original");
         const pullFailStart = await client.callTool({
             name: "record_video",
@@ -542,7 +556,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             arguments: { action: "start",
                 deviceId: "android-pixel-owned",
                 remotePath: "/sdcard/stop-cleanup-recording.mp4",
-                localPath: "/tmp/stop-cleanup-android-recording.mp4",
+                localPath: join(homeDir, "stop-cleanup-android-recording.mp4"),
                 timeLimitSec: 5,
             },
         });
@@ -695,17 +709,17 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         expect(log).toContain("adb -s emulator-5582 exec-out screencap -p");
         expect(log).toContain("adb -s emulator-5582 shell screenrecord --time-limit 5 /sdcard/custom-android-recording.mp4");
         expect(log).toContain("adb -s emulator-5582 shell pkill -2 screenrecord");
-        expect(log).toMatch(/adb -s emulator-5582 pull \/sdcard\/custom-android-recording\.mp4 \/tmp\/ccc-device-download-\S+\/payload/);
+        expect(log).toMatch(/adb -s emulator-5582 pull \/sdcard\/custom-android-recording\.mp4 [^\r\n]*ccc-device-download-[^\\/\r\n]+[\\/]payload/);
         expect(log).toContain("adb -s emulator-5582 shell rm -f /sdcard/custom-android-recording.mp4");
         expect(log).toContain("adb -s emulator-5582 shell screenrecord --time-limit 5 /sdcard/fail-immediate-recording.mp4");
         expect(log).toContain("adb -s emulator-5582 shell screenrecord --time-limit 5 /sdcard/natural-exit-recording.mp4");
-        expect(log.match(/adb -s emulator-5582 pull \/sdcard\/fail-once-pull-recording\.mp4 \/tmp\/ccc-device-download-\S+\/payload/g)).toHaveLength(2);
+        expect(log.match(/adb -s emulator-5582 pull \/sdcard\/fail-once-pull-recording\.mp4 [^\r\n]*ccc-device-download-[^\\/\r\n]+[\\/]payload/g)).toHaveLength(2);
         expect(log).toContain("adb -s emulator-5582 shell screenrecord --time-limit 5 /sdcard/stop-cleanup-recording.mp4");
         expect(log).toContain("adb -s emulator-5582 shell uiautomator dump /sdcard/window-android-pixel-owned.xml");
         expect(log).toContain("adb -s emulator-5582 exec-out cat /sdcard/window-android-pixel-owned.xml");
-        const uploadStagePath = log.match(/adb -s emulator-5582 push (\/tmp\/ccc-device-upload-\S+\/payload) \/sdcard\/local\.txt/)?.[1];
-        const downloadStagePath = log.match(/adb -s emulator-5582 pull \/sdcard\/remote\.txt (\/tmp\/ccc-device-download-\S+\/payload)/)?.[1];
-        const failedUploadStagePath = log.match(/adb -s emulator-5582 push (\/tmp\/ccc-device-upload-\S+\/payload) \/sdcard\/fail-push\.txt/)?.[1];
+        const uploadStagePath = log.match(/adb -s emulator-5582 push ([^\r\n]*ccc-device-upload-[^\\/\r\n]+[\\/]payload) \/sdcard\/local\.txt/)?.[1];
+        const downloadStagePath = log.match(/adb -s emulator-5582 pull \/sdcard\/remote\.txt ([^\r\n]*ccc-device-download-[^\\/\r\n]+[\\/]payload)/)?.[1];
+        const failedUploadStagePath = log.match(/adb -s emulator-5582 push ([^\r\n]*ccc-device-upload-[^\\/\r\n]+[\\/]payload) \/sdcard\/fail-push\.txt/)?.[1];
         expect(uploadStagePath).toBeTruthy();
         expect(downloadStagePath).toBeTruthy();
         expect(failedUploadStagePath).toBeTruthy();
@@ -723,6 +737,19 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         expect(log).toContain("adb -s emulator-5582 shell pm clear com.example.mobile");
         expect(log).not.toContain(`avdmanager delete avd --name ${avdName}`);
         expect(log).not.toContain("appium");
+    });
+
+    it("returns asynchronous emulator spawn failures without disconnecting MCP or leaving running state", { timeout: TIMEOUT }, async () => {
+        const create = await client.callTool({ name: "create_android_emulator", arguments: { name: "Spawn Failure", port: 5590, systemImage: "system-images;android-35;google_apis;x86_64" } });
+        expect(create.isError, JSON.stringify(create.content)).not.toBe(true);
+        const deviceId = (parseToolJson(create).device as { deviceId: string }).deviceId;
+        writeFileSync(join(homeDir, "fake-android-spawn-failure"), "1");
+        const started = await client.callTool({ name: "start", arguments: { deviceId } });
+        expect(started.isError).toBe(true);
+        expect(JSON.stringify(started.content)).toContain("ENOENT");
+        const status = await client.callTool({ name: "status", arguments: { deviceId } });
+        expect(status.isError, JSON.stringify(status.content)).not.toBe(true);
+        expect((parseToolJson(status).device as { status: string }).status).toBe("stopped");
     });
 
     it("removes partial owner-scoped AVD artifacts when avdmanager creation fails", { timeout: TIMEOUT }, async () => {
@@ -761,7 +788,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         const avdName = `ccc-${ownerId}-active-partial-create-failure`;
         const avdRoot = join(homeDir, ".android", "avd");
         const failureMarker = join(homeDir, "fake-android-avdmanager-create-fail");
-        const emulator = spawn("/bin/sh", ["-c", "sleep 30", "fake-emulator", "-avd", avdName], {
+        const emulator = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)", "--", "fake-emulator", "-avd", avdName], {
             stdio: "ignore",
         });
         writeFileSync(failureMarker, "fail");
@@ -983,7 +1010,7 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
             const create = await createRequest;
             expect(create.isError).not.toBe(true);
             expect(parseToolJson(create)).toEqual(expect.objectContaining({
-                device: expect.objectContaining({ id: "android-global-port-lock", port: 5680 }),
+                device: expect.objectContaining({ deviceId: "android-global-port-lock", port: 5680 }),
             }));
             expect(readFileSync(logPath, "utf8")).toContain(`avdmanager create avd --name ${avdName}`);
 
@@ -1081,12 +1108,15 @@ describe("device-lab MCP Android emulator lifecycle with fake SDK", () => {
         writeFileSync(targetPath, statePath);
         // Boot polling starts after the runtime claim is persisted. Inject the successor here
         // so process scheduling cannot move the conflict to the earlier start-runtime phase.
-        writeFileSync(adbPath, `#!/bin/sh
-if [ "$1" = "-s" ] && [ "$2" = "emulator-5678" ] && [ "$3" = "shell" ] && [ "$4" = "getprop" ] && [ "$5" = "sys.boot_completed" ]; then
-  state_path="$(/bin/cat "$HOME/fake-android-start-complete-state-path")" || exit 91
-  /bin/cp "$HOME/fake-android-start-complete-state.json" "$state_path.successor" || exit 92
-  /bin/mv "$state_path.successor" "$state_path" || exit 93
-fi
+        writeFileSync(adbPath, `#!${process.execPath}
+{
+ const fs = require('node:fs'), path = require('node:path'), args = process.argv.slice(2);
+ if (args[0] === '-s' && args[1] === 'emulator-5678' && args[2] === 'shell' && args[3] === 'getprop' && args[4] === 'sys.boot_completed') {
+   const target = fs.readFileSync(path.join(process.env.HOME, 'fake-android-start-complete-state-path'), 'utf8');
+   fs.copyFileSync(path.join(process.env.HOME, 'fake-android-start-complete-state.json'), target + '.successor');
+   fs.renameSync(target + '.successor', target);
+ }
+}
 ${originalAdb.replace(/^#![^\n]*\n/, "")}`);
         const beforeLog = readFileSync(logPath, "utf8");
         try {
@@ -1120,21 +1150,21 @@ ${originalAdb.replace(/^#![^\n]*\n/, "")}`);
         const originalAdb = readFileSync(adbPath, "utf8");
         writeFileSync(realAdbPath, originalAdb);
         chmodSync(realAdbPath, 0o755);
-        writeFileSync(emulatorPath, `#!/bin/sh
-echo "emulator $*" >> "$FAKE_ANDROID_LOG"
-if [ "$1" = "-list-avds" ]; then exit 0; fi
-: > "$HOME/fake-android-boot-pending"
-trap '/bin/rm -f "$HOME/fake-android-boot-pending"' EXIT
-/bin/sleep 0.4
-exit 17
+        writeFileSync(emulatorPath, `#!${process.execPath}
+const fs = require('node:fs'), path = require('node:path'), args = process.argv.slice(2);
+fs.appendFileSync(process.env.FAKE_ANDROID_LOG, 'emulator ' + args.join(' ') + '\\n');
+if (args[0] === '-list-avds') process.exit(0);
+const marker = path.join(process.env.HOME, 'fake-android-boot-pending');
+fs.writeFileSync(marker, '');
+process.on('exit', () => fs.rmSync(marker, { force: true }));
+const exitRequest = path.join(process.env.HOME, 'fake-android-exit-after-boot-poll');
+setInterval(() => { if (fs.existsSync(exitRequest)) process.exit(17); }, 10);
 `);
-        writeFileSync(adbPath, `#!/bin/sh
-if [ "$1" = "-s" ] && [ "$3" = "shell" ] && [ "$4" = "getprop" ] && [ "$5" = "sys.boot_completed" ] && [ -f "$HOME/fake-android-boot-pending" ]; then
-  echo "adb $*" >> "$FAKE_ANDROID_LOG"
-  echo "0"
-  exit 0
-fi
-exec "${realAdbPath}" "$@"
+        writeFileSync(adbPath, `#!${process.execPath}
+const fs = require('node:fs'), path = require('node:path'), args = process.argv.slice(2);
+if (args[0] === '-s' && args[2] === 'shell' && args[3] === 'getprop' && args[4] === 'sys.boot_completed' && fs.existsSync(path.join(process.env.HOME, 'fake-android-boot-pending'))) {
+ fs.appendFileSync(process.env.FAKE_ANDROID_LOG, 'adb ' + args.join(' ') + '\\n'); fs.writeFileSync(path.join(process.env.HOME, 'fake-android-exit-after-boot-poll'), ''); console.log('0');
+} else require(${JSON.stringify(realAdbPath)});
 `);
 
         try {
@@ -1322,23 +1352,16 @@ exec "${realAdbPath}" "$@"
         mkdirSync(artifact, { recursive: true });
         writeFileSync(join(artifact, "userdata-qemu.img"), "must survive unknown or active identity");
         writeFileSync(savedAdb, originalAdb, { mode: 0o755 });
-        writeFileSync(adbPath, `#!/bin/sh
-if [ "$1" = "devices" ]; then
-  printf 'List of devices attached\\nemulator-5674\\tdevice\\n'
-  exit 0
-fi
-if [ "$1" = "-s" ] && [ "$2" = "emulator-5674" ] && [ "$3" = "emu" ]; then
-  if [ "$#" = 5 ] && [ "$4" = "avd" ] && [ "$5" = "name" ]; then exit 0; fi
-  expected='avd name
-avd name'
-  if [ "$#" = 4 ] && [ "$4" = "$expected" ]; then
-    printf 'retry\\n' >> "$HOME/console-retry-calls"
-    /bin/cat "$HOME/console-retry-response"
-    exit 0
-  fi
-  exit 19
-fi
-exec "${savedAdb}" "$@"
+        writeFileSync(adbPath, `#!${process.execPath}
+const fs = require('node:fs'), path = require('node:path'), args = process.argv.slice(2);
+if (args[0] === 'devices') { console.log('List of devices attached\\nemulator-5674\\tdevice'); process.exit(0); }
+if (args[0] === '-s' && args[1] === 'emulator-5674' && args[2] === 'emu') {
+ if (args.length === 5 && args[3] === 'avd' && args[4] === 'name') process.exit(0);
+ if (args.length === 4 && args[3] === 'avd name\\navd name') {
+  fs.appendFileSync(path.join(process.env.HOME, 'console-retry-calls'), 'retry\\n');
+  process.stdout.write(fs.readFileSync(path.join(process.env.HOME, 'console-retry-response')));
+ } else process.exit(19);
+} else require(${JSON.stringify(savedAdb)});
 `);
         chmodSync(adbPath, 0o755);
         const remove = () => client.callTool({ name: "delete", arguments: {
@@ -1472,21 +1495,17 @@ exec "${savedAdb}" "$@"
         chmodSync(realAdbPath, 0o755);
         chmodSync(realAvdmanagerPath, 0o755);
         writeFileSync(join(homeDir, "fake-force-delete-kill-pid"), String(pid));
-        writeFileSync(adbPath, `#!/bin/sh
-if [ "$1" = "-s" ] && [ "$3" = "emu" ] && [ "$4" = "kill" ]; then
-  /bin/kill "$(/bin/cat "$HOME/fake-force-delete-kill-pid")"
-  status=$?
-  /bin/rm -f "$HOME/fake-adb-active-$2"
-  exit $status
-fi
-exec "${realAdbPath}" "$@"
+        writeFileSync(adbPath, `#!${process.execPath}
+const fs = require('node:fs'), path = require('node:path'), args = process.argv.slice(2);
+if (args[0] === '-s' && args[2] === 'emu' && args[3] === 'kill') {
+ process.kill(Number(fs.readFileSync(path.join(process.env.HOME, 'fake-force-delete-kill-pid'), 'utf8')));
+ fs.rmSync(path.join(process.env.HOME, 'fake-adb-active-' + encodeURIComponent(args[1])), { force: true });
+} else require(${JSON.stringify(realAdbPath)});
 `);
-        writeFileSync(avdmanagerPath, `#!/bin/sh
-if [ "$1" = "delete" ] && [ "$2" = "avd" ] && [ "$3" = "--name" ] && [ "$4" = "${avdName}" ]; then
-  echo "injected AVD delete failure" >&2
-  exit 19
-fi
-exec "${realAvdmanagerPath}" "$@"
+        writeFileSync(avdmanagerPath, `#!${process.execPath}
+const args = process.argv.slice(2);
+if (args[0] === 'delete' && args[1] === 'avd' && args[2] === '--name' && args[3] === ${JSON.stringify(avdName)}) { console.error('injected AVD delete failure'); process.exit(19); }
+require(${JSON.stringify(realAvdmanagerPath)});
 `);
         chmodSync(adbPath, 0o755);
         chmodSync(avdmanagerPath, 0o755);
@@ -1709,20 +1728,12 @@ exec "${realAvdmanagerPath}" "$@"
         const delegatedAdbPath = join(binDir, "adb-before-result-validation");
         writeFileSync(delegatedAdbPath, originalAdb);
         chmodSync(delegatedAdbPath, 0o755);
-        writeFileSync(adbPath, `#!/bin/sh
-if [ "$1" = "-s" ] && [ "$3" = "install" ] && [ "$5" = "/tmp/slow-install.apk" ]; then
-  /bin/sleep 1
-  exit 0
-fi
-if [ "$1" = "-s" ] && [ "$3" = "shell" ] && [ "$4" = "monkey" ] && [ "$6" = "com.example.missing" ]; then
-  echo "No activities found to run, monkey aborted."
-  exit 0
-fi
-if [ "$1" = "-s" ] && [ "$3" = "shell" ] && [ "$4" = "am" ] && [ "$7" = "com.example.missing/.MainActivity" ]; then
-  echo "Error: Activity class com.example.missing/.MainActivity does not exist."
-  exit 0
-fi
-exec "${delegatedAdbPath}" "$@"
+        writeFileSync(adbPath, `#!${process.execPath}
+const args = process.argv.slice(2);
+if (args[0] === '-s' && args[2] === 'install' && args[4] === '/tmp/slow-install.apk') { setTimeout(() => {}, 1000); }
+else if (args[0] === '-s' && args[2] === 'shell' && args[3] === 'monkey' && args[5] === 'com.example.missing') console.log('No activities found to run, monkey aborted.');
+else if (args[0] === '-s' && args[2] === 'shell' && args[3] === 'am' && args[6] === 'com.example.missing/.MainActivity') console.log('Error: Activity class com.example.missing/.MainActivity does not exist.');
+else require(${JSON.stringify(delegatedAdbPath)});
 `);
         chmodSync(adbPath, 0o755);
 

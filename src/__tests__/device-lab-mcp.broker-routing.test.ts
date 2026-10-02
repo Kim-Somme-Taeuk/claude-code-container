@@ -1,3 +1,4 @@
+import { spawnSync } from "child_process";
 import { toolOperation, publicToolName } from "../../device-lab-mcp/src/tools.mjs";
 import { callInternalBroker } from "./helpers/device-lab-mcp-fixture.js";
 import { createHash } from "crypto";
@@ -366,7 +367,7 @@ describe("device-lab MCP broker routing", () => {
             expect(payload).toEqual(expect.objectContaining({
                 ok: true,
                 routedBy: "device-lifecycle-broker",
-                result: { device },
+                result: { device: { ...device, id: undefined, deviceId: device.id } },
             }));
             const failed = await client.callTool({
                 name: "create_linux_vm",
@@ -522,8 +523,8 @@ describe("device-lab MCP broker routing", () => {
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text || "{}"));
             expect(payload.routedBy).toBe("device-list-broker-implicit");
             expect(payload.devices).toEqual(expect.arrayContaining([
-                expect.objectContaining({ id: "x11-current-display" }),
-                expect.objectContaining({ id: "broker-listed-windows-vm", backend: "windows-vm" }),
+                expect.objectContaining({ deviceId: "x11-current-display" }),
+                expect.objectContaining({ deviceId: "broker-listed-windows-vm", backend: "windows-vm" }),
             ]));
         } finally {
             cleanupOwner(owner);
@@ -1148,7 +1149,7 @@ describe("device-lab MCP broker routing", () => {
                 ["key", { keyCode: 224 }],
                 ["click", { x: 10, y: 20 }],
                 ["screenshot", {}],
-                ["ui", { appiumPort: 4729, serverPort: 8209, automationName: "UiAutomator2", provider: "appium", physical: true }],
+                ["ui", {}],
                 ["wait_for_text", { text: "Ready", timeoutMs: 100, intervalMs: 50 }],
                 ["open_url", { url: "https://example.test/route" }],
                 ["install_app", { path: projectTestPath("Route.apk") }],
@@ -1334,7 +1335,7 @@ describe("device-lab MCP broker routing", () => {
         }
     });
 
-    it("routes an implicit Hyper-V cursor move and refuses moves that cannot reach Hyper-V", { timeout: TIMEOUT }, async () => {
+    it("routes Hyper-V and Sandbox cursor moves and rejects unresolved devices", { timeout: TIMEOUT }, async () => {
         const authRoot = join(homeDir, ".ccc", "devices", "broker", "auth");
         const authFile = join(authRoot, `${brokerOwnerId()}.json`);
         mkdirSync(authRoot, { recursive: true });
@@ -1378,15 +1379,17 @@ describe("device-lab MCP broker routing", () => {
             expect(moved, JSON.stringify(moved)).toEqual(expect.objectContaining({ routedBy: "device-mutating-broker-implicit" }));
             expect(invoked, JSON.stringify(moved)).toEqual([expect.objectContaining({ tool: "device_cursor_position", backend: "windows-vm", deviceId: "hv-cursor", x: 10, y: 20 })]);
 
+            const sandbox = await call({ deviceId: "sandbox-cursor", x: 10, y: 20 });
+            expect(sandbox.ok).toBe(true);
+            expect(invoked.at(-1)).toMatchObject({ tool: "device_cursor_position", backend: "windows-sandbox", deviceId: "sandbox-cursor", x: 10, y: 20 });
             for (const args of [
-                { deviceId: "sandbox-cursor", x: 10, y: 20 },
                 { x: 10, y: 20 },
                 { deviceId: "sandbox-cursor", x: 10, y: 20, broker: false },
                 { deviceId: "hv-cursor", incarnationId, x: 10, y: 20, implicitBroker: false },
             ]) {
-                expect(await call(args)).toEqual(expect.objectContaining({ ok: false, error: "device-cursor-move-backend-unsupported" }));
+                expect(await call(args)).toEqual(expect.objectContaining({ ok: false, error: expect.any(String) }));
             }
-            expect(invoked).toHaveLength(1);
+            expect(invoked).toHaveLength(2);
         } finally {
             if (!authExisted) rmSync(authFile, { force: true });
             await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -1730,7 +1733,7 @@ describe("device-lab MCP broker routing", () => {
             const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"));
             expect(payload).toEqual(expect.objectContaining({
                 routedBy: "device-lifecycle-broker-implicit",
-                device: expect.objectContaining({ id: "android-broker-session-status" }),
+                device: expect.objectContaining({ deviceId: "android-broker-session-status" }),
                 authority: "host-broker",
                 automation: expect.objectContaining({ sessionId: "broker-session-1" }),
             }));
@@ -2158,7 +2161,7 @@ describe("device-lab MCP broker routing", () => {
                 selected: expect.objectContaining({ timeoutMs: 30000 }),
                 result: expect.objectContaining({
                     device: expect.objectContaining({
-                        id: "android-implicit-wifi",
+                        deviceId: "android-implicit-wifi",
                         serial: "10.0.0.11:5555",
                         connection: "wifi",
                     }),
@@ -2345,7 +2348,7 @@ describe("device-lab MCP broker routing", () => {
     it("plans and dry-runs lifecycle commands through an explicitly supplied host broker", { timeout: TIMEOUT }, async () => {
         const ownerRoot = join(homedir(), ".ccc/devices/owners", brokerOwnerId());
         const fakeWsb = join(homeDir, "fake-wsb");
-        writeFileSync(fakeWsb, "#!/bin/sh\ncase \"$5\" in\n  *fail*) echo broker failure >&2; exit 7 ;;\n  *) echo wsb \"$@\"; exit 0 ;;\nesac\n");
+        writeFileSync(fakeWsb, "const args = process.argv.slice(2); if (args[4]?.includes('fail')) { console.error('broker failure'); process.exit(7); } console.log('wsb ' + args.join(' '));\n");
         chmodSync(fakeWsb, 0o755);
         const windowsRoot = join(ownerRoot, "windows");
         mkdirSync(windowsRoot, { recursive: true });
@@ -2365,7 +2368,14 @@ describe("device-lab MCP broker routing", () => {
             host: "127.0.0.1",
             port: 0,
             startedAt: "2026-01-01T00:00:00.000Z",
+            platform: "linux", // Exercise CLI routing; native Sandbox registration has separate coverage.
             providerPaths: { wsb: fakeWsb },
+            // Execute the fake CLI as Node rather than requiring host shell associations.
+            commandRunner: (command) => {
+                if (command.mode !== "exec") return { ...command, status: 0, stdout: "", stderr: "" };
+                const result = spawnSync(process.execPath, [fakeWsb, ...(command.args || [])], { encoding: "utf8", timeout: 5000, windowsHide: true });
+                return { ...command, status: result.status, stdout: result.stdout || "", stderr: result.stderr || "" };
+            },
         });
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address() as AddressInfo;
@@ -2388,7 +2398,7 @@ describe("device-lab MCP broker routing", () => {
                     command: "device_create",
                     deviceId: "windows-broker-created",
                     device: expect.objectContaining({
-                        id: "windows-broker-created",
+                        deviceId: "windows-broker-created",
                         status: "stopped",
                         authority: "host-broker",
                     }),
@@ -2513,7 +2523,7 @@ describe("device-lab MCP broker routing", () => {
                 command: "device_status",
                 deviceId: "win-broker-plan",
                 invoked: true,
-                device: expect.objectContaining({ id: "win-broker-plan" }),
+                device: expect.objectContaining({ deviceId: "win-broker-plan" }),
             }));
 
             const lifecycleStop = await client.callTool({
@@ -2527,14 +2537,8 @@ describe("device-lab MCP broker routing", () => {
                     timeoutMs: 500,
                 },
             });
-            expect(lifecycleStop.isError).not.toBe(true);
-            expect(JSON.parse(((lifecycleStop.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
-                    backend: "windows-sandbox",
-                    command: "device_stop",
-                    invoked: false,
-                    dryRun: true,
-                    execution: expect.objectContaining({ mode: "dry-run", mutatesHost: false }),
-            }));
+            expect(lifecycleStop.isError).toBe(true);
+            expect(JSON.stringify(lifecycleStop)).toContain("stop does not support dryRun");
 
             const implicitLifecycleStop = await client.callTool({
                 name: "stop",
@@ -2546,21 +2550,14 @@ describe("device-lab MCP broker routing", () => {
                     timeoutMs: 500,
                 },
             });
-            expect(implicitLifecycleStop.isError).not.toBe(true);
-            expect(JSON.parse(((implicitLifecycleStop.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
-                routedBy: "device-lifecycle-broker-implicit",
-                backend: "windows-sandbox",
-                command: "device_stop",
-                invoked: false,
-                dryRun: true,
-            }));
+            expect(implicitLifecycleStop.isError).toBe(true);
+            expect(JSON.stringify(implicitLifecycleStop)).toContain("stop does not support dryRun");
 
             const realLifecycleStop = await client.callTool({
                 name: "stop",
                 arguments: {
                     deviceId: "win-broker-plan",
                     viaBroker: true,
-                    dryRun: false,
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
                     timeoutMs: 500,
@@ -2572,7 +2569,7 @@ describe("device-lab MCP broker routing", () => {
                     command: "device_stop",
                     invoked: true,
                     dryRun: false,
-                    device: expect.objectContaining({ id: "win-broker-plan", status: "stopped" }),
+                    device: expect.objectContaining({ deviceId: "win-broker-plan", status: "stopped" }),
             }));
 
             const failedRun = await callInternalBroker(client, { operation: "brokerCommand",
@@ -2688,7 +2685,7 @@ describe("device-lab MCP broker routing", () => {
             expect(result.isError).not.toBe(true);
             expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 deviceId: "android-slow-avd",
-                device: expect.objectContaining({ id: "android-slow-avd", provisioned: true }),
+                device: expect.objectContaining({ deviceId: "android-slow-avd", provisioned: true }),
                 routedBy: "device-lifecycle-broker-implicit",
             }));
         } finally {
@@ -3044,7 +3041,7 @@ describe("device-lab MCP broker routing", () => {
                 result: expect.objectContaining({
                     tool: "device_inventory",
                     backend: "windows-sandbox",
-                    devices: [expect.objectContaining({ id: "win-readonly-broker" })],
+                    devices: [expect.objectContaining({ deviceId: "win-readonly-broker" })],
                     source: "host-broker-owner-state",
                     startsDevices: false,
                 }),

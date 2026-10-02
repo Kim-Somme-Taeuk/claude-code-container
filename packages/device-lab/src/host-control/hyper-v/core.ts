@@ -263,7 +263,7 @@ export function isoWriterLines(fileSystems: 3 | 7 = 7): string[] {
         "    $Cause = $_.Exception",
         "    for ($Depth = 0; $Cause -and $Depth -lt 8; $Depth++) {",
         "      $CauseMessage = [string]$Cause.Message",
-        "      if ($CauseMessage -match '\\b(hyper-v-provisioning-media-(?:block-invalid|stream-invalid|output-open-failed|copy-incomplete|com-unavailable|configure-failed|filesystem-selection-failed|volume-name-invalid|volume-name-failed|source-entry-invalid|source-directory-failed|source-file-invalid|source-file-failed|add-tree-failed|result-image-failed)\\b') { $CccIsoFailure = [string]$Matches[0]; break }",
+        "      if ($CauseMessage -match '\\b(hyper-v-provisioning-media-(?:block-invalid|stream-invalid|output-open-failed|copy-incomplete|com-unavailable|configure-failed|filesystem-selection-failed|volume-name-invalid|volume-name-failed|source-entry-invalid|source-directory-failed|source-file-invalid|source-file-failed|add-tree-failed|result-image-failed))\\b') { $CccIsoFailure = [string]$Matches[0]; break }",
         "      $Cause = $Cause.InnerException",
         "    }",
         "    if ($null -eq $CccIsoFailure) { $CccIsoFailure = 'hyper-v-provisioning-media-create-failed' }",

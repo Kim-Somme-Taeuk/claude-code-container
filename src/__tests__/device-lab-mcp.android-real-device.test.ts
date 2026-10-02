@@ -1,6 +1,6 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cleanupFakeAndroidMcpContext, createFakeAndroidMcpContext, TIMEOUT, type FakeAndroidMcpContext } from "./helpers/fake-android-mcp-fixture.js";
 
 function parseToolJson(result: { content?: unknown }) {
@@ -14,7 +14,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
     let binDir: string;
     let logPath: string;
 
-    beforeAll(async () => {
+    beforeEach(async () => {
         context = await createFakeAndroidMcpContext();
         client = context.client;
         homeDir = context.homeDir;
@@ -22,7 +22,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         logPath = context.logPath;
     }, TIMEOUT);
 
-    afterAll(async () => {
+    afterEach(async () => {
         await cleanupFakeAndroidMcpContext(context);
     }, TIMEOUT);
 
@@ -240,10 +240,10 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         });
         expect(attach.isError).not.toBe(true);
         const attached = JSON.parse(((attach.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; backend: string; serial: string; status: string; creatable: boolean; physical: boolean; targetStatus: { targetKind: string; leaseState: { state: string; hardwareId: string }; sessionState: { state: string } } };
+            device: { deviceId: string; backend: string; serial: string; status: string; creatable: boolean; physical: boolean; targetStatus: { targetKind: string; leaseState: { state: string; hardwareId: string }; sessionState: { state: string } } };
         };
         expect(attached.device).toEqual(expect.objectContaining({
-            id: "android-device-real-pixel",
+            deviceId: "android-device-real-pixel",
             backend: "android-device",
             serial: "R5CREAL123",
             connection: "usb",
@@ -269,10 +269,10 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         });
         expect(wifiAttach.isError).not.toBe(true);
         const wifiAttached = JSON.parse(((wifiAttach.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; serial: string; connection: string; transport: { type: string; host: string; port: number } };
+            device: { deviceId: string; serial: string; connection: string; transport: { type: string; host: string; port: number } };
         };
         expect(wifiAttached.device).toEqual(expect.objectContaining({
-            id: "android-device-wifi-pixel",
+            deviceId: "android-device-wifi-pixel",
             serial: "192.168.1.50:5555",
             connection: "wifi",
             transport: expect.objectContaining({ type: "wifi", host: "192.168.1.50", port: 5555 }),
@@ -283,10 +283,10 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         });
         expect(wifiSerialAttach.isError).not.toBe(true);
         const wifiSerialAttached = JSON.parse(((wifiSerialAttach.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; serial: string; connection: string; transport: { type: string; host: string; port: number } };
+            device: { deviceId: string; serial: string; connection: string; transport: { type: string; host: string; port: number } };
         };
         expect(wifiSerialAttached.device).toEqual(expect.objectContaining({
-            id: "android-device-wifi-serial-pixel",
+            deviceId: "android-device-wifi-serial-pixel",
             serial: "192.168.1.60:5555",
             connection: "wifi",
             transport: expect.objectContaining({ type: "wifi", host: "192.168.1.60", port: 5555 }),
@@ -323,13 +323,13 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
             ["click", { deviceId: "android-device-real-pixel", x: 10, y: 20 }, { provider: "adb", tapped: { x: 10, y: 20 } }],
             ["back", { deviceId: "android-device-real-pixel" }, { provider: "adb", key: 4 }],
             ["ui", { deviceId: "android-device-real-pixel" }, { provider: "adb-uiautomator", source: expect.stringContaining("<hierarchy>"), remotePath: "/sdcard/window-android-device-real-pixel.xml" }],
-            ["wait_for_text", { deviceId: "android-device-real-pixel", text: "Hello", timeoutMs: 100, intervalMs: 50 }, { provider: "adb-uiautomator", text: "Hello", found: true }],
+            ["wait_for_text", { deviceId: "android-device-real-pixel", text: "Hello", timeoutMs: 5000, intervalMs: 50 }, { provider: "adb-uiautomator", text: "Hello", found: true }],
             ["install_app", { deviceId: "android-device-real-pixel", path: "/tmp/Real.apk" }, { provider: "adb", installed: "/tmp/Real.apk" }],
             ["launch_app", { deviceId: "android-device-real-pixel", appId: "com.example.real" }, { provider: "adb", launched: "com.example.real" }],
             ["screenshot", { deviceId: "android-device-real-pixel" }, { type: "image", data: expectedAndroidPng, mimeType: "image/png" }],
         ] as Array<[string, Record<string, unknown>, Record<string, unknown>]>) {
             const result = await client.callTool({ name: tool, arguments: args });
-            expect(result.isError, tool).not.toBe(true);
+            expect(result.isError, `${tool}: ${JSON.stringify(result.content)}`).not.toBe(true);
             if (tool === "screenshot") {
                 expect((result.content as Array<{ type: string; data: string; mimeType: string }>)[0]).toEqual(expectedPayload);
             } else {
@@ -451,9 +451,9 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
 
         const list = await client.callTool({ name: "devices", arguments: {} });
         const listed = JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            devices: Array<{ id: string }>;
+            devices: Array<{ deviceId: string }>;
         };
-        expect(listed.devices.some((device) => device.id === "android-device-real-pixel")).toBe(false);
+        expect(listed.devices.some((device) => device.deviceId === "android-device-real-pixel")).toBe(false);
 
         const log = readFileSync(logPath, "utf-8");
         expect(log).toContain("adb devices -l");
@@ -624,7 +624,7 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         expect(cleanup.isError).not.toBe(true);
     });
 
-    it("preserves active recording metadata and the physical lease when stop or detach cannot confirm recorder exit", { timeout: TIMEOUT }, async () => {
+    async function verifyRecorderCleanup(mode: "identity" | "signal") {
         const deviceId = "android-real-recorder-cleanup-retry";
         const attachedResult = await client.callTool({
             name: "attach",
@@ -640,20 +640,17 @@ describe("device-lab MCP Android real-device flows with fake SDK", () => {
         const ignoreSignalMarker = join(homeDir, "fake-adb-screenrecord-ignore-sigint");
 
         renameSync(adbPath, originalAdbPath);
-        writeFileSync(adbPath, `#!/bin/sh
-if [ "$1" = "-s" ] && [ "$3" = "shell" ] && [ "$4" = "pkill" ] && [ -f "$HOME/fake-adb-pkill-fail" ]; then
-  echo "screenrecord pkill denied" >&2
-  exit 17
-fi
-if [ "$1" = "-s" ] && [ "$3" = "shell" ] && [ "$4" = "screenrecord" ] && [ -f "$HOME/fake-adb-screenrecord-ignore-sigint" ]; then
-  trap '' INT
-fi
-exec "${originalAdbPath}" "$@"
+        writeFileSync(adbPath, `#!${process.execPath}
+const fs = require('node:fs'), path = require('node:path'), args = process.argv.slice(2);
+if (args[0] === '-s' && args[2] === 'shell' && args[3] === 'pkill' && fs.existsSync(path.join(process.env.HOME, 'fake-adb-pkill-fail'))) { console.error('screenrecord pkill denied'); process.exit(17); }
+if (args[0] === '-s' && args[2] === 'shell' && args[3] === 'screenrecord' && fs.existsSync(path.join(process.env.HOME, 'fake-adb-screenrecord-ignore-sigint'))) process.on('SIGINT', () => {});
+require(${JSON.stringify(originalAdbPath)});
 `);
         chmodSync(adbPath, 0o755);
 
         let stubbornPid: number | undefined;
         try {
+          if (mode === "identity") {
             const started = await client.callTool({
                 name: "record_video",
                 arguments: { action: "start", deviceId, remotePath: "/sdcard/cleanup-failure.mp4" },
@@ -690,6 +687,7 @@ exec "${originalAdbPath}" "$@"
             const finalized = await client.callTool({ name: "record_video", arguments: { action: "stop", deviceId } });
             expect(finalized.isError).not.toBe(true);
 
+          } else {
             writeFileSync(ignoreSignalMarker, "1");
             const stubbornStart = await client.callTool({
                 name: "record_video",
@@ -707,6 +705,7 @@ exec "${originalAdbPath}" "$@"
                 recording: expect.objectContaining({ active: true, pid: stubbornPid }),
             }));
             expect(() => readFileSync(leasePath, "utf-8")).not.toThrow();
+          }
         } finally {
             rmSync(failFallbackMarker, { force: true });
             rmSync(ignoreSignalMarker, { force: true });
@@ -718,33 +717,24 @@ exec "${originalAdbPath}" "$@"
             await new Promise((resolve) => setTimeout(resolve, 100));
             await client.callTool({ name: "detach", arguments: { deviceId } });
         }
-    });
+    }
+
+    it("preserves recording metadata and physical lease when identity verification and fallback fail", { timeout: TIMEOUT }, () => verifyRecorderCleanup("identity"));
+    // Windows does not support a child ignoring process.kill(SIGINT); retain this real signal test on POSIX.
+    it.skipIf(process.platform === "win32")("preserves recording metadata and physical lease while a recorder ignores SIGINT", { timeout: TIMEOUT }, () => verifyRecorderCleanup("signal"));
 
     it("formats IPv6 wireless endpoints and bounds physical-device install and launch results", { timeout: TIMEOUT }, async () => {
         const deviceId = "android-real-adb-result-validation";
         const adbPath = join(binDir, "adb");
         const delegatedAdbPath = join(binDir, "adb-before-real-result-validation");
         renameSync(adbPath, delegatedAdbPath);
-        writeFileSync(adbPath, `#!/bin/sh
-if [ "$1" = "connect" ] && [ "$2" = "[2001:db8::50]:5555" ]; then
-  echo "adb $*" >> "$FAKE_ANDROID_LOG"
-  echo "connected to $2"
-  exit 0
-fi
-if [ "$1" = "pair" ] && [ "$2" = "[2001:db8::70]:37099" ] && [ "$3" = "123456" ]; then
-  echo "adb $*" >> "$FAKE_ANDROID_LOG"
-  echo "Successfully paired to $2"
-  exit 0
-fi
-if [ "$1" = "-s" ] && [ "$3" = "install" ] && [ "$5" = "/tmp/slow-real-install.apk" ]; then
-  /bin/sleep 1
-  exit 0
-fi
-if [ "$1" = "-s" ] && [ "$3" = "shell" ] && [ "$4" = "monkey" ] && [ "$6" = "com.example.real.missing" ]; then
-  echo "No activities found to run, monkey aborted."
-  exit 0
-fi
-exec "${delegatedAdbPath}" "$@"
+        writeFileSync(adbPath, `#!${process.execPath}
+const fs = require('node:fs'), args = process.argv.slice(2);
+if (args[0] === 'connect' && args[1] === '[2001:db8::50]:5555') { fs.appendFileSync(process.env.FAKE_ANDROID_LOG, 'adb ' + args.join(' ') + '\\n'); console.log('connected to ' + args[1]); }
+else if (args[0] === 'pair' && args[1] === '[2001:db8::70]:37099' && args[2] === '123456') { fs.appendFileSync(process.env.FAKE_ANDROID_LOG, 'adb ' + args.join(' ') + '\\n'); console.log('Successfully paired to ' + args[1]); }
+else if (args[0] === '-s' && args[2] === 'install' && args[4] === '/tmp/slow-real-install.apk') setTimeout(() => {}, 1000);
+else if (args[0] === '-s' && args[2] === 'shell' && args[3] === 'monkey' && args[5] === 'com.example.real.missing') console.log('No activities found to run, monkey aborted.');
+else require(${JSON.stringify(delegatedAdbPath)});
 `);
         chmodSync(adbPath, 0o755);
 

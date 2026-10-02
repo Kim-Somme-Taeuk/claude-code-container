@@ -26,23 +26,35 @@ describe("device-lab screenshot file boundaries", () => {
         });
     });
 
+    it("rejects a symbolic screenshot link when the host permits creating one", (context) => {
+        const directory = tempRoot();
+        const source = join(directory, "source.png");
+        const symbolic = join(directory, "symbolic.png");
+        writeFileSync(source, "fakepng");
+        try { symlinkSync(source, symbolic); }
+        catch (error) {
+            if (process.platform === "win32" && ["EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code || "")) {
+                context.skip(true, "Windows file symlinks require Developer Mode or privilege"); return;
+            }
+            throw error;
+        }
+        expect(screenshotFileResult(symbolic, "test-screenshot")).toEqual(expect.objectContaining({ isError: true }));
+    });
+
     it("rejects missing, empty, linked, and oversized outputs", () => {
         const directory = tempRoot();
         const source = join(directory, "source.png");
         const empty = join(directory, "empty.png");
-        const symbolic = join(directory, "symbolic.png");
         const hard = join(directory, "hard.png");
         const oversized = join(directory, "oversized.png");
         writeFileSync(source, "fakepng");
         writeFileSync(empty, "");
-        symlinkSync(source, symbolic);
         linkSync(source, hard);
         writeFileSync(oversized, "x");
         truncateSync(oversized, DEVICE_SCREENSHOT_LIMIT_BYTES + 1);
 
         expect(screenshotFileResult(join(directory, "missing.png"), "test-screenshot")).toEqual(expect.objectContaining({ isError: true }));
         expect(screenshotFileResult(empty, "test-screenshot")).toEqual(expect.objectContaining({ isError: true }));
-        expect(screenshotFileResult(symbolic, "test-screenshot")).toEqual(expect.objectContaining({ isError: true }));
         expect(screenshotFileResult(hard, "test-screenshot")).toEqual(expect.objectContaining({ isError: true }));
         expect(screenshotFileResult(oversized, "test-screenshot")).toEqual(expect.objectContaining({ isError: true }));
     });

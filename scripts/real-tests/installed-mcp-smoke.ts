@@ -60,6 +60,7 @@ export function installedMcpSmokeSample(toolName) {
         scroll: { ...direct, deviceId: windowsId, x: 1, y: 1, direction: "down", amount: 1, timeoutMs: 1 },
         move: { deviceId: "x11-current-display", x: 1, y: 1 },
         cursor_position: { ...direct, deviceId: windowsId, timeoutMs: 1 },
+        focus_window: { ...direct, deviceId: windowsId, handle: "123", timeoutMs: 1 },
         window_list: { ...direct, deviceId: windowsId, timeoutMs: 1 },
         ui: { ...direct, deviceId: windowsId, maxDepth: 1, maxNodes: 1, timeoutMs: 1 },
         snapshot: { action: "list", ...direct, deviceId: linuxId },
@@ -165,7 +166,7 @@ export async function runInstalledMcpSmoke(options: any = {}) {
                 failures.push(`status current-display returned isError=true: ${contentText(statusResult)}`);
             } else {
                 const status = parseToolPayload(statusResult);
-                if (status.id !== "x11-current-display") failures.push(`status returned id=${JSON.stringify(status.id)}`);
+                if (status.deviceId !== "x11-current-display") failures.push(`status returned id=${JSON.stringify(status.deviceId)}`);
                 if (status.kind !== "display") failures.push(`status returned kind=${JSON.stringify(status.kind)}`);
                 if (status.backend !== "x11") failures.push(`status returned backend=${JSON.stringify(status.backend)}`);
             }

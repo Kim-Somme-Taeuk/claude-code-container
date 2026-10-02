@@ -1,3 +1,4 @@
+import { regionInputError } from "./screenshot-region.mjs";
 import { validateListFilesArgs } from "@ccc/device-lab/providers/file-listing.mjs";
 import { createInputError, normalizeCreateArgs, CREATE_TOOL_BACKENDS } from "./creation-input.mjs";
 import { TOOLS, SINGLE_BACKEND_TOOL_DEFAULTS, GROUP_OPERATIONS, DISCOVERY_OPERATIONS, toolOperation } from "./tools.mjs";
@@ -53,7 +54,6 @@ export function toolInputError(name, args = {}) {
     if (name === "devices") {
         if (Object.hasOwn(args, "view") && (typeof args.view !== "string" || !Object.hasOwn(DISCOVERY_OPERATIONS, args.view))) return "devices view must be owned, available, or backends";
         if (Object.hasOwn(args, "backend") && !schema.properties.backend.enum.includes(args.backend)) return "devices backend is unsupported";
-        if (args.view === "available" && !Object.hasOwn(args, "backend")) return "devices view:available requires backend";
         if (args.view === "available" && args.backend === "x11-current-display") return "The current display has no available-device inventory; use devices view:owned or backends";
     }
     if (["devices", "set_network"].includes(name)) {
@@ -132,15 +132,26 @@ export function toolInputError(name, args = {}) {
     }
     if (name === "set_battery" && !["level", "charging", "status"].some(key => Object.hasOwn(args, key))) return "set_battery requires level, charging, or status";
     if (name === "clipboard" && Object.hasOwn(args, "text") && typeof args.text !== "string") return "clipboard text must be a string";
-    if (name === "list_files") return validateListFilesArgs({ ...args, ...(Object.hasOwn(args, "appId") ? { bundleId: args.appId } : {}) })?.replace(/bundleId/g, "appId") || null;
+    if (name === "list_files") {
+        const error = validateListFilesArgs({ ...args, ...(Object.hasOwn(args, "appId") ? { bundleId: args.appId } : {}) })?.replace(/bundleId/g, "appId");
+        if (error) return error;
+    }
     if (name === "key" && Object.hasOwn(args, "key") === Object.hasOwn(args, "keyCode")) return "key requires exactly one of key or keyCode";
     if (name === "key" && !(typeof args.key === "string" && args.key.length > 0)
         && !(Number.isInteger(args.keyCode) && args.keyCode >= 0)) return "key requires key or keyCode";
+    if (name === "screenshot" && Object.hasOwn(args, "region")) { const error = regionInputError(args.region); if (error) return error; }
+    if (name === "focus_window" && (typeof args.handle !== "string" || args.handle.length > 2048 || !((/^[1-9][0-9]{0,15}$/.test(args.handle) && Number.isSafeInteger(Number(args.handle))) || /^macos:[1-9][0-9]{0,9}:[1-9][0-9]{0,15}:.+$/.test(args.handle)))) return "focus_window requires a handle from window_list";
+    if (name === "drag") {
+        if (["x1", "y1", "x2", "y2"].some(key => !Number.isSafeInteger(args[key]) || args[key] < 0)) return "drag requires nonnegative integer x1, y1, x2 and y2";
+        if (args.durationMs !== undefined && (!Number.isInteger(args.durationMs) || args.durationMs < 1 || args.durationMs > 10000)) return "drag durationMs must be an integer from 1 to 10000";
+    }
     if (name === "move" && (!Number.isInteger(args.x) || args.x < 0 || !Number.isInteger(args.y) || args.y < 0)) return "move requires nonnegative integer x and y";
     if (name === "cursor_position" && (Object.hasOwn(args, "x") || Object.hasOwn(args, "y"))) return "Use move to change cursor position";
     if (Object.hasOwn(SINGLE_BACKEND_TOOL_DEFAULTS, name) && Object.hasOwn(args, "backend")) {
         return `${name} selects its backend automatically; omit backend`;
     }
+    const unknown = Object.keys(args).find(key => !Object.hasOwn(schema.properties, key) && !TRANSPORT_FIELDS.has(key));
+    if (unknown) return `${name} does not support ${unknown}`;
     return null;
 }
 
@@ -150,6 +161,7 @@ export function normalizePublicToolArgs(name, args = {}) {
     if (Object.hasOwn(CREATE_TOOL_BACKENDS, name)) return normalizeCreateArgs({ ...normalized, backend: CREATE_TOOL_BACKENDS[name] });
     if (name === "click") delete normalized.count;
     if (name === "reset") normalized.eraseSimulator = true;
+    if (name === "start") normalized.waitForBoot ??= true;
     const schema = TOOLS.find(tool => tool.name === name)?.inputSchema;
     if (schema?.properties.appId && Object.hasOwn(args, "appId")) {
         normalized.packageName = args.appId;

@@ -1,3 +1,4 @@
+import { directorySymlink } from "./helpers/file-symlink-fixture.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { basename, join } from "path";
@@ -43,7 +44,7 @@ describe("quarantineAndRemoveDirectory", () => {
             quarantineAndRemoveDirectory(target, (path) => {
                 if (basename(path) === "device" && path !== target) {
                     renameSync(path, displaced);
-                    symlinkSync(external, path, "dir");
+                    directorySymlink(external, path);
                 }
             });
         } catch (error) {

@@ -134,7 +134,7 @@ export function assertHyperVLinuxCreateContract(device: any, expectedDeviceId: s
             );
         }
     };
-    requireField("id", expectedDeviceId, (value) => value === expectedDeviceId);
+    requireField("deviceId", expectedDeviceId, (value) => value === expectedDeviceId);
     requireField("guestProvisioned", true, (value) => value === true);
     requireField("guestTransport", "ssh", (value) => value === "ssh");
     requireField("switchName", "CCC Device Lab", (value) => value === "CCC Device Lab");
@@ -196,9 +196,9 @@ export function hyperVLinuxVmE2ECapability(options: any = {}) {
 async function cleanupPrevious(callTool: (tool: string, args: any) => Promise<any>) {
     const inventory = resultValue(hyperVLinuxToolPayload(await callTool("devices", { view: "available", detail: true, backend: "linux-vm" })));
     const devices = Array.isArray(inventory?.devices) ? inventory.devices : [];
-    for (const device of devices.filter((candidate: any) => String(candidate?.id || "").startsWith(DEVICE_PREFIX))) {
-        try { await callTool("stop", { detail: true, deviceId: device.id, incarnationId: device.incarnationId, force: true }); } catch { /* delete is still attempted */ }
-        hyperVLinuxToolPayload(await callTool("delete", { detail: true, deviceId: device.id, incarnationId: device.incarnationId, ...HYPER_V_LINUX_E2E_DELETE_OPTIONS }));
+    for (const device of devices.filter((candidate: any) => String(candidate?.deviceId || "").startsWith(DEVICE_PREFIX))) {
+        try { await callTool("stop", { detail: true, deviceId: device.deviceId, incarnationId: device.incarnationId, force: true }); } catch { /* delete is still attempted */ }
+        hyperVLinuxToolPayload(await callTool("delete", { detail: true, deviceId: device.deviceId, incarnationId: device.incarnationId, ...HYPER_V_LINUX_E2E_DELETE_OPTIONS }));
     }
 }
 
@@ -243,7 +243,7 @@ export async function runHyperVLinuxVmE2E(options: any = {}) {
 
             currentStep = "inventory VM";
             const inventory = resultValue(hyperVLinuxToolPayload(await callTool("devices", { view: "available", detail: true, backend: "linux-vm" })));
-            assert.ok(Array.isArray(inventory.devices) && inventory.devices.some((device: any) => device.id === deviceId));
+            assert.ok(Array.isArray(inventory.devices) && inventory.devices.some((device: any) => device.deviceId === deviceId));
 
             currentStep = "start and wait for SSH";
             const started = lifecycleDevice(hyperVLinuxToolPayload(await callTool("start", { detail: true, ...direct, waitForBoot: true, bootTimeoutMs: 1200000 })), "start");
@@ -260,7 +260,7 @@ export async function runHyperVLinuxVmE2E(options: any = {}) {
 
             currentStep = "read VM status";
             const status = lifecycleDevice(hyperVLinuxToolPayload(await callTool("status", { detail: true, ...direct })), "status");
-            assert.strictEqual(status.id, deviceId);
+            assert.strictEqual(status.deviceId, deviceId);
             assert.strictEqual(status.status, "running");
 
             currentStep = "execute guest command";

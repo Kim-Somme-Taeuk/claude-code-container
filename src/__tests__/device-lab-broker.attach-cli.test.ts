@@ -1,3 +1,5 @@
+import * as fixtureFs from "fs";
+import { isolateDeviceLabTestEnvironment } from "./helpers/device-lab-test-environment.js";
 import { DEVICE_BROKER_PROTOCOL_VERSION } from "@ccc/device-lab/providers/contracts/broker-protocol.mjs";
 import { spawn } from "child_process";
 import { createHash } from "crypto";
@@ -43,18 +45,18 @@ async function waitForBrokerHealth(port: number, timeoutMs = 30000) {
 }
 
 describe("device-lab host broker physical attach and CLI", () => {
-    let originalHome: string | undefined;
+    let originalHomeRestore: (() => void) | undefined;
+    let fixtureHome: string | undefined;
 
     beforeEach(() => {
-        originalHome = process.env.HOME;
-        process.env.HOME = mkdtempSync(join(tmpdir(), "ccc-device-broker-attach-test-home-"));
+        fixtureHome = mkdtempSync(join(tmpdir(), "ccc-device-broker-attach-test-home-"));
+        originalHomeRestore = isolateDeviceLabTestEnvironment(fixtureHome);
     });
 
     afterEach(() => {
         vi.restoreAllMocks();
-        if (process.env.HOME) rmSync(process.env.HOME, { recursive: true, force: true });
-        if (originalHome === undefined) delete process.env.HOME;
-        else process.env.HOME = originalHome;
+        if (fixtureHome) rmSync(fixtureHome, { recursive: true, force: true });
+        originalHomeRestore?.();
     });
 
     it("attaches and detaches physical Android/iOS devices through broker RPC with leases", async () => {
@@ -943,8 +945,12 @@ describe("device-lab host broker physical attach and CLI", () => {
                 params: { backend: "android-device", deviceId },
             }),
         });
+        const rename = fixtureFs.renameSync;
+        const failure = vi.spyOn(fixtureFs, "renameSync").mockImplementation((source, target) => {
+            if (String(target) === join(ownerStateRoot, "devices.json")) throw Object.assign(new Error("injected state write failure"), { code: "EIO" });
+            return rename(source, target);
+        });
         try {
-            chmodSync(ownerStateRoot, 0o500);
             const failed = await detach();
             expect(failed.status).toBe(500);
             expect(await failed.json()).toEqual(expect.objectContaining({
@@ -968,12 +974,12 @@ describe("device-lab host broker physical attach and CLI", () => {
                 leaseClaimNonce: claimNonce,
             }));
 
-            chmodSync(ownerStateRoot, 0o700);
+            failure.mockRestore();
             const recovered = await detach();
             expect(recovered.status).toBe(200);
             expect(existsSync(leaseFile)).toBe(false);
         } finally {
-            chmodSync(ownerStateRoot, 0o700);
+            failure.mockRestore();
             await close(server);
             rmSync(join(homedir(), ".ccc/devices/owners", ownerId), { recursive: true, force: true });
             rmSync(leaseFile, { force: true });
@@ -2136,7 +2142,7 @@ describe("device-lab host broker physical attach and CLI", () => {
 
         expect(result.ok).toBe(true);
         expect(result.service.manager).toBe("systemd-user");
-        expect(result.service.definitionPath).toContain(".config/systemd/user/ccc-device-broker.service");
+        expect(result.service.definitionPath).toContain(join(".config", "systemd", "user", "ccc-device-broker.service"));
         expect(result.service.command).toEqual([
             process.execPath,
             "/opt/ccc/dist/index.js",
@@ -2186,7 +2192,7 @@ describe("device-lab host broker physical attach and CLI", () => {
         });
         expect(mac.ok).toBe(true);
         expect(mac.service.manager).toBe("launchd-user");
-        expect(mac.service.definitionPath).toContain("Library/LaunchAgents/com.ccc.device-broker.plist");
+        expect(mac.service.definitionPath).toContain(join("Library", "LaunchAgents", "com.ccc.device-broker.plist"));
         expect(mac.service.commands[0].args).toEqual(["print", expect.stringContaining("/com.ccc.device-broker")]);
 
         const win = deviceBrokerService("status", {
@@ -2237,3 +2243,5 @@ describe("device-lab host broker physical attach and CLI", () => {
         }
     });
 });
+
+vi.mock("fs", async (importOriginal) => ({ ...await importOriginal<typeof import("fs")>() }));

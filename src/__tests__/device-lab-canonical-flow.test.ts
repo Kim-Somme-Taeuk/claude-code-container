@@ -40,7 +40,7 @@ const hidden = ["mobile_install_app", "mobile_launch_app", "mobile_screenshot", 
 const shared = { deviceId: "target-a", incarnationId: "a".repeat(32) };
 const direct = { implicitBroker: false };
 const step = (args: Record<string, unknown> = {}, tool = "click") => ({ tool, arguments: { ...direct,
-    ...(["devices", "set_network"].includes(tool) ? {} : { x: 1, y: 2 }), ...args } });
+    ...(tool === "click" ? { x: 1, y: 2 } : {}), ...args } });
 const call = (name: string, args: Record<string, unknown>) => fixture.handlers[1]({ params: { name, arguments: args } });
 const parse = (result: any) => JSON.parse(result.content[0].text);
 const flow = (steps: unknown[], args: Record<string, unknown> = {}) => call("run_flow", { deviceId: shared.deviceId, incarnationId: shared.incarnationId, ...args, steps });
@@ -75,8 +75,9 @@ describe("canonical public contract", () => {
         expect(fixture.nextScope).toBe(0);
     });
     it.each(["install_app", "launch_app"])("accepts canonical %s standalone and in flows", async (tool) => {
-        const args = { ...shared, ...direct, ...(tool === "launch_app" ? { appId: "example.app" } : { path: "/fixture/app.apk" }) };
-        expect((await call(tool, args)).isError).toBe(false);
+        const args = { deviceId: shared.deviceId, ...direct, ...(tool === "launch_app" ? { appId: "example.app" } : { path: "/fixture/app.apk" }) };
+        const directResult = await call(tool, args);
+        expect(directResult.isError, JSON.stringify(directResult)).toBe(false);
         expect(parse(await flow([step(args, tool)])).ok).toBe(true);
         expect(fixture.calls.map(entry => publicToolName(entry.name))).toEqual([tool, tool]);
     });
@@ -89,7 +90,7 @@ describe("canonical public contract", () => {
     });
     it.each(DEVICE_FLOW_TOOL_NAMES.filter(name => name !== "move"))("dispatches advertised flow choice %s through the existing handler", async (tool) => {
         const sample = { ...(tool === "record_video" ? { action: "status" } : tool === "permission" ? { action: "grant", permission: "android.permission.CAMERA" } : {}),
-            level: 50, key: "HOME", text: "needle", appId: "example.app", path: "/fixture/app.apk", confirmDestructive: true,
+            handle: "42", x1: 1, y1: 2, x2: 3, y2: 4, level: 50, key: "HOME", text: "needle", appId: "example.app", path: "/fixture/app.apk", confirmDestructive: true,
             view: "available", backend: "android-emulator", wifi: false };
         const properties = TOOLS.find(entry => entry.name === tool)!.inputSchema.properties;
         const arguments_ = { ...direct, ...Object.fromEntries(Object.entries(sample).filter(([key]) => Object.hasOwn(properties, key))) };
@@ -109,7 +110,7 @@ describe("shared target selection", () => {
     it("inherits only target fields and starts a fresh broker scope for every step", async () => {
         const input = [step(), step({ deviceId: shared.deviceId, incarnationId: "b".repeat(32) })];
         const original = structuredClone(input);
-        expect(parse(await flow(input, { viaBroker: true, autolaunch: true, force: true, confirmDestructive: true, token: "private", port: 1234 })).ok).toBe(true);
+        expect(parse(await flow(input, { viaBroker: true, autolaunch: true, port: 1234 })).ok).toBe(true);
         expect(fixture.calls.map(call => call.args)).toEqual([
             { ...shared, ...direct, x: 1, y: 2 },
             { ...shared, ...direct, x: 1, y: 2, incarnationId: "b".repeat(32) },
@@ -166,8 +167,9 @@ describe("flow policy and bounds", () => {
         const args = tool === "set_network" ? { wifi: false, airplaneMode: false }
             : tool === "set_battery" ? { level: 50 } : { appId: "example.app" };
         const denied = parse(await flow([step(args, tool)], { confirmDestructive: true, force: true }));
-        expect(denied).toMatchObject({ ok: false, stoppedAt: 0 });
-        expect(JSON.stringify(denied)).toContain("destructive-action-confirmation-required");
+        expect(denied).toMatchObject({ ok: false, error: "run_flow does not support confirmDestructive" });
+        const missingStepConfirmation = parse(await flow([step(args, tool)]));
+        expect(JSON.stringify(missingStepConfirmation)).toContain("destructive-action-confirmation-required");
         expect(fixture.calls).toEqual([]);
         const allowed = parse(await flow([step({ ...args, confirmDestructive: true }, tool)]));
         expect(allowed.ok).toBe(true);

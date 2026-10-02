@@ -1173,10 +1173,10 @@ try {
             $VirtualMachine = Assert-HyperVWindowsSingleVirtualMachine $VirtualMachines
             $Context = Get-HyperVConsoleContext $VirtualMachine $Request
             $Action = [string]$Request.action
-            if ($Action -notin @('click', 'doubleClick', 'cursor', 'scroll', 'key', 'type')) {
+            if ($Action -notin @('click', 'doubleClick', 'cursor', 'scroll', 'drag', 'key', 'type')) {
                 throw 'hyper-v-console-input-invalid'
             }
-            if ($Action -in @('click', 'doubleClick', 'cursor', 'scroll')) {
+            if ($Action -in @('click', 'doubleClick', 'cursor', 'scroll', 'drag')) {
                 if ([long]$Request.width -ne 640 -or [long]$Request.height -ne 480 -or
                     [long]$Request.nativeWidth -ne $Context.Width -or [long]$Request.nativeHeight -ne $Context.Height) {
                     throw 'hyper-v-console-geometry-changed'
@@ -1186,6 +1186,10 @@ try {
                 if ($X -lt 0 -or $X -ge 640 -or $Y -lt 0 -or $Y -ge 480) { throw 'hyper-v-console-input-invalid' }
                 if ($Action -eq 'scroll' -and [string]$Request.direction -in @('left', 'right')) {
                     throw 'hyper-v-console-scroll-unsupported'
+                }
+                if ($Action -eq 'drag') {
+                    $X2 = [long]$Request.x2; $Y2 = [long]$Request.y2; $Duration = [long]$Request.durationMs
+                    if ($X2 -lt 0 -or $X2 -ge 640 -or $Y2 -lt 0 -or $Y2 -ge 480 -or $Duration -lt 1 -or $Duration -gt 10000) { throw 'hyper-v-console-input-invalid' }
                 }
                 $Mouse = Get-HyperVConsoleMouse $Context
                 $NativeX = if ($Context.Width -eq 1) { 0 } else { [int][Math]::Round($X * ($Context.Width - 1.0) / 639.0) }
@@ -1200,6 +1204,21 @@ try {
                     for ($Index = 0; $Index -lt $Clicks; $Index++) {
                         $null = Invoke-HyperVConsoleMethod $Mouse 'ClickButton' @{ buttonIndex = [uint32]$ButtonIndex }
                         if ($Index -eq 0 -and $Clicks -eq 2) { Start-Sleep -Milliseconds 80 }
+                    }
+                } elseif ($Action -eq 'drag') {
+                    $DragFailure = $null
+                    try {
+                        $null = Invoke-HyperVConsoleMethod $Mouse 'SetButtonState' @{ buttonIndex = [uint32]1; isDown = $true }
+                        $Steps = [int][Math]::Max(1, [Math]::Ceiling($Duration / 20.0))
+                        for ($Step = 1; $Step -le $Steps; $Step++) {
+                            Start-Sleep -Milliseconds ([int][Math]::Max(1, [Math]::Round($Duration / $Steps)))
+                            $DragX = [int][Math]::Round(($X + ($X2 - $X) * $Step / $Steps) * ($Context.Width - 1.0) / 639.0)
+                            $DragY = [int][Math]::Round(($Y + ($Y2 - $Y) * $Step / $Steps) * ($Context.Height - 1.0) / 479.0)
+                            $null = Invoke-HyperVConsoleMethod $Mouse 'SetAbsolutePosition' @{ horizontalPosition = $DragX; verticalPosition = $DragY }
+                        }
+                    } catch { $DragFailure = $_; throw } finally {
+                        try { $null = Invoke-HyperVConsoleMethod $Mouse 'SetButtonState' @{ buttonIndex = [uint32]1; isDown = $false } }
+                        catch { if ($null -eq $DragFailure) { throw } }
                     }
                 } elseif ($Action -eq 'scroll') {
                     $Direction = [string]$Request.direction

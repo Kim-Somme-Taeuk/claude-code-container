@@ -1,7 +1,8 @@
+import { directorySymlink, fileSymlinkOrSkip } from "./helpers/file-symlink-fixture.js";
 import { chmodSync, mkdirSync, mkdtempSync, existsSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { runHyperVCreateCompensation } from "@ccc/device-lab/device-lab/broker/hyper-v/vm-create-compensation.js";
 import type { HyperVCreateEffect } from "@ccc/hyper-v/lifecycle/index.js";
@@ -13,10 +14,13 @@ import type { HyperVCreateEffect } from "@ccc/hyper-v/lifecycle/index.js";
 let root = "";
 
 beforeEach(() => {
+    // These cases exercise the Node fallback; Windows callers supply guarded native cleanup.
+    vi.spyOn(process, "platform", "get").mockReturnValue("linux");
     root = mkdtempSync(join(tmpdir(), "ccc-hyperv-comp-"));
 });
 
 afterEach(() => {
+    vi.restoreAllMocks();
     try { chmodSync(root, 0o700); } catch { /* the test may not have changed it */ }
     rmSync(root, { recursive: true, force: true });
 });
@@ -110,7 +114,7 @@ describe("compensating what creation actually did", () => {
         const victim = join(realDirectory, "root.vhdx");
         writeFileSync(victim, "not creation's to delete");
         const link = join(root, "link");
-        symlinkSync(realDirectory, link);
+        directorySymlink(realDirectory, link);
 
         const attempts = await runHyperVCreateCompensation([
             { kind: "file-created", path: join(link, "root.vhdx") },
@@ -125,7 +129,7 @@ describe("compensating what creation actually did", () => {
         mkdirSync(realDirectory);
         writeFileSync(join(realDirectory, "keep.txt"), "keep");
         const link = join(root, "device-1");
-        symlinkSync(realDirectory, link);
+        directorySymlink(realDirectory, link);
 
         const attempts = await runHyperVCreateCompensation([
             { kind: "directory-created", path: link },
@@ -205,11 +209,11 @@ describe("compensating what creation actually did", () => {
     // reason this is named separately is diagnostic: "something put a link where the disk
     // should be" is a different situation from "the disk is not a file", and an operator
     // reading the report should not have to guess which happened.
-    it("names a symlink left where the created disk should be", async () => {
+    it("names a symlink left where the created disk should be", async (context) => {
         const outside = join(root, "elsewhere.vhdx");
         writeFileSync(outside, "not creation's");
         const diskPath = join(root, "root.vhdx");
-        symlinkSync(outside, diskPath);
+        fileSymlinkOrSkip(context, outside, diskPath);
 
         const attempts = await runHyperVCreateCompensation([{ kind: "file-created", path: diskPath }]);
 
@@ -231,3 +235,14 @@ describe("compensating what creation actually did", () => {
         await expect(runHyperVCreateCompensation([])).resolves.toEqual([]);
     });
 });
+
+ it("requires an explicit guarded remover on Windows", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    const { diskPath } = deviceTree();
+    const effects = [{ kind: "file-created" as const, path: diskPath }];
+    expect(await runHyperVCreateCompensation(effects)).toMatchObject([{ ok: false, error: "hyper-v-create-compensation-native-cleanup-required" }]);
+    expect(existsSync(diskPath)).toBe(true);
+    const removePath = vi.fn(async () => { rmSync(diskPath); });
+    expect(await runHyperVCreateCompensation(effects, { removePath })).toMatchObject([{ ok: true }]);
+    expect(removePath).toHaveBeenCalledWith({ kind: "delete-file", path: diskPath });
+ });

@@ -910,7 +910,7 @@ export async function runBrokerE2E(options: any = {}) {
             const imageDefinition = parseToolResult(await callTool("create_macos_vm", {
                 detail: true, name: "Level 2 public missing base image", deviceId: missingImageDeviceId, image: "missing-source",
             }));
-            assert.strictEqual(imageDefinition.device.id, missingImageDeviceId);
+            assert.strictEqual(imageDefinition.device.deviceId, missingImageDeviceId);
             try {
                 const materialization = markExpectedToolError(await callTool("start", { detail: true, deviceId: missingImageDeviceId, waitForBoot: false }));
                 assert.strictEqual(materialization?.isError, true, "missing image unexpectedly materialized");

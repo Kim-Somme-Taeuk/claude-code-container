@@ -202,7 +202,7 @@ export async function runMacosVmE2E(options: any = {}) {
             })));
         created = true;
         const createdDevice = lifecycleDevice(create, "macOS VM create_macos_vm");
-        assert.strictEqual(createdDevice.id, deviceId);
+        assert.strictEqual(createdDevice.deviceId, deviceId);
         assert.strictEqual(createdDevice.provider, "tart");
         assert.ok(createdDevice.providerInstance);
         managedProviderInstances.push(createdDevice.providerInstance);
@@ -215,7 +215,7 @@ export async function runMacosVmE2E(options: any = {}) {
                 bootTimeoutMs: optionTimeoutMs(typedOptions.bootTimeoutMs, bootTimeoutMs()),
             })));
         const startedDevice = lifecycleDevice(start, "macOS VM device_start");
-        assert.strictEqual(startedDevice.id, deviceId);
+        assert.strictEqual(startedDevice.deviceId, deviceId);
         assert.ok(["running", "starting"].includes(startedDevice.status));
         const tartAfterStart = inspectTartInstance(cap.tart, createdDevice.providerInstance);
         assert.strictEqual(tartAfterStart.found, true, `Tart instance missing after start: ${createdDevice.providerInstance}`);
@@ -231,7 +231,7 @@ export async function runMacosVmE2E(options: any = {}) {
 
             const status = await timedStep(timings, "statusMs", async () => parseContractToolPayload("status", await callTool("status", { detail: true, deviceId })));
         const statusDevice = lifecycleDevice(status, "macOS VM device_status");
-        assert.strictEqual(statusDevice.id, deviceId);
+        assert.strictEqual(statusDevice.deviceId, deviceId);
         assert.ok(["running", "starting"].includes(statusDevice.status));
         assert.strictEqual(statusDevice.providerInstance, createdDevice.providerInstance);
 
@@ -374,7 +374,7 @@ export async function runMacosVmE2E(options: any = {}) {
                     provider: "tart",
                 }));
                 const baseDevice = lifecycleDevice(createViaBase, "macOS VM image creation");
-                disposableDeviceIds.push(baseDevice.id);
+                disposableDeviceIds.push(baseDevice.deviceId);
                 managedProviderInstances.push(baseDevice.providerInstance);
                 assert.ok(baseDevice.providerInstance);
                 assert.strictEqual(inspectTartInstance(cap.tart, baseDevice.providerInstance).found, false);
@@ -384,7 +384,7 @@ export async function runMacosVmE2E(options: any = {}) {
                     deviceId: `${deviceId}-base-clone`,
                     sourceDeviceId: deviceId,
                 }));
-                disposableDeviceIds.push(cloneViaBase.device.id);
+                disposableDeviceIds.push(cloneViaBase.device.deviceId);
                 managedProviderInstances.push(cloneViaBase.device.providerInstance);
                 assert.strictEqual(cloneViaBase.operation, "base-image-clone");
                 assert.ok(cloneViaBase.device.providerInstance);
@@ -407,7 +407,7 @@ export async function runMacosVmE2E(options: any = {}) {
             const tartAfterDelete = inspectTartInstance(cap.tart, createdDevice.providerInstance);
             assert.strictEqual(tartAfterDelete.found, false, `Tart instance survived delete: ${createdDevice.providerInstance}`);
             const listAfterDelete = await timedStep(timings, "statusAfterDeleteMs", async () => parsePayload(await callTool("devices", { detail: true })));
-            assert.strictEqual(listAfterDelete.devices.some((device) => device.id === deviceId), false);
+            assert.strictEqual(listAfterDelete.devices.some((device) => device.deviceId === deviceId), false);
         const timingDetail = Object.entries(timings).map(([key, value]) => `${key}=${value}`).join(" ");
 
         return {

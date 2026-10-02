@@ -1,3 +1,4 @@
+import { directorySymlink } from "./helpers/file-symlink-fixture.js";
 import { createHash } from "crypto";
 import { existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -115,11 +116,11 @@ describe("Hyper-V image store module", () => {
     it("keeps image cache paths below the injected private root", () => {
         const privateRoot = "/private/device-broker";
 
-        expect(hyperVImageRoot(privateRoot)).toBe("/private/device-broker/images/hyper-v");
+        expect(hyperVImageRoot(privateRoot)).toBe(join(privateRoot, "images/hyper-v"));
         expect(hyperVImageProfileRoot(privateRoot, "ubuntu-lts"))
-            .toBe("/private/device-broker/images/hyper-v/ubuntu-lts");
+            .toBe(join(privateRoot, "images/hyper-v/ubuntu-lts"));
         expect(hyperVOwnerImageProfileRoot(privateRoot, "owner-a", "windows-11"))
-            .toBe("/private/device-broker/owners/owner-a/images/hyper-v/windows-11");
+            .toBe(join(privateRoot, "owners/owner-a/images/hyper-v/windows-11"));
     });
 
     it("accepts only supported image profiles", () => {
@@ -818,7 +819,7 @@ describe("Hyper-V ubuntu-lts image cache inspection", () => {
             setup: (profileRoot: string) => {
                 const target = join(dirname(profileRoot), "linked-cache");
                 writeCache(target, automaticManifest(profileRoot));
-                symlinkSync(target, profileRoot);
+                directorySymlink(target, profileRoot);
             },
         }]),
     ];

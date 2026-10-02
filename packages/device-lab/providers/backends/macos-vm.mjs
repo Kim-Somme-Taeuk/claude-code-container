@@ -1,3 +1,5 @@
+import { MACOS_WINDOW_JXA } from "./macos-window-focus.mjs";
+import { desktopPointValid, desktopDragValid } from "../display/desktop-input.mjs";
 import { commandPath, run, runWithTimeout } from "../commands.mjs";
 import { ownerId, slug } from "../context.mjs";
 import { validateGuestPath, validateLocalOutputPath, validateLocalReferencePath } from "../policy/files.mjs";
@@ -144,6 +146,8 @@ export function macosBackend(discovery = macosDiscovery()) {
             "device_scroll",
             "device_cursor_position",
             "device_window_list",
+            "device_focus_window",
+            "device_drag",
             "device_accessibility_snapshot",
             "device_base_image_create",
             "device_base_image_clone",
@@ -294,7 +298,7 @@ function macosHelperMetadata(device) {
         ssh: publicSshConfig(device.ssh),
         status: provisioning?.status || (bridgeConfigured ? "ssh-configured" : "planned"),
         provisioning,
-        requiredFor: ["device_exec", "device_screenshot", "device_click", "device_double_click", "device_key", "device_type", "device_scroll", "device_cursor_position", "device_window_list", "device_accessibility_snapshot", "device_record_video_start", "device_record_video_stop", "device_upload", "device_download"],
+        requiredFor: ["device_focus_window", "device_drag", "device_exec", "device_screenshot", "device_click", "device_double_click", "device_key", "device_type", "device_scroll", "device_cursor_position", "device_window_list", "device_accessibility_snapshot", "device_record_video_start", "device_record_video_stop", "device_upload", "device_download"],
     };
 }
 
@@ -791,12 +795,12 @@ async function waitForProviderStart(child, label) {
     });
 }
 
-async function waitForMacosBoot(plan, timeoutMs = 300000) {
+async function waitForMacosBoot(plan, timeoutMs = 300000, deadlineAt) {
     if (plan.selectedProvider !== "tart" || !plan.providerCommand || !plan.providerInstance) {
         return { ready: false, skipped: true, reason: "boot readiness is only implemented for Tart" };
     }
     const parsedTimeout = Number(timeoutMs);
-    const deadline = Date.now() + (Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? parsedTimeout : 300000);
+    const deadline = deadlineAt ?? Date.now() + (Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? parsedTimeout : 300000);
     let last = null;
     const attempts = [];
     const ipAttempts = () => [
@@ -805,7 +809,8 @@ async function waitForMacosBoot(plan, timeoutMs = 300000) {
     ];
     while (Date.now() < deadline) {
         for (const attempt of ipAttempts()) {
-            const ip = runProviderCommand(plan.providerCommand, attempt.args, "ip");
+            if (Date.now() >= deadline) break;
+            const ip = runWithTimeout(plan.providerCommand, attempt.args, Math.max(1, Math.min(macosProviderTimeoutMs("ip"), deadline - Date.now())));
             last = ip;
             attempts.push({
                 resolver: attempt.resolver,
@@ -906,7 +911,36 @@ function scpBaseArgs(device) {
     return args;
 }
 
-function macosGuestHelperScript(device) {
+// Normalize captures to the same main-display coordinate space used by CGEvent.
+export function macosScreenshotCommand(remotePath) {
+    const script = String.raw`set -eu
+geometry() {
+  osascript -l JavaScript <<'JXA'
+ObjC.import('ApplicationServices');
+var id = $.CGMainDisplayID();
+var b = $.CGDisplayBounds(id);
+var w = Number(b.size.width), h = Number(b.size.height);
+if (Number(b.origin.x) !== 0 || Number(b.origin.y) !== 0 || ![w,h].every(function(v) { return isFinite(v) && Math.floor(v) === v && v > 0 && v <= 16384; }) || w*h > 33554432) throw Error('display-geometry-invalid');
+String(id) + ' ' + w + ' ' + h;
+JXA
+}
+before=$(geometry)
+set -- $before
+[ "$#" -eq 3 ] || { echo display-geometry-invalid >&2; exit 1; }
+width=$2; height=$3
+case "$width:$height" in *[!0-9:]*|:*) echo display-geometry-invalid >&2; exit 1;; esac
+screencapture -x -m -t png "$capture_path"
+sips --resampleHeightWidth "$height" "$width" "$capture_path" >/dev/null
+sizes=$(sips -g pixelWidth -g pixelHeight "$capture_path")
+actual_width=$(printf '%s\n' "$sizes" | awk '$1 == "pixelWidth:" { print $2 }')
+actual_height=$(printf '%s\n' "$sizes" | awk '$1 == "pixelHeight:" { print $2 }')
+[ "$actual_width" = "$width" ] && [ "$actual_height" = "$height" ] || { echo screenshot-coordinate-size-mismatch >&2; exit 1; }
+[ "$(geometry)" = "$before" ] || { echo display-geometry-changed >&2; exit 1; }
+`;
+    return `capture_path=${shellQuote(remotePath)}; export capture_path; sh -c ${shellQuote(script)}`;
+}
+
+export function macosGuestHelperScript(device) {
     return [
         "#!/bin/sh",
         "set -eu",
@@ -976,6 +1010,35 @@ function macosGuestHelperScript(device) {
         "}",
         "JXA",
         "    ;;",
+        "  drag|move)",
+        "    osascript -l JavaScript - \"$@\" <<'JXA'",
+        "function run(argv) {",
+        "  ObjC.import('ApplicationServices');",
+        "  var mode = String(argv[0]);",
+        "  var x1 = Number(argv[1]), y1 = Number(argv[2]);",
+        "  var x2 = mode === 'drag' ? Number(argv[3]) : x1;",
+        "  var y2 = mode === 'drag' ? Number(argv[4]) : y1;",
+        "  var ms = mode === 'drag' ? Number(argv[5]) : 1;",
+        "  if (![x1,y1,x2,y2,ms].every(function(v) { return isFinite(v) && Math.floor(v) === v && v >= 0 && v <= 2147483647; }) || ms < 1 || ms > 10000) throw Error('invalid-pointer-arguments');",
+        "  var bounds = $.CGDisplayBounds($.CGMainDisplayID());",
+        "  if (x1 >= bounds.size.width || x2 >= bounds.size.width || y1 >= bounds.size.height || y2 >= bounds.size.height) throw Error('pointer-outside-display');",
+        "  var point = $.CGPointMake(x1,y1);",
+        "  function post(kind, at) { var event = $.CGEventCreateMouseEvent(null, kind, at, $.kCGMouseButtonLeft); if (!event) throw Error('mouse-event-unavailable'); $.CGEventPost($.kCGHIDEventTap, event); }",
+        "  post($.kCGEventMouseMoved, point);",
+        "  if (mode === 'drag') {",
+        "    try {",
+        "      post($.kCGEventLeftMouseDown, point);",
+        "      for (var i = 1; i <= 20; i++) {",
+        "        delay(ms / 20000);",
+        "        point = $.CGPointMake(x1 + (x2-x1)*i/20, y1 + (y2-y1)*i/20);",
+        "        post($.kCGEventLeftMouseDragged, point);",
+        "      }",
+        "    } finally { post($.kCGEventLeftMouseUp, point); }",
+        "  }",
+        "  return JSON.stringify({ok:true});",
+        "}",
+        "JXA",
+        "    ;;",
         "  cursor_position)",
         "    osascript -l JavaScript <<'JXA'",
         "function run() {",
@@ -985,27 +1048,9 @@ function macosGuestHelperScript(device) {
         "}",
         "JXA",
         "    ;;",
-        "  window_list)",
-        "    osascript -l JavaScript <<'JXA'",
-        "function safe(fn, fallback) { try { return fn(); } catch (error) { return fallback; } }",
-        "function run() {",
-        "  var systemEvents = Application('System Events');",
-        "  var processes = safe(function () { return systemEvents.processes.whose({visible:true})(); }, []);",
-        "  var windows = [];",
-        "  for (var p = 0; p < processes.length; p++) {",
-        "    var process = processes[p];",
-        "    var processName = safe(function () { return process.name(); }, '');",
-        "    var pid = safe(function () { return process.unixId(); }, null);",
-        "    var processWindows = safe(function () { return process.windows(); }, []);",
-        "    for (var w = 0; w < processWindows.length; w++) {",
-        "      var win = processWindows[w];",
-        "      var position = safe(function () { return win.position(); }, null);",
-        "      var size = safe(function () { return win.size(); }, null);",
-        "      windows.push({processName:processName, processId:pid, title:safe(function () { return win.name(); }, ''), role:safe(function () { return win.role(); }, ''), subrole:safe(function () { return win.subrole(); }, ''), position:position, size:size});",
-        "    }",
-        "  }",
-        "  return JSON.stringify({ok:true, provider:'macos-system-events', windows:windows});",
-        "}",
+        "  window_list|focus_window)",
+        "    osascript -l JavaScript - \"$@\" <<'JXA'",
+        MACOS_WINDOW_JXA,
         "JXA",
         "    ;;",
         "  accessibility_snapshot)",
@@ -1058,7 +1103,11 @@ export function writeMacosGuestHelper(device, options = {}) {
     return writeMacosExecutableArtifact(path, macosGuestHelperScript(device), options);
 }
 
-function provisionMacosGuestHelper(device) {
+function provisionMacosGuestHelper(device, { deadlineAt } = {}) {
+    const exhausted = () => Number.isFinite(deadlineAt) && Date.now() >= deadlineAt;
+    const budget = () => Number.isFinite(deadlineAt) ? Math.max(1, Math.min(macosHelperTimeoutMs(), deadlineAt - Date.now())) : undefined;
+    const timeout = () => ({ ok: false, error: "macos-helper-readiness-timeout", provisioning: { status: "failed", provider: "ssh", updatedAt: new Date().toISOString() } });
+    if (exhausted()) return timeout();
     const target = sshTarget(device);
     if (!target) {
         return {
@@ -1115,7 +1164,8 @@ function provisionMacosGuestHelper(device) {
         };
     }
     const remoteScriptPath = device.helper?.remoteScriptPath || `/tmp/ccc-${device.id}-guest-helper.sh`;
-    const copy = runHelperCommand(discovery.scp, [...scpBaseArgs(device), localScriptPath, `${target}:${remoteScriptPath}`], undefined, sshCommandOptions(device));
+    if (exhausted()) return timeout();
+    const copy = runHelperCommand(discovery.scp, [...scpBaseArgs(device), localScriptPath, `${target}:${remoteScriptPath}`], budget(), sshCommandOptions(device));
     if (copy.status !== 0) {
         return {
             ok: false,
@@ -1130,7 +1180,8 @@ function provisionMacosGuestHelper(device) {
             },
         };
     }
-    const chmod = runHelperCommand(discovery.ssh, [...sshBaseArgs(device), target, `chmod 700 ${shellQuote(remoteScriptPath)} && ${shellQuote(remoteScriptPath)} status`], undefined, sshCommandOptions(device));
+    if (exhausted()) return timeout();
+    const chmod = runHelperCommand(discovery.ssh, [...sshBaseArgs(device), target, `chmod 700 ${shellQuote(remoteScriptPath)} && ${shellQuote(remoteScriptPath)} status`], budget(), sshCommandOptions(device));
     if (chmod.status !== 0) {
         return {
             ok: false,
@@ -1158,6 +1209,24 @@ function provisionMacosGuestHelper(device) {
             updatedAt: new Date().toISOString(),
         },
     };
+}
+
+export async function waitForMacosGuestHelper(device, deadlineAt, {
+    provision = provisionMacosGuestHelper, now = Date.now, delay = sleep,
+} = {}) {
+    let last;
+    while (now() < deadlineAt) {
+        last = provision(device, { deadlineAt });
+        if (last.ok && now() < deadlineAt) return last;
+        const command = last.command;
+        const transient = ["macos-helper-scp-failed", "macos-helper-chmod-failed"].includes(last.error)
+            && (command?.error?.code === "ETIMEDOUT"
+                || /connection (?:refused|reset|closed)|connection timed out|operation timed out|no route to host|network is unreachable/i.test(`${command?.stderr || ""}\n${command?.stdout || ""}`));
+        if (!transient && !last.ok) return last;
+        if (now() >= deadlineAt) break;
+        await delay(Math.min(500, deadlineAt - now()));
+    }
+    return { ok: false, error: "macos-helper-readiness-timeout", provisioning: { ...last?.provisioning, status: "failed", updatedAt: new Date().toISOString() } };
 }
 
 function sshBridge(device, toolName) {
@@ -1842,7 +1911,8 @@ async function handleMacosToolUnlocked(name, args) {
         }
 
         case "device_start": {
-            const { deviceId, headless, waitForBoot = false, bootTimeoutMs = 300000 } = args;
+            const { deviceId, headless, waitForBoot = true, bootTimeoutMs = 300000 } = args;
+            const startDeadlineAt = Date.now() + (Number.isFinite(bootTimeoutMs) ? Math.min(600000, Math.max(1000, bootTimeoutMs)) : 300000);
             const device = findMacosDevice(deviceId);
             if (!device) return undefined;
             if (device.status !== "stopped" || device.lifecycle) {
@@ -1922,14 +1992,16 @@ async function handleMacosToolUnlocked(name, args) {
                 const rollback = rollbackStartedMacosVm(deviceId, claim.lifecycle, plan);
                 return macosLifecycleConflict(deviceId, "start-runtime-readback", { found: Boolean(findMacosDevice(deviceId)), matched: false }, rollback);
             }
-            const boot = waitForBoot ? await waitForMacosBoot(plan, bootTimeoutMs) : { ready: false, skipped: true };
+            const boot = waitForBoot ? await waitForMacosBoot(plan, bootTimeoutMs, startDeadlineAt) : { ready: false, skipped: true };
             startedDevice.status = boot.ready || boot.skipped ? "running" : "starting";
             startedDevice.bootReady = boot.ready;
             startedDevice.lastBootCheck = boot;
             if (boot.ready && boot.ip && startedDevice.ssh?.user && !startedDevice.ssh.host) {
                 startedDevice.ssh = { ...startedDevice.ssh, host: boot.ip };
             }
-            const provision = provisionMacosGuestHelper(startedDevice);
+            const provision = waitForBoot
+                ? await waitForMacosGuestHelper(startedDevice, startDeadlineAt)
+                : provisionMacosGuestHelper(startedDevice);
             const completed = macosLifecycleReplacement(persistedStarted, null, {
                 provider: plan.selectedProvider,
                 providerInstance: plan.providerInstance,
@@ -1947,6 +2019,9 @@ async function handleMacosToolUnlocked(name, args) {
                 return macosLifecycleConflict(deviceId, "start-complete", completedTransition, rollback);
             }
             const updated = completedTransition.device;
+            if (waitForBoot && !boot.ready && !boot.skipped) {
+                return textResult(false, JSON.stringify({ ok: false, error: "macos-boot-not-ready", device: deviceWithPlan(updated), boot }));
+            }
             if (!provision.ok) {
                 return textResult(false, JSON.stringify({
                     ok: false,
@@ -2068,7 +2143,7 @@ async function handleMacosToolUnlocked(name, args) {
             const remotePath = `/tmp/ccc-${device.id}-${randomUUID()}-screenshot.png`;
             const commandOptions = sshCommandOptions(device);
             try {
-                const capture = runHelperCommand(bridge.discovery.ssh, [...sshBaseArgs(device), bridge.target, `screencapture -x ${shellQuote(remotePath)}`], helperTimeoutMs, commandOptions);
+                const capture = runHelperCommand(bridge.discovery.ssh, [...sshBaseArgs(device), bridge.target, macosScreenshotCommand(remotePath)], helperTimeoutMs, commandOptions);
                 if (capture.status !== 0) return fail(capture);
                 const copy = runHelperCommand(bridge.discovery.scp, [...scpBaseArgs(device), `${bridge.target}:${remotePath}`, localPath], helperTimeoutMs, commandOptions);
                 if (copy.status !== 0) return fail(copy);
@@ -2157,10 +2232,35 @@ async function handleMacosToolUnlocked(name, args) {
             });
         }
 
+        case "device_focus_window": {
+            const device = findMacosDevice(args.deviceId);
+            if (!device) return undefined;
+            if (typeof args.handle !== "string" || args.handle.length > 2048 || !/^macos:[1-9][0-9]{0,9}:[1-9][0-9]{0,15}:[^\r\n]+$/.test(args.handle)) return textResult(false, "window-handle-invalid");
+            const helper = macosHelperCommand(device, "focus_window", [args.handle], args.helperTimeoutMs);
+            if (helper.error) return helper.error;
+            if (helper.result.status !== 0) return fail(helper.result);
+            const payload = macosHelperJson(helper.result.stdout);
+            return payload?.ok === true ? jsonResult({ ok: true }) : textResult(false, "window-focus-unverified");
+        }
+        case "device_drag": {
+            const device = findMacosDevice(args.deviceId);
+            if (!device) return undefined;
+            if (!desktopDragValid(args)) return textResult(false, "invalid-drag-arguments");
+            const helper = macosHelperCommand(device, "drag", [args.x1, args.y1, args.x2, args.y2, args.durationMs ?? 700].map(String), args.helperTimeoutMs);
+            if (helper.error) return helper.error;
+            return helper.result.status === 0 ? jsonResult({ ok: true }) : fail(helper.result);
+        }
         case "device_cursor_position": {
             const { deviceId, helperTimeoutMs } = args;
             const device = findMacosDevice(deviceId);
             if (!device) return undefined;
+            const moving = args.x !== undefined || args.y !== undefined;
+            if (moving && !desktopPointValid(args.x, args.y)) return textResult(false, "invalid-pointer-coordinates");
+            if (moving) {
+                const moved = macosHelperCommand(device, "move", [String(args.x), String(args.y)], helperTimeoutMs);
+                if (moved.error) return moved.error;
+                return moved.result.status === 0 ? jsonResult({ ok: true }) : fail(moved.result);
+            }
             const helper = macosHelperCommand(device, "cursor_position", [], helperTimeoutMs);
             if (helper.error) return helper.error;
             if (helper.result.status !== 0) return fail(helper.result);

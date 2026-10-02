@@ -83,7 +83,7 @@ describe("macOS VM Tart E2E source image auto-selection", () => {
         }));
     });
 
-    it("auto-selects a single local Tart image by default when no source env is configured", () => {
+    it.skipIf(process.platform === "win32")("auto-selects a single local Tart image by default when no source env is configured", () => {
         const previousSource = process.env.CCC_REAL_MACOS_VM_SOURCE_IMAGE;
         const previousCompatSource = process.env.CCC_REAL_TART_SOURCE_IMAGE;
         const dir = mkdtempSync(join(tmpdir(), "ccc-fake-tart-"));
@@ -120,7 +120,7 @@ describe("macOS VM Tart E2E source image auto-selection", () => {
         }
     });
 
-    it("uses the project name as the default SSH user and generates an owner-scoped key", () => {
+    it.skipIf(process.platform === "win32")("uses the project name as the default SSH user and generates an owner-scoped key", () => {
         const previousHome = process.env.HOME;
         const previousPath = process.env.PATH;
         const previousUser = process.env.CCC_REAL_MACOS_VM_SSH_USER;

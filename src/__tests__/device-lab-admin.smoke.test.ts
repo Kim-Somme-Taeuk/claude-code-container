@@ -1,14 +1,19 @@
+import * as childProcess from "child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     devicesCli,
     formatDevicesSmoke,
 } from "../device-lab-admin.js";
 import { createDeviceLabAdminTestFixture } from "./helpers/device-lab-admin-fixture.js";
 
+vi.mock("child_process", async (importOriginal) => ({ ...await importOriginal<typeof import("child_process")>() }));
+
 describe("device-lab admin smoke diagnostics", () => {
     const fixture = createDeviceLabAdminTestFixture();
+    // This suite models a host without native Hyper-V; native setup has separate suites.
+    beforeEach(() => vi.spyOn(process, "platform", "get").mockReturnValue("linux"));
 
     afterEach(() => {
         vi.restoreAllMocks();
@@ -42,7 +47,7 @@ describe("device-lab admin smoke diagnostics", () => {
         writeFileSync(serverPath, "export {};\n");
         writeFileSync(scriptPath, "console.log(JSON.stringify({ status: 'PASS' }));\n");
 
-        const smoke = formatDevicesSmoke(cwd, 250, undefined, {
+        const smoke = formatDevicesSmoke(cwd, 5000, undefined, {
             mcpSurface: true,
             mcpServerPath: serverPath,
             mcpSmokeScriptPath: scriptPath,
@@ -66,7 +71,7 @@ describe("device-lab admin smoke diagnostics", () => {
             "",
         ].join("\n"));
 
-        const smoke = formatDevicesSmoke(cwd, 250, undefined, {
+        const smoke = formatDevicesSmoke(cwd, 5000, undefined, {
             mcpSurface: true,
             mcpServerPath: serverPath,
             mcpSmokeScriptPath: scriptPath,
@@ -97,17 +102,17 @@ describe("device-lab admin smoke diagnostics", () => {
         const logPath = join(fixture.homeDir, "smoke-real-provider.log");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        const recorder = `printf '%s %s\\n' "$0" "$*" >> "${logPath}"; echo ok; exit 0`;
-        fixture.writeTool(binDir, "adb", recorder);
-        fixture.writeTool(binDir, "emulator", recorder);
-        fixture.writeTool(binDir, "xcrun", recorder);
-        fixture.writeTool(binDir, "xcodebuild", recorder);
-        fixture.writeTool(binDir, "wsb", recorder);
-        fixture.writeTool(binDir, "tart", recorder);
-        fixture.writeTool(binDir, "ssh", recorder);
-        fixture.writeTool(binDir, "scp", recorder);
+        const recorder = `appendFileSync(${JSON.stringify(logPath)}, process.argv[1] + ' ' + args.join(' ') + '\\n'); console.log('ok');`;
+        fixture.writeNodeTool(binDir, "adb", recorder);
+        fixture.writeNodeTool(binDir, "emulator", recorder);
+        fixture.writeNodeTool(binDir, "xcrun", recorder);
+        fixture.writeNodeTool(binDir, "xcodebuild", recorder);
+        fixture.writeNodeTool(binDir, "wsb", recorder);
+        fixture.writeNodeTool(binDir, "tart", recorder);
+        fixture.writeNodeTool(binDir, "ssh", recorder);
+        fixture.writeNodeTool(binDir, "scp", recorder);
 
-        const smoke = formatDevicesSmoke(cwd, 250, undefined, { mode: "real-provider" });
+        const smoke = formatDevicesSmoke(cwd, 5000, undefined, { mode: "real-provider" });
 
         expect(smoke).toContain("mode: real-provider (explicit opt-in)");
         expect(smoke).toContain("Real provider policy: bounded readiness/inventory commands only; no devices are created, started, stopped, or deleted");
@@ -119,16 +124,16 @@ describe("device-lab admin smoke diagnostics", () => {
         expect(smoke).toContain("windows-vm: SKIP - not a Windows host");
         expect(smoke).toContain("linux-vm: SKIP - not a Windows host");
         expect(smoke).toContain("macos-vm: PASS - real provider macOS VM CLI and SSH bridge responded; SCP bridge tool found; no VM started");
-        expect(smoke).toContain(`${join(binDir, "scp")} path-check -> 0`);
+        expect(smoke).toContain(`${join(binDir, "scp.mjs")} path-check -> 0`);
         const commandLog = readFileSync(logPath, "utf-8");
-        expect(commandLog).toContain("adb version");
-        expect(commandLog).toContain("emulator -list-avds");
-        expect(commandLog).toContain("xcrun simctl list -j");
-        expect(commandLog).toContain("xcrun xctrace list devices");
-        expect(commandLog).not.toContain("xcodebuild -version");
-        expect(commandLog).toContain("wsb --help");
-        expect(commandLog).toContain("tart --version");
-        expect(commandLog).toContain("ssh -V");
+        expect(commandLog).toContain("adb.mjs version");
+        expect(commandLog).toContain("emulator.mjs -list-avds");
+        expect(commandLog).toContain("xcrun.mjs simctl list -j");
+        expect(commandLog).toContain("xcrun.mjs xctrace list devices");
+        expect(commandLog).not.toContain("xcodebuild.mjs -version");
+        expect(commandLog).toContain("wsb.mjs --help");
+        expect(commandLog).toContain("tart.mjs --version");
+        expect(commandLog).toContain("ssh.mjs -V");
         expect(commandLog).not.toMatch(/\b(start|run|launch|boot|delete|stop|shutdown)\b/);
     });
 
@@ -138,14 +143,14 @@ describe("device-lab admin smoke diagnostics", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "tart", "echo tart 2.24.0; exit 0");
-        fixture.writeTool(binDir, "ssh", "echo OpenSSH; exit 0");
-        fixture.writeTool(binDir, "scp", "echo scp; exit 0");
+        fixture.writeNodeTool(binDir, "tart", "console.log(\"tart 2.24.0\"); process.exit(0);");
+        fixture.writeNodeTool(binDir, "ssh", "console.log(\"OpenSSH\"); process.exit(0);");
+        fixture.writeNodeTool(binDir, "scp", "console.log(\"scp\"); process.exit(0);");
 
-        const smoke = formatDevicesSmoke(cwd, 250, undefined, { mode: "real-provider" });
+        const smoke = formatDevicesSmoke(cwd, 5000, undefined, { mode: "real-provider" });
 
         expect(smoke).toContain("macos-vm: PASS - real provider macOS VM CLI and SSH bridge responded; SCP bridge tool found; no VM started");
-        expect(smoke).toContain(`${join(binDir, "tart")} --version -> 0`);
+        expect(smoke).toContain(`${join(binDir, "tart.mjs")} --version -> 0`);
         expect(smoke).not.toContain("missing tart, vz, utmctl");
     });
 
@@ -155,12 +160,12 @@ describe("device-lab admin smoke diagnostics", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "tart", "echo tart-ok; exit 0");
+        fixture.writeNodeTool(binDir, "tart", "console.log(\"tart-ok\"); process.exit(0);");
 
-        const smoke = formatDevicesSmoke(cwd, 250, undefined, { mode: "real-provider" });
+        const smoke = formatDevicesSmoke(cwd, 5000, undefined, { mode: "real-provider" });
 
         expect(smoke).toContain("macos-vm: SKIP - missing ssh, scp");
-        expect(smoke).toContain(`${join(binDir, "tart")} --version -> 0`);
+        expect(smoke).toContain(`${join(binDir, "tart.mjs")} --version -> 0`);
         expect(smoke).not.toMatch(/\b(tart|vz|utmctl) (start|run|launch|boot|delete|stop|shutdown)\b/);
     });
 
@@ -170,14 +175,10 @@ describe("device-lab admin smoke diagnostics", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "xcrun", `case "$1" in
-  simctl) echo 'xcrun: error: unable to find utility "simctl", not a developer tool or in PATH' >&2; exit 72 ;;
-  xctrace) echo 'xcrun: error: unable to find utility "xctrace", not a developer tool or in PATH' >&2; exit 72 ;;
-  *) echo ok; exit 0 ;;
-esac`);
-        fixture.writeTool(binDir, "xcodebuild", "echo Xcode; exit 0");
+        fixture.writeNodeTool(binDir, "xcrun", `if (['simctl', 'xctrace'].includes(args[0])) { console.error('xcrun: error: unable to find utility "' + args[0] + '", not a developer tool or in PATH'); process.exit(72); } console.log('ok');`);
+        fixture.writeNodeTool(binDir, "xcodebuild", "console.log(\"Xcode\"); process.exit(0);");
 
-        const smoke = formatDevicesSmoke(cwd, 250, undefined, { mode: "real-provider" });
+        const smoke = formatDevicesSmoke(cwd, 5000, undefined, { mode: "real-provider" });
 
         expect(smoke).toContain("ios-simulator: SKIP - missing simctl");
         expect(smoke).toContain("ios-device: SKIP - missing xctrace");
@@ -191,13 +192,23 @@ esac`);
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", "echo Android Debug Bridge version 1.0.41; exit 0");
-        fixture.writeTool(binDir, "emulator", `"${process.execPath}" -e 'setTimeout(() => {}, 1000)'`);
+        fixture.writeNodeTool(binDir, "adb", "console.log(\"Android Debug Bridge version 1.0.41\"); process.exit(0);");
+        fixture.writeNodeTool(binDir, "emulator", "setTimeout(() => {}, 1000);");
 
-        const smoke = formatDevicesSmoke(cwd, 50, undefined, { mode: "real-provider" });
+        // Exercise timeout classification, without racing Node startup against
+        // a 50ms deadline on busy Windows hosts. Other probes still execute.
+        const routedSpawn = vi.mocked(childProcess.spawnSync).getMockImplementation()!;
+        vi.mocked(childProcess.spawnSync).mockImplementation(((command: string, args: string[] = [], options = {}) => {
+            if (command === join(binDir, "emulator.mjs") && args[0] === "-list-avds") {
+                const error = Object.assign(new Error("emulator inventory timed out"), { code: "ETIMEDOUT" });
+                return { status: null, signal: "SIGTERM", pid: 0, stdout: "", stderr: "", output: [null, "", ""], error };
+            }
+            return routedSpawn(command, args, options);
+        }) as typeof childProcess.spawnSync);
+        const smoke = formatDevicesSmoke(cwd, 5000, undefined, { mode: "real-provider" });
 
         expect(smoke).toContain("android-emulator: SKIP - emulator inventory timed out");
-        expect(smoke).toContain(`${join(binDir, "emulator")} -list-avds -> unknown`);
+        expect(smoke).toContain(`${join(binDir, "emulator.mjs")} -list-avds -> unknown`);
         expect(smoke).not.toContain("android-emulator: FAIL");
     });
 
@@ -210,27 +221,48 @@ esac`);
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "tart", "echo tart-ok; exit 0");
-        fixture.writeTool(binDir, presentTool, "echo bridge-ok; exit 0");
+        fixture.writeNodeTool(binDir, "tart", "console.log(\"tart-ok\"); process.exit(0);");
+        fixture.writeNodeTool(binDir, presentTool, "console.log(\"bridge-ok\"); process.exit(0);");
 
-        const smoke = formatDevicesSmoke(cwd, 250, undefined, { mode: "real-provider" });
+        const smoke = formatDevicesSmoke(cwd, 5000, undefined, { mode: "real-provider" });
 
         expect(smoke).toContain(`macos-vm: SKIP - ${missingDetail}`);
-        expect(smoke).toContain(`${join(binDir, "tart")} --version -> 0`);
+        expect(smoke).toContain(`${join(binDir, "tart.mjs")} --version -> 0`);
         expect(smoke).not.toMatch(/\b(tart|vz|utmctl) (start|run|launch|boot|delete|stop|shutdown)\b/);
     });
 
-    it("routes opt-in real provider smoke through the CLI with bounded timeout parsing", () => {
+    it.each([
+        ["--timeout-ms=123"],
+        ["--timeout-ms", "123"],
+    ])("routes opt-in real provider smoke through the CLI with bounded timeout parsing: %j", (...timeoutArgs) => {
         const cwd = "/project/admin-smoke-real-cli-test";
         fixture.setupFixture(cwd);
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", "echo ok; exit 0");
-        fixture.writeTool(binDir, "emulator", "echo ok; exit 0");
+        fixture.writeNodeTool(binDir, "adb", "console.log(\"ok\"); process.exit(0);");
+        fixture.writeNodeTool(binDir, "emulator", "console.log(\"ok\"); process.exit(0);");
         const log = vi.spyOn(console, "log").mockImplementation(() => {});
 
-        const exitCode = devicesCli(["smoke", "--real-lab", "--timeout-ms=123"], cwd);
+        // Verify the parsed budget at the process boundary without making Node
+        // fixture startup race a 123ms deadline. Real children run in other cases.
+        const routedSpawn = vi.mocked(childProcess.spawnSync).getMockImplementation()!;
+        const readiness = [
+            [join(binDir, "adb.mjs"), ["version"]],
+            [join(binDir, "emulator.mjs"), ["-list-avds"]],
+            [join(binDir, "adb.mjs"), ["devices", "-l"]],
+        ] as const;
+        vi.mocked(childProcess.spawnSync).mockImplementation(((command: string, args: string[] = [], options = {}) => {
+            if (readiness.some(([tool, expectedArgs]) => command === tool && JSON.stringify(args) === JSON.stringify(expectedArgs))) {
+                return { status: 0, signal: null, pid: 0, stdout: "ok\n", stderr: "", output: [null, "ok\n", ""] };
+            }
+            return routedSpawn(command, args, options);
+        }) as typeof childProcess.spawnSync);
+        const exitCode = devicesCli(["smoke", "--real-lab", ...timeoutArgs], cwd);
+
+        for (const [command, args] of readiness) {
+            expect(childProcess.spawnSync).toHaveBeenCalledWith(command, args, expect.objectContaining({ timeout: 123 }));
+        }
 
         expect(exitCode).toBe(0);
         expect(log).toHaveBeenCalledWith(expect.stringContaining("mode: real-provider (explicit opt-in)"));
@@ -254,24 +286,24 @@ esac`);
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", "echo adb-version; exit 0");
-        fixture.writeTool(binDir, "emulator", "echo avd-one; exit 0");
-        fixture.writeTool(binDir, "xcrun", "echo '{\"devices\":{}}'; exit 0");
-        fixture.writeTool(binDir, "xcodebuild", "echo Xcode; exit 0");
-        fixture.writeTool(binDir, "wsb", "echo wsb-help; exit 0");
-        fixture.writeTool(binDir, "tart", "echo tart-version >&2; exit 7");
+        fixture.writeNodeTool(binDir, "adb", "console.log(\"adb-version\"); process.exit(0);");
+        fixture.writeNodeTool(binDir, "emulator", "console.log(\"avd-one\"); process.exit(0);");
+        fixture.writeNodeTool(binDir, "xcrun", "console.log(\"{\\\"devices\\\":{}}\"); process.exit(0);");
+        fixture.writeNodeTool(binDir, "xcodebuild", "console.log(\"Xcode\"); process.exit(0);");
+        fixture.writeNodeTool(binDir, "wsb", "console.log(\"wsb-help\"); process.exit(0);");
+        fixture.writeNodeTool(binDir, "tart", "console.error(\"tart-version\"); process.exit(7);");
 
         const smoke = formatDevicesSmoke(cwd);
 
         expect(smoke).toContain("android-emulator: PASS - adb and emulator responded");
         expect(smoke).toContain("android-device: PASS - adb physical-device inventory responded");
-        expect(smoke).toContain(`${join(binDir, "adb")} version -> 0`);
-        expect(smoke).toContain(`${join(binDir, "emulator")} -list-avds -> 0`);
+        expect(smoke).toContain(`${join(binDir, "adb.mjs")} version -> 0`);
+        expect(smoke).toContain(`${join(binDir, "emulator.mjs")} -list-avds -> 0`);
         expect(smoke).toContain("ios-simulator: PASS - xcrun simctl inventory responded");
         expect(smoke).toContain("ios-device: PASS - xcrun xctrace physical-device inventory responded");
         expect(smoke).toContain("windows-sandbox: PASS - wsb CLI responded");
         expect(smoke).toContain("macos-vm: FAIL - tart-version");
-        expect(smoke).toContain(`${join(binDir, "tart")} --version -> 7`);
+        expect(smoke).toContain(`${join(binDir, "tart.mjs")} --version -> 7`);
     });
 
     it("bounds smoke host command execution with a timeout", () => {
@@ -280,13 +312,13 @@ esac`);
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", `"${process.execPath}" -e 'setTimeout(() => {}, 1000)'`);
-        fixture.writeTool(binDir, "emulator", "echo avd-one; exit 0");
+        fixture.writeNodeTool(binDir, "adb", "setTimeout(() => {}, 1000);");
+        fixture.writeNodeTool(binDir, "emulator", "console.log(\"avd-one\"); process.exit(0);");
 
         const smoke = formatDevicesSmoke(cwd, 50);
 
         expect(smoke).toContain("android-emulator: FAIL -");
-        expect(smoke).toContain(`${join(binDir, "adb")} version -> unknown`);
+        expect(smoke).toContain(`${join(binDir, "adb.mjs")} version -> unknown`);
         expect(smoke).toMatch(/ETIMEDOUT|timed out|Timeout/i);
     });
 
@@ -299,20 +331,14 @@ esac`);
         const oldAndroidDeviceSerial = process.env.CCC_REAL_ANDROID_DEVICE_SERIAL;
         const oldAndroidSerial = process.env.CCC_REAL_ANDROID_SERIAL;
         const oldIosUdid = process.env.CCC_REAL_IOS_DEVICE_UDID;
-        fixture.writeTool(binDir, "adb", `case "$1" in
-  devices) echo 'adb inventory unavailable' >&2; exit 70 ;;
-  *) echo ok; exit 0 ;;
-esac`);
-        fixture.writeTool(binDir, "xcrun", `case "$1" in
-  xctrace) echo 'xctrace inventory unavailable' >&2; exit 71 ;;
-  *) echo ok; exit 0 ;;
-esac`);
+        fixture.writeNodeTool(binDir, "adb", `if (args[0] === 'devices') { console.error('adb inventory unavailable'); process.exit(70); } console.log('ok');`);
+        fixture.writeNodeTool(binDir, "xcrun", `if (args[0] === 'xctrace') { console.error('xctrace inventory unavailable'); process.exit(71); } console.log('ok');`);
         try {
             delete process.env.CCC_REAL_ANDROID_DEVICE_SERIAL;
             delete process.env.CCC_REAL_ANDROID_SERIAL;
             delete process.env.CCC_REAL_IOS_DEVICE_UDID;
 
-            const smoke = formatDevicesSmoke(cwd, 250, undefined, { mode: "real-provider" });
+            const smoke = formatDevicesSmoke(cwd, 5000, undefined, { mode: "real-provider" });
 
             expect(smoke).toContain("android-device: SKIP - physical-device inventory unavailable without an explicit leased device target");
             expect(smoke).toContain("ios-device: SKIP - physical-device inventory unavailable without an explicit leased device target");

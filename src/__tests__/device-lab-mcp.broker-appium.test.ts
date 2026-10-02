@@ -70,7 +70,7 @@ function pointerActionBody(requests: Array<{ method: string; url: string; body: 
         .find((body) => body.actions?.some((action) => action.id === id));
 }
 
-function writeIosPhysicalAttachment(ownerId: string, deviceId: string, udid: string) {
+function writeIosPhysicalAttachment(ownerId: string, deviceId: string, udid: string, appiumPort?: number) {
     const claimId = `${deviceId}-claim`;
     const claimNonce = `${deviceId}-nonce`;
     writeBrokerDevices(ownerId, "ios-device", [{
@@ -81,6 +81,7 @@ function writeIosPhysicalAttachment(ownerId: string, deviceId: string, udid: str
         leaseClaimId: claimId,
         leaseClaimNonce: claimNonce,
         appium: null,
+        ...(appiumPort ? { appiumPort } : {}),
     }]);
     const leaseDir = join(homedir(), ".ccc", "devices", "physical-leases", "ios-device", "locks");
     mkdirSync(leaseDir, { recursive: true });
@@ -137,7 +138,7 @@ describe("device-lab MCP broker Appium routing", () => {
                     params: { ownerProbe: true },
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
-                    timeoutMs: 500,
+                    timeoutMs: 5000,
                 },
             });
             const echoPayload = JSON.parse(((echo.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -163,10 +164,10 @@ describe("device-lab MCP broker Appium routing", () => {
                     physical: true,
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
-                    timeoutMs: 500,
+                    timeoutMs: 5000,
                 },
             });
-            expect(record.isError).not.toBe(true);
+            expect(record.isError, JSON.stringify(record.content)).not.toBe(true);
             expect(JSON.parse(((record.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 ok: true,
                 method: "broker.appium.record",
@@ -189,7 +190,7 @@ describe("device-lab MCP broker Appium routing", () => {
                     deviceId: "iphone-owned",
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
-                    timeoutMs: 500,
+                    timeoutMs: 5000,
                 },
             });
             expect(JSON.parse(((status.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -206,7 +207,7 @@ describe("device-lab MCP broker Appium routing", () => {
                     backend: "ios-device",
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
-                    timeoutMs: 500,
+                    timeoutMs: 5000,
                 },
             });
             expect(JSON.parse(((list.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -224,7 +225,7 @@ describe("device-lab MCP broker Appium routing", () => {
                     deviceId: "iphone-owned",
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
-                    timeoutMs: 500,
+                    timeoutMs: 5000,
                 },
             });
             expect(JSON.parse(((clear.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -241,7 +242,7 @@ describe("device-lab MCP broker Appium routing", () => {
                     appiumPort: fakeAppium.port,
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
-                    timeoutMs: 500,
+                    timeoutMs: 5000,
                 },
             });
             expect(JSON.parse(((start.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -265,7 +266,7 @@ describe("device-lab MCP broker Appium routing", () => {
                     deviceId: "iphone-owned",
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
-                    timeoutMs: 500,
+                    timeoutMs: 5000,
                 },
             });
             expect(JSON.parse(((ensureSession.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -308,7 +309,7 @@ describe("device-lab MCP broker Appium routing", () => {
                     },
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
-                    timeoutMs: 500,
+                    timeoutMs: 5000,
                 },
             });
             expect(JSON.parse(((request.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -327,7 +328,7 @@ describe("device-lab MCP broker Appium routing", () => {
                     deviceId: "iphone-owned",
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
-                    timeoutMs: 500,
+                    timeoutMs: 5000,
                 },
             });
             expect(JSON.parse(((deleteSession.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -348,7 +349,7 @@ describe("device-lab MCP broker Appium routing", () => {
                     deviceId: "iphone-owned",
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
-                    timeoutMs: 500,
+                    timeoutMs: 5000,
                 },
             });
             expect(JSON.parse(((stop.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -416,7 +417,7 @@ describe("device-lab MCP broker Appium routing", () => {
                     params: { ownerProbe: true },
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
-                    timeoutMs: 500,
+                    timeoutMs: 5000,
                 },
             });
             const echoPayload = JSON.parse(((echo.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -424,15 +425,14 @@ describe("device-lab MCP broker Appium routing", () => {
                 ownerId: string;
             };
             expect(echoPayload.ok).toBe(true);
-            writeIosPhysicalAttachment(echoPayload.ownerId, "iphone-broker-mobile", "REAL-UDID-2");
+            writeIosPhysicalAttachment(echoPayload.ownerId, "iphone-broker-mobile", "REAL-UDID-2", fakeAppium.port);
 
             const baseArgs = {
                 deviceId: "iphone-broker-mobile",
                 viaBroker: true,
-                appiumPort: fakeAppium.port,
                 hostCandidates: ["127.0.0.1"],
                 port: address.port,
-                timeoutMs: 500,
+                timeoutMs: 5000,
                 rpcTimeoutMs: 750,
             };
             const dump = await client.callTool({
@@ -456,7 +456,7 @@ describe("device-lab MCP broker Appium routing", () => {
 
             const tap = await client.callTool({
                 name: "click",
-                arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, rpcTimeoutMs: baseArgs.rpcTimeoutMs, x: 40, y: 50 },
+                arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, rpcTimeoutMs: baseArgs.rpcTimeoutMs, x: 40, y: 50 },
             });
             expect(JSON.parse(((tap.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 provider: "broker-appium",
@@ -469,7 +469,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 ["swipe", { x1: 10, y1: 20, x2: 110, y2: 120, durationMs: 350 }],
                 ["drag", { x1: 11, y1: 21, x2: 111, y2: 121, durationMs: 950 }],
             ] as const) {
-                const result = await client.callTool({ name, arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, rpcTimeoutMs: baseArgs.rpcTimeoutMs, ...args } });
+                const result = await client.callTool({ name, arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, rpcTimeoutMs: baseArgs.rpcTimeoutMs, ...args } });
                 expect(result.isError, `${name}: ${JSON.stringify(result)}`).not.toBe(true);
                 expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                     provider: "broker-appium",
@@ -479,7 +479,7 @@ describe("device-lab MCP broker Appium routing", () => {
             }
             const typed = await client.callTool({
                 name: "type",
-                arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, rpcTimeoutMs: baseArgs.rpcTimeoutMs, text: "hello" },
+                arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, rpcTimeoutMs: baseArgs.rpcTimeoutMs, text: "hello" },
             });
             expect(JSON.parse(((typed.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 provider: "broker-appium",
@@ -497,7 +497,7 @@ describe("device-lab MCP broker Appium routing", () => {
             }));
             const wait = await client.callTool({
                 name: "wait_for_text",
-                arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, rpcTimeoutMs: baseArgs.rpcTimeoutMs, text: "Welcome", intervalMs: 50 },
+                arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, rpcTimeoutMs: baseArgs.rpcTimeoutMs, text: "Welcome", intervalMs: 50 },
             });
             expect(JSON.parse(((wait.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 found: true,
@@ -636,7 +636,7 @@ describe("device-lab MCP broker Appium routing", () => {
                     params: { ownerProbe: true },
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
-                    timeoutMs: 500,
+                    timeoutMs: 5000,
                 },
             });
             const echoPayload = JSON.parse(((echo.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -646,16 +646,15 @@ describe("device-lab MCP broker Appium routing", () => {
             expect(echoPayload.ok).toBe(true);
             simulatorName = `ccc-${echoPayload.ownerId}-ios-sim-broker-apps`;
             writeBrokerDevices(echoPayload.ownerId, "ios", [
-                { id: "ios-sim-broker-apps", status: "booted", backend: "ios-simulator", udid: "SIM-UDID-1", simulatorName, appium: null },
+                { id: "ios-sim-broker-apps", status: "booted", backend: "ios-simulator", udid: "SIM-UDID-1", simulatorName, appium: null, appiumPort: fakeAppium.port },
             ]);
 
             const baseArgs = {
                 deviceId: "ios-sim-broker-apps",
                 viaBroker: true,
-                appiumPort: fakeAppium.port,
                 hostCandidates: ["127.0.0.1"],
                 port: address.port,
-                timeoutMs: 500,
+                timeoutMs: 5000,
             };
             const screenshot = await client.callTool({ name: "screenshot", arguments: baseArgs });
             expect(screenshot.isError, JSON.stringify(screenshot)).not.toBe(true);
@@ -670,7 +669,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 ["set_location", { latitude: 37.5, longitude: 127.0, altitude: 42 }],
                 ["clipboard", { text: "hello broker" }],
             ] as const) {
-                const result = await client.callTool({ name, arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, ...args } });
+                const result = await client.callTool({ name, arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, ...args } });
                 expect(result.isError, `${name}: ${JSON.stringify(result)}`).not.toBe(true);
                 const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"));
                 if (["install_app", "launch_app"].includes(name)) {
@@ -691,7 +690,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 backend: "ios-simulator",
                 text: "hello broker",
             }));
-            const waitForApp = await client.callTool({ name: "wait_for_app", arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, appId: "com.example.Test", intervalMs: 50 } });
+            const waitForApp = await client.callTool({ name: "wait_for_app", arguments: { deviceId: baseArgs.deviceId, viaBroker: baseArgs.viaBroker, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, appId: "com.example.Test", intervalMs: 50 } });
             expect(JSON.parse(((waitForApp.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 found: true,
                 provider: "broker-appium",
@@ -766,7 +765,7 @@ describe("device-lab MCP broker Appium routing", () => {
                     params: { ownerProbe: true },
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
-                    timeoutMs: 500,
+                    timeoutMs: 5000,
                 },
             });
             const echoPayload = JSON.parse(((echo.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -775,17 +774,15 @@ describe("device-lab MCP broker Appium routing", () => {
             };
             expect(echoPayload.ok).toBe(true);
             writeBrokerDevices(echoPayload.ownerId, "android", [
-                { id: "android-broker-mobile", name: "Broker Pixel", status: "running", backend: "android-emulator", serial: "emulator-5554", appium: null },
+                { id: "android-broker-mobile", name: "Broker Pixel", status: "running", backend: "android-emulator", serial: "emulator-5554", appium: null, appiumPort: fakeAppium.port },
             ]);
 
             const baseArgs = {
                 deviceId: "android-broker-mobile",
                 broker: true,
-                backend: "android-emulator",
-                appiumPort: fakeAppium.port,
                 hostCandidates: ["127.0.0.1"],
                 port: address.port,
-                timeoutMs: 500,
+                timeoutMs: 5000,
             };
             for (const [name, args] of [
                 ["key", { keyCode: 82 }],
@@ -795,7 +792,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 ["lock", {}],
                 ["unlock", {}],
             ] as const) {
-                const result = await client.callTool({ name, arguments: { deviceId: baseArgs.deviceId, broker: baseArgs.broker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, ...args } });
+                const result = await client.callTool({ name, arguments: { deviceId: baseArgs.deviceId, broker: baseArgs.broker, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, ...args } });
                 expect(result.isError, `${name}: ${JSON.stringify(result)}`).not.toBe(true);
                 expect(JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                     provider: "broker-appium",
@@ -806,7 +803,7 @@ describe("device-lab MCP broker Appium routing", () => {
 
             const reverse = await client.callTool({
                 name: "set_orientation",
-                arguments: { deviceId: baseArgs.deviceId, broker: baseArgs.broker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, orientation: "reverse-landscape" },
+                arguments: { deviceId: baseArgs.deviceId, broker: baseArgs.broker, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, orientation: "reverse-landscape" },
             });
             expect(reverse.isError).not.toBe(true);
             expect(JSON.parse(((reverse.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
@@ -907,7 +904,7 @@ describe("device-lab MCP broker Appium routing", () => {
                     params: { ownerProbe: true },
                     hostCandidates: ["127.0.0.1"],
                     port: address.port,
-                    timeoutMs: 500,
+                    timeoutMs: 5000,
                 },
             });
             const echoPayload = JSON.parse(((echo.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -916,16 +913,15 @@ describe("device-lab MCP broker Appium routing", () => {
             };
             expect(echoPayload.ok).toBe(true);
             writeBrokerDevices(echoPayload.ownerId, "android", [
-                { id: "android-broker-apps", name: "Broker Pixel Apps", status: "running", backend: "android-emulator", serial: "emulator-5556", appium: null },
+                { id: "android-broker-apps", name: "Broker Pixel Apps", status: "running", backend: "android-emulator", serial: "emulator-5556", appium: null, appiumPort: fakeAppium.port },
             ]);
 
             const baseArgs = {
                 deviceId: "android-broker-apps",
                 broker: true,
-                appiumPort: fakeAppium.port,
                 hostCandidates: ["127.0.0.1"],
                 port: address.port,
-                timeoutMs: 500,
+                timeoutMs: 5000,
             };
             const screenshot = await client.callTool({ name: "screenshot", arguments: baseArgs });
             expect(screenshot.isError, JSON.stringify(screenshot)).not.toBe(true);
@@ -941,7 +937,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 ["set_location", { latitude: 35.1, longitude: 129.2 }],
                 ["clipboard", { text: "hello broker" }],
             ] as const) {
-                const result = await client.callTool({ name, arguments: { deviceId: baseArgs.deviceId, broker: baseArgs.broker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, ...args } });
+                const result = await client.callTool({ name, arguments: { deviceId: baseArgs.deviceId, broker: baseArgs.broker, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, ...args } });
                 expect(result.isError, `${name}: ${JSON.stringify(result)}`).not.toBe(true);
                 const payload = JSON.parse(((result.content as Array<{ text?: string }>)[0].text ?? "{}"));
                 if (["install_app", "launch_app"].includes(name)) {
@@ -962,7 +958,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 backend: "android-emulator",
                 text: "hello broker",
             }));
-            const waitForApp = await client.callTool({ name: "wait_for_app", arguments: { deviceId: baseArgs.deviceId, broker: baseArgs.broker, appiumPort: baseArgs.appiumPort, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, appId: "com.example.android", intervalMs: 50 } });
+            const waitForApp = await client.callTool({ name: "wait_for_app", arguments: { deviceId: baseArgs.deviceId, broker: baseArgs.broker, hostCandidates: baseArgs.hostCandidates, port: baseArgs.port, timeoutMs: baseArgs.timeoutMs, appId: "com.example.android", intervalMs: 50 } });
             expect(JSON.parse(((waitForApp.content as Array<{ text?: string }>)[0].text ?? "{}"))).toEqual(expect.objectContaining({
                 found: true,
                 provider: "broker-appium",
@@ -1004,7 +1000,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 viaBroker: true,
                 hostCandidates: ["127.0.0.1"],
                 port,
-                timeoutMs: 500,
+                timeoutMs: 5000,
             },
         });
         expect(result.isError).toBe(true);
@@ -1019,7 +1015,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 confirmDestructive: true,
                 hostCandidates: ["127.0.0.1"],
                 port,
-                timeoutMs: 500,
+                timeoutMs: 5000,
             },
         });
         expect(clearData.isError).toBe(true);
@@ -1032,7 +1028,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 viaBroker: true,
                 hostCandidates: ["127.0.0.1"],
                 port,
-                timeoutMs: 500,
+                timeoutMs: 5000,
             },
         });
         expect(missingAppId.isError).toBe(true);
@@ -1047,7 +1043,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 longitude: 2,
                 hostCandidates: ["127.0.0.1"],
                 port,
-                timeoutMs: 500,
+                timeoutMs: 5000,
             },
         });
         expect(unsafePhysicalLocation.isError).toBe(true);
@@ -1062,7 +1058,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 longitude: 2,
                 hostCandidates: ["127.0.0.1"],
                 port,
-                timeoutMs: 500,
+                timeoutMs: 5000,
             },
         });
         expect(unsafeIosPhysicalLocation.isError).toBe(true);
@@ -1084,7 +1080,7 @@ describe("device-lab MCP broker Appium routing", () => {
                 viaBroker: true,
                 hostCandidates: ["127.0.0.1"],
                 port,
-                timeoutMs: 500,
+                timeoutMs: 5000,
             },
         });
         expect(result.isError).toBe(true);

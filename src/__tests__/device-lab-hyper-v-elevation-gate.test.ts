@@ -1,3 +1,4 @@
+import { isolateDeviceLabTestEnvironment } from "./helpers/device-lab-test-environment.js";
 import { mkdtempSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -533,19 +534,20 @@ describe("Hyper-V elevation log lines", () => {
 });
 
 describe("Hyper-V elevation gate in broker status", () => {
-    let originalHome: string | undefined;
+    let originalHomeRestore: (() => void) | undefined;
+    let fixtureHome: string | undefined;
 
     beforeEach(() => {
         resetHyperVElevationGateForTest();
-        originalHome = process.env.HOME;
-        process.env.HOME = mkdtempSync(join(tmpdir(), "ccc-elevation-gate-test-home-"));
+
+        fixtureHome = mkdtempSync(join(tmpdir(), "ccc-elevation-gate-test-home-"));
+        originalHomeRestore = isolateDeviceLabTestEnvironment(fixtureHome);
     });
 
     afterEach(() => {
         resetHyperVElevationGateForTest();
-        if (process.env.HOME) rmSync(process.env.HOME, { recursive: true, force: true });
-        if (originalHome === undefined) delete process.env.HOME;
-        else process.env.HOME = originalHome;
+        if (fixtureHome) rmSync(fixtureHome, { recursive: true, force: true });
+        originalHomeRestore?.();
     });
 
     it("reports only the bounded gate state, code and time", async () => {

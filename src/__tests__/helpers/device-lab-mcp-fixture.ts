@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { deviceLabTestHomeEnvironment, isolateDeviceLabTestEnvironment } from "./device-lab-test-environment.js";
 import { createHash } from "crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -35,6 +36,7 @@ export interface DeviceLabMcpTestContext {
     homeDir: string;
     pathDir: string;
     originalHome: string | undefined;
+    restoreEnvironment: () => void;
 }
 
 export interface DeviceLabMcpTestContextOptions {
@@ -67,7 +69,7 @@ export function installDefaultImplicitBroker(client: Client, value: boolean) {
 export async function createDeviceLabMcpTestContext(options: DeviceLabMcpTestContextOptions = {}): Promise<DeviceLabMcpTestContext> {
     const originalHome = process.env.HOME;
     const homeDir = mkdtempSync(join(tmpdir(), "ccc-device-lab-test-"));
-    process.env.HOME = homeDir;
+    const restoreEnvironment = isolateDeviceLabTestEnvironment(homeDir);
     const pathDir = join(homeDir, "bin");
     mkdirSync(pathDir, { recursive: true });
     // A container's real owner credential must not override these synthetic
@@ -85,6 +87,7 @@ export async function createDeviceLabMcpTestContext(options: DeviceLabMcpTestCon
         const core = join(dependencies, "@ccc/device-lab");
         cpSync(join(repoRoot, "packages/device-lab"), core, {recursive:true,
             filter: path => !path.split(/[\\/]/).includes("node_modules")});
+        symlinkSync(join(repoRoot, "node_modules/pngjs"), join(dependencies, "pngjs"), "junction");
         symlinkSync(join(repoRoot, "packages/hyper-v"), join(dependencies, "@ccc/hyper-v"), "junction");
         mkdirSync(join(dependencies, "@modelcontextprotocol"), {recursive:true});
         symlinkSync(join(repoRoot, "node_modules/@modelcontextprotocol/sdk"), join(dependencies, "@modelcontextprotocol/sdk"), "junction");
@@ -101,7 +104,7 @@ if(existsSync(fake)){eval(readFileSync(fake,'utf8').replace(/^#![^\\n]*\\n/,''))
         command: process.execPath,
         args: [serverPath],
         env: {
-            HOME: homeDir,
+            ...deviceLabTestHomeEnvironment(homeDir),
             PATH: pathDir,
             NODE_ENV: "test",
             NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
@@ -115,23 +118,32 @@ if(existsSync(fake)){eval(readFileSync(fake,'utf8').replace(/^#![^\\n]*\\n/,''))
         { capabilities: {} },
     );
 
-    await client.connect(transport);
+    try {
+        await client.connect(transport);
+    } catch (error) {
+        await client.close().catch(() => {});
+        restoreEnvironment();
+        rmSync(homeDir, { recursive: true, force: true });
+        throw error;
+    }
     if (brokerModuleUrl) clientBrokerModules.set(client, brokerModuleUrl);
     clientEnvironments.set(client, {
-        HOME: homeDir, PATH: pathDir, NODE_ENV: "test",
+        ...deviceLabTestHomeEnvironment(homeDir), PATH: pathDir, NODE_ENV: "test",
         NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
         CCC_DEVICE_LAB_TEST_ALLOW_UNVERIFIED_BROKER: "1", ...options.env,
     });
     const defaultImplicitBroker = options.defaultImplicitBroker ?? false;
     if (!options.rawPublicCalls) installDefaultImplicitBroker(client, defaultImplicitBroker);
-    return { client, homeDir, pathDir, originalHome };
+    return { client, homeDir, pathDir, originalHome, restoreEnvironment };
 }
 
 export async function cleanupDeviceLabMcpTestContext(context: DeviceLabMcpTestContext | undefined) {
     if (!context) return;
-    await internalClients.get(context.client)?.close();
-    await context?.client.close();
-    rmSync(context.homeDir, { recursive: true, force: true });
-    if (context.originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = context.originalHome;
+    try {
+        await internalClients.get(context.client)?.close();
+        await context.client.close();
+    } finally {
+        context.restoreEnvironment();
+        rmSync(context.homeDir, { recursive: true, force: true });
+    }
 }

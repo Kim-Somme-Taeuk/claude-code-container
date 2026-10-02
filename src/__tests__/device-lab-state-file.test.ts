@@ -28,7 +28,7 @@ describe("device-lab fenced file writes", () => {
         const root = mkdtempSync(join(tmpdir(), "ccc-device-write-root-"));
         const outside = mkdtempSync(join(tmpdir(), "ccc-device-write-outside-"));
         roots.push(root, outside);
-        symlinkSync(outside, join(root, "downloads"), "dir");
+        symlinkSync(outside, join(root, "downloads"), process.platform === "win32" ? "junction" : "dir");
 
         expect(() => writeDeviceLabBinaryFile(root, join(root, "downloads", "result.bin"), Buffer.from("blocked"), "device-download"))
             .toThrow("device-download-path-invalid");
@@ -53,7 +53,7 @@ describe("device-lab fenced file writes", () => {
         const outside = mkdtempSync(join(tmpdir(), "ccc-device-read-outside-"));
         roots.push(root, outside);
         writeFileSync(join(outside, "secret.bin"), "outside");
-        symlinkSync(outside, join(root, "uploads"), "dir");
+        symlinkSync(outside, join(root, "uploads"), process.platform === "win32" ? "junction" : "dir");
 
         expect(() => readDeviceLabBinaryFileWithinRoot(root, join(root, "uploads", "secret.bin"), "device-upload"))
             .toThrow("device-upload-path-invalid");

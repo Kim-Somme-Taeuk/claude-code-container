@@ -56,7 +56,9 @@ let home: string;
 beforeAll(async () => { await startServer(); });
 beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "ccc-stabilization-macos-"));
+    for (const key of Object.keys(process.env)) if (/^(CCC_|ANDROID_)/i.test(key)) vi.stubEnv(key, undefined);
     vi.stubEnv("HOME", home);
+    vi.stubEnv("USERPROFILE", home);
     vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
     fixture.calls.length = 0;
     fixture.cloneTimeout = false;
@@ -70,7 +72,8 @@ describe("public managed macOS creation", () => {
         const [device] = readMacosDevices();
         expect(device).toMatchObject({ id: "managed-mac", image: "custom-base", status: "stopped", providerResourceManaged: true, headless });
         expect(mutations().map(call => call.args)).toEqual([["clone", "custom-base", device.providerInstance]]);
-        expect((await call("start", { deviceId: device.id })).isError).not.toBe(true);
+        // This fixture proves lifecycle arguments; its fake SSH response has no readiness probe.
+        expect((await call("start", { deviceId: device.id, waitForBoot: false })).isError).not.toBe(true);
         expect(mutations().map(call => call.args[0])).toEqual(["clone", "run"]);
         expect(mutations()[1].args.includes("--no-graphics")).toBe(headless);
     });

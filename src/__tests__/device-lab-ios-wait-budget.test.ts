@@ -1,3 +1,4 @@
+import { isolateDeviceLabTestEnvironment } from "./helpers/device-lab-test-environment.js";
 import { createServer } from "http";
 import { AddressInfo } from "net";
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
@@ -5,6 +6,7 @@ import { tmpdir } from "os";
 import { withSharedMutationLock } from "@ccc/device-lab/providers/state/shared-mutation-lock.mjs";
 import { join } from "path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import * as waitBudgets from "@ccc/device-lab/providers/wait-budget.mjs";
 import * as commands from "@ccc/device-lab/providers/commands.mjs";
 import * as simulatorState from "@ccc/device-lab/providers/state/ios-state.mjs";
 import { ownerId } from "@ccc/device-lab/providers/context.mjs";
@@ -13,25 +15,29 @@ import * as state from "@ccc/device-lab/providers/state/ios-device-state.mjs";
 import * as leases from "@ccc/device-lab/providers/state/physical-lease-store.mjs";
 import { handleIosRealTool } from "@ccc/device-lab/providers/backends/ios-device.mjs";
 
-const homeFixture = vi.hoisted(() => ({ root: null as string | null }));
-vi.mock("os", async (importOriginal) => {
-    const actual = await importOriginal<typeof import("os")>();
-    return { ...actual, homedir: () => homeFixture.root ?? actual.homedir() };
-});
+let testHome: string;
+let restoreEnvironment: () => void;
 let device: any;
 beforeEach(() => {
+    testHome = mkdtempSync(join(tmpdir(), "ccc-ios-wait-budget-"));
+    restoreEnvironment = isolateDeviceLabTestEnvironment(testHome);
     device = { id: "physical-budget", udid: "UDID", leaseClaimId: "claim", leaseClaimNonce: "nonce", appium: { runtimeId: "generation", sessionId: "session", serverUrl: "http://fixture" } };
     vi.spyOn(state, "findIosRealDevice").mockImplementation(() => device);
     vi.spyOn(leases, "heartbeatPhysicalLease").mockReturnValue({ ok: true, lease: {} });
     vi.spyOn(simulator, "iosAppiumDiscovery").mockReturnValue({ available: true });
 });
-afterEach(() => { homeFixture.root = null; vi.restoreAllMocks(); vi.useRealTimers(); });
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); restoreEnvironment(); rmSync(testHome, { recursive: true, force: true }); });
 const wait = (name = "mobile_wait_for_text", timeoutMs = 100) => handleIosRealTool(name, { deviceId: device.id, text: "needle", bundleId: "app.target", timeoutMs, intervalMs: 10 });
 
 it.each(["mobile_wait_for_text", "mobile_wait_for_app"])("%s bootstraps once and shares shrinking allowance with lease checks", async (name) => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     let time = 0;
-    vi.spyOn(performance, "now").mockImplementation(() => time);
+    // Only observation time is synthetic: native lock/process probes must keep
+    // their real monotonic clock and timers to remain bounded on Windows.
+    vi.spyOn(waitBudgets, "createWaitBudget").mockImplementation((timeoutMs) => {
+        const deadline = time + timeoutMs;
+        const remaining = () => Math.max(0, deadline - time);
+        return { timeoutMs, remaining, requestTimeout: (max = 120000) => Math.min(max, Math.ceil(remaining())), pause: async () => {} };
+    });
     const observations: number[] = [];
     const fetch = vi.spyOn(simulator, "fetchIosAppiumJson").mockImplementation(async (url, options) => {
         if (url.endsWith("/status") || url.endsWith("/session/session")) { time += 1000; return { value: {} }; }
@@ -40,7 +46,6 @@ it.each(["mobile_wait_for_text", "mobile_wait_for_app"])("%s bootstraps once and
         return { value: observations.length === 2 ? (name.endsWith("text") ? "needle" : { bundleId: "app.target" }) : "unrelated" };
     });
     const pending = wait(name);
-    await vi.runAllTimersAsync();
     expect((await pending)?.isError).toBe(false);
     expect(observations).toEqual([100, 70]);
     expect(fetch.mock.calls.filter(([url]) => url.endsWith("/status"))).toHaveLength(1);
@@ -51,7 +56,6 @@ it.each(["mobile_wait_for_text", "mobile_wait_for_app"])("%s bootstraps once and
 });
 
 it.each(["lease", "generation", "attachment"])("stops polling after %s changes without repeating bootstrap", async (change) => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     let observations = 0;
     vi.spyOn(simulator, "fetchIosAppiumJson").mockImplementation(async (url) => {
         if (!url.endsWith("/source")) return { value: {} };
@@ -62,14 +66,19 @@ it.each(["lease", "generation", "attachment"])("stops polling after %s changes w
         return { value: "unrelated" };
     });
     const pending = wait();
-    await vi.runAllTimersAsync();
     expect((await pending)?.isError).toBe(true);
     expect(observations).toBe(1);
 });
 
 it("does not fetch after the physical lease guard exhausts the shared allowance", async () => {
     let time = 0;
-    vi.spyOn(performance, "now").mockImplementation(() => time);
+    // Only observation time is synthetic: native lock/process probes must keep
+    // their real monotonic clock and timers to remain bounded on Windows.
+    vi.spyOn(waitBudgets, "createWaitBudget").mockImplementation((timeoutMs) => {
+        const deadline = time + timeoutMs;
+        const remaining = () => Math.max(0, deadline - time);
+        return { timeoutMs, remaining, requestTimeout: (max = 120000) => Math.min(max, Math.ceil(remaining())), pause: async () => {} };
+    });
     vi.mocked(leases.heartbeatPhysicalLease).mockImplementation((_backend, _udid, _id, options) => {
         if (options.waitBudget) time = 100;
         return { ok: true, lease: {} };
@@ -145,8 +154,7 @@ it.each(["match", "generation", "body"])("simulator text wait preserves one boot
 
 it("real physical heartbeat carries its deadline through the hardware lock into a contended aggregate lock", () => {
     vi.mocked(leases.heartbeatPhysicalLease).mockRestore();
-    const root = mkdtempSync(join(tmpdir(), "ccc-lease-budget-"));
-    homeFixture.root = root;
+    const root = testHome;
     const aggregate = join(root, ".ccc/devices/physical-leases/ios-device.mutation.lock");
     const hardware = join(root, ".ccc/devices/physical-leases/ios-device/locks/UDID.mutation.lock");
     const start = performance.now();

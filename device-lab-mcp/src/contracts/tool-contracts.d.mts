@@ -2,7 +2,7 @@ export type DeviceBackend = "android-emulator" | "android-device" | "ios-simulat
 export type ObjectOutput = Record<string, unknown>;
 export type ActionOutput = "ok" | ObjectOutput;
 export interface DeviceRecord {
-    id: string;
+    deviceId: string;
     backend?: DeviceBackend;
     status?: string;
     provider?: string;
@@ -104,6 +104,7 @@ export interface DeviceLabToolOutputMap {
     wait_for_app: WaitOutput;
     run_flow: FlowOutput;
     move: ActionOutput;
+    focus_window: ActionOutput;
 }
 
 export const DEVICE_LAB_OUTPUT_CONTRACTS: Readonly<Record<keyof DeviceLabToolOutputMap, string>>;

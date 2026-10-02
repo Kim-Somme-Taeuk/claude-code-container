@@ -1,3 +1,6 @@
+import { availableDevices } from "./available-devices.mjs";
+import { cropScreenshotResult } from "./screenshot-region.mjs";
+import { finishStartReadiness, startBootTimeoutMs } from "./start-readiness.mjs";
 import { buildListFilesCommand, listFilesFromExecResult } from "@ccc/device-lab/providers/file-listing.mjs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -28,6 +31,7 @@ const FLOW_MAX_STEPS = 50;
 const DEVICE_REQUIRED_TOOLS = new Set(OPERATION_TOOLS
     .filter((tool) => tool.inputSchema?.required?.includes("deviceId"))
     .map((tool) => tool.name));
+DEVICE_REQUIRED_TOOLS.add("device_drag");
 const DEVICE_FLOW_ALLOWED_TOOLS = new Set(DEVICE_FLOW_TOOL_NAMES);
 const BROKER_LIFECYCLE_COMMANDS = new Set(["device_create", "device_status", "device_start", "device_stop", "device_reboot", "device_delete"]);
 const HYPER_V_LIFECYCLE_BACKENDS = new Set(["windows-vm", "linux-vm"]);
@@ -56,6 +60,8 @@ const BROKER_MUTATING_DEVICE_TOOLS = new Set([
     "device_type",
     "device_scroll",
     "device_cursor_position",
+    "device_drag",
+    "device_focus_window",
     "device_snapshot_create",
     "device_snapshot_restore",
     "device_snapshot_delete",
@@ -99,6 +105,8 @@ const DIRECT_DEVICE_BACKEND_HINT_TOOLS = new Set([
     "device_type",
     "device_scroll",
     "device_cursor_position",
+    "device_drag",
+    "device_focus_window",
     "device_upload",
     "device_download",
     "device_reset",
@@ -114,6 +122,7 @@ const DIRECT_DEVICE_BACKEND_HINT_TOOLS = new Set([
 ]);
 const CURRENT_DISPLAY_DEVICE_ID = "x11-current-display";
 const MOBILE_COMMON_OPERATIONS = new Map([
+    ["device_drag", "mobile_drag"],
     ["device_click", "mobile_tap"], ["device_double_click", "mobile_double_tap"],
     ["device_accessibility_snapshot", "mobile_dump_ui"], ["device_type", "mobile_type_text"], ["device_key", "mobile_key"],
 ]);
@@ -127,6 +136,9 @@ function commonOperation(name, backend, args) {
     return { name: MOBILE_COMMON_OPERATIONS.get(name) || name };
 }
 const DISPLAY_DEVICE_TOOL_MAP = new Map([
+    ["device_drag", "display_drag"],
+    ["device_focus_window", "display_focus_window"],
+    ["device_window_list", "display_window_list"],
     ["device_screenshot", "display_screenshot"],
     ["device_click", "display_click"],
     ["device_double_click", "display_double_click"],
@@ -339,9 +351,7 @@ export function brokerLifecycleExecutionTimeout(args) {
         return { rpcTimeoutMs: 135000 };
     }
     if (args?.waitForBoot === true) {
-        const bootTimeoutMs = Number.isFinite(args?.bootTimeoutMs)
-            ? Math.min(600000, Math.max(1000, Number(args.bootTimeoutMs)))
-            : 60000;
+        const bootTimeoutMs = startBootTimeoutMs(args);
         return { rpcTimeoutMs: bootTimeoutMs + 15000 };
     }
     return { rpcTimeoutMs: DEFAULT_BROKER_LIFECYCLE_RPC_TIMEOUT_MS };
@@ -1093,8 +1103,8 @@ async function maybeHandleImplicitBrokerDeviceTool(name, args) {
         }
         brokerBackend = inventoryBackend.backend;
     }
-    if (isCursorMove(name, args) && !HYPER_V_LIFECYCLE_BACKENDS.has(brokerBackend)) {
-        return cursorMoveBackendUnsupportedResult();
+    if (isCursorMove(name, args) && !["windows-vm", "linux-vm", "windows-sandbox", "macos-vm"].includes(brokerBackend)) {
+        return jsonResult({ ok: false, error: "device-cursor-move-backend-unsupported" });
     }
     const common = commonOperation(name, brokerBackend, args);
     if (common.error) return textResult(false, common.error);
@@ -1352,6 +1362,8 @@ const HYPER_V_LINUX_TOOLS = new Set([
     "device_type",
     "device_scroll",
     "device_cursor_position",
+    "device_drag",
+    "device_focus_window",
     "device_snapshot_list",
     "device_snapshot_create",
     "device_snapshot_restore",
@@ -1431,10 +1443,6 @@ function isCursorMove(name, args = {}) {
     return name === "device_cursor_position" && (args.x !== undefined || args.y !== undefined);
 }
 
-function cursorMoveBackendUnsupportedResult() {
-    return jsonResult({ ok: false, error: "device-cursor-move-backend-unsupported", detail: "Cursor movement requires backend windows-vm or linux-vm with provider hyper-v." });
-}
-
 function unhandledDeviceToolResult(name, args) {
     if (!DEVICE_REQUIRED_TOOLS.has(name)) return null;
     const deviceId = args.deviceId;
@@ -1476,9 +1484,21 @@ async function handleFilteredBackends(args, detail) {
     }) };
 }
 
-async function dispatchTool(name, rawArgs, { detail = false } = {}) {
+async function dispatchTool(name, rawArgs, options = {}) {
+    const { region, ...args } = rawArgs || {};
+    const startedAt = Date.now();
+    const result = await dispatchDeviceTool(name, args, options);
+    if (name === "device_start") return finishStartReadiness(result, args, startedAt,
+        (probe, probeArgs) => dispatchDeviceTool(probe, probeArgs, options));
+    return name === "device_screenshot" && region !== undefined ? cropScreenshotResult(result, region) : result;
+}
+
+async function dispatchDeviceTool(name, rawArgs, { detail = false } = {}) {
     const args = normalizeToolArgs(rawArgs, name);
     if (name === "device_list") return handleDeviceList(args);
+    if (name === "device_inventory" && args.backend === undefined) {
+        return availableDevices(backend => dispatchDeviceTool(name, { ...args, backend }, { detail }), { detail });
+    }
     if (name === "device_backends") return handleFilteredBackends(args, detail);
     if (MOBILE_COMMON_OPERATIONS.has(name) && args.backend !== undefined) {
         const common = commonOperation(name, args.backend, args);
@@ -1497,14 +1517,7 @@ async function dispatchTool(name, rawArgs, { detail = false } = {}) {
             return jsonResult({ ok: false, error: "device-cursor-coordinates-invalid", detail: "Provide both x and y as nonnegative screenshot pixels." });
         }
         if (args.deviceId === CURRENT_DISPLAY_DEVICE_ID && (args.backend === undefined || args.backend === CURRENT_DISPLAY_DEVICE_ID)) return handleDisplayTool("display_move", args);
-        // An omitted backend is resolved from the owner inventory below; only a named
-        // non-Hyper-V backend, or no device to resolve, can be refused here.
-        // Opting out of the implicit broker skips that resolution, and direct handlers only read.
-        const unresolvable = optsOutOfImplicitBroker(args)
-            || typeof args.deviceId !== "string" || !args.deviceId || args.deviceId === CURRENT_DISPLAY_DEVICE_ID;
-        if (args.backend !== undefined ? !HYPER_V_LIFECYCLE_BACKENDS.has(args.backend) : unresolvable) {
-            return cursorMoveBackendUnsupportedResult();
-        }
+
     }
     if (args.deviceId !== undefined
         && (typeof args.deviceId !== "string" || !OWNER_DEVICE_ID_PATTERN.test(args.deviceId))) {

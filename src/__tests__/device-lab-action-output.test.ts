@@ -39,7 +39,7 @@ describe("action-first output", () => {
     });
     it("returns minimal device rows and cursor coordinates", () => {
         expect(parse(actionResult("devices", "device_list", json({ devices: [{ id: "d", name: "Pixel", runtimeState: "running", ownerId: "private" }], ownerId: "private" }))))
-            .toEqual([{ id: "d", name: "Pixel", state: "running" }]);
+            .toEqual([{ deviceId: "d", name: "Pixel", state: "running" }]);
         expect(parse(actionResult("cursor_position", "device_cursor_position", json({ x: 0, y: 2, provider: "xdotool", raw: "x:0" }))))
             .toEqual({ x: 0, y: 2 });
         expect(parse(actionResult("cursor_position", "device_cursor_position", json({ cursor: { x: 0, y: 2 }, provider: "windows-helper" }))))

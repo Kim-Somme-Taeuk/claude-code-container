@@ -45,12 +45,12 @@ describe("provider proof from owned device identity", () => {
         const evidence = createTargetBackendEvidence();
         const args = { deviceId: "owned-vm" };
         expect(evidence.observe("click", args, result("ok"))).toBeUndefined();
-        evidence.observe("devices", { view: "available", backend: "windows-vm" }, result({ devices: [{ id: "owned-vm" }] }));
+        evidence.observe("devices", { view: "available", backend: "windows-vm" }, result({ devices: [{ deviceId: "owned-vm" }] }));
         expect(evidence.observe("click", args, result("ok"))).toBe("windows-vm");
         expect(evidence.observe("click", { deviceId: "other" }, result("ok"))).toBeUndefined();
-        evidence.observe("devices", {}, result({ result: { backends: [{ stateKey: "linux-vm", devices: [{ id: "host-owned" }] }] } }));
+        evidence.observe("devices", {}, result({ result: { backends: [{ stateKey: "linux-vm", devices: [{ deviceId: "host-owned" }] }] } }));
         expect(evidence.lookup("host-owned")).toBe("linux-vm");
-        evidence.observe("devices", {}, result({ result: { backends: [{ stateKey: "android", devices: [{ id: "pixel" }] }, { stateKey: "ios-device", devices: [{ id: "owned-iphone" }] }, { stateKey: "ios-device", error: "failed", devices: [{ id: "iphone" }] }] } }));
+        evidence.observe("devices", {}, result({ result: { backends: [{ stateKey: "android", devices: [{ deviceId: "pixel" }] }, { stateKey: "ios-device", devices: [{ deviceId: "owned-iphone" }] }, { stateKey: "ios-device", error: "failed", devices: [{ deviceId: "iphone" }] }] } }));
         expect(evidence.lookup("pixel")).toBe("android-emulator");
         expect(evidence.lookup("owned-iphone")).toBe("ios-device");
         expect(evidence.lookup("iphone")).toBeUndefined();
@@ -58,15 +58,15 @@ describe("provider proof from owned device identity", () => {
     });
     it("rejects failed inventories, arbitrary backend arguments and conflicting identities", () => {
         const evidence = createTargetBackendEvidence();
-        evidence.observe("devices", { view: "available", backend: "windows-vm" }, result({ devices: [{ id: "owned" }] }, true));
+        evidence.observe("devices", { view: "available", backend: "windows-vm" }, result({ devices: [{ deviceId: "owned" }] }, true));
         expect(evidence.lookup("owned")).toBeUndefined();
-        evidence.observe("exec", { deviceId: "owned" }, result({ result: { id: "owned", backend: "windows-vm" } }));
+        evidence.observe("exec", { deviceId: "owned" }, result({ result: { deviceId: "owned", backend: "windows-vm" } }));
         expect(evidence.lookup("owned")).toBeUndefined();
-        evidence.observe("click", { backend: "windows-vm", deviceId: "owned" }, result({ id: "owned" }));
+        evidence.observe("click", { backend: "windows-vm", deviceId: "owned" }, result({ deviceId: "owned" }));
         expect(evidence.lookup("owned")).toBeUndefined();
-        evidence.observe("status", { deviceId: "owned" }, result({ device: { id: "owned", backend: "windows-vm" } }));
+        evidence.observe("status", { deviceId: "owned" }, result({ device: { deviceId: "owned", backend: "windows-vm" } }));
         expect(evidence.lookup("owned")).toBe("windows-vm");
-        evidence.observe("status", { deviceId: "owned" }, result({ device: { id: "owned", backend: "linux-vm" } }));
+        evidence.observe("status", { deviceId: "owned" }, result({ device: { deviceId: "owned", backend: "linux-vm" } }));
         expect(evidence.lookup("owned")).toBeUndefined();
     });
 });

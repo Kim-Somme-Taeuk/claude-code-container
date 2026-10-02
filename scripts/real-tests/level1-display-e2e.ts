@@ -63,12 +63,12 @@ export async function run() {
 
         const listed = parseToolPayload(await callTool("devices", { detail: true }));
         assert.ok(Array.isArray(listed.devices), JSON.stringify(listed));
-        assert.ok(listed.devices.some((device) => device.id === "x11-current-display" && device.available === true), JSON.stringify(listed.devices));
+        assert.ok(listed.devices.some((device) => device.deviceId === "x11-current-display" && device.available === true), JSON.stringify(listed.devices));
         steps.push({ name: "devices includes current display", status: "PASS" });
 
         const displayDevice = { deviceId: "x11-current-display" };
         const status = parseToolPayload(await callTool("status", { detail: true, deviceId: displayDevice.deviceId }));
-        assert.strictEqual(status.id, "x11-current-display", JSON.stringify(status));
+        assert.strictEqual(status.deviceId, "x11-current-display", JSON.stringify(status));
         assert.strictEqual(status.kind, "display", JSON.stringify(status));
         assert.strictEqual(status.available, true, JSON.stringify(status));
         steps.push({ name: "device_status current display alias", status: "PASS" });
@@ -175,7 +175,7 @@ export async function run() {
         assert.strictEqual(flow.results.length, 4);
         assert.strictEqual(flow.results[0].tool, "status");
         assert.strictEqual(flow.results[0].isError, false);
-        assert.strictEqual(flow.results[0].content?.[0]?.value?.id, "x11-current-display");
+        assert.strictEqual(flow.results[0].content?.[0]?.value?.deviceId, "x11-current-display");
         assert.strictEqual(flow.results[0].content?.[0]?.value?.available, true);
         assert.strictEqual(flow.results[1].tool, "cursor_position");
         assert.strictEqual(flow.results[1].isError, false);
@@ -183,7 +183,7 @@ export async function run() {
         assert.strictEqual(typeof flow.results[1].content?.[0]?.value?.y, "number");
         assert.strictEqual(flow.results[2].tool, "status");
         assert.strictEqual(flow.results[2].isError, false);
-        assert.strictEqual(flow.results[2].content?.[0]?.value?.id, "x11-current-display");
+        assert.strictEqual(flow.results[2].content?.[0]?.value?.deviceId, "x11-current-display");
         assert.strictEqual(flow.results[3].tool, "cursor_position");
         assert.strictEqual(flow.results[3].isError, false);
         steps.push({ name: "run_flow", status: "PASS" });

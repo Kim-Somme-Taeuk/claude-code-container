@@ -1,3 +1,7 @@
+import * as fixtureFs from "fs";
+import * as windowsProcesses from "@ccc/device-lab/windows-system-powershell.js";
+import { directorySymlink } from "./helpers/file-symlink-fixture.js";
+import { isolateDeviceLabTestEnvironment } from "./helpers/device-lab-test-environment.js";
 import { isolatedDeviceLabPackage } from "./helpers/isolated-device-lab-package.js";
 import { createHash } from "crypto";
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
@@ -10,6 +14,8 @@ import { appiumWebDriverRequestTimeoutMs, createDeviceBrokerServer, DEVICE_BROKE
 import { deviceLabOwnerId } from "@ccc/device-lab/device-lab-owner.js";
 import { readDeviceRuntimeProcessIdentity } from "@ccc/device-lab/device-lab-process-identity.js";
 import { cleanupOwner, close, listen, ownerRpcEndpoint, ownerRpcHeaders, writeBrokerDevices } from "./helpers/host-broker-test-fixture.js";
+
+vi.mock("fs", async (importOriginal) => ({ ...await importOriginal<typeof import("fs")>() }));
 
 async function createFakeAppiumServer(sessionId = "BROKER-SESSION-1", options: { deleteStatus?: number; readyAfterStatusRequests?: number; sessionCreateFailures?: number; onSessionCreated?: () => void } = {}) {
     const requests: Array<{ method: string; url: string; body: unknown }> = [];
@@ -122,18 +128,18 @@ function writePhysicalLease(ownerId: string, backend: "android-device" | "ios-de
 }
 
 describe("device-lab host broker Appium session authority", () => {
-    let originalHome: string | undefined;
+    let originalHomeRestore: (() => void) | undefined;
+    let fixtureHome: string | undefined;
 
     beforeEach(() => {
-        originalHome = process.env.HOME;
-        process.env.HOME = mkdtempSync(join(tmpdir(), "ccc-device-broker-appium-test-home-"));
+        fixtureHome = mkdtempSync(join(tmpdir(), "ccc-device-broker-appium-test-home-"));
+        originalHomeRestore = isolateDeviceLabTestEnvironment(fixtureHome);
     });
 
     afterEach(() => {
         vi.restoreAllMocks();
-        if (process.env.HOME) rmSync(process.env.HOME, { recursive: true, force: true });
-        if (originalHome === undefined) delete process.env.HOME;
-        else process.env.HOME = originalHome;
+        if (fixtureHome) rmSync(fixtureHome, { recursive: true, force: true });
+        originalHomeRestore?.();
     });
 
     it("gives proxied WebDriver commands enough time for device-side clipboard work", () => {
@@ -157,7 +163,10 @@ describe("device-lab host broker Appium session authority", () => {
         });
         const appiumUrl = await listen(appium);
         const port = (appium.address() as AddressInfo).port;
-        const broker = createDeviceBrokerServer({ cwd, host: "127.0.0.1", port: 0 });
+        // This tests the HTTP deadline, with process effects simulated through the
+        // existing command-runner seam; native ownership has separate coverage.
+        const commandRunner = vi.fn(() => { throw new Error("unexpected provider command"); });
+        const broker = createDeviceBrokerServer({ cwd, host: "127.0.0.1", port: 0, commandRunner });
         const baseUrl = await listen(broker);
         writeBrokerDevices(ownerId, "android", [{
             id: "pixel-wait", status: "running", backend: "android-emulator",
@@ -172,8 +181,9 @@ describe("device-lab host broker Appium session authority", () => {
                 } }),
             });
             const payload = await response.json();
+            expect(requests, JSON.stringify(payload)).toBe(1);
+            expect(commandRunner).not.toHaveBeenCalled();
             expect(performance.now() - started).toBeLessThan(1800);
-            expect(requests).toBe(1);
             expect(response.status).toBe(504);
             expect(payload).toMatchObject({ ok: false, error: "appium-request-timeout" });
             expect(JSON.stringify(payload)).not.toContain("matching text");
@@ -678,7 +688,7 @@ describe("device-lab host broker Appium session authority", () => {
         writeFileSync(join(externalRuntime, "sentinel.txt"), "unchanged");
         const headers = ownerRpcHeaders(ownerId);
         const { runtimeRoot } = brokerAppiumTestPaths();
-        symlinkSync(externalRuntime, runtimeRoot);
+        directorySymlink(externalRuntime, runtimeRoot);
         const commandRunner = vi.fn(() => ({ mode: "exec" as const, provider: "unexpected", status: 0, stdout: "", stderr: "" }));
         const { createDeviceBrokerServer: createIsolatedBrokerServer } = await isolatedDeviceLabPackage(packageRoot);
         const server = createIsolatedBrokerServer({ cwd: packageRoot, host: "127.0.0.1", port: 0, commandRunner });
@@ -719,7 +729,7 @@ describe("device-lab host broker Appium session authority", () => {
         const headers = ownerRpcHeaders(ownerId);
         const { runtimeRoot, nodeModules } = brokerAppiumTestPaths();
         mkdirSync(runtimeRoot);
-        symlinkSync(externalModules, nodeModules);
+        directorySymlink(externalModules, nodeModules);
         const commandRunner = vi.fn(() => ({ mode: "exec" as const, provider: "unexpected", status: 0, stdout: "", stderr: "" }));
         const { createDeviceBrokerServer: createIsolatedBrokerServer } = await isolatedDeviceLabPackage(packageRoot);
         const server = createIsolatedBrokerServer({ cwd: packageRoot, host: "127.0.0.1", port: 0, commandRunner });
@@ -1158,7 +1168,7 @@ describe("device-lab host broker Appium session authority", () => {
             expect(await stop.json()).toEqual(expect.objectContaining({
                 ok: false,
                 error: "appium-stop-failed",
-                signal: expect.objectContaining({ attempted: false, ok: false, reason: "runtime-process-identity-mismatch" }),
+                signal: expect.objectContaining({ attempted: false, ok: false, [process.platform === "win32" ? "error" : "reason"]: "runtime-process-identity-mismatch" }),
             }));
             expect(killSpy).not.toHaveBeenCalled();
             const state = JSON.parse(readFileSync(join(root, "devices.json"), "utf8")) as { devices: Array<Record<string, unknown>> };
@@ -1201,7 +1211,7 @@ describe("device-lab host broker Appium session authority", () => {
             expect(stop.status).toBe(502);
             expect(await stop.json()).toEqual(expect.objectContaining({
                 ok: false,
-                signal: expect.objectContaining({ attempted: false, ok: false, reason: "runtime-process-identity-unavailable" }),
+                signal: expect.objectContaining({ attempted: false, ok: false, [process.platform === "win32" ? "error" : "reason"]: "runtime-process-identity-unavailable" }),
             }));
             expect(killSpy).toHaveBeenCalledWith(fakePid, 0);
             expect(killSpy).not.toHaveBeenCalledWith(fakePid, "SIGTERM");
@@ -1700,12 +1710,23 @@ describe("device-lab host broker Appium session authority", () => {
             { id: "pixel-raced", status: "running", backend: "android-emulator", appium: previous },
         ]);
         let terminated = false;
+        const recordSuccessor = () => {
+            writeFileSync(join(root, "devices.json"), JSON.stringify({
+                devices: [{ id: "pixel-raced", status: "running", backend: "android-emulator", appium: successor }],
+            }));
+            terminated = true;
+        };
+        // Model the termination boundary on both hosts; never terminate this test worker.
+        // Identity inspection before that boundary still uses the real process identity.
+        const windowsStop = vi.spyOn(windowsProcesses, "terminateWindowsProcessByStartToken").mockImplementation((pid, token) => {
+            expect(pid).toBe(process.pid);
+            expect(token).toBe(previousProcessIdentity.startToken);
+            recordSuccessor();
+            return { ok: true, pid, status: 0 };
+        });
         const killSpy = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
             if (pid === process.pid && signal === "SIGTERM") {
-                writeFileSync(join(root, "devices.json"), JSON.stringify({
-                    devices: [{ id: "pixel-raced", status: "running", backend: "android-emulator", appium: successor }],
-                }));
-                terminated = true;
+                recordSuccessor();
                 return true;
             }
             if (pid === process.pid && signal === 0 && terminated) {
@@ -1732,7 +1753,12 @@ describe("device-lab host broker Appium session authority", () => {
                 currentAppium: expect.objectContaining({ runtimeId: successor.runtimeId, serverPid: 91002 }),
                 signal: expect.objectContaining({ attempted: true, ok: true, pid: process.pid }),
             }));
-            expect(killSpy).toHaveBeenCalledWith(process.pid, "SIGTERM");
+            if (process.platform === "win32") {
+                expect(windowsStop).toHaveBeenCalledWith(process.pid, previousProcessIdentity.startToken);
+            } else {
+                expect(killSpy).toHaveBeenCalledWith(process.pid, "SIGTERM");
+                expect(windowsStop).not.toHaveBeenCalled();
+            }
             const persisted = JSON.parse(readFileSync(join(root, "devices.json"), "utf8")) as { devices: Array<Record<string, unknown>> };
             expect(persisted.devices[0]?.appium).toEqual(successor);
         } finally {
@@ -2896,8 +2922,14 @@ describe("device-lab host broker Appium session authority", () => {
             headers,
             body: JSON.stringify({ method: "broker.cleanup.owner", params: { backend: "android-device" } }),
         });
+        const rename = fixtureFs.renameSync;
+        const stateWriteFailure = vi.spyOn(fixtureFs, "renameSync").mockImplementation((source, target) => {
+            if (String(target) === join(phoneRoot, "devices.json")) {
+                throw Object.assign(new Error("injected state write failure"), { code: "EIO" });
+            }
+            return rename(source, target);
+        });
         try {
-            chmodSync(phoneRoot, 0o500);
             const failed = await cleanup();
             expect(failed.status).toBe(200);
             expect(await failed.json()).toEqual(expect.objectContaining({
@@ -2930,13 +2962,13 @@ describe("device-lab host broker Appium session authority", () => {
                 leaseClaimNonce: claimNonce,
             }));
 
-            chmodSync(phoneRoot, 0o700);
+            stateWriteFailure.mockRestore();
             const recovered = await cleanup();
             expect(recovered.status).toBe(200);
             expect(await recovered.json()).toEqual(expect.objectContaining({ ok: true }));
             expect(existsSync(leaseFile)).toBe(false);
         } finally {
-            chmodSync(phoneRoot, 0o700);
+            stateWriteFailure.mockRestore();
             await close(server);
             cleanupOwner(ownerId);
             rmSync(leaseFile, { force: true });

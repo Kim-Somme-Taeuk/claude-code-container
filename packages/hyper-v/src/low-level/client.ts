@@ -661,8 +661,9 @@ function normalizeConsoleInput(operation: HyperVWindowsOperation, input: HyperVC
     const pointer = candidate as Record<string, unknown>;
     const expectedKeys = ["selector", "expectedName", "expectedNotes", "action", "x", "y", "width", "height", "nativeWidth", "nativeHeight",
         ...((candidate.action === "click" || candidate.action === "doubleClick") ? ["button"] : []),
-        ...(candidate.action === "scroll" ? ["direction", "amount"] : [])];
-    if (!["click", "doubleClick", "cursor", "scroll"].includes(String(candidate.action))
+        ...(candidate.action === "scroll" ? ["direction", "amount"] : []),
+        ...(candidate.action === "drag" ? ["x2", "y2", "durationMs"] : [])];
+    if (!["click", "doubleClick", "cursor", "scroll", "drag"].includes(String(candidate.action))
         || !hasExactKeys(candidate, expectedKeys)
         || pointer.width !== CONSOLE_WIDTH || pointer.height !== CONSOLE_HEIGHT
         || !consoleDimension(pointer.nativeWidth) || !consoleDimension(pointer.nativeHeight)
@@ -677,6 +678,12 @@ function normalizeConsoleInput(operation: HyperVWindowsOperation, input: HyperVC
     if (candidate.action === "scroll" && (!["up", "down", "left", "right"].includes(String(candidate.direction))
         || !Number.isSafeInteger(candidate.amount) || (candidate.amount as number) < 1 || (candidate.amount as number) > 10)) {
         throw error("validation", operation, "console-scroll-invalid");
+    }
+    if (candidate.action === "drag" && (!Number.isSafeInteger(candidate.x2) || !Number.isSafeInteger(candidate.y2)
+        || (candidate.x2 as number) < 0 || (candidate.x2 as number) >= CONSOLE_WIDTH
+        || (candidate.y2 as number) < 0 || (candidate.y2 as number) >= CONSOLE_HEIGHT
+        || !Number.isSafeInteger(candidate.durationMs) || (candidate.durationMs as number) < 1 || (candidate.durationMs as number) > 10000)) {
+        throw error("validation", operation, "console-drag-invalid");
     }
     return { ...input, ...identity };
 }

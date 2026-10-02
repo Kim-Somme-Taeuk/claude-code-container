@@ -25,8 +25,8 @@ import { publicToolName } from "../../device-lab-mcp/src/tools.mjs";
 import { startServer } from "../../device-lab-mcp/src/server.mjs";
 
 const wrap = (data: unknown, isError = false) => ({ content: [{ type: "text", text: JSON.stringify(data) }], isError });
-const args = { deviceId: "flow-wait-fixture", implicitBroker: false, text: "needle" };
-const waitArgs = (tool: string) => tool === "wait_for_app" ? { ...args, appId: "example.app" } : args;
+const args = { deviceId: "flow-wait-fixture", implicitBroker: false };
+const waitArgs = (tool: string) => tool === "wait_for_app" ? { ...args, appId: "example.app" } : tool === "wait_for_text" ? { ...args, text: "needle" } : args;
 const action = { tool: "click", arguments: { ...args, x: 1, y: 2 } };
 const parse = (result: any) => JSON.parse(result.content[0].text);
 async function call(name: string, arguments_: Record<string, unknown>) {
@@ -64,7 +64,7 @@ describe.each(["run_flow"])("%s wait conditions", (name) => {
         fixture.observations.set("wait_for_text", wrap({ found: false }));
         fixture.observations.set("wait_for_app", wrap({ running: false }));
         const result = parse(await call(name, { detail: false, stopOnError: false, steps: [
-            { tool: "wait_for_text", arguments: args }, action,
+            { tool: "wait_for_text", arguments: waitArgs("wait_for_text") }, action,
             { tool: "wait_for_app", arguments: waitArgs("wait_for_app") },
         ] }));
         expect(result.ok).toBe(false);

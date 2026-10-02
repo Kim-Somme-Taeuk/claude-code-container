@@ -33,7 +33,9 @@ describe.skipIf(process.platform !== "linux")("broker setup reuse with authentic
         writeFileSync(behavior, "{}");
         const owner = ownerId();
         writeFileSync(auth, JSON.stringify({ ownerId: owner, secret: "b".repeat(64) }), { mode: 0o600 });
+        for (const key of Object.keys(process.env)) if (/^(CCC_|ANDROID_)/i.test(key)) vi.stubEnv(key, undefined);
         vi.stubEnv("HOME", home);
+        vi.stubEnv("USERPROFILE", home);
         vi.stubEnv("NODE_ENV", "production");
         vi.stubEnv("CCC_DEVICE_BROKER_AUTH_FILE", auth);
         vi.stubEnv("CCC_DEVICE_LAB_TEST_ALLOW_UNVERIFIED_BROKER", "");

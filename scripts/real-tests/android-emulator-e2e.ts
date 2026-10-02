@@ -224,7 +224,7 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
 
     const confirmStopped = (payload) => {
         const device = deviceFromPayload(payload, "stop");
-        assert.strictEqual(device.id, deviceId);
+        assert.strictEqual(device.deviceId, deviceId);
         assert.strictEqual(device.status, "stopped");
     };
     const confirmDeleted = (payload) => {
@@ -250,7 +250,7 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
                 systemImage: cap.systemImage.package,
             }) }));
             const createdDevice = deviceFromPayload(createdPayload, "create");
-            assert.strictEqual(createdDevice.id, deviceId);
+            assert.strictEqual(createdDevice.deviceId, deviceId);
             // The normalized success payload may omit ok. Once identity is
             // verified, later assertions must still clean up this fixture.
             created = true;
@@ -260,7 +260,7 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
             const inventory = parsePayload(await callTool("devices", { view: "available", detail: true, ...direct }));
             const inventoryDevices = inventory.devices || inventory.result?.devices;
             assert.ok(Array.isArray(inventoryDevices));
-            assert.ok(inventoryDevices.some((device) => device.id === deviceId));
+            assert.ok(inventoryDevices.some((device) => device.deviceId === deviceId));
 
             const started = parsePayload(await callTool("start", { detail: true,
                 deviceId,
@@ -268,13 +268,13 @@ export async function runAndroidEmulatorE2E(options: any = {}) {
                 bootTimeoutMs: options.bootTimeoutMs || 180000,
             }));
             const startedDevice = deviceFromPayload(started, "start");
-            assert.strictEqual(startedDevice.id, deviceId);
+            assert.strictEqual(startedDevice.deviceId, deviceId);
             assert.strictEqual(startedDevice.status, "running");
             assert.strictEqual(started.boot.ready, true);
 
             const status = parsePayload(await callTool("status", { detail: true, deviceId }));
             const statusDevice = deviceFromPayload(status, "status");
-            assert.strictEqual(statusDevice.id, deviceId);
+            assert.strictEqual(statusDevice.deviceId, deviceId);
             assert.strictEqual(statusDevice.status, "running");
 
             const exec = parsePayload(await callTool("exec", { detail: true,

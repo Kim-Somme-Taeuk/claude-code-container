@@ -13,12 +13,14 @@ import { cleanupFakeMacosMcpContext, createFakeMacosMcpContext } from "./helpers
 function json(result: any) { return JSON.parse(result.content[0].text); }
 
 const mobileCatalogTools = ["adb", "emulator", "avdmanager", "xcrun", "xcodebuild"];
-function mobileCatalogLookups(log: string) {
+function catalogLookups(log: string) {
     return readFileSync(log, "utf8").trim().split("\n").filter(Boolean)
         .map((line) => JSON.parse(line))
-        .flatMap(({ command, args }) => command === "/bin/sh" && args?.[0] === "-c"
-            ? [String(args[1]).replace(/^command -v /, "")] : [])
-        .filter((name) => mobileCatalogTools.includes(name)).sort();
+        .flatMap(({ command, args }) => command === "where" ? [String(args[0])] : command === "/bin/sh" && args?.[0] === "-c"
+            ? [String(args[1]).replace(/^command -v /, "")] : []);
+}
+function mobileCatalogLookups(log: string) {
+    return catalogLookups(log).filter(name => mobileCatalogTools.includes(name)).sort();
 }
 
 describe("provider discovery is shared only inside one inventory operation", () => {
@@ -55,7 +57,7 @@ describe("provider discovery is shared only inside one inventory operation", () 
         const originalLog = process.env.AUDIT_IOS_LOG;
         process.env.AUDIT_IOS_INVENTORY = inventoryPath;
         process.env.AUDIT_IOS_LOG = logPath;
-        writeFileSync(xcrun, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$AUDIT_IOS_LOG"\n/bin/cat "$AUDIT_IOS_INVENTORY"\n');
+        writeFileSync(xcrun, `#!${process.execPath}\nconst fs=require("node:fs"); fs.appendFileSync(process.env.AUDIT_IOS_LOG, process.argv.slice(2).join(" ")+"\\n"); process.stdout.write(fs.readFileSync(process.env.AUDIT_IOS_INVENTORY));\n`);
         chmodSync(xcrun, 0o755);
         const devices: Array<{ name: string; udid: string; state: string }> = [];
         try {
@@ -83,7 +85,7 @@ describe("provider discovery is shared only inside one inventory operation", () 
             expect(json(inventory).devices).toHaveLength(3);
             expect(readFileSync(logPath, "utf8").trim().split("\n")).toEqual(["simctl list -j"]);
 
-            writeFileSync(xcrun, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$AUDIT_IOS_LOG"\necho "simctl unavailable" >&2\nexit 9\n');
+            writeFileSync(xcrun, `#!${process.execPath}\nrequire("node:fs").appendFileSync(process.env.AUDIT_IOS_LOG, process.argv.slice(2).join(" ")+"\\n"); console.error("simctl unavailable"); process.exit(9);\n`);
             writeFileSync(logPath, "");
             const failed = await handleIosTool("device_inventory", { backend: "ios-simulator" });
             expect(json(failed).hostSimulators.available).toBe(false);
@@ -99,7 +101,7 @@ describe("provider discovery is shared only inside one inventory operation", () 
         const context = createFakeMacosMcpContext();
         const commandPath = vi.spyOn(commands, "commandPath");
         const xcrun = join(context.binDir, "xcrun");
-        writeFileSync(xcrun, '#!/bin/sh\necho "device inventory failed" >&2\nexit 7\n');
+        writeFileSync(xcrun, `#!${process.execPath}\nconsole.error("device inventory failed"); process.exit(7);\n`);
         chmodSync(xcrun, 0o755);
         try {
             const unsupported = await handleIosRealTool("device_wireless", { backend: "ios-device", action: "pair", udid: "test-phone" });
@@ -135,23 +137,23 @@ describe("broker-first backend discovery over the MCP wire", () => {
             writeFileSync(log, "");
             const minimal = await context.client.callTool({ name: "devices", arguments: { view: "backends", ...args, detail: false } });
             expect(json(minimal)).toMatchObject({ ok: false, error: "broker-unavailable" });
-            expect(readFileSync(log, "utf8")).not.toMatch(/command -v (?:adb|emulator|avdmanager|xcrun|wsb|tart)/);
+            expect(catalogLookups(log).filter(name => ["adb", "emulator", "avdmanager", "xcrun", "wsb", "tart"].includes(name))).toEqual([]);
             expect(mobileCatalogLookups(log)).toEqual([]);
-            expect(readFileSync(log, "utf8")).toContain("command -v qemu-system-x86_64");
+            expect(catalogLookups(log)).toContain("qemu-system-x86_64");
 
             expect(json(minimal).backends.some((backend: any) => backend.name === "linux-vm")).toBe(true);
 
             writeFileSync(log, "");
             const detailed = await context.client.callTool({ name: "devices", arguments: { view: "backends", ...args, detail: true } });
             expect(json(detailed).localBackends.length).toBeGreaterThan(1);
-            expect(readFileSync(log, "utf8")).toContain("command -v adb");
-            expect(readFileSync(log, "utf8")).toContain("command -v qemu-system-x86_64");
+            expect(catalogLookups(log)).toContain("adb");
+            expect(catalogLookups(log)).toContain("qemu-system-x86_64");
             expect(mobileCatalogLookups(log)).toEqual([...mobileCatalogTools].sort());
 
             writeFileSync(log, "");
             const direct = await context.client.callTool({ name: "devices", arguments: { view: "backends", implicitBroker: false, detail: false } });
             expect(json(direct).backends.some((backend: any) => backend.name === "android-emulator")).toBe(true);
-            expect(readFileSync(log, "utf8")).toContain("command -v adb");
+            expect(catalogLookups(log)).toContain("adb");
             expect(mobileCatalogLookups(log)).toEqual([...mobileCatalogTools].sort());
         } finally { await cleanupDeviceLabMcpTestContext(context); }
     });
@@ -166,8 +168,8 @@ describe("broker-first backend discovery over the MCP wire", () => {
             writeFileSync(preload, `const fs=require('fs'),cp=require('child_process');
 const original=cp.spawnSync;
 cp.spawnSync=function(command,args,...rest){
-    const match=command==='/bin/sh'&&args?.[0]==='-c'&&/^command -v (adb|emulator|avdmanager|xcrun|xcodebuild)$/.exec(args[1]);
-    if(match){const value=JSON.parse(fs.readFileSync(${JSON.stringify(statePath)},'utf8'))[match[1]];return {status:value?0:1,stdout:value?value+'\\n':'',stderr:''};}
+    const name=command==='where'?args?.[0]:command==='/bin/sh'&&args?.[0]==='-c'?/^command -v (.+)$/.exec(args[1])?.[1]:null;
+    if(['adb','emulator','avdmanager','xcrun','xcodebuild'].includes(name)){const value=JSON.parse(fs.readFileSync(${JSON.stringify(statePath)},'utf8'))[name];return {status:value?0:1,stdout:value?value+'\\n':'',stderr:''};}
     return original.call(this,command,args,...rest);
 };require('module').syncBuiltinESMExports();`);
             env.NODE_OPTIONS = `--require=${JSON.stringify(join(home, "isolate-broker-auth.cjs"))} --require=${JSON.stringify(preload)}`;

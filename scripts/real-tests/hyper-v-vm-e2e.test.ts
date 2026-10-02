@@ -412,25 +412,25 @@ describe("Hyper-V E2E zero-config image selection", () => {
 
     it("reports the exact missing Hyper-V Linux create response field", () => {
         const device = {
-            id: "linux-hyper-v-real-e2e-contract",
+            deviceId: "linux-hyper-v-real-e2e-contract",
             guestTransport: "ssh",
             switchName: "CCC Device Lab",
             networkAddress: "172.29.0.10",
         };
-        expect(() => assertHyperVLinuxCreateContract(device, device.id)).toThrow(
+        expect(() => assertHyperVLinuxCreateContract(device, device.deviceId)).toThrow(
             "hyper-v-linux-create-response-invalid: guestProvisioned expected true, received missing",
         );
     });
 
     it("accepts the complete sanitized Hyper-V Linux create response", () => {
         const device = {
-            id: "linux-hyper-v-real-e2e-contract",
+            deviceId: "linux-hyper-v-real-e2e-contract",
             guestProvisioned: true,
             guestTransport: "ssh",
             switchName: "CCC Device Lab",
             networkAddress: "172.29.0.10",
         };
-        expect(() => assertHyperVLinuxCreateContract(device, device.id)).not.toThrow();
+        expect(() => assertHyperVLinuxCreateContract(device, device.deviceId)).not.toThrow();
     });
 
     it("forces every Hyper-V Linux E2E operation through the broker", () => {
@@ -1923,16 +1923,16 @@ describe("Windows public deletion observation", () => {
     const missing = response({ ok: false, error: "device-not-found", deviceId: id }, true);
     it("marks coverage as expected only after successful absence verification", () => {
         const observed = { ...missing, __cccToolCallRecord: { expectedError: false } };
-        expect(() => assertHyperVWindowsDeleted(response({ devices: [{ id }] }), observed, id)).toThrow();
+        expect(() => assertHyperVWindowsDeleted(response({ devices: [{ deviceId: id }] }), observed, id)).toThrow();
         expect(observed.__cccToolCallRecord.expectedError).toBe(false);
         assertHyperVWindowsDeleted(response({ devices: [] }), observed, id);
         expect(observed.__cccToolCallRecord.expectedError).toBe(true);
     });
     it("accepts absence and the deviceId-only missing-device response", () => {
-        expect(() => assertHyperVWindowsDeleted(response({ devices: [{ id: "other" }] }), missing, id)).not.toThrow();
+        expect(() => assertHyperVWindowsDeleted(response({ devices: [{ deviceId: "other" }] }), missing, id)).not.toThrow();
     });
     it("rejects a VM still present or an unavailable inventory", () => {
-        for (const inventory of [{ devices: [{ id }] }, {}, { ok: false, error: "host-broker-unavailable" }]) {
+        for (const inventory of [{ devices: [{ deviceId: id }] }, { devices: [{ id }] }, {}, { ok: false, error: "host-broker-unavailable" }]) {
             expect(() => assertHyperVWindowsDeleted(response(inventory), missing, id)).toThrow();
         }
     });
@@ -1967,21 +1967,21 @@ describe("Windows E2E configured Hyper-V subnet", () => {
 
 
 describe("previous Windows E2E residue cleanup", () => {
-    const device = { id: "windows-vm-real-e2e-previous", incarnationId: "a".repeat(32) };
+    const device = { deviceId: "windows-vm-real-e2e-previous", incarnationId: "a".repeat(32) };
     const reply = (value: unknown, isError = false) => ({ isError, content: [{ type: "text", text: JSON.stringify(value) }] });
-    const missing = { ok: false, error: "device-not-found", deviceId: device.id };
+    const missing = { ok: false, error: "device-not-found", deviceId: device.deviceId };
     it("accepts a disappeared VM only after fresh inventory confirms absence", async () => {
         const calls: Array<{ tool: string; args: any }> = [];
         let inventoryCalls = 0;
         await cleanupPrevious(async (tool, args) => {
             calls.push({ tool, args });
-            if (tool === "devices") return reply({ devices: ++inventoryCalls === 1 ? [device, { id: "unrelated" }] : [] });
+            if (tool === "devices") return reply({ devices: ++inventoryCalls === 1 ? [device, { deviceId: "unrelated" }] : [] });
             if (tool === "stop") throw new Error("already disappeared");
             return reply(missing, true);
         });
         expect(calls.map(call => call.tool)).toEqual(["devices", "stop", "delete", "devices"]);
         for (const call of calls.filter(call => call.tool !== "devices")) {
-            expect(call.args.deviceId).toBe(device.id);
+            expect(call.args.deviceId).toBe(device.deviceId);
             expect(call.args.incarnationId).toBe(device.incarnationId);
         }
     });

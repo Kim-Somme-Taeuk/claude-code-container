@@ -1,3 +1,4 @@
+import { isolateDeviceLabTestEnvironment } from "./helpers/device-lab-test-environment.js";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -10,7 +11,8 @@ function parseToolJson(result: { content?: unknown }) {
     return JSON.parse((((result.content as Array<{ text?: string }> | undefined) ?? [])[0]?.text ?? "{}")) as Record<string, unknown>;
 }
 
-describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => {
+// This fixture executes POSIX shell scripts; portable transport/contract tests remain active on Windows.
+describe.skipIf(process.platform === "win32")("device-lab MCP iOS real-device flows with fake xctrace/Appium (POSIX fixture)", () => {
     let context: FakeIosMcpContext;
     let client: FakeIosMcpContext["client"];
     let homeDir: string;
@@ -143,10 +145,10 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         });
         expect(attach.isError).not.toBe(true);
         const attached = JSON.parse(((attach.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; backend: string; physical: boolean; status: string; creatable: boolean; targetStatus: { targetKind: string; leaseState: { state: string; hardwareId: string } } };
+            device: { deviceId: string; backend: string; physical: boolean; status: string; creatable: boolean; targetStatus: { targetKind: string; leaseState: { state: string; hardwareId: string } } };
         };
         expect(attached.device).toEqual(expect.objectContaining({
-            id: "ios-device-real-iphone",
+            deviceId: "ios-device-real-iphone",
             backend: "ios-device",
             physical: true,
             connection: "usb",
@@ -177,10 +179,10 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
         });
         expect(wifiAttach.isError).not.toBe(true);
         const wifiAttached = JSON.parse(((wifiAttach.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; connection: string; transport: { type: string; host: string; visibleVia: string } };
+            device: { deviceId: string; connection: string; transport: { type: string; host: string; visibleVia: string } };
         };
         expect(wifiAttached.device).toEqual(expect.objectContaining({
-            id: "ios-device-network-iphone",
+            deviceId: "ios-device-network-iphone",
             connection: "wifi",
             transport: expect.objectContaining({ type: "wifi", host: "network-iphone.local", visibleVia: "xctrace" }),
         }));
@@ -530,11 +532,12 @@ describe("device-lab MCP iOS real-device flows with fake xctrace/Appium", () => 
     });
 });
 
-describe("iOS real-device backend prerequisite boundaries", () => {
+// Prerequisite probes below execute fake xcrun shell scripts too.
+describe.skipIf(process.platform === "win32")("iOS real-device backend prerequisite boundaries (POSIX fixture)", () => {
     it("requires exact xctrace UDID visibility for real-device E2E capability", () => {
         const homeDir = mkdtempSync(join(tmpdir(), "ccc-device-lab-ios-e2e-capability-home-"));
         const binDir = mkdtempSync(join(tmpdir(), "ccc-device-lab-ios-e2e-capability-bin-"));
-        const oldHome = process.env.HOME;
+        let oldHomeRestore: (() => void) | undefined;
         const oldPath = process.env.PATH;
         const oldUdid = process.env.CCC_REAL_IOS_DEVICE_UDID;
         const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
@@ -549,7 +552,7 @@ fi
 exit 1
 `);
             chmodSync(xcrunPath, 0o755);
-            process.env.HOME = homeDir;
+            oldHomeRestore = isolateDeviceLabTestEnvironment(homeDir);
             process.env.PATH = binDir;
 
             process.env.CCC_REAL_IOS_DEVICE_UDID = "00008155-00AA";
@@ -565,8 +568,7 @@ exit 1
             }));
         } finally {
             platformSpy.mockRestore();
-            if (oldHome === undefined) delete process.env.HOME;
-            else process.env.HOME = oldHome;
+            oldHomeRestore?.();
             if (oldPath === undefined) delete process.env.PATH;
             else process.env.PATH = oldPath;
             if (oldUdid === undefined) delete process.env.CCC_REAL_IOS_DEVICE_UDID;
@@ -579,7 +581,7 @@ exit 1
     it("allows physical attach/status inventory with xctrace even when xcodebuild is absent", async () => {
         const homeDir = mkdtempSync(join(tmpdir(), "ccc-device-lab-ios-xctrace-only-home-"));
         const binDir = mkdtempSync(join(tmpdir(), "ccc-device-lab-ios-xctrace-only-bin-"));
-        const oldHome = process.env.HOME;
+        let oldHomeRestore: (() => void) | undefined;
         const oldPath = process.env.PATH;
         try {
             const xcrunPath = join(binDir, "xcrun");
@@ -592,7 +594,7 @@ fi
 exit 1
 `);
             chmodSync(xcrunPath, 0o755);
-            process.env.HOME = homeDir;
+            oldHomeRestore = isolateDeviceLabTestEnvironment(homeDir);
             process.env.PATH = binDir;
 
             const inventory = await handleIosRealTool("device_inventory", { backend: "ios-device" });
@@ -628,8 +630,7 @@ exit 1
             const detach = await handleIosRealTool("device_detach", { deviceId: attached.device.id });
             expect(detach?.isError).not.toBe(true);
         } finally {
-            if (oldHome === undefined) delete process.env.HOME;
-            else process.env.HOME = oldHome;
+            oldHomeRestore?.();
             if (oldPath === undefined) delete process.env.PATH;
             else process.env.PATH = oldPath;
             rmSync(homeDir, { recursive: true, force: true });
@@ -640,7 +641,7 @@ exit 1
     it("rejects physical iOS effects after the exact lease is lost", async () => {
         const homeDir = mkdtempSync(join(tmpdir(), "ccc-device-lab-ios-lease-fence-home-"));
         const binDir = mkdtempSync(join(tmpdir(), "ccc-device-lab-ios-lease-fence-bin-"));
-        const oldHome = process.env.HOME;
+        let oldHomeRestore: (() => void) | undefined;
         const oldPath = process.env.PATH;
         const udid = "00008166-00AA00BB00CC00DD";
         try {
@@ -655,7 +656,7 @@ echo "unexpected xcrun effect" >> "${join(homeDir, "effects.log")}"
 exit 0
 `);
             chmodSync(xcrunPath, 0o755);
-            process.env.HOME = homeDir;
+            oldHomeRestore = isolateDeviceLabTestEnvironment(homeDir);
             process.env.PATH = binDir;
 
             const attach = await handleIosRealTool("device_attach", { backend: "ios-device", name: "Lease Fence iPhone", udid });
@@ -682,8 +683,7 @@ exit 0
             const detach = await handleIosRealTool("device_detach", { deviceId: attached.device.id });
             expect(detach?.isError).not.toBe(true);
         } finally {
-            if (oldHome === undefined) delete process.env.HOME;
-            else process.env.HOME = oldHome;
+            oldHomeRestore?.();
             if (oldPath === undefined) delete process.env.PATH;
             else process.env.PATH = oldPath;
             rmSync(homeDir, { recursive: true, force: true });

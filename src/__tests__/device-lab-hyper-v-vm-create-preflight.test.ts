@@ -1,5 +1,6 @@
+import { fileSymlinkOrSkip } from "./helpers/file-symlink-fixture.js";
 import { createHash } from "crypto";
-import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from "fs";
+import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "fs";
 import { tmpdir } from "os";
 import { promises as fsPromises } from "fs";
 import { join } from "path";
@@ -188,13 +189,13 @@ describe("cloning the base image", () => {
         expect(readFileSync(diskPath, "utf8")).toBe("occupied");
     });
 
-    it("refuses a symlinked base image", async () => {
+    it("refuses a symlinked base image", async (context) => {
         const bytes = Buffer.alloc(4096, 5);
         const { imageRoot, sha256 } = writeBaseImage(bytes);
         const realPath = join(root, "outside.vhdx");
         writeFileSync(realPath, bytes);
         const linkPath = join(imageRoot, "link.vhdx");
-        symlinkSync(realPath, linkPath);
+        fileSymlinkOrSkip(context, realPath, linkPath);
         const { deviceRoot, diskPath } = devicePaths();
 
         await expect(cloneHyperVBaseImage({
@@ -211,15 +212,16 @@ describe("cloning the base image", () => {
         const { imageRoot, imagePath, sha256 } = writeBaseImage(bytes);
         const { deviceRoot, diskPath } = devicePaths();
 
-        const clone = cloneHyperVBaseImage({
+        // Mutate after the source handle is open but before copying starts. No timer race
+        // or floating clone Promise may outlive this test's temporary directory.
+        await expect(cloneHyperVBaseImage({
             baseImageRoot: imageRoot, baseImagePath: imagePath, expectedSha256: sha256, deviceRoot, diskPath,
-        });
-        // Same inode, same length, different content -- invisible to every dev/ino/size check.
-        await new Promise((resolve) => setTimeout(resolve, 1));
-        const descriptor = openSync(imagePath, "r+");
-        try { writeSync(descriptor, Buffer.alloc(1024, 42), 0, 1024, bytes.length - 1024); } finally { closeSync(descriptor); }
-
-        await expect(clone).rejects.toThrow(/hyper-v-base-image-hash-mismatch/);
+            onDestinationCreated: () => {
+                const descriptor = openSync(imagePath, "r+");
+                try { writeSync(descriptor, Buffer.alloc(1024, 42), 0, 1024, bytes.length - 1024); }
+                finally { closeSync(descriptor); }
+            },
+        })).rejects.toThrow(/hyper-v-base-image-hash-mismatch/);
     });
 
     it("stops before the first chunk when the deadline has already passed", async () => {
@@ -287,13 +289,16 @@ describe("cloning the base image", () => {
         const impostor = join(imageRoot, "impostor.vhdx");
         writeFileSync(impostor, bytes);
 
-        const clone = cloneHyperVBaseImage({
+        // Windows can refuse rename-over-open-file. Model the changed path observation
+        // with a real, identical-content second inode while retaining real copy/readback IO.
+        const realLstat = fsPromises.lstat.bind(fsPromises);
+        let destinationCreated = false;
+        vi.spyOn(fsPromises, "lstat").mockImplementation(((path: Parameters<typeof fsPromises.lstat>[0], ...args: any[]) =>
+            realLstat(path === imagePath && destinationCreated ? impostor : path, ...args)) as typeof fsPromises.lstat);
+        await expect(cloneHyperVBaseImage({
             baseImageRoot: imageRoot, baseImagePath: imagePath, expectedSha256: sha256, deviceRoot, diskPath,
-        });
-        await new Promise((resolve) => setTimeout(resolve, 1));
-        renameSync(impostor, imagePath);
-
-        await expect(clone).rejects.toThrow(/hyper-v-base-image-identity-changed/);
+            onDestinationCreated: () => { destinationCreated = true; },
+        })).rejects.toThrow(/hyper-v-base-image-identity-changed/);
     });
 });
 

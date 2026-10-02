@@ -27,9 +27,16 @@ describe("Android first-create choices", () => {
         expect(createInputError({ backend: "android-emulator", name: "new-phone", systemImage: result.systemImages[0], deviceProfile: result.deviceProfiles[0] })).toBeNull();
         expect(command.run).toHaveBeenCalledWith(avdmanager, ["list", "device"], { timeout: 5000, maxBuffer: 262144 });
     });
-    it("resolves a selected tool symlink and excludes stale SDK candidates", () => {
+    it("resolves a selected tool symlink and excludes stale SDK candidates", (context) => {
         const active = join(root, "active"), stale = join(root, "stale"); image(active, "arm64-v8a"); image(stale);
-        const link = join(root, "avdmanager-link"); symlinkSync(manager(active), link);
+        const link = join(root, "avdmanager-link");
+        try { symlinkSync(manager(active), link); }
+        catch (error) {
+            if (process.platform === "win32" && ["EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code || "")) {
+                context.skip(true, "Windows file symlinks require Developer Mode or privilege"); return;
+            }
+            throw error;
+        }
         expect(androidCreationChoices({ avdmanager: link }, [stale]).systemImages).toEqual(["system-images;android-35;google_apis;arm64-v8a"]);
     });
     it("uses selected emulator or configured SDK when manager path has no SDK layout", () => {
@@ -48,7 +55,7 @@ describe("Android first-create choices", () => {
     it("does not follow linked directories outside the SDK", () => {
         const sdk = join(root, "sdk"), outside = join(root, "outside"); image(outside);
         mkdirSync(join(sdk, "system-images"), { recursive: true });
-        symlinkSync(join(outside, "system-images", "android-35"), join(sdk, "system-images", "android-35"), "dir");
+        symlinkSync(join(outside, "system-images", "android-35"), join(sdk, "system-images", "android-35"), process.platform === "win32" ? "junction" : "dir");
         expect(androidCreationChoices({ avdmanager: manager(sdk) }, []).systemImages).toEqual([]);
     });
     it.each([

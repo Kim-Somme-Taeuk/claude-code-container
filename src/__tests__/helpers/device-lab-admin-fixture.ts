@@ -1,10 +1,15 @@
+import { isolateDeviceLabTestEnvironment } from "./device-lab-test-environment.js";
+import * as childProcess from "child_process";
+import { vi } from "vitest";
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { deviceLabOwnerId } from "../../device-lab-admin.js";
 
 export function createDeviceLabAdminTestFixture() {
-    const originalHome = process.env.HOME;
+    let restoreEnvironment: (() => void) | undefined;
+    let restoreToolRouting: (() => void) | undefined;
+    const nodeTools = new Map<string, string>();
     const originalPath = process.env.PATH;
     let homeDir: string | null = null;
 
@@ -14,7 +19,7 @@ export function createDeviceLabAdminTestFixture() {
 
     function setupFixture(cwd: string, profile?: string) {
         homeDir = join(tmpdir(), `ccc-device-admin-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-        process.env.HOME = homeDir;
+        restoreEnvironment = isolateDeviceLabTestEnvironment(homeDir);
         process.env.PATH = "/tmp/ccc-device-admin-empty-path";
         const owner = deviceLabOwnerId(cwd, profile);
         const androidDir = join(homeDir, ".ccc/devices/owners", owner, "android");
@@ -104,11 +109,39 @@ export function createDeviceLabAdminTestFixture() {
         return path;
     }
 
+    // The cleanup tests exercise process effects and timeouts, not OS executable discovery.
+    // Route only their registered tools to real Node children, avoiding shell/where dependencies.
+    function writeNodeTool(binDir: string, name: string, body: string) {
+        if (!restoreToolRouting) {
+            const originalSpawn = childProcess.spawnSync;
+            const spy = vi.spyOn(childProcess, "spawnSync").mockImplementation(((command: string, args: string[] = [], options: Record<string, unknown> = {}) => {
+                const lookup = command === "where" ? args[0]
+                    : command === "/bin/sh" && args[0] === "-c" && args[1]?.startsWith("command -v ") ? args[1].slice(11) : undefined;
+                if (lookup !== undefined) {
+                    const path = nodeTools.get(lookup);
+                    return { status: path ? 0 : 1, signal: null, pid: 0, stdout: path ? `${path}\n` : "", stderr: "", output: [null, path ? `${path}\n` : "", ""] };
+                }
+                if ([...nodeTools.values()].includes(command)) {
+                    return originalSpawn(process.execPath, [command, ...args], options);
+                }
+                return originalSpawn(command, args, options);
+            }) as typeof childProcess.spawnSync);
+            restoreToolRouting = () => spy.mockRestore();
+        }
+        const path = join(binDir, `${name}.mjs`);
+        writeFileSync(path, `import { appendFileSync, writeFileSync } from "node:fs";\nconst args = process.argv.slice(2);\n${body}\n`);
+        nodeTools.set(name, path);
+        return path;
+    }
+
     function cleanup() {
+        restoreToolRouting?.();
+        restoreToolRouting = undefined;
+        nodeTools.clear();
         if (homeDir) rmSync(homeDir, { recursive: true, force: true });
         homeDir = null;
-        if (originalHome === undefined) delete process.env.HOME;
-        else process.env.HOME = originalHome;
+        restoreEnvironment?.();
+        restoreEnvironment = undefined;
         if (originalPath === undefined) delete process.env.PATH;
         else process.env.PATH = originalPath;
     }
@@ -124,5 +157,6 @@ export function createDeviceLabAdminTestFixture() {
         readDevices,
         setupFixture,
         writeTool,
+        writeNodeTool,
     };
 }

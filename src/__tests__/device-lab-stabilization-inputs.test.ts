@@ -50,6 +50,7 @@ describe("public execution input stability", () => {
         const { minimum, maximum } = tool.inputSchema.properties.intervalMs;
         const args = { deviceId: "fixture", appId: "example.app", text: "ready", implicitBroker: false };
         if (name === "wait_for_text") delete (args as any).appId;
+        else delete (args as any).text;
         for (const intervalMs of [0, minimum - 1, maximum + 1, "500", null, NaN, Infinity]) {
             expect(toolInputError(name, { ...args, intervalMs })).toContain("intervalMs");
             expect((await call(name, { ...args, intervalMs })).isError).toBe(true);

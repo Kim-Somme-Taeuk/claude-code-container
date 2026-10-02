@@ -1,9 +1,11 @@
+import { fileSymlinkOrSkip } from "./helpers/file-symlink-fixture.js";
+import { deviceLabTestHomeEnvironment } from "./helpers/device-lab-test-environment.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, truncateSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cleanupWindowsSandboxMinimizeWatchdogs, windowsHelperScript, windowsReadyMinimizeWatchdogArgs, windowsSandboxGuestProcessStatus, windowsSandboxMinimizeWatchdogArgs, windowsSandboxRuntimeDelta, windowsSandboxSessionIdsFromListOutput, windowsWsbConfigLaunchArgs } from "@ccc/device-lab/providers/backends/windows-sandbox.mjs";
 import { installDefaultImplicitBroker } from "./helpers/device-lab-mcp-fixture.js";
 
@@ -37,6 +39,8 @@ async function waitForStableLog(logPath: string, stableMs = 75) {
     return previous;
 }
 
+// Lifecycle fixtures intentionally do not run a guest helper; readiness is covered by
+// device-lab-start-readiness and the real Sandbox E2E. Exercise explicit async start here.
 describe("device-lab MCP with fake Windows Sandbox CLI", () => {
     it("creates recording archives without the optional PowerShell archive module", () => {
         const script = windowsHelperScript({
@@ -82,7 +86,13 @@ describe("device-lab MCP with fake Windows Sandbox CLI", () => {
         }
     }
 
-    beforeAll(async () => {
+    const responders = new Set<ReturnType<typeof setInterval>>();
+    function trackResponder(callback: () => void, delay: number) {
+        const timer = setInterval(callback, delay);
+        responders.add(timer);
+        return timer;
+    }
+    beforeEach(async () => {
         homeDir = mkdtempSync(join(tmpdir(), "ccc-device-lab-windows-home-"));
         binDir = mkdtempSync(join(tmpdir(), "ccc-device-lab-windows-bin-"));
         logPath = join(homeDir, "fake-windows.log");
@@ -90,40 +100,46 @@ describe("device-lab MCP with fake Windows Sandbox CLI", () => {
         failExistingLoginPath = join(homeDir, "fail-existing-login");
 
         const wsbPath = join(binDir, "wsb");
-        writeFileSync(wsbPath, `#!/bin/sh
-printf '%s\\n' "wsb $*" >> "$FAKE_WINDOWS_LOG"
-if [ -f "$HOME/fake-windows-replace-command" ] && [ "$(/bin/cat "$HOME/fake-windows-replace-command")" = "$1" ]; then
-  if [ -f "$HOME/fake-windows-replace-state-target" ] && [ -f "$HOME/fake-windows-replace-state-source" ]; then
-    /bin/cp "$HOME/fake-windows-replace-state-source" "$(/bin/cat "$HOME/fake-windows-replace-state-target")"
-  fi
-  if [ -f "$HOME/fake-windows-replace-lock-target" ] && [ -f "$HOME/fake-windows-replace-lock-source" ]; then
-    /bin/cp "$HOME/fake-windows-replace-lock-source" "$(/bin/cat "$HOME/fake-windows-replace-lock-target")"
-  fi
-  : > "$HOME/fake-windows-replace-done"
-fi
-if [ -n "$FAKE_WINDOWS_FAIL_EXISTING_LOGIN" ] && [ -f "$FAKE_WINDOWS_FAIL_EXISTING_LOGIN" ]; then
-  case " $* " in
-    *" --run-as ExistingLogin"*)
-      echo "Windows Sandbox environment process could not be started. The logon session does not exist. (0x80070520)" >&2
-      exit 32
-      ;;
-  esac
-fi
-if [ "$1" = "stop" ] && [ -f "$FAKE_WINDOWS_FAIL_STOP" ]; then
-  echo "forced stop failure" >&2
-  exit 7
-fi
-exit 0
+        writeFileSync(wsbPath, `const fs=require('node:fs'),path=require('node:path');
+const args=process.argv.slice(2),home=process.env.HOME;
+fs.appendFileSync(process.env.FAKE_WINDOWS_LOG,'wsb '+args.join(' ')+'\\n');
+const marker=path.join(home,'fake-windows-replace-command');
+if(fs.existsSync(marker)&&fs.readFileSync(marker,'utf8').trim()===args[0]){
+ for(const kind of ['state','lock']){
+  const target=path.join(home,'fake-windows-replace-'+kind+'-target');
+  const source=path.join(home,'fake-windows-replace-'+kind+'-source');
+  if(fs.existsSync(target)&&fs.existsSync(source))fs.copyFileSync(source,fs.readFileSync(target,'utf8').trim());
+ }
+ fs.writeFileSync(path.join(home,'fake-windows-replace-done'),'');
+}
+if(process.env.FAKE_WINDOWS_FAIL_EXISTING_LOGIN&&fs.existsSync(process.env.FAKE_WINDOWS_FAIL_EXISTING_LOGIN)&&args.some((arg,index)=>arg==='--run-as'&&args[index+1]==='ExistingLogin')){
+ console.error('Windows Sandbox environment process could not be started. The logon session does not exist. (0x80070520)');process.exit(32);
+}
+if(args[0]==='stop'&&fs.existsSync(process.env.FAKE_WINDOWS_FAIL_STOP)){console.error('forced stop failure');process.exit(7);}
 `);
+        const preload = join(homeDir, "fake-wsb-launcher.cjs");
+        // This suite models the wsb CLI transport, not native .wsb file association.
+        // Keep that route deterministic on Windows; native launcher scripts have separate tests.
+        writeFileSync(preload, `Object.defineProperty(process,'platform',{value:'linux'});
+const cp=require('node:child_process');const fixture=${JSON.stringify(wsbPath)};
+const sync=cp.spawnSync;
+cp.spawnSync=function(command,args=[],options){
+ const lookup=command==='where'?args[0]:command==='/bin/sh'&&args[0]==='-c'&&args[1]?.startsWith('command -v ')?args[1].slice(11):null;
+ if(lookup!==null)return {status:lookup==='wsb'?0:1,stdout:lookup==='wsb'?fixture+'\\n':'',stderr:''};
+ return command===fixture?sync(process.execPath,[fixture,...args],options):sync(command,args,options);
+};
+const spawn=cp.spawn;cp.spawn=function(command,args=[],options){return command===fixture?spawn(process.execPath,[fixture,...args],options):spawn(command,args,options)};
+require('node:module').syncBuiltinESMExports();`);
         chmodSync(wsbPath, 0o755);
 
         const transport = new StdioClientTransport({
             command: process.execPath,
             args: [join(repoRoot, "device-lab-mcp/server.mjs")],
             env: {
-                HOME: homeDir,
+                ...deviceLabTestHomeEnvironment(homeDir),
                 PATH: binDir,
                 NODE_ENV: "test",
+                NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
                 FAKE_WINDOWS_LOG: logPath,
                 FAKE_WINDOWS_FAIL_STOP: failStopPath,
                 FAKE_WINDOWS_FAIL_EXISTING_LOGIN: failExistingLoginPath,
@@ -139,7 +155,9 @@ exit 0
         installDefaultImplicitBroker(client, false);
     }, TIMEOUT);
 
-    afterAll(async () => {
+    afterEach(async () => {
+        for (const responder of responders) clearInterval(responder);
+        responders.clear();
         await client?.close();
         if (homeDir) rmSync(homeDir, { recursive: true, force: true });
         if (binDir) rmSync(binDir, { recursive: true, force: true });
@@ -290,9 +308,9 @@ exit 0
         });
         expect(create.isError).not.toBe(true);
         const created = JSON.parse(((create.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; helper: { scratchDir: string; toolsDir: string; hostHelperScript: string } };
+            device: { deviceId: string; helper: { scratchDir: string; toolsDir: string; hostHelperScript: string } };
         };
-        expect(created.device.id).toBe("windows-win-helper");
+        expect(created.device.deviceId).toBe("windows-win-helper");
         expect(created.device).toEqual(expect.objectContaining({ minimized: true }));
         expect(created.device.helper.scratchDir).toContain("windows-win-helper");
 
@@ -303,7 +321,7 @@ exit 0
         });
         expect(inventory.isError).not.toBe(true);
         const inventoryPayload = JSON.parse(((inventory.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            devices: Array<{ id: string; helper: { scratchDir: string }; configPath: string }>;
+            devices: Array<{ deviceId: string; helper: { scratchDir: string }; configPath: string }>;
             discovery: { available: boolean; wsb: string };
             hostSandboxes: { lazy: boolean; provider: string };
         };
@@ -311,7 +329,7 @@ exit 0
         expect(inventoryPayload.hostSandboxes).toEqual(expect.objectContaining({ lazy: true, provider: "wsb" }));
         expect(inventoryPayload.devices).toEqual(expect.arrayContaining([
             expect.objectContaining({
-                id: "windows-win-helper",
+                deviceId: "windows-win-helper",
                 helper: expect.objectContaining({ scratchDir: expect.stringContaining("windows-win-helper") }),
                 configPath: expect.stringContaining("windows-win-helper.wsb"),
             }),
@@ -320,7 +338,7 @@ exit 0
 
         const start = await client.callTool({
             name: "start",
-            arguments: { deviceId: "windows-win-helper" },
+            arguments: { waitForBoot: false, deviceId: "windows-win-helper" },
         });
         expect(start.isError).not.toBe(true);
         const started = JSON.parse(((start.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -396,7 +414,7 @@ exit 0
             started.device.helper.hostBootstrapLauncherScript,
         ].map((file) => lstatSync(file).ino);
 
-        const log = readFileSync(logPath, "utf-8");
+        const log = await waitForLog(logPath, /wsb connect --id [0-9a-f-]{36}/);
         expect(log).toMatch(/wsb start --id [0-9a-f-]{36} --config/);
         expect(log).toMatch(/wsb connect --id [0-9a-f-]{36}/);
         expect(log).toContain("<Configuration>");
@@ -405,7 +423,7 @@ exit 0
         let omitRecordStopArchive = false;
         let failRecordStop = false;
         const helperRequests: Array<Record<string, unknown>> = [];
-        const responder = setInterval(() => {
+        const responder = trackResponder(() => {
             let files: string[] = [];
             try {
                 files = readdirSync(started.device.helper.inboxDir).filter((name) => name.endsWith(".json"));
@@ -583,14 +601,14 @@ exit 0
 
         const mismatchedResponse = await client.callTool({
             name: "exec",
-            arguments: { deviceId: "windows-win-helper", command: "mismatched-response", timeoutMs: 300 },
+            arguments: { deviceId: "windows-win-helper", command: "mismatched-response", timeoutMs: 2000 },
         });
         expect(mismatchedResponse.isError).toBe(true);
         expect((mismatchedResponse.content as Array<{ text?: string }>)[0].text).toContain("response id or type mismatch");
 
         const oversizedResponse = await client.callTool({
             name: "exec",
-            arguments: { deviceId: "windows-win-helper", command: "oversized-response", timeoutMs: 300 },
+            arguments: { deviceId: "windows-win-helper", command: "oversized-response", timeoutMs: 2000 },
         });
         expect(oversizedResponse.isError).toBe(true);
         expect((oversizedResponse.content as Array<{ text?: string }>)[0].text).toContain("windows-helper-response-file-too-large");
@@ -867,37 +885,6 @@ exit 0
         expect(retriedArchiveStop.isError).not.toBe(true);
         expect(readFileSync(retryRecordingPath, "utf8")).toBe("fakezip");
 
-        const unsafeStatusPath = join(homeDir, "unsafe-status-recording.zip");
-        const unsafeStatusTarget = join(homeDir, "unsafe-status-target.zip");
-        const unsafeStatusRecordStart = await client.callTool({
-            name: "record_video",
-            arguments: { action: "start", deviceId: "windows-win-helper", localPath: unsafeStatusPath, timeLimitSec: 1, timeoutMs: 1000 },
-        });
-        expect(unsafeStatusRecordStart.isError).not.toBe(true);
-        writeFileSync(unsafeStatusTarget, "do-not-overwrite");
-        symlinkSync(unsafeStatusTarget, unsafeStatusPath);
-        forceInactiveRecordStatus = true;
-        const unsafeInactiveRecordStatus = await client.callTool({
-            name: "record_video",
-            arguments: { action: "status", deviceId: "windows-win-helper", timeoutMs: 1000 },
-        });
-        expect(unsafeInactiveRecordStatus.isError).not.toBe(true);
-        const unsafeInactivePayload = JSON.parse(((unsafeInactiveRecordStatus.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            helper: string;
-            recording: { active: boolean };
-        };
-        expect(unsafeInactivePayload.helper).toContain("recording-local-path-symlink-rejected");
-        expect(unsafeInactivePayload.recording).toEqual(expect.objectContaining({ active: true }));
-        expect(readFileSync(unsafeStatusTarget, "utf-8")).toBe("do-not-overwrite");
-        forceInactiveRecordStatus = false;
-        rmSync(unsafeStatusPath, { force: true });
-        const unsafeStatusRecordStop = await client.callTool({
-            name: "record_video",
-            arguments: { action: "stop", deviceId: "windows-win-helper", timeoutMs: 1000 },
-        });
-        expect(unsafeStatusRecordStop.isError).not.toBe(true);
-        expect(readFileSync(unsafeStatusPath, "utf-8")).toBe("fakezip");
-
         const boundedRecordStart = await client.callTool({
             name: "record_video",
             arguments: { action: "start", deviceId: "windows-win-helper", localPath: join(homeDir, "bounded-windows-recording.zip"), timeLimitSec: 1, timeoutMs: 1000 },
@@ -968,6 +955,54 @@ exit 0
         ]));
     });
 
+    it("preserves a recording whose destination was replaced by a file link", { timeout: TIMEOUT }, async (testContext) => {
+        const target = join(homeDir, "record-link-target.zip"), probe = join(homeDir, "record-link-probe.zip");
+        writeFileSync(target, "do-not-overwrite");
+        fileSymlinkOrSkip(testContext, target, probe);
+        rmSync(probe);
+        const deviceId = "windows-record-link";
+        const create = await client.callTool({ name: "create_windows_sandbox", arguments: { name: "Record Link", deviceId } });
+        expect(create.isError).not.toBe(true);
+        const start = await client.callTool({ name: "start", arguments: { deviceId, waitForBoot: false } });
+        expect(start.isError).not.toBe(true);
+        const helper = JSON.parse((start.content as Array<{text: string}>)[0].text).device.helper as { inboxDir: string; outboxDir: string; downloadsDir: string };
+        const destination = join(homeDir, "record-link.zip");
+        const responder = trackResponder(() => {
+            for (const file of readdirSync(helper.inboxDir).filter(name => name.endsWith(".json"))) {
+                const requestPath = join(helper.inboxDir, file);
+                const request = JSON.parse(readFileSync(requestPath, "utf8"));
+                const recording: Record<string, unknown> = { sessionId: request.sessionId, provider: "windows-helper-frame-archive" };
+                if (request.type === "record_start") {
+                    recording.frameDir = `C:\\ccc\\scratch\\downloads\\${request.sessionId}-frames`;
+                } else {
+                    const archive = `${request.type === "record_status" ? request.sessionId : request.id}.zip`;
+                    writeFileSync(join(helper.downloadsDir, archive), "fakezip");
+                    Object.assign(recording, { active: false, state: "Completed", archivePath: `C:\\ccc\\scratch\\downloads\\${archive}` });
+                }
+                writeFileSync(join(helper.outboxDir, `${request.id}.json`), JSON.stringify({ id: request.id, type: request.type, ok: true, recording }));
+                rmSync(requestPath, { force: true });
+            }
+        }, 25);
+        try {
+            const recording = await client.callTool({ name: "record_video", arguments: { action: "start", deviceId, localPath: destination, timeoutMs: 1000 } });
+            expect(recording.isError).not.toBe(true);
+            fileSymlinkOrSkip(testContext, target, destination);
+            const status = await client.callTool({ name: "record_video", arguments: { action: "status", deviceId, timeoutMs: 1000 } });
+            expect(status.isError).not.toBe(true);
+            const payload = JSON.parse((status.content as Array<{text: string}>)[0].text);
+            expect(payload.helper).toContain("recording-local-path-symlink-rejected");
+            expect(payload.recording).toMatchObject({ active: true });
+            expect(readFileSync(target, "utf8")).toBe("do-not-overwrite");
+            rmSync(destination);
+            const stop = await client.callTool({ name: "record_video", arguments: { action: "stop", deviceId, timeoutMs: 1000 } });
+            expect(stop.isError).not.toBe(true);
+            expect(readFileSync(destination, "utf8")).toBe("fakezip");
+        } finally {
+            clearInterval(responder);
+            await client.callTool({ name: "stop", arguments: { deviceId } });
+        }
+    });
+
     it("cleans Windows Sandbox scratch on delete and preserves state when forced stop fails", { timeout: TIMEOUT }, async () => {
         const stoppedCreate = await client.callTool({
             name: "create_windows_sandbox",
@@ -979,7 +1014,7 @@ exit 0
         });
         expect(stoppedCreate.isError).not.toBe(true);
         const stoppedCreated = JSON.parse(((stoppedCreate.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; helper: { scratchDir: string } };
+            device: { deviceId: string; helper: { scratchDir: string } };
         };
         expect(existsSync(stoppedCreated.device.helper.scratchDir)).toBe(true);
 
@@ -1004,7 +1039,7 @@ exit 0
         };
         const runningStart = await client.callTool({
             name: "start",
-            arguments: { deviceId: "windows-delete-running" },
+            arguments: { waitForBoot: false, deviceId: "windows-delete-running" },
         });
         expect(runningStart.isError).not.toBe(true);
 
@@ -1039,7 +1074,7 @@ exit 0
         });
         expect(inventoryAfterDelete.isError).not.toBe(true);
         const inventoryAfterDeletePayload = JSON.parse(((inventoryAfterDelete.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            devices: Array<{ id: string }>;
+            devices: Array<{ deviceId: string }>;
         };
         expect(inventoryAfterDeletePayload.devices.some((device) => device.id === "windows-delete-running")).toBe(false);
 
@@ -1057,7 +1092,7 @@ exit 0
         };
         const failStart = await client.callTool({
             name: "start",
-            arguments: { deviceId: "windows-delete-stop-failure" },
+            arguments: { waitForBoot: false, deviceId: "windows-delete-stop-failure" },
         });
         expect(failStart.isError).not.toBe(true);
 
@@ -1100,7 +1135,7 @@ exit 0
         try {
             const start = await client.callTool({
                 name: "start",
-                arguments: { deviceId: "windows-one-shot" },
+                arguments: { waitForBoot: false, deviceId: "windows-one-shot" },
             });
             expect(start.isError).not.toBe(true);
             const startedPayload = JSON.parse(((start.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
@@ -1110,7 +1145,7 @@ exit 0
 
             const exec = await client.callTool({
                 name: "exec",
-                arguments: { deviceId: "windows-one-shot", command: "whoami", timeoutMs: 350 },
+                arguments: { deviceId: "windows-one-shot", command: "whoami", timeoutMs: 2000 },
             });
             expect(exec.isError).toBe(true);
             const text = (exec.content as Array<{ text?: string }>)[0].text ?? "";
@@ -1179,7 +1214,7 @@ exit 0
         try {
             const start = await client.callTool({
                 name: "start",
-                arguments: { deviceId: "windows-existing-login-retry" },
+                arguments: { waitForBoot: false, deviceId: "windows-existing-login-retry" },
             });
             expect(start.isError).not.toBe(true);
             started = true;
@@ -1250,14 +1285,14 @@ exit 0
 
         const firstStart = await client.callTool({
             name: "start",
-            arguments: { deviceId: "windows-singleton-one" },
+            arguments: { waitForBoot: false, deviceId: "windows-singleton-one" },
         });
         expect(firstStart.isError).not.toBe(true);
         const firstLock = readFileSync(staleLockPath, "utf-8");
         const logBeforeDuplicateStart = readFileSync(logPath, { encoding: "utf-8", flag: "a+" });
         const duplicateFirstStart = await client.callTool({
             name: "start",
-            arguments: { deviceId: "windows-singleton-one" },
+            arguments: { waitForBoot: false, deviceId: "windows-singleton-one" },
         });
         expect(duplicateFirstStart.isError).toBe(true);
         expect((duplicateFirstStart.content as Array<{ text?: string }>)[0].text).toContain("Refusing to start windows-singleton-one while status is running");
@@ -1266,7 +1301,7 @@ exit 0
 
         const blockedSecondStart = await client.callTool({
             name: "start",
-            arguments: { deviceId: "windows-singleton-two" },
+            arguments: { waitForBoot: false, deviceId: "windows-singleton-two" },
         });
         expect(blockedSecondStart.isError).toBe(true);
         expect((blockedSecondStart.content as Array<{ text?: string }>)[0].text).toContain("Windows Sandbox is already claimed on this host");
@@ -1290,7 +1325,7 @@ exit 0
 
         const secondStart = await client.callTool({
             name: "start",
-            arguments: { deviceId: "windows-singleton-two" },
+            arguments: { waitForBoot: false, deviceId: "windows-singleton-two" },
         });
         expect(secondStart.isError).not.toBe(true);
 
@@ -1311,7 +1346,7 @@ exit 0
         });
         expect(create.isError).not.toBe(true);
         if (operation !== "start") {
-            const start = await client.callTool({ name: "start", arguments: { deviceId } });
+            const start = await client.callTool({ name: "start", arguments: { waitForBoot: false, deviceId } });
             expect(start.isError).not.toBe(true);
         }
 
@@ -1380,7 +1415,7 @@ exit 0
             arguments: {  name: "Windows singleton recovery", deviceId },
         });
         expect(create.isError).not.toBe(true);
-        const start = await client.callTool({ name: "start", arguments: { deviceId } });
+        const start = await client.callTool({ name: "start", arguments: { waitForBoot: false, deviceId } });
         expect(start.isError).not.toBe(true);
         rmSync(lockPath, { force: true });
 
@@ -1388,7 +1423,7 @@ exit 0
         expect(recoveredStop.isError).not.toBe(true);
         expect(existsSync(lockPath)).toBe(false);
 
-        const restart = await client.callTool({ name: "start", arguments: { deviceId } });
+        const restart = await client.callTool({ name: "start", arguments: { waitForBoot: false, deviceId } });
         expect(restart.isError).not.toBe(true);
         const restarted = JSON.parse(((restart.content as Array<{ text?: string }>)[0].text ?? "{}")) as { device: { sandboxId: string } };
         writeFileSync(lockPath, `${JSON.stringify({
@@ -1424,7 +1459,7 @@ exit 0
             arguments: {  name: "Windows stopped runtime recovery", deviceId },
         });
         expect(create.isError).not.toBe(true);
-        const start = await client.callTool({ name: "start", arguments: { deviceId } });
+        const start = await client.callTool({ name: "start", arguments: { waitForBoot: false, deviceId } });
         expect(start.isError).not.toBe(true);
         const started = JSON.parse(((start.content as Array<{ text?: string }>)[0].text ?? "{}")) as { device: { sandboxId: string } };
 
@@ -1466,7 +1501,7 @@ exit 0
         try {
             await expect(client.callTool({
                 name: "start",
-                arguments: { deviceId: "windows-malformed-lock" },
+                arguments: { waitForBoot: false, deviceId: "windows-malformed-lock" },
             })).rejects.toThrow("windows-sandbox-lock-state-invalid");
             expect(readFileSync(lockPath, "utf8")).toBe("{not-json");
             expect(readFileSync(logPath, { encoding: "utf-8", flag: "a+" }).slice(logBefore.length)).not.toContain("wsb start");

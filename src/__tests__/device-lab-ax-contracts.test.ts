@@ -13,7 +13,7 @@ const input = (name: string, args: Record<string, unknown>, valid: boolean) => {
 const payload = (result: any) => JSON.parse(result.content[0].text);
 
 describe("AX requests agree with preflight", () => {
-    it("keeps all 58 public tools", () => expect(TOOLS).toHaveLength(58));
+    it("keeps all 59 public tools", () => expect(TOOLS).toHaveLength(59));
     it.each(["delete", "uninstall_app", "clear_app_data", "set_battery"])("%s advertises mandatory true confirmation", name => {
         const args = { deviceId: "phone", ...(name === "set_battery" ? { level: 50 } : {}), ...(["uninstall_app", "clear_app_data"].includes(name) ? { appId: "com.example.app" } : {}) };
         input(name, args, false);
@@ -63,7 +63,7 @@ describe("AX responses retain decision evidence", () => {
             id: "qa", name: "QA", backend: "macos-vm", provider: "tart", status: "running",
             capabilities: ["device_screenshot", "device_snapshot_create", "device_snapshot_restore"],
         }] })));
-        expect(device).toMatchObject({ id: "qa", backend: "macos-vm", provider: "tart" });
+        expect(device).toMatchObject({ deviceId: "qa", backend: "macos-vm", provider: "tart" });
         expect(device.capabilities).toContain("screenshot");
         expect(device.supportedActions.snapshot).toEqual(["create", "restore"]);
         expect(device.supportedActions.snapshot).not.toContain("list");

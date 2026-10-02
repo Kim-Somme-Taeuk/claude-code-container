@@ -236,6 +236,7 @@ export type HyperVConsolePointerInput = {
 export type HyperVConsoleInput = HyperVConsoleIdentity & (
     | (HyperVConsolePointerInput & { readonly action: "click" | "doubleClick"; readonly button: "left" | "right" })
     | (HyperVConsolePointerInput & { readonly action: "cursor" })
+    | (HyperVConsolePointerInput & { readonly action: "drag"; readonly x2: number; readonly y2: number; readonly durationMs: number })
     | (HyperVConsolePointerInput & { readonly action: "scroll"; readonly direction: "up" | "down" | "left" | "right"; readonly amount: number })
     | { readonly action: "key"; readonly keys: readonly string[] }
     | { readonly action: "type"; readonly text: string }

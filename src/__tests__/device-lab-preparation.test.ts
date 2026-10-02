@@ -1,12 +1,22 @@
+import { isolateDeviceLabTestEnvironment } from "./helpers/device-lab-test-environment.js";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLab, handleLinuxVmTool, inspectLab, ownerId, startLab } from "@ccc/device-lab/providers/backends/linux-vm.mjs";
 import { withOwnerDeviceOperation } from "@ccc/device-lab/providers/state/device-store.mjs";
 
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+let restoreEnvironment: (() => void) | undefined;
+beforeEach(() => {
+    const home = mkdtempSync(join(tmpdir(), "ccc-preparation-home-"));
+    roots.push(home);
+    restoreEnvironment = isolateDeviceLabTestEnvironment(home);
+});
+afterEach(() => {
+    restoreEnvironment?.();
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 function fixture(extra: Record<string, unknown> = {}) {
     const root = mkdtempSync(join(tmpdir(), "ccc-preparation-"));

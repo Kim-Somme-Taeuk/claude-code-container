@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
+import { linuxWindowListCommand, windowsWindowListCommand, parseGuestWindowList, linuxFocusWindowCommand, windowsFocusWindowCommand, parseGuestFocusWindow } from "./device-lab/broker/hyper-v/window-list.js";
 import { spawn, spawnSync } from "child_process";
 import { accessSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readlinkSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "fs";
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "http";
@@ -328,7 +329,7 @@ const DESKTOP_DEVICE_CAPABILITIES = [
     "device_list_files",
     "device_inventory", "device_create", "device_delete", "device_start", "device_stop",
     "device_status", "device_exec", "device_screenshot", "device_click",
-    "device_double_click", "device_key", "device_type", "device_scroll",
+    "device_double_click", "device_drag", "device_focus_window", "device_key", "device_type", "device_scroll",
     "device_cursor_position", "device_window_list", "device_accessibility_snapshot",
     "device_record_video_start", "device_record_video_stop", "device_record_video_status",
     "device_upload", "device_download",
@@ -339,10 +340,11 @@ const MACOS_VM_CAPABILITIES = [
     "device_snapshot_create", "device_snapshot_restore", "device_snapshot_delete",
 ];
 const HYPER_V_VM_CAPABILITIES = [
+    "device_window_list",
     "device_list_files",
     "device_inventory", "device_create", "device_delete", "device_start", "device_stop", "device_reboot", "device_status",
     "device_exec", "device_upload", "device_download",
-    "device_screenshot", "device_click", "device_double_click", "device_key", "device_type", "device_scroll", "device_cursor_position",
+    "device_screenshot", "device_click", "device_double_click", "device_drag", "device_focus_window", "device_key", "device_type", "device_scroll", "device_cursor_position",
     "device_snapshot_list", "device_snapshot_create", "device_snapshot_restore", "device_snapshot_delete",
 ];
 const HYPER_V_LINUX_VM_CAPABILITIES = [...HYPER_V_VM_CAPABILITIES];
@@ -396,6 +398,8 @@ const DEVICE_BROKER_DESKTOP_TOOL_METHODS = new Set([
     "device_screenshot",
     "device_click",
     "device_double_click",
+    "device_drag",
+    "device_focus_window",
     "device_key",
     "device_type",
     "device_scroll",
@@ -568,7 +572,7 @@ function hyperVX11InputFailure(result: BrokerRpcResult, tool: string): BrokerRpc
         : { ok: false };
     return { ...result, payload: { ...payload, tool } };
 }
-const HYPER_V_CONSOLE_TOOL_METHODS = new Set(["device_screenshot", "device_click", "device_double_click", "device_key", "device_type", "device_scroll", "device_cursor_position"]);
+const HYPER_V_CONSOLE_TOOL_METHODS = new Set(["device_screenshot", "device_click", "device_double_click", "device_drag", "device_key", "device_type", "device_scroll", "device_cursor_position"]);
 const DEVICE_BROKER_MUTATING_RPC_METHODS = new Set([
     "broker.cleanup.owner",
     "broker.lease.claim",
@@ -815,6 +819,13 @@ export type BrokerPortProcess = {
 };
 export type BrokerPortProcessResolver = (port: number, platform: NodeJS.Platform) => BrokerPortProcess | null;
 
+/** Host-process effect dependency; invoked only after the caller verifies the process generation. */
+export type HostBrokerProcessTerminator = (
+    pid: number,
+    expectedIdentity: DeviceRuntimeProcessIdentity | undefined,
+    expectedStartToken: string | undefined,
+) => { ok: boolean; error?: string };
+
 export interface HostDeviceBrokerOptions extends DeviceBrokerOptions {
     bindHost?: string;
     probeHost?: string;
@@ -824,6 +835,7 @@ export interface HostDeviceBrokerOptions extends DeviceBrokerOptions {
     portProcessResolver?: BrokerPortProcessResolver;
     processIdentityReader?: (pid: number, platform: NodeJS.Platform) => DeviceRuntimeProcessIdentity | null;
     processStartTokenReader?: (pid: number, platform: NodeJS.Platform) => string | null;
+    terminateProcess?: HostBrokerProcessTerminator;
     env?: NodeJS.ProcessEnv;
     enabled?: boolean;
 }
@@ -1808,6 +1820,7 @@ async function stopIncompatibleHostBroker(
     platform: NodeJS.Platform = process.platform,
     portProcessResolver: BrokerPortProcessResolver = discoverBrokerPortProcess,
     expectedCliPath?: string | readonly string[],
+    terminateProcess?: HostBrokerProcessTerminator,
 ) {
     if (compatibility && typeof compatibility === "object"
         && (compatibility as { brokerNewerThanCli?: unknown }).brokerNewerThanCli === true) {
@@ -1912,7 +1925,7 @@ async function stopIncompatibleHostBroker(
             observation: initialIdentity || { status, currentStartToken: initialStartToken },
         };
     }
-    if (process.platform === "win32") {
+    if (terminateProcess || process.platform === "win32") {
         const windowsIdentity = expectedIdentity
             ? inspectDeviceRuntimeProcessIdentity(expectedIdentity, pid, identityOptions)
             : null;
@@ -1929,7 +1942,9 @@ async function stopIncompatibleHostBroker(
                 observation: windowsIdentity || { status, currentStartToken: windowsStartToken },
             };
         }
-        const stopped = terminateWindowsProcessTree(pid, expectedIdentity, false, expectedStartToken || undefined);
+        const stopped = terminateProcess
+            ? terminateProcess(pid, expectedIdentity, expectedStartToken || undefined)
+            : terminateWindowsProcessTree(pid, expectedIdentity, false, expectedStartToken || undefined);
         if (!stopped.ok) {
             return { stopped: false, restartable: false, reason: "runtime-stop-failed", runtime, compatibility, detail: stopped.error };
         }
@@ -2478,7 +2493,7 @@ export async function ensureHostDeviceBroker(options: HostDeviceBrokerOptions = 
         const restartReason = compatibility.compatible
             ? { ...(compatibility as Record<string, unknown>), runtimeBindHostMismatch: true, expectedHost: bindHost, runtimeHost: runtime?.host ?? null }
             : compatibility;
-        const stopped = await stopIncompatibleHostBroker(ownerId, port, restartReason, normalized.platform, portProcessResolver, normalized.trustedCliPaths);
+        const stopped = await stopIncompatibleHostBroker(ownerId, port, restartReason, normalized.platform, portProcessResolver, normalized.trustedCliPaths, options.terminateProcess);
         prelaunchAttempts.push(stopped);
         if (!stopped.restartable) {
             return {
@@ -2504,6 +2519,7 @@ export async function ensureHostDeviceBroker(options: HostDeviceBrokerOptions = 
                 normalized.platform,
                 portProcessResolver,
                 normalized.trustedCliPaths,
+                options.terminateProcess,
             );
             prelaunchAttempts.push(stopped);
             if (!stopped.restartable) {
@@ -2605,11 +2621,13 @@ export async function ensureHostDeviceBroker(options: HostDeviceBrokerOptions = 
                 if (observation.status === "match"
                     || (spawnedProcessStartToken && currentStartToken === spawnedProcessStartToken)) {
                     try {
-                        const result = process.platform === "win32"
-                            ? terminateWindowsProcessTree(pid, spawnedProcessIdentity || undefined, false, spawnedProcessStartToken || undefined)
-                            : currentStartToken === spawnedProcessStartToken
-                                ? (process.kill(pid, "SIGTERM"), { ok: true })
-                                : { ok: false, error: "runtime-process-start-token-mismatch" };
+                        const result = options.terminateProcess
+                            ? options.terminateProcess(pid, spawnedProcessIdentity || undefined, spawnedProcessStartToken || undefined)
+                            : process.platform === "win32"
+                                ? terminateWindowsProcessTree(pid, spawnedProcessIdentity || undefined, false, spawnedProcessStartToken || undefined)
+                                : currentStartToken === spawnedProcessStartToken
+                                    ? (process.kill(pid, "SIGTERM"), { ok: true })
+                                    : { ok: false, error: "runtime-process-start-token-mismatch" };
                         startupCleanup = {
                             attempted: true,
                             ok: result.ok,
@@ -2683,7 +2701,9 @@ export async function ensureHostDeviceBroker(options: HostDeviceBrokerOptions = 
             if (pid && (observation.status === "match"
                 || (spawnedProcessStartToken && currentStartToken === spawnedProcessStartToken))) {
                 try {
-                    if (process.platform === "win32") {
+                    if (options.terminateProcess) {
+                        options.terminateProcess(pid, spawnedProcessIdentity || undefined, spawnedProcessStartToken || undefined);
+                    } else if (process.platform === "win32") {
                         terminateWindowsProcessTree(pid, spawnedProcessIdentity || undefined, false, spawnedProcessStartToken || undefined);
                     } else if (currentStartToken === spawnedProcessStartToken) {
                         process.kill(pid, "SIGTERM");
@@ -3714,6 +3734,16 @@ function validateDeviceToolParams(params: unknown): DeviceToolParamError | Devic
         && !deviceId) {
         return { ok: false, status: 400, error: "missing-device-id" };
     }
+    if (tool === "device_drag" && (["x1", "y1", "x2", "y2"].some(key => !Number.isSafeInteger(record[key]) || Number(record[key]) < 0)
+        || (record.durationMs !== undefined && (!Number.isSafeInteger(record.durationMs) || Number(record.durationMs) < 1 || Number(record.durationMs) > 10000)))) {
+        return { ok: false, status: 400, error: "device-drag-invalid" };
+    }
+    if (tool === "device_focus_window" && (typeof record.handle !== "string" || !(
+        (/^[1-9][0-9]{0,15}$/.test(record.handle) && Number.isSafeInteger(Number(record.handle)))
+        || (record.handle.length <= 2048 && /^macos:[1-9][0-9]{0,9}:[1-9][0-9]{0,15}:[^\r\n]+$/.test(record.handle))
+    ))) {
+        return { ok: false, status: 400, error: "window-handle-invalid" };
+    }
     const remotePath = typeof record.remotePath === "string" && record.remotePath ? record.remotePath : null;
     const localPath = typeof record.localPath === "string" && record.localPath ? record.localPath : null;
     if (tool === "device_record_video_start" && record.timeLimitSec !== undefined
@@ -4195,7 +4225,7 @@ async function invokeDeviceRecordingStop(ownerId: string, parsed: DeviceToolPara
 function brokerDeviceToolSupportedMethods(backend: string | null): Set<string> {
     const recordingTools = ["device_record_video_status", "device_record_video_start", "device_record_video_stop"];
     if (isHyperVBackend(backend)) {
-        return new Set(["device_exec", "device_upload", "device_download", "device_screenshot", "device_click", "device_double_click", "device_key", "device_type", "device_scroll", "device_cursor_position", "device_snapshot_list", "device_snapshot_create", "device_snapshot_restore", "device_snapshot_delete"]);
+        return new Set(["device_exec", "device_upload", "device_download", "device_screenshot", "device_click", "device_double_click", "device_drag", "device_focus_window", "device_key", "device_type", "device_scroll", "device_cursor_position", "device_window_list", "device_snapshot_list", "device_snapshot_create", "device_snapshot_restore", "device_snapshot_delete"]);
     }
     if (backend === "windows-sandbox" || backend === "macos-vm") {
         return new Set([...DEVICE_BROKER_DESKTOP_TOOL_METHODS, ...DEVICE_BROKER_DESKTOP_FILE_TOOL_METHODS, ...recordingTools]);
@@ -4543,6 +4573,29 @@ async function invokeHyperVDeviceTool(ownerId: string, parsed: DeviceToolParamSu
     if (parsed.tool === "device_snapshot_restore") {
         forgetHyperVConsoleFrame(hyperVConsoleFrameKey(ownerId, match.backend || "", deviceId));
     }
+    if (parsed.tool === "device_window_list" || parsed.tool === "device_focus_window") {
+        if (match.backend === "windows-vm" && typeof parsed.params.helperTimeoutMs === "number" && parsed.params.helperTimeoutMs < 30000) {
+            return { status: 400, payload: { ok: false, error: parsed.tool === "device_focus_window" ? "window-focus-timeout-too-short" : "window-list-timeout-too-short", minimumTimeoutMs: 30000, deviceId } };
+        }
+        const result = await invokeHyperVDeviceTool(ownerId, {
+            ...parsed, tool: "device_exec",
+            params: { ...parsed.params, incarnationId,
+                command: parsed.tool === "device_focus_window"
+                    ? (match.backend === "linux-vm" ? linuxFocusWindowCommand(String(parsed.params.handle)) : windowsFocusWindowCommand(String(parsed.params.handle)))
+                    : (match.backend === "linux-vm" ? linuxWindowListCommand() : windowsWindowListCommand()) },
+        }, { ...match, device }, normalized);
+        if (result.status !== 200) return hyperVX11InputFailure(result, parsed.tool);
+        const payload = result.payload as { result?: { stdout?: unknown } };
+        try {
+            const stdout = payload.result?.stdout;
+            if (typeof stdout !== "string") throw new Error("window-list-invalid-result");
+            return { status: 200, payload: { ok: true, result: {
+                deviceId, tool: parsed.tool, ...(parsed.tool === "device_focus_window" ? parseGuestFocusWindow(stdout) : parseGuestWindowList(match.backend || "", stdout)),
+            } } };
+        } catch (error) {
+            return { status: 502, payload: { ok: false, error: error instanceof Error ? error.message : "window-list-invalid-result", deviceId, tool: parsed.tool } };
+        }
+    }
     if (HYPER_V_CONSOLE_TOOL_METHODS.has(parsed.tool)) {
         const identity = {
             selector: { kind: "id" as const, id: vmId },
@@ -4620,11 +4673,16 @@ async function invokeHyperVDeviceTool(ownerId: string, parsed: DeviceToolParamSu
             } else {
                 const frame = currentHyperVConsoleFrame(frameKey, incarnationId);
                 if (!frame) return errorResult(409, "hyper-v-console-screenshot-required");
-                const x = hyperVConsolePixel(parsed.params.x, frame.width);
-                const y = hyperVConsolePixel(parsed.params.y, frame.height);
+                const x = hyperVConsolePixel(parsed.tool === "device_drag" ? parsed.params.x1 : parsed.params.x, frame.width);
+                const y = hyperVConsolePixel(parsed.tool === "device_drag" ? parsed.params.y1 : parsed.params.y, frame.height);
                 if (x === null || y === null) return errorResult(400, "hyper-v-console-pixel-invalid");
                 const pointer = { ...identity, x, y, width: frame.width, height: frame.height, nativeWidth: frame.nativeWidth, nativeHeight: frame.nativeHeight };
-                if (parsed.tool === "device_click" || parsed.tool === "device_double_click") {
+                if (parsed.tool === "device_drag") {
+                    const x2 = hyperVConsolePixel(parsed.params.x2, frame.width);
+                    const y2 = hyperVConsolePixel(parsed.params.y2, frame.height);
+                    if (x2 === null || y2 === null) return errorResult(400, "hyper-v-console-pixel-invalid");
+                    await client.sendVMConsoleInput({ ...pointer, action: "drag", x2, y2, durationMs: Number(parsed.params.durationMs ?? 700) });
+                } else if (parsed.tool === "device_click" || parsed.tool === "device_double_click") {
                     const button = parsed.params.button === undefined ? "left" : parsed.params.button;
                     if (button !== "left" && button !== "right") return errorResult(400, "hyper-v-console-button-invalid");
                     await client.sendVMConsoleInput({ ...pointer, action: parsed.tool === "device_click" ? "click" : "doubleClick", button });
@@ -5285,15 +5343,6 @@ async function invokeBackendDeviceTool(ownerId: string, parsed: DeviceToolParamS
                 supportedTools: [...brokerDeviceToolSupportedMethods(match.backend)],
                 supportedBackends: DEVICE_BROKER_BACKEND_TOOL_RUNNER_BACKENDS,
             },
-        };
-    }
-    // Only the Hyper-V console moves the pointer; every other desktop runner reads the cursor
-    // and would report a requested move as success. Refuse it here, where every MCP route ends.
-    if (parsed.tool === "device_cursor_position" && !isHyperVBackend(match.backend)
-        && (parsed.params.x !== undefined || parsed.params.y !== undefined)) {
-        return {
-            status: 400,
-            payload: { ok: false, error: "device-cursor-move-backend-unsupported", backend: match.backend, tool: parsed.tool, deviceId: parsed.deviceId },
         };
     }
     const leaseFailure = refreshPhysicalDeviceLeaseForOperation(ownerId, match, String(parsed.deviceId));
@@ -11200,7 +11249,7 @@ function processIdentity(pid) {
             commandLine = readFileSync("/proc/" + pid + "/cmdline").toString("utf8").split("\0").filter(Boolean).join(" ");
         } else if (process.platform === "win32") {
             if (typeof payload.windowsPowerShellPath !== "string" || !payload.windowsPowerShellPath) return null;
-            const script = "$P = Get-CimInstance Win32_Process -Filter 'ProcessId = " + pid + "' -ErrorAction SilentlyContinue; if ($P) { [pscustomobject]@{ startToken = $P.CreationDate.ToUniversalTime().ToString('o'); commandLine = [string]$P.CommandLine } | ConvertTo-Json -Compress }";
+            const script = "$P = Get-CimInstance Win32_Process -Filter 'ProcessId = " + pid + "' -ErrorAction SilentlyContinue; $H = Get-Process -Id " + pid + " -ErrorAction SilentlyContinue; if ($P -and $H) { [pscustomobject]@{ startToken = ${windowsStartTokenExpression("$H")}; commandLine = [string]$P.CommandLine } | ConvertTo-Json -Compress }";
             const observed = spawnSync(payload.windowsPowerShellPath, ["-WindowStyle", "Hidden", "-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: 5000, windowsHide: true });
             const parsed = observed.status === 0 && observed.stdout && observed.stdout.trim() ? JSON.parse(observed.stdout) : null;
             startToken = parsed && typeof parsed.startToken === "string" ? "windows:" + parsed.startToken : "";
@@ -11258,6 +11307,7 @@ function terminateTree(pid, expectedIdentity) {
                 ...process.env,
                 CCC_WINDOWS_TERMINATE_PID: String(pid),
                 CCC_WINDOWS_TERMINATE_START_TOKEN: expectedIdentity.startToken,
+                CCC_WINDOWS_TERMINATE_TIMEOUT_MS: "10000",
             },
         });
         const output = boundedText(String(result.stdout || "") + "\n" + String(result.stderr || ""));

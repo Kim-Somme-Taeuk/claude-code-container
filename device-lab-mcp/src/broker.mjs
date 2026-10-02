@@ -2781,6 +2781,7 @@ export async function brokerCommand(options = {}) {
 }
 
 export const BROKER_DEVICE_TOOL_PARAM_KEYS = [
+    "handle",
     "backend",
     "action",
     "serial",

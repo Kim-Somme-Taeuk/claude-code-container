@@ -56,7 +56,7 @@ describe("bounded single-backend argument contract", () => {
         expect(schema.required).not.toContain("backend");
     });
     it.each(entries)("%s derives its internal backend when omitted", async (name, backend) => {
-        const input = { deviceId: "owned-target", implicitBroker: false,
+        const input = { implicitBroker: false,
             ...(name === "import_image" ? { name: "Image", sourcePath: "test.qcow2" } : {}),
         };
         const original = structuredClone(input);

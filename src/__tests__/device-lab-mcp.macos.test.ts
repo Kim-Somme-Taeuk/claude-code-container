@@ -1,4 +1,7 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import childProcess, { ChildProcess } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { fileSymlinkOrSkip } from "./helpers/file-symlink-fixture.js";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { handleMacosTool } from "@ccc/device-lab/providers/backends/macos-vm.mjs";
@@ -156,9 +159,23 @@ describe("macOS VM backend with fake Tart provider", () => {
             provider: "tart",
         });
         expect(created?.isError).not.toBe(true);
-        process.env.FAKE_TART_RUN_EXIT_IMMEDIATELY = "1";
+        // Deliver the provider's exit during startup deterministically. A real Node
+        // fixture may itself take longer than the readiness grace period to boot.
+        const originalSpawn = childProcess.spawn;
+        let observedRun = false;
+        childProcess.spawn = ((command: string, args: string[] = [], options: any) => {
+            if (command !== join(context.binDir, "tart") || args[0] !== "run") {
+                return originalSpawn(command, args, options);
+            }
+            observedRun = true;
+            const child = new ChildProcess();
+            queueMicrotask(() => { child.exitCode = 0; child.emit("exit", 0, null); });
+            return child;
+        }) as typeof childProcess.spawn;
+        syncBuiltinESMExports();
         try {
             const started = await handleMacosTool("device_start", { deviceId });
+            expect(observedRun).toBe(true);
             expect(started?.isError).toBe(true);
             expect((started?.content as Array<{ text?: string }>)[0].text).toContain("exited before it was ready: exit 0");
             const state = JSON.parse(readFileSync(macosStatePath(), "utf-8")) as {
@@ -169,7 +186,8 @@ describe("macOS VM backend with fake Tart provider", () => {
             expect(persisted?.lifecycle).toBeUndefined();
             expect(persisted?.runtime).toBeUndefined();
         } finally {
-            delete process.env.FAKE_TART_RUN_EXIT_IMMEDIATELY;
+            childProcess.spawn = originalSpawn;
+            syncBuiltinESMExports();
         }
         expect((await handleMacosTool("device_delete", { deviceId }))?.isError).not.toBe(true);
         writeFileSync(logPath, "");
@@ -479,37 +497,11 @@ describe("macOS VM backend with fake Tart provider", () => {
         }
     });
 
-    it("plans, starts, stops, and diagnoses helper-required operations without provider calls on create", async () => {
-        const create = await handleMacosTool("device_create", {
-            backend: "macos-vm",
-            name: "Fake Tart",
-            provider: "auto",
-            image: "ghcr.io/example/macos:latest",
-            memoryMb: 4096,
-            cpus: 2,
-            sshHost: "127.0.0.1",
-            sshPort: 2222,
-            sshUser: "ccc",
-        });
-        expect(create?.isError).not.toBe(true);
-        const created = JSON.parse(((create?.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { id: string; providerPlan: { selectedProvider: string; providerInstance: string; startCommand: { args: string[] }; helper: { workspaceDir: string; hostHelperScript: string; remoteScriptPath: string }; implemented: string[]; deferred: string[] } };
-        };
-        expect(created.device.id).toBe("macos-fake-tart");
-        expect(created.device.providerPlan.selectedProvider).toBe("tart");
-        expect(created.device.providerPlan.providerInstance).toContain("macos-fake-tart");
-        expect(created.device.providerPlan.startCommand.args).toEqual(["run", created.device.providerPlan.providerInstance]);
-        expect(created.device.providerPlan.helper.workspaceDir).toContain("macos-fake-tart");
-        expect(created.device.providerPlan.helper.remoteScriptPath).toBe("/tmp/ccc-macos-fake-tart-guest-helper.sh");
-        expect(created.device.providerPlan.implemented).toEqual(expect.arrayContaining(["base-image-clone", "snapshot-clone", "provider-delete"]));
-        expect(created.device.providerPlan.deferred).toEqual([]);
-        expect(existsSync(created.device.providerPlan.helper.hostHelperScript)).toBe(false);
-        expect(readFileSync(logPath, { encoding: "utf-8", flag: "a+" })).not.toContain("tart run");
-
+    it("rejects linked SSH keys at creation and after replacement", async (testContext) => {
         const sshKey = join(homeDir, "id_ed25519");
         const sshKeyLink = join(homeDir, "linked-key");
         writeFileSync(sshKey, "private-key");
-        symlinkSync(sshKey, sshKeyLink);
+        fileSymlinkOrSkip(testContext, sshKey, sshKeyLink);
         const symlinkKeyCreate = await handleMacosTool("device_create", {
             backend: "macos-vm",
             name: "Symlink Key",
@@ -537,7 +529,7 @@ describe("macOS VM backend with fake Tart provider", () => {
         });
         expect(mutableKeyCreate?.isError).not.toBe(true);
         rmSync(mutableSshKey, { force: true });
-        symlinkSync(mutableSshKeyTarget, mutableSshKey);
+        fileSymlinkOrSkip(testContext, mutableSshKeyTarget, mutableSshKey);
         const mutableKeyExec = await handleMacosTool("device_exec", {
             deviceId: "macos-mutable-key",
             command: "whoami",
@@ -549,6 +541,35 @@ describe("macOS VM backend with fake Tart provider", () => {
         expect(mutableKeyStart?.isError).toBe(true);
         expect((mutableKeyStart?.content as Array<{ text?: string }>)[0].text).toContain("ssh-key-path-symlink-rejected");
         expect(readFileSync(logPath, "utf-8").slice(logBeforeMutableKeyStart.length)).not.toContain("tart run");
+
+    });
+
+    it("plans, starts, stops, and diagnoses helper-required operations without provider calls on create", async () => {
+        const create = await handleMacosTool("device_create", {
+            backend: "macos-vm",
+            name: "Fake Tart",
+            provider: "auto",
+            image: "ghcr.io/example/macos:latest",
+            memoryMb: 4096,
+            cpus: 2,
+            sshHost: "127.0.0.1",
+            sshPort: 2222,
+            sshUser: "ccc",
+        });
+        expect(create?.isError).not.toBe(true);
+        const created = JSON.parse(((create?.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
+            device: { id: string; providerPlan: { selectedProvider: string; providerInstance: string; startCommand: { args: string[] }; helper: { workspaceDir: string; hostHelperScript: string; remoteScriptPath: string }; implemented: string[]; deferred: string[] } };
+        };
+        expect(created.device.id).toBe("macos-fake-tart");
+        expect(created.device.providerPlan.selectedProvider).toBe("tart");
+        expect(created.device.providerPlan.providerInstance).toContain("macos-fake-tart");
+        expect(created.device.providerPlan.startCommand.args).toEqual(["run", created.device.providerPlan.providerInstance]);
+        expect(created.device.providerPlan.helper.workspaceDir).toContain("macos-fake-tart");
+        expect(created.device.providerPlan.helper.remoteScriptPath).toBe("/tmp/ccc-macos-fake-tart-guest-helper.sh");
+        expect(created.device.providerPlan.implemented).toEqual(expect.arrayContaining(["base-image-clone", "snapshot-clone", "provider-delete"]));
+        expect(created.device.providerPlan.deferred).toEqual([]);
+        expect(existsSync(created.device.providerPlan.helper.hostHelperScript)).toBe(false);
+        expect(readFileSync(logPath, { encoding: "utf-8", flag: "a+" })).not.toContain("tart run");
 
         const inventory = await handleMacosTool("device_inventory", { backend: "macos-vm" });
         expect(inventory?.isError).not.toBe(true);
@@ -919,7 +940,7 @@ describe("macOS VM backend with fake Tart provider", () => {
         }));
         const hostHelperScript = readFileSync(started.device.helper.hostHelperScript, "utf-8");
         expect(hostHelperScript).toContain("ccc macOS guest helper for macos-fake-tart");
-        expect(hostHelperScript).toContain("window_list)");
+        expect(hostHelperScript).toContain("window_list|focus_window)");
         expect(hostHelperScript).toContain("accessibility_snapshot)");
         expect(hostHelperScript).toContain("macos-system-events");
         const startedStatus = await handleMacosTool("device_status", { deviceId: "macos-fake-tart" });

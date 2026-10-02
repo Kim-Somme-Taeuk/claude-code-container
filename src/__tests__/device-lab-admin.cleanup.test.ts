@@ -16,6 +16,11 @@ import {
 import { readDeviceRuntimeProcessIdentity } from "@ccc/device-lab/device-lab-process-identity.js";
 import { createDeviceLabAdminTestFixture } from "./helpers/device-lab-admin-fixture.js";
 
+// Keep the subprocess namespace spyable while preserving actual process execution.
+vi.mock("child_process", async (importOriginal) => ({
+    ...await importOriginal<typeof import("child_process")>(),
+}));
+
 const sleeper = new Int32Array(new SharedArrayBuffer(4));
 
 function replaceStateFromLockedChild(mutationFile: string, stateFile: string, successor: unknown): void {
@@ -132,7 +137,7 @@ describe("device-lab admin cleanup and stop commands", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", "exit 0");
+        fixture.writeNodeTool(binDir, "adb", "process.exit(0)");
 
         const result = stopOwnerDevice("android-running", cwd);
 
@@ -156,7 +161,7 @@ describe("device-lab admin cleanup and stop commands", () => {
         const commandLog = join(fixture.homeDir, "adb.log");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", `echo invoked >> "${commandLog}"; exit 0`);
+        fixture.writeNodeTool(binDir, "adb", `appendFileSync(${JSON.stringify(commandLog)}, "invoked\\n");`);
 
         const result = stopOwnerDevice("android-running", cwd);
 
@@ -176,7 +181,7 @@ describe("device-lab admin cleanup and stop commands", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", `printf '%s' '${JSON.stringify(successorState)}' > "${androidFile}"; exit 0`);
+        fixture.writeNodeTool(binDir, "adb", `writeFileSync(${JSON.stringify(androidFile)}, ${JSON.stringify(JSON.stringify(successorState))});`);
 
         const result = stopOwnerDevice("android-running", cwd);
 
@@ -198,7 +203,7 @@ describe("device-lab admin cleanup and stop commands", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "tart", `printf '%s' '${JSON.stringify(successorState)}' > "${macosFile}"; exit 0`);
+        fixture.writeNodeTool(binDir, "tart", `writeFileSync(${JSON.stringify(macosFile)}, ${JSON.stringify(JSON.stringify(successorState))});`);
 
         const result = deleteOwnerDevice("macos-stopped", cwd);
 
@@ -229,7 +234,7 @@ describe("device-lab admin cleanup and stop commands", () => {
         const commandLog = join(fixture.homeDir, "adb.log");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", `echo "$*" >> "${commandLog}"; exit 0`);
+        fixture.writeNodeTool(binDir, "adb", `appendFileSync(${JSON.stringify(commandLog)}, '' + args.join(' ') + '\\n');`);
 
         const result = cleanupOwnerDevices(cwd);
         const live = result.results.find((candidate) => candidate.id === "android-running");
@@ -297,7 +302,7 @@ describe("device-lab admin cleanup and stop commands", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", "exit 0");
+        fixture.writeNodeTool(binDir, "adb", "process.exit(0)");
         vi.spyOn(process, "kill").mockImplementation(() => true);
 
         const result = cleanupOwnerDevices(cwd, 25);
@@ -339,10 +344,10 @@ describe("device-lab admin cleanup and stop commands", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", [
-            `printf '%s' '${JSON.stringify(successorState)}' > "${androidDeviceFile}"`,
-            `printf '%s' '${JSON.stringify(successorLease)}' > "${leaseFile}"`,
-            "exit 0",
+        fixture.writeNodeTool(binDir, "adb", [
+            `writeFileSync(${JSON.stringify(androidDeviceFile)}, ${JSON.stringify(JSON.stringify(successorState))});`,
+            `writeFileSync(${JSON.stringify(leaseFile)}, ${JSON.stringify(JSON.stringify(successorLease))});`,
+            "process.exit(0)",
         ].join("; "));
 
         const result = stopOwnerDevice("android-real-recording", cwd);
@@ -369,7 +374,7 @@ describe("device-lab admin cleanup and stop commands", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", "echo stop-failed >&2; exit 9");
+        fixture.writeNodeTool(binDir, "adb", "process.stderr.write('stop-failed'); process.exit(9)");
 
         const result = stopOwnerDevice("android-running", cwd);
 
@@ -396,10 +401,10 @@ describe("device-lab admin cleanup and stop commands", () => {
             sandboxId: "12345678-1234-4234-9234-1234567890ab",
         }));
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", `echo "adb $*" >> "${logPath}"; exit 0`);
-        fixture.writeTool(binDir, "xcrun", `echo "xcrun $*" >> "${logPath}"; exit 0`);
-        fixture.writeTool(binDir, "wsb", `echo "wsb $*" >> "${logPath}"; exit 0`);
-        fixture.writeTool(binDir, "tart", `echo "tart $*" >> "${logPath}"; exit 0`);
+        fixture.writeNodeTool(binDir, "adb", `appendFileSync(${JSON.stringify(logPath)}, 'adb ' + args.join(' ') + '\\n');`);
+        fixture.writeNodeTool(binDir, "xcrun", `appendFileSync(${JSON.stringify(logPath)}, 'xcrun ' + args.join(' ') + '\\n');`);
+        fixture.writeNodeTool(binDir, "wsb", `appendFileSync(${JSON.stringify(logPath)}, 'wsb ' + args.join(' ') + '\\n');`);
+        fixture.writeNodeTool(binDir, "tart", `appendFileSync(${JSON.stringify(logPath)}, 'tart ' + args.join(' ') + '\\n');`);
 
         const cleanup = cleanupOwnerDevices(cwd);
 
@@ -543,7 +548,7 @@ describe("device-lab admin cleanup and stop commands", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", "exit 0");
+        fixture.writeNodeTool(binDir, "adb", "process.exit(0)");
 
         const result = stopOwnerDevice("android-real-recording", cwd);
 
@@ -822,10 +827,10 @@ describe("device-lab admin cleanup and stop commands", () => {
         const logPath = join(fixture.homeDir, "cleanup-stale.log");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", `echo "adb $*" >> "${logPath}"; exit 0`);
-        fixture.writeTool(binDir, "xcrun", `echo "xcrun $*" >> "${logPath}"; exit 0`);
-        fixture.writeTool(binDir, "wsb", `echo "wsb $*" >> "${logPath}"; exit 0`);
-        fixture.writeTool(binDir, "tart", `echo "tart $*" >> "${logPath}"; exit 0`);
+        fixture.writeNodeTool(binDir, "adb", `appendFileSync(${JSON.stringify(logPath)}, 'adb ' + args.join(' ') + '\\n');`);
+        fixture.writeNodeTool(binDir, "xcrun", `appendFileSync(${JSON.stringify(logPath)}, 'xcrun ' + args.join(' ') + '\\n');`);
+        fixture.writeNodeTool(binDir, "wsb", `appendFileSync(${JSON.stringify(logPath)}, 'wsb ' + args.join(' ') + '\\n');`);
+        fixture.writeNodeTool(binDir, "tart", `appendFileSync(${JSON.stringify(logPath)}, 'tart ' + args.join(' ') + '\\n');`);
         const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
 
         const cleanup = cleanupOwnerDevices(cwd);
@@ -890,7 +895,7 @@ describe("device-lab admin cleanup and stop commands", () => {
         const logPath = join(fixture.homeDir, "cleanup-invalid-pids.log");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", `echo "adb $*" >> "${logPath}"; exit 0`);
+        fixture.writeNodeTool(binDir, "adb", `appendFileSync(${JSON.stringify(logPath)}, 'adb ' + args.join(' ') + '\\n');`);
         const killSpy = vi.spyOn(process, "kill").mockImplementation(() => {
             throw new Error("stale pid");
         });
@@ -947,8 +952,8 @@ describe("device-lab admin cleanup and stop commands", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", "echo adb-failed >&2; exit 9");
-        fixture.writeTool(binDir, "wsb", "echo wsb-failed >&2; exit 8");
+        fixture.writeNodeTool(binDir, "adb", "process.stderr.write('adb-failed'); process.exit(9)");
+        fixture.writeNodeTool(binDir, "wsb", "process.stderr.write('wsb-failed'); process.exit(8)");
 
         const cleanup = cleanupOwnerDevices(cwd);
 
@@ -982,10 +987,10 @@ describe("device-lab admin cleanup and stop commands", () => {
         const logPath = join(fixture.homeDir, "admin-stop-all.log");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", `echo "adb $*" >> "${logPath}"; exit 0`);
-        fixture.writeTool(binDir, "xcrun", `echo "xcrun $*" >> "${logPath}"; exit 0`);
-        fixture.writeTool(binDir, "wsb", `echo "wsb $*" >> "${logPath}"; exit 0`);
-        fixture.writeTool(binDir, "tart", `echo "tart $*" >> "${logPath}"; exit 0`);
+        fixture.writeNodeTool(binDir, "adb", `appendFileSync(${JSON.stringify(logPath)}, 'adb ' + args.join(' ') + '\\n');`);
+        fixture.writeNodeTool(binDir, "xcrun", `appendFileSync(${JSON.stringify(logPath)}, 'xcrun ' + args.join(' ') + '\\n');`);
+        fixture.writeNodeTool(binDir, "wsb", `appendFileSync(${JSON.stringify(logPath)}, 'wsb ' + args.join(' ') + '\\n');`);
+        fixture.writeNodeTool(binDir, "tart", `appendFileSync(${JSON.stringify(logPath)}, 'tart ' + args.join(' ') + '\\n');`);
 
         const result = stopAllProjectDevices();
 
@@ -1023,8 +1028,8 @@ describe("device-lab admin cleanup and stop commands", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", "echo adb-failed >&2; exit 9");
-        fixture.writeTool(binDir, "wsb", "echo wsb-failed >&2; exit 8");
+        fixture.writeNodeTool(binDir, "adb", "process.stderr.write('adb-failed'); process.exit(9)");
+        fixture.writeNodeTool(binDir, "wsb", "process.stderr.write('wsb-failed'); process.exit(8)");
 
         const result = stopAllProjectDevices();
 
@@ -1044,10 +1049,10 @@ describe("device-lab admin cleanup and stop commands", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", "exit 0");
-        fixture.writeTool(binDir, "xcrun", "exit 0");
-        fixture.writeTool(binDir, "wsb", "exit 0");
-        fixture.writeTool(binDir, "tart", "exit 0");
+        fixture.writeNodeTool(binDir, "adb", "process.exit(0)");
+        fixture.writeNodeTool(binDir, "xcrun", "process.exit(0)");
+        fixture.writeNodeTool(binDir, "wsb", "process.exit(0)");
+        fixture.writeNodeTool(binDir, "tart", "process.exit(0)");
         const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
         expect(devicesCli(["stop", "--all-projects"], cwd)).toBe(0);
@@ -1062,10 +1067,10 @@ describe("device-lab admin cleanup and stop commands", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", "exit 0");
-        fixture.writeTool(binDir, "xcrun", "exit 0");
-        fixture.writeTool(binDir, "wsb", "exit 0");
-        fixture.writeTool(binDir, "tart", "exit 0");
+        fixture.writeNodeTool(binDir, "adb", "process.exit(0)");
+        fixture.writeNodeTool(binDir, "xcrun", "process.exit(0)");
+        fixture.writeNodeTool(binDir, "wsb", "process.exit(0)");
+        fixture.writeNodeTool(binDir, "tart", "process.exit(0)");
         const invokeOwnerRpc = vi.fn();
         vi.spyOn(console, "log").mockImplementation(() => undefined);
 
@@ -1081,7 +1086,7 @@ describe("device-lab admin cleanup and stop commands", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "adb", `"${process.execPath}" -e 'setTimeout(() => {}, 1000)'`);
+        fixture.writeNodeTool(binDir, "adb", "setTimeout(() => {}, 1000)");
 
         const cleanup = cleanupOwnerDevices(cwd, 50);
 
@@ -1130,7 +1135,7 @@ describe("device-lab admin cleanup and stop commands", () => {
         const logPath = join(fixture.homeDir, "admin-delete-macos-managed.log");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "tart", `echo "tart $*" >> "${logPath}"; exit 0`);
+        fixture.writeNodeTool(binDir, "tart", `appendFileSync(${JSON.stringify(logPath)}, 'tart ' + args.join(' ') + '\\n');`);
 
         const result = deleteOwnerDevice("macos-stopped", cwd);
 
@@ -1153,7 +1158,7 @@ describe("device-lab admin cleanup and stop commands", () => {
         const binDir = join(fixture.homeDir, "bin");
         mkdirSync(binDir, { recursive: true });
         process.env.PATH = binDir;
-        fixture.writeTool(binDir, "tart", `if [ "$2" = "ccc-mac-stopped" ]; then echo tart-delete-failed >&2; exit 7; fi; exit 0`);
+        fixture.writeNodeTool(binDir, "tart", "if (args[1] === 'ccc-mac-stopped') { process.stderr.write('tart-delete-failed'); process.exit(7); }");
 
         const result = deleteOwnerDevice("macos-stopped", cwd);
 

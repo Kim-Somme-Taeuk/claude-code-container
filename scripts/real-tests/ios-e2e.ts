@@ -148,7 +148,7 @@ export async function runIosSimulatorE2E(options: any = {}) {
             }));
             created = true;
             const createdDevice = create.device;
-            assert.strictEqual(createdDevice.id, deviceId);
+            assert.strictEqual(createdDevice.deviceId, deviceId);
             const createdCandidates = simctlDevices(cap.discovery.xcrun)
                 .filter((device) => device?.udid && !simulatorUdidsBefore.has(device.udid));
             assert.strictEqual(createdCandidates.length, 1, `simctl expected one newly created simulator, found ${JSON.stringify(createdCandidates)}`);
@@ -161,7 +161,7 @@ export async function runIosSimulatorE2E(options: any = {}) {
                 bootTimeoutMs: typedOptions.bootTimeoutMs || 180000,
             }));
             const startedDevice = start.device;
-            assert.strictEqual(startedDevice.id, deviceId);
+            assert.strictEqual(startedDevice.deviceId, deviceId);
             const bootStatus = run(cap.discovery.xcrun, ["simctl", "bootstatus", createdUdid, "-b"], typedOptions.bootTimeoutMs || 180000);
             assert.strictEqual(bootStatus.status, 0, bootStatus.stderr || bootStatus.stdout || `simctl bootstatus exited ${bootStatus.status}`);
             const bootedSimulator = findSimctlDevice(cap.discovery.xcrun, (device) => device?.udid === createdUdid);
@@ -169,7 +169,7 @@ export async function runIosSimulatorE2E(options: any = {}) {
 
             const status = parseContractToolPayload("status", await callTool("status", { detail: true, deviceId }));
             const statusDevice = lifecycleDevice(status, "status");
-            assert.strictEqual(statusDevice.id, deviceId);
+            assert.strictEqual(statusDevice.deviceId, deviceId);
             assert.strictEqual(statusDevice.status, "running");
 
             const exec = parsePayload(await callTool("exec", { detail: true,
@@ -180,7 +180,7 @@ export async function runIosSimulatorE2E(options: any = {}) {
 
             const session = parseContractToolPayload("status", await callTool("status", { detail: true, deviceId }));
             assert.ok("device" in session && session.device && typeof session.device === "object");
-            assert.strictEqual(lifecycleDevice(session, "status").id, deviceId, JSON.stringify(session));
+            assert.strictEqual(lifecycleDevice(session, "status").deviceId, deviceId, JSON.stringify(session));
 
             const mobileScreenshot = await callTool("screenshot", { detail: true, deviceId });
             assert.strictEqual(mobileScreenshot?.content?.[0]?.type, "image");
@@ -437,7 +437,7 @@ export async function runIosSimulatorE2E(options: any = {}) {
             assert.strictEqual(del.deleted, deviceId);
             assert.strictEqual(findSimctlDevice(cap.discovery.xcrun, (device) => device?.udid === createdUdid), null, `simctl simulator survived delete: ${createdUdid}`);
             const listAfterDelete = parsePayload(await callTool("devices", { detail: true }));
-            assert.strictEqual(listAfterDelete.devices.some((device) => device.id === deviceId), false);
+            assert.strictEqual(listAfterDelete.devices.some((device) => device.deviceId === deviceId), false);
 
             return {
                 status: "PASS",
@@ -501,12 +501,12 @@ export async function runIosRealDeviceE2E(options: any = {}) {
                 udid: cap.udid,
             }));
             attached = true;
-            assert.strictEqual(attach.device.id, deviceId);
+            assert.strictEqual(attach.device.deviceId, deviceId);
             assert.strictEqual(attach.device.udid, cap.udid);
 
             const status = parseContractToolPayload("status", await callTool("status", { detail: true, deviceId }));
             const statusDevice = lifecycleDevice(status, "status");
-            assert.strictEqual(statusDevice.id, deviceId);
+            assert.strictEqual(statusDevice.deviceId, deviceId);
             assert.strictEqual(statusDevice.udid, cap.udid);
             assert.ok(status.hostDevice);
 
@@ -515,7 +515,7 @@ export async function runIosRealDeviceE2E(options: any = {}) {
 
             const mobileSession = parseContractToolPayload("status", await callTool("status", { detail: true, deviceId }));
             assert.ok("device" in mobileSession && mobileSession.device && typeof mobileSession.device === "object");
-            assert.strictEqual(lifecycleDevice(mobileSession, "status").id, deviceId);
+            assert.strictEqual(lifecycleDevice(mobileSession, "status").deviceId, deviceId);
 
             const appium = iosAppiumDiscovery();
             if (appium.available) {
@@ -652,7 +652,7 @@ export async function runIosRealDeviceE2E(options: any = {}) {
             attached = false;
             assert.strictEqual(detach.detached, deviceId);
             const listAfterDetach = parsePayload(await callTool("devices", { detail: true }));
-            assert.strictEqual(listAfterDetach.devices.some((device) => device.id === deviceId), false);
+            assert.strictEqual(listAfterDetach.devices.some((device) => device.deviceId === deviceId), false);
 
             return {
                 status: "PASS",

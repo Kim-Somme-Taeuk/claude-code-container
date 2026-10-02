@@ -1,6 +1,7 @@
 import { waitForAndroidText, waitForAndroidApp } from "./android-wait.mjs";
 import { androidCreationChoices } from "./android-sdk-inventory.mjs";
 import { spawn } from "child_process";
+import { once } from "node:events";
 import { createHash, randomUUID } from "crypto";
 import { closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, unlinkSync, writeSync } from "fs";
 import { homedir } from "os";
@@ -395,7 +396,7 @@ export function scheduleAndroidWindowsHiddenLauncherCleanup(path, child, delayMs
     timer.unref?.();
 }
 
-function spawnAndroidEmulator(discovery, device, emulatorArgs) {
+async function spawnAndroidEmulator(discovery, device, emulatorArgs) {
     if (process.platform === "win32") {
         const launcherPath = materializeAndroidWindowsHiddenLauncher(device, discovery.emulator, emulatorArgs);
         let child;
@@ -411,6 +412,7 @@ function spawnAndroidEmulator(discovery, device, emulatorArgs) {
             throw error;
         }
         scheduleAndroidWindowsHiddenLauncherCleanup(launcherPath, child);
+        await once(child, "spawn");
         child.unref();
         return child;
     }
@@ -421,6 +423,7 @@ function spawnAndroidEmulator(discovery, device, emulatorArgs) {
         env: process.env,
         windowsHide: true,
     });
+    await once(child, "spawn");
     child.unref();
     return child;
 }
@@ -1066,7 +1069,7 @@ async function handleAndroidToolUnlocked(name, args) {
             const emulatorArgs = ["-avd", device.avdName, ...(device.port ? ["-port", String(device.port)] : []), ...androidEmulatorStartArgs(device, args)];
             let child;
             try {
-                child = spawnAndroidEmulator(discovery, device, emulatorArgs);
+                child = await spawnAndroidEmulator(discovery, device, emulatorArgs);
             } catch (error) {
                 transitionAndroidDevice(deviceId, claimed, device);
                 return textResult(false, `Android Emulator failed to start: ${error instanceof Error ? error.message : String(error)}`);

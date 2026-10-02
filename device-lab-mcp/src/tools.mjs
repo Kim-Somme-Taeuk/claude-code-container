@@ -37,6 +37,7 @@ const selected = OPERATIONS.filter(({ name }) => !name.startsWith("display_") &&
     && !["device_create", "device_workspace_sync", "device_artifacts_export"].includes(name)
     && !["mobile_tap", "mobile_double_tap", "mobile_type_text", "mobile_key"].includes(name));
 const operationByName = new Map(selected.map(({ name }) => [publicToolName(name), name]));
+operationByName.set("drag", "device_drag");
 operationByName.set("move", "device_cursor_position");
 for (const name of Object.keys(CREATE_TOOL_BACKENDS)) operationByName.set(name, "device_create");
 export function toolOperation(name, args = {}) {
@@ -80,7 +81,7 @@ export const TOOLS = selected.map((operation) => {
         tool.description = `${tool.name}: ${Object.keys(group).join(", ")}. Select an explicit action for this device.`;
     }
     if (tool.name === "snapshot") {
-        tool.description += " List takes no selectors; create requires snapshotName; restore/delete require exactly one of snapshotName or snapshotId and confirmDestructive:true. force is available only for create/restore.";
+        tool.description += " List supports Hyper-V and container QEMU; macOS VM supports create/restore/delete. List takes no selectors; create requires snapshotName; restore/delete require exactly one of snapshotName or snapshotId and confirmDestructive:true. force is available only for create/restore.";
         for (const variant of schema.oneOf) {
             const action = variant.properties.action.const;
             if (["restore", "delete"].includes(action)) {
@@ -107,12 +108,26 @@ export const TOOLS = selected.map((operation) => {
     if (tool.name === "record_video") tool.description = "Record device video: start accepts remotePath, localPath and timeLimitSec; stop accepts only localPath; status accepts no recording paths or time limit. timeLimitSec is whole seconds 1..1800: Android integer 1..180 (default 180); iOS Simulator ignores it and records until stop; Windows Sandbox and macOS VM use a supplied limit, otherwise record until stop. Supported on Android emulator/device, iOS Simulator, Windows Sandbox and macOS VM; output paths vary by backend.";
     if (tool.name === "clipboard") {
         schema.properties.text = { type: "string", description: "Set clipboard when present, including an empty string. Omit to read." };
-        tool.description = "Read the device clipboard, or write it when text is provided.";
+        tool.description = "Read the mobile clipboard, or write it when text is provided. Physical iOS requires broker Appium; desktop is unsupported.";
     }
     if (tool.name === "ui") tool.description = "Inspect mobile UI hierarchy or desktop accessibility for this device.";
     if (tool.name === "click") {
         schema.properties.count = { type: "integer", enum: [1, 2], description: "Clicks: 1 (default) or 2 for double-click/double-tap." };
         tool.description = "Click or tap at screenshot x,y. count:2 double-clicks/double-taps. Mobile supports only the left button. Hyper-V requires the screenshot incarnationId.";
+    }
+    if (tool.name === "screenshot") {
+        schema.properties.region = { type: "object", additionalProperties: false, properties: {
+            x: { type: "integer", minimum: 0 }, y: { type: "integer", minimum: 0 },
+            width: { type: "integer", minimum: 1 }, height: { type: "integer", minimum: 1 },
+        }, required: ["x", "y", "width", "height"] };
+        tool.description += " Optional region crops without resizing; input coordinates remain relative to the full screenshot. Returns crop origin and full dimensions. Region supports PNG only.";
+    }
+    if (tool.name === "drag") {
+        schema.properties.incarnationId = structuredClone(OPERATIONS.find(t => t.name === "device_click").inputSchema.properties.incarnationId);
+        schema.properties.timeoutMs = { type: "number", minimum: 1, maximum: 300000 };
+        for (const key of ["x1", "y1", "x2", "y2"]) schema.properties[key] = { type: "integer", minimum: 0 };
+        schema.properties.durationMs = { type: "integer", minimum: 1, maximum: 10000 };
+        tool.description = "Drag from x1,y1 to x2,y2 in full screenshot pixels. Desktop uses the left button; mobile uses touch. durationMs defaults to 700. Supports mobile, X11, Sandbox, macOS and Hyper-V desktops. Hyper-V requires screenshot incarnationId.";
     }
     if (tool.name === "type") tool.description = "Type text into the focused device. Hyper-V requires the screenshot incarnationId; Windows VM console typing supports ASCII only.";
     if (tool.name === "key") {
@@ -132,12 +147,12 @@ export const TOOLS = selected.map((operation) => {
     }
     if (tool.name === "run_flow") {
         schema.properties.steps.items.properties.tool.enum = DEVICE_FLOW_TOOL_NAMES;
-        tool.description = renameReferences(operation.description).replace(/backend,?\s*/g, "") + " Recording supports only status in flows.";
+        tool.description = renameReferences(operation.description).replace(/backend,?\s*/g, "") + " Recording supports only status in flows. For efficient observation, finish an action sequence with a screenshot step; images are returned only when requested.";
         schema.properties.deviceId.description = "Device ID inherited by steps that omit it. Each step resolves ownership independently.";
     }
     if (["back", "forward", "recents", "power"].includes(tool.name)) tool.description += " Android only (emulator or physical device).";
     if (tool.name === "set_battery") tool.description = "Set simulated Android emulator battery state; requires confirmDestructive:true and at least one of level (integer percent 0..100), charging, or status (integer 1..5). Physical phones and other backends are unsupported.";
-    if (tool.name === "window_list") tool.description = "List visible windows on Windows Sandbox, macOS VM, or the current X11 display. Hyper-V Windows/Linux VMs and mobile devices are unsupported.";
+    if (tool.name === "window_list") tool.description = "List visible named windows on Windows Sandbox, macOS VM, Hyper-V Windows/Linux VM, or the current X11 display. Requires an active desktop; Windows Hyper-V requires the guest credential user at the console and timeoutMs >= 30000 (default). Mobile and container-QEMU are unsupported.";
     if (tool.name === "wireless") {
         tool.description = "Inspect physical-device wireless debugging (action defaults to status). iOS supports only status, optionally filtered by udid. Android usb-tcpip requires serial; pair requires pairHost, pairPort and pairingCode; connect requires host or a network serial. Supplying host/serial to pair also connects. Android port defaults to 5555; connect:true requires a connection target.";
         schema.allOf = [
@@ -156,16 +171,16 @@ export const TOOLS = selected.map((operation) => {
     if (schema.properties.altitude) schema.properties.altitude.description = "Altitude in meters; backend default when omitted.";
     if (tool.name === "status") tool.description = "Read device state and read-only automation diagnostics. Running container QEMU devices include live readiness; stopped devices do not run guest probes. Appium is optional and is not started by status.";
     if (tool.name === "devices") {
-        tool.description = "Find owned device IDs (default), available candidates for a backend, or backend readiness. Select view:owned, available, or backends.";
+        tool.description = "Find owned device IDs (default), available candidates across backends, or backend readiness. backend optionally filters the results. Select view:owned, available, or backends.";
         schema.properties = {
-            view: { type: "string", enum: Object.keys(DISCOVERY_OPERATIONS), description: "Defaults to owned. Available requires backend." },
+            view: { type: "string", enum: Object.keys(DISCOVERY_OPERATIONS), description: "Defaults to owned. Available discovers all backends when backend is omitted." },
             backend: structuredClone(OPERATIONS.find(({ name }) => name === "device_inventory").inputSchema.properties.backend),
             detail: { type: "boolean" },
         };
         schema.properties.backend.enum.push("x11-current-display");
         schema.required = [];
         schema.additionalProperties = false;
-        schema.allOf = [{ if: { properties: { view: { const: "available" } }, required: ["view"] }, then: { required: ["backend"], properties: { backend: { not: { const: "x11-current-display" } } } } }];
+        schema.allOf = [{ if: { properties: { view: { const: "available" } }, required: ["view"] }, then: { properties: { backend: { not: { const: "x11-current-display" } } } } }];
     }
     if (tool.name === "list_images") tool.description = "List owner-scoped container QEMU disk image records. These are not macOS VM clones or Hyper-V images.";
     if (tool.name === "import_image") tool.description = "Import or register a disk image for container QEMU. sourcePath is a project file; copy selects whether to copy it into managed storage.";
@@ -210,7 +225,7 @@ for (const [name, backend] of Object.entries(CREATE_TOOL_BACKENDS)) {
 }
 const move = structuredClone(TOOLS.find(({ name }) => name === "cursor_position"));
 move.name = "move";
-move.description = "Move the cursor to screenshot x,y on the current X11 display or Hyper-V Windows/Linux VM. Other devices return unsupported. Hyper-V requires the screenshot incarnationId.";
+move.description = "Move the cursor to full screenshot x,y on X11, Windows Sandbox, macOS VM or Hyper-V Windows/Linux VM. Mobile and container QEMU are unsupported. Hyper-V requires the screenshot incarnationId.";
 move.inputSchema.properties.x = { type: "integer", minimum: 0 };
 move.inputSchema.properties.y = { type: "integer", minimum: 0 };
 move.inputSchema.required = ["deviceId", "x", "y"];
@@ -218,6 +233,7 @@ TOOLS.push(move);
 
 // Existing devices carry their provider identity; callers never select it again.
 for (const tool of TOOLS) {
+    tool.inputSchema.additionalProperties = false;
     if (["delete", "uninstall_app", "clear_app_data", "set_battery", "set_network", "reset"].includes(tool.name)) {
         tool.inputSchema.required.push("confirmDestructive");
         tool.inputSchema.properties.confirmDestructive.const = true;
@@ -237,7 +253,7 @@ for (const tool of TOOLS) {
 }
 
 export const SIMPLE_ACTIONS = new Set([
-    "click", "move", "type", "key", "scroll", "long_press", "swipe", "drag",
+    "click", "move", "focus_window", "type", "key", "scroll", "long_press", "swipe", "drag",
     "home", "back", "forward", "recents", "power", "lock", "unlock", "set_orientation",
     "open_url", "set_location", "set_battery", "set_network",
 ]);

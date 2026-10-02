@@ -5,7 +5,20 @@ const publicNames = new Set(TOOLS.map(({ name }) => name));
 
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const evidenceKeys = ["error", "code", "cause", "detail", "reason", "policy", "remedy", "remedies", "recovery", "warning", "warnings", "cleanup", "containment", "scrubContainmentFailed", "diagnosticTruncated", "applied"];
+const failureContextKeys = ["deviceId", "incarnationId", "backend", "tool", "matches", "requestedBackend", "actualBackend", "retryable", "diagnosticCode", "timedOut"];
 const envelopes = ["result", "response", "body", "value", "broker"];
+
+function macosKeyEcho(value, operation) {
+    if (operation !== "device_key" || value.provider !== "ssh-macos-helper" || !object(value.key)) return false;
+    try {
+        const parsed = JSON.parse(value.stdout);
+        return parsed?.ok === true && parsed.provider === "macos-helper"
+            && Object.keys(parsed).every(key => ["ok", "provider", "key"].includes(key))
+            && object(parsed.key) && Object.keys(parsed.key).every(key => ["keyCode", "modifiers"].includes(key))
+            && parsed.key.keyCode === value.key.keyCode && Array.isArray(value.key.modifiers)
+            && parsed.key.modifiers === value.key.modifiers.join(",");
+    } catch { return false; }
+}
 
 function boundKnownFailure(result, boundWarnings = false) {
     if (!result.isError && !boundWarnings) return result;
@@ -42,7 +55,9 @@ function actionEvidence(value, operation, forcedFailure = false) {
             && !(Array.isArray(value[key]) && value[key].length === 0)) evidence[key] = value[key];
     }
     if (typeof value.stderr === "string" && value.stderr.trim()) evidence.warning = value.stderr;
-    if (failed && typeof value.stdout === "string" && value.stdout.trim()) evidence.stdout = value.stdout;
+    // compactToolResult already removes known helper echoes. Preserve remaining
+    // command diagnostics, including warnings emitted on a successful exit.
+    if (typeof value.stdout === "string" && value.stdout.trim() && (failed || !macosKeyEcho(value, operation))) evidence.stdout = value.stdout;
     if (failed && value.status !== undefined) evidence.status = value.status;
     if (operation === "mobile_set_battery" && Array.isArray(value.results)) {
         const diagnostics = value.results.flatMap((entry, index) => {
@@ -59,12 +74,19 @@ function actionEvidence(value, operation, forcedFailure = false) {
         failed ||= nested.failed;
         if (Object.keys(nested.evidence).length) evidence[key] = nested.evidence;
     }
+    if (failed) for (const key of failureContextKeys) {
+        if (value[key] !== undefined) evidence[key] = key === "tool" ? publicToolName(value[key], value.backend) : value[key];
+    }
     return { failed, evidence };
 }
 
-function publicIdentities(value) {
+function publicIdentities(value, deviceRecord = false) {
     if (!object(value)) return value;
     const result = { ...value };
+    if (deviceRecord && typeof result.id === "string") {
+        result.deviceId = result.id;
+        delete result.id;
+    }
     if (Array.isArray(result.capabilities)) {
         const supportedActions = { ...result.supportedActions };
         for (const [name, actions] of Object.entries(GROUP_OPERATIONS)) {
@@ -74,10 +96,10 @@ function publicIdentities(value) {
         if (Object.keys(supportedActions).length) result.supportedActions = supportedActions;
         result.capabilities = [...new Set(result.capabilities.map(name => publicToolName(name, typeof result.backend === "string" ? result.backend : result.name)).filter((name) => publicNames.has(name)))];
         if (result.capabilities.includes("cursor_position")
-            && (result.backend === "x11" || result.name === "x11-current-display" || result.kind === "display" || (["windows-vm", "linux-vm"].includes(result.name || result.backend) && result.provider === "hyper-v"))) result.capabilities.push("move");
+            && (result.backend === "x11" || result.name === "x11-current-display" || result.kind === "display" || ["windows-sandbox", "macos-vm"].includes(result.backend || result.name) || (["windows-vm", "linux-vm"].includes(result.backend || result.name) && result.provider === "hyper-v"))) result.capabilities.push("move");
     }
-    for (const key of ["device", "target", "backend"]) if (object(result[key])) result[key] = publicIdentities(result[key]);
-    for (const key of ["devices", "backends", "localBackends", "targets"]) if (Array.isArray(result[key])) result[key] = result[key].map(publicIdentities);
+    for (const key of ["device", "target", "lab", "backend", "result", "response", "body", "materialized"]) if (object(result[key])) result[key] = publicIdentities(result[key], ["device", "target", "lab"].includes(key));
+    for (const key of ["devices", "backends", "localBackends", "targets", "labs"]) if (Array.isArray(result[key])) result[key] = result[key].map(entry => publicIdentities(entry, ["devices", "targets", "labs"].includes(key)));
     return result;
 }
 
@@ -127,14 +149,15 @@ function publicOperationValue(name, value, compact = false) {
 }
 
 function queryValue(name, value, operation) {
-    if (!object(value) || value.ok === false || value.error) return value;
-    const result = ["exec", "ui"].includes(name) ? value : publicIdentities(value);
+    if (!object(value)) return value;
+    const result = ["exec", "ui"].includes(name) ? value : publicIdentities(value, name === "status" && typeof value.id === "string");
+    if (value.ok === false || value.error) return result;
     delete result.ok;
     if (name === "devices" && operation === "device_list" && Array.isArray(result.devices)) {
         return result.devices.map((device) => {
             if (!object(device)) return device;
             const entry = {};
-            for (const key of ["id", "name", "backend", "provider", "platform", "state", "available", "incarnationId", "capabilities", "supportedActions", "error", "warnings"]) {
+            for (const key of ["deviceId", "name", "backend", "provider", "platform", "state", "available", "incarnationId", "capabilities", "supportedActions", "error", "warnings"]) {
                 if (device[key] !== undefined) entry[key] = device[key];
             }
             entry.state ??= device.runtimeState ?? device.status ?? device.targetStatus?.runtimeState ?? "unknown";
@@ -142,6 +165,13 @@ function queryValue(name, value, operation) {
             const lease = device.leaseState ?? device.targetStatus?.leaseState;
             if (readiness && !["ready", "stopped"].includes(readiness.state)) entry.readiness = readiness;
             if (lease && !["owned", "not-required"].includes(lease.state)) entry.lease = lease;
+            if (device.bootReady === false) entry.bootReady = false;
+            const boot = device.lastBootCheck;
+            if (object(boot) && (boot.ready === false || boot.error || boot.scrubContainmentFailed === true)) {
+                entry.lastBootCheck = Object.fromEntries(["ready", "error", "reason", "diagnosticCode", "scrubContainmentFailed"]
+                    .filter(key => boot[key] !== undefined).map(key => [key, boot[key]]));
+            }
+            if (device.scrubContainmentFailed === true) entry.scrubContainmentFailed = true;
             return entry;
         });
     }
@@ -162,7 +192,7 @@ export function actionResult(name, operation, raw, { detail = false } = {}) {
             if (item.type !== "text") return item;
             try {
                 const value = JSON.parse(item.text);
-                const visible = publicOperationValue(name, ["exec", "ui"].includes(name) ? value : publicIdentities(value));
+                const visible = publicOperationValue(name, ["exec", "ui"].includes(name) ? value : publicIdentities(value, name === "status" && typeof value.id === "string"));
                 return JSON.stringify(value) === JSON.stringify(visible) ? item : { ...item, text: JSON.stringify(visible) };
             } catch { return item; }
         });
