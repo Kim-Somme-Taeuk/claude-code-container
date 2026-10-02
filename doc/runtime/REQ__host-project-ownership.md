@@ -41,7 +41,8 @@ explicit inspection/stopping; it does not automatically kill or recreate it.
 Mise cache volumes are scoped to the UID/GID and mapping contract. Existing
 cache volumes remain intact. Any retained per-container writable state must
 become usable by the replacement identity without changing live state or host
-credential ownership. Diagnostics must inspect the same cache used by startup.
+credential ownership, except for the bounded CCC-managed Codex state migration
+below. Diagnostics must inspect the same cache used by startup.
 Forwarded SSH agent sockets keep their host permissions; startup must never
 broaden a socket's mode to make the agent accessible to other host users.
 
@@ -65,6 +66,31 @@ Existing remote containers continue to use their existing mounts; this change
 does not replace them or change Mutagen synchronization.
 
 ## Existing projects
+
+CCC-managed Codex state (`~/.ccc/codex`, distinct from host `~/.codex`) must
+remain usable after a native host identity transition. Before removing a stopped
+legacy container, verify its actual bind source and obtain the old named ccc
+UID/GID from its immutable image. Translate only those matching IDs independently
+within that exact state directory. Do not guess old IDs from file ownership.
+Preserve content, ordinary modes, symlink targets and unrelated owners.
+
+Serialize all host project startup through a shared lock outside Codex state,
+covering inspection, migration and container creation/start. Refuse migration
+when any running container has an overlapping bind mount, inspection fails,
+the root or its parent is unsafe, or the tree contains hardlinks or nested mount
+boundaries. Preflight the complete tree and use descriptor-relative nofollow
+ownership changes. Unsupported mappings must not receive native host-ID repair.
+A failed migration retains the old container for diagnosis and retry.
+
+If the old container has already been replaced and private Codex state remains
+inaccessible, stop before launching Harness or Codex with a diagnostic naming
+the CCC state directory and requiring verified, offline recovery. Never extend
+this repair to the user's actual `~/.codex`, project files or other credentials.
+
+### Known ceiling
+
+Known ceiling: Unresolvable active bind sources block migration conservatively
+— upgrade when trustworthy runtime-specific path translation is available.
 
 Changing the runtime identity prevents recurrence; it does not automatically
 change ownership of existing host files. Finish active container work before

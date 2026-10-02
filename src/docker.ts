@@ -41,6 +41,7 @@ import { codexConfigFileAclScript } from "./codex-config-acl.js";
 import { SSH_COPY_SCRIPT } from "./ssh-credentials.js";
 import { ensureIdentityImage, getIdentityLabels, getIdentityMiseVolumeName, normalizeImageId, resolveContainerIdentity, type ContainerIdentity } from "./container-identity.js";
 import { withSharedMutationLock } from "./device-lab-shared-state.js";
+import { prepareCodexStateOwnership } from "./codex-state-ownership.js";
 
 const MANAGED_MCP_BUNDLES = ["x11-mcp", "device-lab-mcp", "lab-mcp"] as const;
 const MANAGED_MCP_BUNDLE_MAX_BYTES = 32 * 1024 * 1024;
@@ -591,6 +592,7 @@ export function getCurrentImageId(): string | null {
 
 interface IdentityContainerInspection {
     Image?: string;
+    Mounts?: Array<{ Type?: string; Source?: string; Destination?: string }>;
     State?: { Running?: boolean };
     Config?: { User?: string; Labels?: Record<string, string> };
 }
@@ -1051,9 +1053,15 @@ export function startProjectContainer(
     onRecreate?: () => void,
 ): string {
     const containerName = getContainerName(resolve(projectPath), profile);
-    return withSharedMutationLock(join(DATA_DIR, "container-startup", `${containerName}.lock`), () =>
+    const start = () => withSharedMutationLock(join(DATA_DIR, "container-startup", `${containerName}.lock`), () =>
         startProjectContainerLocked(projectPath, ensureDirs, extraMounts, clipboardPortFile, profile, onRecreate),
     { waitMs: 600_000, reclaimStale: false });
+    // Every host project shares the same Codex state. Hold this across both
+    // ownership preparation and start/create so another project cannot start
+    // using the state between the active-user check and migration.
+    return process.env.container === "docker" ? start() :
+        withSharedMutationLock(join(DATA_DIR, "codex-state.lock"), start,
+            { waitMs: 600_000, reclaimStale: false });
 }
 
 function startProjectContainerLocked(
@@ -1122,6 +1130,7 @@ function startProjectContainerLocked(
                     console.error(`[ccc:debug]   required destination: ${m.containerPath}`);
                 }
             }
+            prepareCodexStateOwnership(previous, imageId, identity);
             prepareLabStateOwnership(containerName, imageId, identity, previous.Image);
             recreateContainer(containerName, "image, user identity or mount contract changed", onRecreate);
         } else if (debug) {

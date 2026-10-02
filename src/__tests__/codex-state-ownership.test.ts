@@ -1,0 +1,145 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { tmpdir } from "os";
+import { join } from "path";
+
+const mocks = vi.hoisted(() => ({ spawn: vi.fn(), lstat: vi.fn(), realpath: vi.fn() }));
+vi.mock("child_process", () => ({ spawnSync: mocks.spawn }));
+vi.mock("fs", () => ({ lstatSync: mocks.lstat, realpathSync: mocks.realpath }));
+vi.mock("../utils.js", () => ({ CODEX_DIR: "/home/test/.ccc/codex" }));
+vi.mock("../container-runtime.js", () => ({ runtimeCli: () => "docker", getRuntimeInfo: () => ({ rootless: false, flavor: "docker-native" }) }));
+const { prepareCodexStateOwnership, assertCodexStateAccessible, codexStateMigrationScript, codexStateAccessScript } = await import("../codex-state-ownership.js");
+const { mkdtempSync, mkdirSync, writeFileSync, chmodSync, symlinkSync, linkSync, lstatSync: realLstat, readFileSync, rmSync } = await vi.importActual<typeof import("fs")>("fs");
+const { spawnSync: realSpawn } = await vi.importActual<typeof import("child_process")>("child_process");
+
+const root = "/home/test/.ccc/codex";
+const previousImage = `sha256:${"a".repeat(64)}`;
+const currentImage = `sha256:${"b".repeat(64)}`;
+const previous = { Image: previousImage, Mounts: [{ Type: "bind", Source: root, Destination: "/home/ccc/.codex" }] };
+const identity = { uid: 1000, gid: 1000, mapping: "host" as const, contractVersion: "1" };
+const success = (stdout = "") => ({ status: 0, stdout, stderr: "" });
+const fixtures: string[] = [];
+
+beforeEach(() => {
+    vi.spyOn(process, "geteuid").mockReturnValue(1000);
+    vi.spyOn(process, "getegid").mockReturnValue(1000);
+    vi.stubEnv("container", "");
+    mocks.spawn.mockReset().mockImplementation((_cli: string, args: string[]) => {
+        if (args[0] === "run" && args.includes(previousImage)) return success("1001:1001");
+        return success();
+    });
+    mocks.lstat.mockReset().mockReturnValue({ uid: 1000, gid: 1000, mode: 0o40775, isDirectory: () => true, isSymbolicLink: () => false });
+    mocks.realpath.mockReset().mockImplementation((path: string) => path);
+});
+afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    for (const path of fixtures.splice(0)) rmSync(path, { recursive: true, force: true });
+});
+
+describe.skipIf(process.platform !== "linux")("proven retained Codex state migration", () => {
+    it("uses immutable old image without mounts and repairs only the managed store", () => {
+        prepareCodexStateOwnership(previous, currentImage, identity);
+        const calls = mocks.spawn.mock.calls.map(call => call[1] as string[]);
+        expect(calls).toHaveLength(3);
+        expect(calls[0]).toContain(previousImage);
+        expect(calls[0]).not.toContain("--mount");
+        expect(calls[1]).toEqual(["ps", "-q"]);
+        expect(calls[2]).toContain(`type=bind,src=${root},dst=/state`);
+        expect(calls[2].filter(arg => arg.startsWith("type=bind"))).toHaveLength(1);
+        expect(calls[2]).toContain(currentImage);
+        expect(calls[2].slice(-5)).toEqual(["/state", "1001", "1001", "1000", "1000"]);
+        expect(calls[2].slice(2, 6)).toEqual(["--network", "none", "--user", "root"]);
+    });
+    it("does not migrate absent stores, non-host mappings, or already-matched IDs", () => {
+        prepareCodexStateOwnership({ Image: previousImage, Mounts: [] }, currentImage, identity);
+        prepareCodexStateOwnership(previous, currentImage, { ...identity, mapping: "desktop" });
+        expect(mocks.spawn).not.toHaveBeenCalled();
+        mocks.spawn.mockReturnValue(success("1000:1000"));
+        prepareCodexStateOwnership(previous, currentImage, identity);
+        expect(mocks.spawn).toHaveBeenCalledTimes(1);
+        expect(mocks.lstat).not.toHaveBeenCalled();
+    });
+    it.each([undefined, "ccc:latest"])("refuses unavailable immutable provenance %s", Image => {
+        expect(() => prepareCodexStateOwnership({ ...previous, Image }, currentImage, identity)).toThrow(/immutable/);
+        expect(mocks.spawn).not.toHaveBeenCalled();
+    });
+    it.each(["0:1001", "1001:0", "ccc:ccc", "1001:4294967295"])("rejects invalid old account %s", value => {
+        mocks.spawn.mockReturnValue(success(value));
+        expect(() => prepareCodexStateOwnership(previous, currentImage, identity)).toThrow(/previous ccc/);
+        expect(mocks.spawn).toHaveBeenCalledTimes(1);
+    });
+    it("refuses a different previous store and symlinked ancestor", () => {
+        expect(() => prepareCodexStateOwnership({ ...previous, Mounts: [{ ...previous.Mounts[0], Source: "/home/test/.codex" }] }, currentImage, identity)).toThrow(/exact CCC/);
+        mocks.lstat.mockImplementation((path: string) => ({ uid: 1000, gid: 1000, mode: 0o40755, isDirectory: () => true, isSymbolicLink: () => path === "/home/test" }));
+        expect(() => prepareCodexStateOwnership(previous, currentImage, identity)).toThrow(/ancestor/);
+        expect(mocks.spawn).toHaveBeenCalledTimes(1);
+    });
+    it.each([root, "/home/test/.ccc", `${root}/tmp`, "/"])("blocks active overlapping source %s", Source => {
+        mocks.spawn.mockImplementation((_cli: string, args: string[]) => args[0] === "run" ? success("1001:1001") :
+            args[0] === "ps" ? success("active") : success(JSON.stringify([{ Id: "active", Mounts: [{ Type: "bind", Source }] }])));
+        expect(() => prepareCodexStateOwnership(previous, currentImage, identity)).toThrow(/in use/);
+        expect(mocks.spawn.mock.calls.filter(call => call[1].includes("--mount"))).toHaveLength(0);
+    });
+    it("fails closed on inspection failure", () => {
+        mocks.spawn.mockImplementation((_cli: string, args: string[]) => args[0] === "run" ? success("1001:1001") :
+            args[0] === "ps" ? success("active") : { status: 1, stderr: "daemon disconnected" });
+        expect(() => prepareCodexStateOwnership(previous, currentImage, identity)).toThrow(/disconnected/);
+        expect(mocks.spawn.mock.calls.filter(call => call[1].includes("--mount"))).toHaveLength(0);
+    });
+    it("reports recovery context when early access fails", () => {
+        mocks.spawn.mockReturnValue({ status: 1, stderr: "Permission denied: app-server-daemon" });
+        expect(() => assertCodexStateAccessible("project" )).toThrow(/Project-folder chown does not repair this separate store/);
+        expect(mocks.spawn.mock.calls[0][1]).toEqual(["exec", "project", "python3", "-c", codexStateAccessScript]);
+    });
+});
+
+describe.skipIf(process.platform !== "linux" || realSpawn("python3", ["--version"]).status !== 0)("real nofollow Python preflight", () => {
+    function fixture() {
+        const path = mkdtempSync(join(tmpdir(), "ccc-codex-state-"));
+        fixtures.push(path);
+        mkdirSync(join(path, "private"), { mode: 0o700 });
+        writeFileSync(join(path, "private", "daemon.lock"), "preserve", { mode: 0o600 });
+        return path;
+    }
+    function execute(path: string) {
+        const stat = realLstat(path);
+        return realSpawn("python3", ["-c", codexStateMigrationScript, path, "65431", "65432", String(stat.uid), String(stat.gid)], { encoding: "utf-8" });
+    }
+    it("traverses private state while preserving external and dangling symlinks", () => {
+        const path = fixture();
+        symlinkSync("/etc/passwd", join(path, "external"));
+        symlinkSync("/does-not-exist", join(path, "dangling"));
+        const before = realLstat(join(path, "private", "daemon.lock"));
+        const result = execute(path);
+        expect(result.stderr).toBe("");
+        expect(result.status).toBe(0);
+        expect(realLstat(join(path, "private", "daemon.lock")).mode).toBe(before.mode);
+        expect(readFileSync(join(path, "private", "daemon.lock"), "utf-8")).toBe("preserve");
+        expect(realLstat(join(path, "external")).isSymbolicLink()).toBe(true);
+    });
+    it("rejects hardlinks in complete preflight", () => {
+        const path = fixture();
+        linkSync(join(path, "private", "daemon.lock"), join(path, "hardlink"));
+        const result = execute(path);
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain("Multiply linked");
+        expect(readFileSync(join(path, "hardlink"), "utf-8")).toBe("preserve");
+    });
+    it("rejects set-ID entries instead of silently clearing their modes", () => {
+        const path = fixture();
+        chmodSync(join(path, "private", "daemon.lock"), 0o4600);
+        const result = execute(path);
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain("Set-ID");
+        expect(realLstat(join(path, "private", "daemon.lock")).mode & 0o7777).toBe(0o4600);
+    });
+    it.skipIf(process.getuid?.() === 0)("access guard detects an unreadable retained lock before launching Codex", () => {
+        const path = fixture();
+        mkdirSync(join(path, "app-server-daemon"), { mode: 0o700 });
+        writeFileSync(join(path, "app-server-daemon", "daemon.lock"), "private", { mode: 0o000 });
+        const script = codexStateAccessScript.replace("root = '/home/ccc/.codex'", `root = ${JSON.stringify(path)}`);
+        const result = realSpawn("python3", ["-c", script], { encoding: "utf-8" });
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain("Unreadable Codex state file");
+    });
+});

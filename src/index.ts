@@ -39,6 +39,7 @@ import {
 import { ensureClipboardServer } from "./clipboard-server.js";
 import { ensureCodexHarness } from "./codex-harness.js";
 import { withCodexConfigLock } from "./codex-config-lock.js";
+import { assertCodexStateAccessible } from "./codex-state-ownership.js";
 import { maybeAttachCodexClipboardImage } from "./codex-clipboard-image.js";
 import {
     parseWorktreeArg,
@@ -634,9 +635,10 @@ export async function exec(
             runMiseInstall();
         }
         if (commandTool?.name === "codex") {
-            ensureCodexHarness(containerName);
             try {
                 withCodexConfigLock(() => prepareCodexConfigForContainer(containerName));
+                assertCodexStateAccessible(containerName);
+                ensureCodexHarness(containerName);
             } catch (error) {
                 // Preparation can fail before Codex runs. Preserve that cause
                 // and release session state.

@@ -31,6 +31,10 @@ vi.mock("fs", async (importOriginal) => {
 });
 
 const mockCleanupOwnerDevices = vi.fn();
+const mockPrepareCodexState = vi.fn();
+vi.mock("../codex-state-ownership.js", () => ({
+    prepareCodexStateOwnership: (...args: unknown[]) => mockPrepareCodexState(...args),
+}));
 const testIdentity = { uid: 1000, gid: 1000, mapping: "host" as const, contractVersion: "1" };
 const baseImageId = `sha256:${"a".repeat(64)}`;
 const derivedImageId = `sha256:${"b".repeat(64)}`;
@@ -213,6 +217,7 @@ describe("docker.ts module exports", () => {
         spawnSyncMock.mockReset();
         spawnSyncMock.mockReturnValue(makeResult(0));
         mockCleanupOwnerDevices.mockReset();
+        mockPrepareCodexState.mockReset();
         mockEnsureIdentityImage.mockReset().mockReturnValue(derivedImageId);
         mockStartupLock.mockClear();
         mockExistsSync.mockReset().mockReturnValue(true);
@@ -1071,11 +1076,11 @@ describe("docker.ts module exports", () => {
         });
 
         it("unwinds startup after an initial pull failure and permits a successful retry", () => {
-            let locked = false;
-            mockStartupLock.mockImplementation((_path, action) => {
-                expect(locked).toBe(false);
-                locked = true;
-                try { return action(); } finally { locked = false; }
+            const locks = new Set<string>();
+            mockStartupLock.mockImplementation((path, action) => {
+                expect(locks.has(path)).toBe(false);
+                locks.add(path);
+                try { return action(); } finally { locks.delete(path); }
             });
             mockProjectRuntime();
             const normal = spawnSyncMock.getMockImplementation()!;
@@ -1088,10 +1093,10 @@ describe("docker.ts module exports", () => {
             const exit = vi.spyOn(process, "exit").mockImplementation(() => { throw new Error("unexpected exit"); });
             expect(() => startProjectContainer(projectPath, ensureDirs)).toThrow(/Failed to pull/);
             expect(exit).not.toHaveBeenCalled();
-            expect(locked).toBe(false);
+            expect(locks.size).toBe(0);
             mockProjectRuntime();
             expect(startProjectContainer(projectPath, ensureDirs)).toBe(getContainerName(projectPath));
-            expect(locked).toBe(false);
+            expect(locks.size).toBe(0);
         });
 
         it("uses the supported profile environment variable in recovery guidance", () => {
@@ -1196,6 +1201,10 @@ describe("docker.ts module exports", () => {
             const onRecreate = vi.fn();
             startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, onRecreate);
             expect(onRecreate).toHaveBeenCalledTimes(1);
+            expect(mockPrepareCodexState).toHaveBeenCalledExactlyOnceWith(
+                expect.objectContaining({ Image: baseImageId }), derivedImageId, testIdentity,
+            );
+            expect(mockPrepareCodexState.mock.invocationCallOrder[0]).toBeLessThan(onRecreate.mock.invocationCallOrder[0]);
             expect(mockEnsureIdentityImage).toHaveBeenCalledWith(baseImageId, testIdentity);
             const args = spawnSyncMock.mock.calls.find((call) => (call[1] as string[])[0] === "run")![1] as string[];
             expect(args.at(-1)).toBe(derivedImageId);
@@ -1204,6 +1213,43 @@ describe("docker.ts module exports", () => {
             expect(args).toContain(`${projectPath}:/project/my-project-c7e2f75b53b9`);
             for (const mount of getAllCredentialMounts()) expect(args.some((arg) => arg.endsWith(`:${mount.containerDir}`))).toBe(true);
             expect(spawnSyncMock.mock.calls.some((call) => (call[1] as string[])[0] === "volume" && (call[1] as string[])[1] === "rm")).toBe(false);
+        });
+
+        it("retains the previous container when shared Codex migration fails and permits retry", () => {
+            mockProjectRuntime({ exists: true, labels: {}, imageId: baseImageId });
+            mockPrepareCodexState.mockImplementationOnce(() => { throw new Error("Codex state may be in use"); });
+            const onRecreate = vi.fn();
+            expect(() => startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, onRecreate))
+                .toThrow("Codex state may be in use");
+            expect(onRecreate).not.toHaveBeenCalled();
+            expect(spawnSyncMock.mock.calls.some((call) => ["stop", "rm", "run", "start"].includes((call[1] as string[])[0]))).toBe(false);
+            expect(startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, onRecreate)).toBe(getContainerName(projectPath));
+            expect(onRecreate).toHaveBeenCalledOnce();
+        });
+
+        it("holds the shared Codex lock through stopped-container migration and creation", () => {
+            const held = new Set<string>();
+            mockStartupLock.mockImplementation((path, action) => {
+                held.add(path);
+                try { return action(); } finally { held.delete(path); }
+            });
+            mockProjectRuntime({ exists: true, labels: {}, imageId: baseImageId });
+            const normal = spawnSyncMock.getMockImplementation()!;
+            let created = false;
+            mockPrepareCodexState.mockImplementation(() => {
+                expect([...held].some((path) => path.endsWith("/codex-state.lock"))).toBe(true);
+            });
+            spawnSyncMock.mockImplementation((command, rawArgs, ...rest) => {
+                const args = rawArgs as string[];
+                if (args[0] === "run" && args.includes("-d")) {
+                    created = true;
+                    expect([...held].some((path) => path.endsWith("/codex-state.lock"))).toBe(true);
+                }
+                return normal(command, rawArgs, ...rest);
+            });
+            startProjectContainer(projectPath, ensureDirs);
+            expect(created).toBe(true);
+            expect(held.size).toBe(0);
         });
 
         it("migrates retained lab state only from verified previous image owners", () => {

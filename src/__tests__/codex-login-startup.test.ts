@@ -13,6 +13,7 @@ const fixture = vi.hoisted(() => ({
     unlink: vi.fn(),
     restore: vi.fn(),
     prepare: vi.fn(),
+    stateAccess: vi.fn(),
     openCodeData: vi.fn(),
     harness: vi.fn(),
     buildMcp: vi.fn(),
@@ -74,6 +75,7 @@ vi.mock("../session.js", () => ({
 }));
 vi.mock("../mcp-forward.js", () => ({ buildMcpConfig: fixture.buildMcp }));
 vi.mock("../codex-harness.js", () => ({ ensureCodexHarness: fixture.harness }));
+vi.mock("../codex-state-ownership.js", () => ({ assertCodexStateAccessible: fixture.stateAccess }));
 vi.mock("../opencode-data-access.js", () => ({ prepareOpenCodeDataDirectory: fixture.openCodeData }));
 vi.mock("../codex-config-lock.js", () => ({ withCodexConfigLock: (operation: () => unknown) => operation() }));
 vi.mock("../localhost-proxy-setup.js", () => ({ setupLocalhostProxy: vi.fn() }));
@@ -145,6 +147,7 @@ describe("ccc codex login startup", () => {
             }
         });
         fixture.prepare.mockImplementation(() => fixture.events.push("container-access"));
+        fixture.stateAccess.mockReset().mockImplementation(() => fixture.events.push("state-access"));
         fixture.openCodeData.mockReset().mockImplementation(() => fixture.events.push("opencode-data"));
         fixture.harness.mockImplementation(() => fixture.events.push("harness"));
         fixture.buildMcp.mockImplementation((_profile, restoreAccess?: () => void) => {
@@ -200,7 +203,8 @@ describe("ccc codex login startup", () => {
         expect(fixture.events.indexOf("host-access")).toBeLessThan(fixture.events.indexOf("mcp"));
         expect(fixture.events.indexOf("mcp")).toBeLessThan(fixture.events.indexOf("container-access"));
         expect(fixture.events.indexOf("mcp")).toBeLessThan(fixture.events.indexOf("harness"));
-        expect(fixture.events.indexOf("harness")).toBeLessThan(fixture.events.indexOf("container-access"));
+        expect(fixture.events.indexOf("container-access")).toBeLessThan(fixture.events.indexOf("state-access"));
+        expect(fixture.events.indexOf("state-access")).toBeLessThan(fixture.events.indexOf("harness"));
         expect(fixture.events.slice(-4)).toEqual(["login", "host-access", "unlink-env", "cleanup"]);
     });
 
@@ -384,6 +388,18 @@ describe("ccc codex login startup", () => {
         expect(fixture.unlink).toHaveBeenCalledWith("/tmp/ccc-login-startup.env");
         expect(fixture.cleanup).toHaveBeenCalledOnce();
         expect(fixture.events.slice(-4)).toEqual(["login", "host-access", "unlink-env", "cleanup"]);
+    });
+
+    it.each([false, true])("rejects inaccessible retained state before Harness and login (running=%s)", async (running) => {
+        fixture.running = running;
+        fixture.missing.clear();
+        const error = new Error("CCC-managed Codex state needs verified offline ownership recovery");
+        fixture.stateAccess.mockImplementation(() => { throw error; });
+        await expect(runLogin()).rejects.toBe(error);
+        expect(fixture.harness).not.toHaveBeenCalled();
+        expect(loginCalls()).toHaveLength(0);
+        expect(fixture.cleanup).toHaveBeenCalledOnce();
+        expect(fixture.unlink).toHaveBeenCalledExactlyOnceWith("/tmp/ccc-login-startup.env");
     });
 
     it.each([false, true])("cleans up and retains preparation failure before login or recovery (running=%s)", async (running) => {
