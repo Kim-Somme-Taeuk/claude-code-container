@@ -14,11 +14,12 @@ status: current
    The MCP (`probeCccHostBrokerProtocol`), host CLI (`probeHostBrokerStatus`) and
    Level 3 (`ensureHostBrokerReady`) use this same contract. Automatic replacement
    still requires verified process identity and never downgrades a newer protocol.
-   A saved host runtime for a different valid port and PID must not prevent
+   A saved CCC host or MCP runtime (`managedBy: "ccc-host"` or `"device-lab-mcp"`)
+   for a different valid port and PID must not prevent
    replacement of the requested port's broker when its exact trusted entry path,
    OS listener PID, and status/OS start token agree. That unrelated record cannot
    authorize termination or the metadata-only fallback. Conflicting records for
-   the same port or PID still block replacement.
+   the same port or PID, and records with an unknown manager, still block replacement.
 2. **Forwarded loopback counts as outside the container.** Inside a container
    (`/.dockerenv`), a `managedBy: "ccc-host"` runtime reached at `127.0.0.1`,
    `localhost` or `::1` is accepted as `loopback-forwarded-container-boundary`. Its trust

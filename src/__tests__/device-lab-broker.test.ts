@@ -195,8 +195,14 @@ describe("device-lab host broker daemon", () => {
 
     it.each([
         ["unrelated saved runtime", {}, true],
+        ["unrelated MCP runtime", { savedManager: "device-lab-mcp" }, true],
+        ["unknown runtime manager", { savedManager: "unknown-manager" }, false],
         ["same port, different process", { savedPort: 17373 }, false],
         ["same process, different port", { savedPid: 5212 }, false],
+        ["MCP same port, different process", { savedManager: "device-lab-mcp", savedPort: 17373 }, false],
+        ["MCP same process, different port", { savedManager: "device-lab-mcp", savedPid: 5212 }, false],
+        ["MCP missing status generation", { savedManager: "device-lab-mcp", statusToken: "" }, false],
+        ["MCP missing command line", { savedManager: "device-lab-mcp", commandLine: "" }, false],
         ["invalid saved port", { savedPort: 0 }, false],
         ["different status generation", { statusToken: "windows:successor" }, false],
         ["missing status generation", { statusToken: "" }, false],
@@ -204,13 +210,13 @@ describe("device-lab host broker daemon", () => {
         ["missing command line", { commandLine: "" }, false],
         ["untrusted entry", { commandLine: "node C:/foreign/broker-entry.js devices broker serve --port 17373" }, false],
     ] as const)("checks port ownership independently of %s", (_label, overrides, accepted) => {
-        const changed = overrides as { savedPort?: number; savedPid?: number; statusToken?: string; statusPid?: number; commandLine?: string };
+        const changed = overrides as { savedManager?: string; savedPort?: number; savedPid?: number; statusToken?: string; statusPid?: number; commandLine?: string };
         const cliPath = "C:/ccc/packages/device-lab/dist/broker-entry.js";
         const listener = fakeBrokerPortProcess(5212, changed.commandLine ?? `node ${cliPath} devices broker serve --port 17373`);
         const verified = hostBrokerRuntimeFromPortProcessForTest(
             "1111111111111111", 17373, {}, "win32", () => listener,
             {
-                name: "ccc-device-broker", managedBy: "ccc-host",
+                name: "ccc-device-broker", managedBy: changed.savedManager ?? "ccc-host",
                 pid: changed.savedPid ?? 50928, port: changed.savedPort ?? 64792,
                 processStartToken: "windows:stale-other-broker",
             },
@@ -2032,8 +2038,8 @@ describe("device-lab host broker daemon", () => {
         }
     });
 
-    it.each(["hidden command line", "unrelated saved runtime"])("repairs an older broker with %s", async (scenario) => {
-        const unrelatedRuntime = scenario === "unrelated saved runtime";
+    it.each(["hidden command line", "unrelated saved runtime", "unrelated MCP runtime"])("repairs an older broker with %s", async (scenario) => {
+        const unrelatedRuntime = scenario !== "hidden command line";
         const ownerId = "edededededededed";
         const stalePid = 22335;
         const staleStartedAt = "2026-07-27T00:00:00.000Z";
@@ -2093,7 +2099,7 @@ describe("device-lab host broker daemon", () => {
         mkdirSync(join(homedir(), ".ccc/devices/broker"), { recursive: true });
         writeFileSync(runtimeFile, JSON.stringify({
             name: "ccc-device-broker",
-            managedBy: "ccc-host",
+            managedBy: scenario === "unrelated MCP runtime" ? "device-lab-mcp" : "ccc-host",
             ownerId,
             pid: stalePid,
             host: "127.0.0.1",

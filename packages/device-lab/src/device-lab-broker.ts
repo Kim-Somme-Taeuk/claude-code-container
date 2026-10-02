@@ -2108,7 +2108,7 @@ function hostBrokerRuntimeFromPortProcess(
     // still requires the trusted command and matching OS/status generation;
     // same-port or same-PID conflicts keep their original fail-closed behavior.
     const persistedOtherPort = persistedRuntime?.name === DEVICE_BROKER_NAME
-        && persistedRuntime.managedBy === "ccc-host"
+        && (persistedRuntime.managedBy === "ccc-host" || persistedRuntime.managedBy === "device-lab-mcp")
         && Number.isInteger(persistedRuntime.port)
         && Number(persistedRuntime.port) > 0 && Number(persistedRuntime.port) <= 65535
         && Number(persistedRuntime.port) !== port
