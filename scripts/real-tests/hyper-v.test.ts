@@ -34,7 +34,7 @@ describe("Level 3 artifact preparation", () => {
         [workspaceBuild, "build"],
         [tsc],
         [tsc, "-p", join("/repo", "tsconfig.real-tests.json")],
-        [esbuild, "device-lab-mcp/server.mjs", "--bundle", "--platform=node", "--format=esm", "--outfile=dist/device-lab-mcp/server.mjs", "--banner:js=// device-lab-mcp-version: 1"],
+        [join("/repo", "device-lab-mcp", "scripts", "build.mjs"), "--outfile", "dist/device-lab-mcp/server.mjs"],
         [workspaceBuild, "assemble"],
     ];
     const windowsStages = [

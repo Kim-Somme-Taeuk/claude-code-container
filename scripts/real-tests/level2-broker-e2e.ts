@@ -30,6 +30,20 @@ export function missingWindowsImageProbe(route: Record<string, unknown>, deviceI
     };
 }
 
+export async function probeMissingMacosImage(callTool: (tool: string, args: Record<string, unknown>) => Promise<any>, deviceId: string) {
+    const args = {
+        detail: true, name: "Level 2 public missing base image", deviceId, image: "missing-source",
+    };
+    assert.strictEqual(toolInputError("create_macos_vm", args), null, "missing-image probe must reach the provider");
+    const create = markExpectedToolError(await callTool("create_macos_vm", args));
+    assert.strictEqual(create?.isError, true, "missing image unexpectedly cloned during create");
+    const diagnostic = String(create.content?.[0]?.text || "");
+    assert.ok(diagnostic.trim().length > 0, "missing image create: missing diagnostic text");
+    assert.doesNotMatch(diagnostic, /Unknown tool:|Unexpected error:/i, "missing image create: unexpected dispatch or internal error");
+    // Creation clones the image before publishing owner state; failure must leave no device to start.
+    assertMissingTargetDiagnostic("status", await callTool("status", { detail: true, deviceId }), { deviceId });
+}
+
 const expectedBackends = [
     "android-emulator",
     "android-device",
@@ -906,19 +920,7 @@ export async function runBrokerE2E(options: any = {}) {
                     assertFailureDiagnostic(tool, parseToolResult(result, { expectedError: true }), expectedPublicDeviceRoutedBy(tool, args));
                 } else assertMissingTargetDiagnostic(tool, result, args);
             }
-            const missingImageDeviceId = "level2-public-missing-base-image";
-            const imageDefinition = parseToolResult(await callTool("create_macos_vm", {
-                detail: true, name: "Level 2 public missing base image", deviceId: missingImageDeviceId, image: "missing-source",
-            }));
-            assert.strictEqual(imageDefinition.device.deviceId, missingImageDeviceId);
-            try {
-                const materialization = markExpectedToolError(await callTool("start", { detail: true, deviceId: missingImageDeviceId, waitForBoot: false }));
-                assert.strictEqual(materialization?.isError, true, "missing image unexpectedly materialized");
-                assert.ok(String(materialization.content?.[0]?.text || "").length > 0, "missing image start: missing diagnostic text");
-            } finally {
-                const removed = parseToolResult(await callTool("delete", { detail: true, deviceId: missingImageDeviceId, force: true, confirmDestructive: true }));
-                assert.strictEqual(removed.deleted, missingImageDeviceId);
-            }
+            await probeMissingMacosImage(callTool, "level2-public-missing-base-image");
             const directMacosImageDiagnostics = scriptedToolCases([
                 ["create_macos_vm", { name: "Level 2 public missing clone", sourceDeviceId: "level2-public-missing-source" }],
             ]);
@@ -946,7 +948,9 @@ export async function runBrokerE2E(options: any = {}) {
                     continue;
                 }
                 if (creationBackend === "linux-vm" && args.provider !== "hyper-v") {
-                    assert.strictEqual(toolInputError(tool, args), "create_linux_vm dryRun requires provider:hyper-v; container QEMU does not support dryRun");
+                    assert.strictEqual(toolInputError(tool, args), args.provider === "container-qemu"
+                        ? "create container-qemu does not support dryRun:true"
+                        : "create_linux_vm dryRun requires provider:hyper-v; container QEMU does not support dryRun");
                     inputRejections++;
                     continue;
                 }

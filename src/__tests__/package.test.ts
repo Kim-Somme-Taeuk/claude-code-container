@@ -22,7 +22,8 @@ const HIDDEN_LEGACY_TRANSPORT_KEYS = new Set([
 ]);
 
 function schemaProperties(inputSchema: unknown): Record<string, unknown> {
-    return ((inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties || {}) as Record<string, unknown>;
+    const schema = inputSchema as { properties?: Record<string, unknown>; oneOf?: unknown[] } | undefined;
+    return Object.assign({}, schema?.properties, ...(schema?.oneOf || []).map(schemaProperties));
 }
 
 describe("npm package contents", () => {
@@ -117,6 +118,7 @@ describe("npm package contents", () => {
         expect(files).toContain("dist/packages/device-lab/dist/broker-entry.js");
         expect(files).toContain("dist/packages/hyper-v/powershell/Invoke-HyperVWindowsOperation.ps1");
         expect(files).toContain("device-lab-mcp/server.mjs");
+        expect(files).toContain("device-lab-mcp/scripts/build.mjs");
         expect(files).toContain("device-lab-mcp/src/server.mjs");
         expect(files).toContain("device-lab-mcp/src/tools.mjs");
         expect(files).toContain("dist/packages/device-lab/providers/backends/android.mjs");
@@ -547,7 +549,7 @@ describe("npm package contents", () => {
                 expect(advertisedTransportKeys).toEqual([]);
                 expect(listed.tools.map((tool) => tool.name)).not.toContain("device_broker_service");
 
-                const payload = parseToolPayload(await callTool("backends", { implicitBroker: false, detail: true })) as {
+                const payload = parseToolPayload(await callTool("devices", { view: "backends", implicitBroker: false, detail: true })) as {
                     source?: string;
                     backends?: Array<{ name?: string }>;
                 };
@@ -560,29 +562,30 @@ describe("npm package contents", () => {
                     "macos-vm",
                 ]));
 
-                const displayStatus = parseToolPayload(await callTool("status", { deviceId: "x11-current-display" })) as {
-                    id?: string;
+                const displayStatus = parseToolPayload(await callTool("status", { deviceId: "x11-current-display", detail: true })) as {
+                    deviceId?: string;
                     kind?: string;
                     backend?: string;
                 };
                 expect(displayStatus).toEqual(expect.objectContaining({
-                    id: "x11-current-display",
+                    deviceId: "x11-current-display",
                     kind: "display",
                     backend: "x11",
                 }));
 
                 const displayFlow = parseToolPayload(await callTool("run_flow", {
+                    detail: true,
                     steps: [{ tool: "status", arguments: { deviceId: "x11-current-display" } }],
                 })) as {
                     ok?: boolean;
-                    results?: Array<{ tool?: string; isError?: boolean; content?: Array<{ value?: { id?: string } }> }>;
+                    results?: Array<{ tool?: string; isError?: boolean; content?: Array<{ value?: { deviceId?: string } }> }>;
                 };
                 expect(displayFlow.ok).toBe(true);
                 expect(displayFlow.results?.[0]).toEqual(expect.objectContaining({
                     tool: "status",
                     isError: false,
                 }));
-                expect(displayFlow.results?.[0]?.content?.[0]?.value).toEqual(expect.objectContaining({ id: "x11-current-display" }));
+                expect(displayFlow.results?.[0]?.content?.[0]?.value).toEqual(expect.objectContaining({ deviceId: "x11-current-display" }));
 
                 for (const name of ["create_android_emulator", "create_ios_simulator", "create_windows_sandbox", "create_macos_vm"]) {
                     await callTool(name, distSmokeSample(name));

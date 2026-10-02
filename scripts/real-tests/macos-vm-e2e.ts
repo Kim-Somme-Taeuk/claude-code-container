@@ -206,7 +206,10 @@ export async function runMacosVmE2E(options: any = {}) {
         assert.strictEqual(createdDevice.provider, "tart");
         assert.ok(createdDevice.providerInstance);
         managedProviderInstances.push(createdDevice.providerInstance);
-        assert.strictEqual(inspectTartInstance(cap.tart, createdDevice.providerInstance).found, false);
+        assert.strictEqual(createdDevice.status, "stopped");
+        const tartAfterCreate = inspectTartInstance(cap.tart, createdDevice.providerInstance);
+        assert.strictEqual(tartAfterCreate.found, true, `Tart clone missing after create: ${createdDevice.providerInstance}`);
+        assert.match(tartAfterCreate.image.state, /stopped/i, JSON.stringify(tartAfterCreate));
 
             const start = await timedStep(timings, "startMs", async () => parseContractToolPayload("start", await callTool("start", { detail: true,
                 deviceId,
@@ -377,7 +380,10 @@ export async function runMacosVmE2E(options: any = {}) {
                 disposableDeviceIds.push(baseDevice.deviceId);
                 managedProviderInstances.push(baseDevice.providerInstance);
                 assert.ok(baseDevice.providerInstance);
-                assert.strictEqual(inspectTartInstance(cap.tart, baseDevice.providerInstance).found, false);
+                assert.strictEqual(baseDevice.status, "stopped");
+                const tartBaseImage = inspectTartInstance(cap.tart, baseDevice.providerInstance);
+                assert.strictEqual(tartBaseImage.found, true, `Tart clone missing after image create: ${baseDevice.providerInstance}`);
+                assert.match(tartBaseImage.image.state, /stopped/i, JSON.stringify(tartBaseImage));
 
                 const cloneViaBase = parsePayload(await callTool("create_macos_vm", { detail: true,
                     name: `Base clone ${suffix}`,
@@ -388,6 +394,10 @@ export async function runMacosVmE2E(options: any = {}) {
                 managedProviderInstances.push(cloneViaBase.device.providerInstance);
                 assert.strictEqual(cloneViaBase.operation, "base-image-clone");
                 assert.ok(cloneViaBase.device.providerInstance);
+                assert.strictEqual(cloneViaBase.device.status, "stopped");
+                const tartClone = inspectTartInstance(cap.tart, cloneViaBase.device.providerInstance);
+                assert.strictEqual(tartClone.found, true, `Tart clone missing after device clone: ${cloneViaBase.device.providerInstance}`);
+                assert.match(tartClone.image.state, /stopped/i, JSON.stringify(tartClone));
 
                 for (const disposableId of [...disposableDeviceIds]) {
                     const removed = parseContractToolPayload("delete", await callTool("delete", { detail: true, deviceId: disposableId, force: true, confirmDestructive: true }));

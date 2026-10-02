@@ -525,7 +525,9 @@ describe("Windows Setup diagnostics elevation request", () => {
         const outfile = (bundling?.args || []).find((arg) => arg.startsWith("--outfile="))?.slice("--outfile=".length);
         expect(outfile, "the builder's outfile and the requester's lookup path must be the same file")
             .toBe(PRIVILEGED_BUNDLE_RELATIVE_PATH.split(sep).join("/"));
-        expect(spawns[3].args).toContain("device-lab-mcp/server.mjs");
+        expect(spawns[3].args).toEqual([
+            join("/repo", "device-lab-mcp", "scripts", "build.mjs"), "--outfile", "dist/device-lab-mcp/server.mjs",
+        ]);
         expect(spawns[4]).toBe(bundling);
         expect(spawns.at(-1)?.args, "embedded runtime assembly follows both bundles on Windows")
             .toEqual([join("/repo", "scripts", "workspace-build.mjs"), "assemble"]);

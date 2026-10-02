@@ -58,8 +58,7 @@ export function buildLevel3Artifacts(repoRoot, options: any = {}) {
     const packageVersion = JSON.parse(readFile(join(repoRoot, "package.json"), "utf-8")).version;
     const builtUtils = join(repoRoot, "dist", "utils.js");
     writeFile(builtUtils, readFile(builtUtils, "utf-8").replace("__CLI_VERSION__", packageVersion));
-    const esbuild = join(repoRoot, "node_modules", "esbuild-wasm", "bin", "esbuild");
-    const bundled = spawn(process.execPath, [esbuild, "device-lab-mcp/server.mjs", "--bundle", "--platform=node", "--format=esm", "--outfile=dist/device-lab-mcp/server.mjs", "--banner:js=// device-lab-mcp-version: 1"], {
+    const bundled = spawn(process.execPath, [join(repoRoot, "device-lab-mcp", "scripts", "build.mjs"), "--outfile", "dist/device-lab-mcp/server.mjs"], {
         cwd: repoRoot, env, encoding: "utf-8", windowsHide: true,
     });
     if (bundled.status !== 0) {
@@ -77,6 +76,7 @@ export function buildLevel3Artifacts(repoRoot, options: any = {}) {
     // runs that can never use it. The elevation request is gated on win32 anyway, so off Windows
     // the bundle has no reader.
     if ((options.platform || process.platform) === "win32") {
+        const esbuild = join(repoRoot, "node_modules", "esbuild-wasm", "bin", "esbuild");
         const privileged = spawn(process.execPath, [
             esbuild,
             "scripts/real-tests/hyper-v-windows-setup-diagnostics-privileged.ts",

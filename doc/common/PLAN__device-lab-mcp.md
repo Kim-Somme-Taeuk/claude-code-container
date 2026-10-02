@@ -34,7 +34,11 @@ lifecycle calls expose provider-compatible fields and Android emulator starts
 honor `waitForBoot` before reporting readiness.
 
 Level 3 rebuilds both the TypeScript host CLI/broker and packaged device MCP
-before real-provider execution. Windows broker recovery allows a longer cold
+before real-provider execution. The workspace, CLI and Level 3 MCP builds share
+one build script, including the Node ESM `createRequire` bridge needed by bundled
+CommonJS image dependencies. A regression test initializes the emitted server
+and lists its tools; a successful bundler exit alone is insufficient.
+Windows broker recovery allows a longer cold
 start window and reports a bounded broker-log tail when health never becomes
 ready, so a stale `dist/index.js` or opaque launch timeout cannot masquerade as
 a provider response-shape failure.

@@ -38,8 +38,10 @@ Source cloning retains owner/lifecycle checks and inherits provider, CPU and
 memory. With sourceDeviceId, image/provider/memoryMb/cpus/headless are rejected;
 custom ssh remains available. force is accepted only with sourceDeviceId:
 force:true stops a running source before cloning, and a later failure may leave
-that source stopped. Image/no-source creation retains definition-first behavior;
-start materializes and boots it. The public clone_macos_vm tool is removed.
+that source stopped. Image creation clones the requested Tart image immediately
+and publishes a stopped device only after provisioning succeeds. A missing image
+fails at create without publishing a device; start boots the existing clone.
+The public clone_macos_vm tool is removed.
 
 `click` accepts optional integer count:1 or count:2, defaulting to one click.
 Two clicks use the existing double-click/double-tap implementation, including

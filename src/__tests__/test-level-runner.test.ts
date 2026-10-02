@@ -1,6 +1,6 @@
 import Ajv from "ajv";
 import { toolInputError } from "../../device-lab-mcp/src/tool-arguments.mjs";
-import { missingWindowsImageProbe } from "../../scripts/real-tests/level2-broker-e2e.ts";
+import { missingWindowsImageProbe, probeMissingMacosImage } from "../../scripts/real-tests/level2-broker-e2e.ts";
 import { spawn, spawnSync } from "child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -759,12 +759,12 @@ describe("test level runner", () => {
         let startCount = 0;
         const callTool = async (tool: string) => {
             if (tool === "status") {
-                return mcpTextResult({ device: { id: "windows-real-sandbox-test", status: "running", sandboxId: ownedId } });
+                return mcpTextResult({ device: { deviceId: "windows-real-sandbox-test", status: "running", sandboxId: ownedId } });
             }
             startCount += 1;
             return startCount === 1
                 ? mcpTextResult("CO_E_APPSINGLEUSE", true)
-                : mcpTextResult({ device: { id: "windows-real-sandbox-test", status: "running", sandboxId: ownedId } });
+                : mcpTextResult({ device: { deviceId: "windows-real-sandbox-test", status: "running", sandboxId: ownedId } });
         };
 
         const started = await startWindowsSandboxE2EDevice(callTool, "windows-real-sandbox-test", {
@@ -1488,6 +1488,7 @@ describe("test level runner", () => {
             "detail", // Public response formatting, never a provider argument.
             "view", // Selects the private discovery operation before dispatch.
             "count", // Selects the private single/double click operation before dispatch.
+            "region", // Crops the returned screenshot in the MCP adapter after provider dispatch.
             "appId", // Translated to provider-specific packageName or bundleId.
             "broker",
             "viaBroker",
@@ -2075,6 +2076,50 @@ describe("test level runner", () => {
         expect(new Ajv({ strict: false }).compile(schema)(publicArgs)).toBe(true);
         expect(toolInputError("create_windows_vm", { ...request, port: 17373 }))
             .toBe("create windows-vm does not support port");
+    });
+
+    it.each(["device-not-found", "device-backend-not-found"])("accepts immediate missing macOS image failure with unpublished device (%s)", async (error) => {
+        const deviceId = "missing-image-device";
+        const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+        const createRecord = { expectedError: false };
+        const statusRecord = { expectedError: false };
+        await probeMissingMacosImage(async (tool, args) => {
+            calls.push({ tool, args });
+            return tool === "create_macos_vm"
+                ? { isError: true, content: [{ type: "text", text: "Tart source image missing-source does not exist" }], __cccToolCallRecord: createRecord }
+                : { isError: true, content: [{ type: "text", text: JSON.stringify({ ok: false, error, deviceId }) }], __cccToolCallRecord: statusRecord };
+        }, deviceId);
+        expect(calls.map(call => call.tool)).toEqual(["create_macos_vm", "status"]);
+        expect(calls[0].args).toMatchObject({ deviceId, image: "missing-source" });
+        expect(calls[1].args).toMatchObject({ deviceId });
+        expect(createRecord.expectedError).toBe(true);
+        expect(statusRecord.expectedError).toBe(true);
+    });
+
+    it("rejects deferred macOS image creation that only publishes a definition", async () => {
+        const calls: string[] = [];
+        await expect(probeMissingMacosImage(async (tool) => {
+            calls.push(tool);
+            return { content: [{ type: "text", text: JSON.stringify({ device: { deviceId: "missing-image-device", status: "stopped" } }) }] };
+        }, "missing-image-device")).rejects.toThrow("missing image unexpectedly cloned during create");
+        expect(calls).toEqual(["create_macos_vm"]);
+    });
+
+    it("rejects a failed macOS image creation that leaves a published device", async () => {
+        const calls: string[] = [];
+        await expect(probeMissingMacosImage(async (tool) => {
+            calls.push(tool);
+            return tool === "create_macos_vm"
+                ? { isError: true, content: [{ type: "text", text: "missing source image" }] }
+                : { content: [{ type: "text", text: JSON.stringify({ device: { deviceId: "missing-image-device", status: "stopped" } }) }] };
+        }, "missing-image-device")).rejects.toThrow("status unexpectedly succeeded for missing device");
+        expect(calls).toEqual(["create_macos_vm", "status"]);
+    });
+
+    it.each(["Unexpected error: provider dispatch threw", "Unknown tool: create_macos_vm"])("rejects unrelated macOS image probe errors (%s)", async (diagnostic) => {
+        await expect(probeMissingMacosImage(async () => ({
+            isError: true, content: [{ type: "text", text: diagnostic }],
+        }), "missing-image-device")).rejects.toThrow("missing image create: unexpected dispatch or internal error");
     });
 
     it("covers broker autolaunch and broker-backed provider discovery in the real MCP E2E", () => {
