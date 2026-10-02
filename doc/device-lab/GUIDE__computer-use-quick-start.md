@@ -243,6 +243,24 @@ network state prefix and gateway. A nested host must be able to reread its
 `172.30.0.x` allocations for later cleanup; cross-subnet records remain invalid.
 Do not delete network state to bypass validation errors.
 
+Older Windows unit tests that isolated `HOME` without `USERPROFILE` could write
+simulated state into the real profile. Current fixtures isolate both. If the
+saved Hyper-V identities are exactly `00000000-0000-0000-0000-000000000001`
+and `ccc-test-nat-1`, or the Sandbox claim belongs to the old `windows-refresh`
+fixture, run this one-time recovery from the Windows repository checkout:
+
+```powershell
+node --import tsx scripts/repair-device-lab-test-state.ts
+```
+
+Recovery takes the normal host mutation locks and backs up original metadata.
+It verifies the live switch, NAT, and gateway before correcting their recorded
+identities, preserves all VM allocations, and clears unproven resource-deletion
+ownership. It does not stop VMs or recreate network resources. Sandbox recovery
+requires the exact fixture claim, an absent owner definition, a dead recorded
+process, and a fresh empty Sandbox inventory. Unknown or conflicting evidence
+is preserved and reported; rerunning after successful recovery is harmless.
+
 Previous Windows E2E VM cleanup accepts `device-not-found` only for the exact
 requested ID and only after a fresh, successful inventory confirms it is absent.
 A remaining or replaced device, unreadable inventory, or other deletion error
