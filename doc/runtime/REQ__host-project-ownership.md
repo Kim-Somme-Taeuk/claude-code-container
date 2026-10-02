@@ -19,8 +19,9 @@ described below.
 Verify the named user, primary group, HOME and final image user before reuse.
 Concurrent builds must serialize and failed builds must not publish valid caches.
 Validation containers use the same applicable runtime mapping and cgroup options
-as project containers. Image-download failure unwinds startup and session locks
-so retrying after recovery does not require manually removing a lock.
+as project containers. If no local image exists, image-download failure unwinds
+startup and session locks so retrying does not require manually removing a lock.
+A failed update download continues with the existing local image when available.
 
 Both image upgrade and mount-contract recreation must refuse to replace a
 running container whose identity contract differs. Explain that the user must
@@ -47,13 +48,21 @@ broaden a socket's mode to make the agent accessible to other host users.
 Lab-volume migration runs only while that exact named volume has no running
 container users. Establish its previous ccc UID/GID from the old container's
 image before removal; translate only those owners, without following symlinks,
-in a helper that mounts no host directories or credentials. An in-use volume,
+in a helper that mounts no host directories or credentials. The dedicated volume
+root itself is assigned to the target UID/GID, regardless of its previous owner.
+An in-use volume,
 unknown previous owner, or mismatched detached-volume owner rejects startup and
 retains the data. Do not guess an old owner from the volume's root directory.
 For recovery, finish the volume's running work, confirm the previous and target
 numeric owners and the exact named volume, then repair only verified old-owned
 entries in that isolated volume before retrying. Do not use a project-wide or
 host-wide ownership command to repair a named volume.
+
+Remote startup selects a separate mise cache by the actual remote image's UID
+and GID before creating a container. This permits both old UID1001 images and
+new UID1000 images without changing ownership of the legacy shared cache.
+Existing remote containers continue to use their existing mounts; this change
+does not replace them or change Mutagen synchronization.
 
 ## Existing projects
 

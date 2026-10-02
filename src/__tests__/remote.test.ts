@@ -969,6 +969,51 @@ describe('remoteExec', () => {
       })
   }
 
+  it.each(['1001-1001', '1000-1000'])('isolates a new remote image cache for %s and preserves existing containers', async (identity) => {
+    setupSuccessfulSpawnSyncs()
+    mockExistsSync.mockReturnValue(true)
+    mockReadFileSync.mockReturnValue(JSON.stringify({ host: 'myhost', user: 'myuser', remotePath: '' }))
+    mockSpawn.mockReturnValue(makeSpawnMock(0) as any)
+    mockPrompt.mockResolvedValue('n')
+    vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('exit:0') })
+    await expect(remoteExec('/home/user/project')).rejects.toThrow('exit:0')
+    const startup = mockSpawnSync.mock.calls.find(([command, args]) => command === 'ssh' &&
+      Array.isArray(args) && args.some((arg) => String(arg).includes('ccc_mise_identity=')))
+    expect(startup).toBeDefined()
+    const script = (startup![1] as string[])[1]
+    const real = await vi.importActual<typeof childProcess>('child_process')
+    // Execute the production shell control flow with only Docker intercepted.
+    const fakeDocker = `docker() {
+      printf '<%s> ' "$@" >&2; printf '\\n' >&2
+      case "$1:$2" in
+        container:inspect) return "$FAKE_EXISTS";;
+        image:inspect) printf 'sha256:immutable-image';;
+        run:--rm) printf '%s' "$FAKE_IDENTITY";;
+        run:-d) printf '<%s> ' "$@"; return 0;;
+        start:*) return 0;;
+        *) return 1;;
+      esac
+    }
+    `
+    for (const existing of [false, true]) {
+      const result = real.spawnSync('/bin/sh', ['-c', fakeDocker + script], {
+        encoding: 'utf8', env: { ...process.env, FAKE_IDENTITY: identity, FAKE_EXISTS: existing ? '0' : '1' },
+      })
+      expect(result.status).toBe(0)
+      expect(result.stderr).not.toContain('<ccc-mise-cache:/home/ccc/.local/share/mise>')
+      expect(result.stderr).not.toContain('<chown>')
+      expect(result.stderr).not.toContain('<stop>')
+      expect(result.stderr).not.toContain('<rm>')
+      if (existing) {
+        expect(result.stderr).toContain('<start>')
+        expect(result.stderr).not.toContain('<run>')
+      } else {
+        expect(result.stdout).toContain(`<ccc-mise-cache-v1-remote-${identity}:/home/ccc/.local/share/mise>`)
+        expect(result.stdout).toContain('<sha256:immutable-image> <sleep> <infinity>')
+      }
+    }
+  })
+
   beforeEach(() => {
     vi.clearAllMocks()
     vi.spyOn(console, 'log').mockImplementation(() => {})

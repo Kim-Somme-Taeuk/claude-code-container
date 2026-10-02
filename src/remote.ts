@@ -4,6 +4,7 @@ import {spawn, spawnSync} from "child_process";
 import {existsSync, mkdirSync, readFileSync, writeFileSync} from "fs";
 import {join, resolve} from "path";
 import {hashPath, getProjectId, getClaudeDir, CONTAINER_ENV_KEY, CONTAINER_ENV_VALUE, prompt, REMOTE_CONFIG_DIR, IMAGE_NAME, CONTAINER_PID_LIMIT, COMMON_IGNORE_DIRS, MISE_VOLUME_NAME, collectForwardedEnv, isValidEnvKey} from "./utils.js";
+import {IDENTITY_CONTRACT_VERSION} from "./container-identity.js";
 import {getContainerName} from "./docker.js";
 
 // === Types ===
@@ -105,15 +106,23 @@ async function startRemoteContainer(config: RemoteConfig, projectPath: string, p
     const containerName = getContainerName(projectPath, profile);
     const claudeDir = getClaudeDir(profile);
 
-    // Build docker run command (no project volume, just credentials and mise cache)
-    const dockerCmd = `docker run -d --name ${containerName} \
+    // Probe the immutable remote image, not the local host's numeric identity.
+    // Existing containers retain their mounts and legacy caches remain intact.
+    const dockerCmd = `if docker container inspect ${containerName} >/dev/null 2>&1; then
+        docker start ${containerName}
+    else
+        ccc_remote_image=$(docker image inspect ${IMAGE_NAME} --format '{{.Id}}') || exit 1
+        ccc_mise_identity=$(docker run --rm --network none --entrypoint /bin/sh "$ccc_remote_image" -c 'printf "%s-%s" "$(id -u)" "$(id -g)"') || exit 1
+        case "$ccc_mise_identity" in ''|*[!0-9-]*) echo 'Invalid remote image identity' >&2; exit 1;; esac
+        docker run -d --name ${containerName} \
         --network host \
         -v ${claudeDir}:/home/ccc/.claude \
-        -v ${MISE_VOLUME_NAME}:/home/ccc/.local/share/mise \
+        -v "${MISE_VOLUME_NAME}-v${IDENTITY_CONTRACT_VERSION}-remote-$ccc_mise_identity:/home/ccc/.local/share/mise" \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -w /project/${projectId} \
         --pids-limit ${CONTAINER_PID_LIMIT} \
-        ${IMAGE_NAME} sleep infinity 2>/dev/null || docker start ${containerName}`;
+        "$ccc_remote_image" sleep infinity 2>/dev/null || docker start ${containerName}
+    fi`;
 
     const result = spawnSync("ssh", [
         `${config.user}@${config.host}`,
