@@ -42,7 +42,7 @@ beforeEach(() => {
     mocks.locked = false;
     _setRuntimeInfoForTest(native);
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 describe("container identity policy", () => {
     it.each([[1000, 1000], [1001, 1001], [12345, 23456], [1000, 4000]])(
@@ -170,6 +170,24 @@ describe("validated derived image cache", () => {
     function buildCalls() {
         return mocks.spawn.mock.calls.filter(([, args]) => args[0] === "build");
     }
+
+    it.each(["explicit", "nested"])("honors %s Podman cgroup policy in mandatory identity probes", (mode) => {
+        _setRuntimeInfoForTest({ ...native, runtime: "podman", flavor: "podman-rootless", rootless: true });
+        vi.stubEnv("CCC_PODMAN_CGROUPS", mode === "explicit" ? "disabled" : "");
+        vi.stubEnv("container", mode === "nested" ? "docker" : "");
+        const target = { ...identity, uid: 1000, gid: 1000, mapping: "podman-keep-id" as const };
+        fakeRuntime({ target, cached: imageFor(target) });
+        const normal = mocks.spawn.getMockImplementation()!;
+        mocks.spawn.mockImplementation((command, args, options) => {
+            if (args[0] === "run" && !args.includes("--cgroups=disabled")) return result(1, "", "cgroup creation denied");
+            return normal(command, args, options);
+        });
+        expect(ensureIdentityImage(baseId, target)).toBe(builtId);
+        expect(buildCalls()).toHaveLength(0);
+        const probe = mocks.spawn.mock.calls.find(([, args]) => args[0] === "run")![1];
+        expect(probe).toContain("--userns=keep-id:uid=1000,gid=1000");
+        expect(probe[probe.indexOf("--user") + 1]).toBe("ccc");
+    });
 
     it("builds and reuses Podman bare image IDs with one canonical base cache", () => {
         _setRuntimeInfoForTest({ ...native, runtime: "podman", flavor: "podman-rootless", rootless: true });

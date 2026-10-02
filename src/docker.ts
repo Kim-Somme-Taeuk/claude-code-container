@@ -622,7 +622,7 @@ function matchesIdentity(inspected: IdentityContainerInspection, identity: Conta
 }
 
 function identityTransitionError(containerName: string): Error {
-    return new Error(`Container ${containerName} is running with an older or different user identity. Finish its work, run 'ccc stop' in that project (with the same --profile if used), then retry. It has not been stopped or changed.`);
+    return new Error(`Container ${containerName} is running with an older or different user identity. Finish its work, run 'ccc stop' in that project (or 'CCC_PROFILE=<name> ccc stop' with the same profile), then retry. It has not been stopped or changed.`);
 }
 
 /** Safe before session registration: never stops or changes an existing container. */
@@ -722,9 +722,7 @@ export function ensureImage(): void {
         return;
     }
 
-    console.error(`Error: Failed to pull ${remoteRef}.`);
-    console.error(`You can build locally instead: ${runtimeCli()} build -t ccc .`);
-    process.exit(1);
+    throw new Error(`Failed to pull ${remoteRef}. Retry when the registry is available, or build locally: ${runtimeCli()} build -t ccc .`);
 }
 
 // === Clipboard Shim Sync ===
@@ -910,12 +908,8 @@ export function fixSshPermissions(containerName: string): void {
     const hostSshDir = join(homedir(), ".ssh");
     const cli = runtimeCli();
 
-    spawnSync(
-        cli,
-        ["exec", containerName, "sh", "-c", "chmod 666 /tmp/ssh-agent.sock 2>/dev/null; true"],
-        { stdio: "ignore" },
-    );
-
+    // The forwarded socket belongs to the mapped host user. Never broaden
+    // its permissions: a chmod here also changes the host's agent socket.
     if (existsSync(hostSshDir)) {
         const copied = spawnSync(
             cli,

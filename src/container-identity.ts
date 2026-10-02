@@ -2,7 +2,7 @@ import { spawnSync } from "child_process";
 import { createHash } from "crypto";
 import { homedir } from "os";
 import { join } from "path";
-import { getRuntimeInfo, runtimeCli, type RuntimeInfo } from "./container-runtime.js";
+import { getRuntimeInfo, runtimeCli, runtimeExtraRunArgs, type RuntimeInfo } from "./container-runtime.js";
 import { withSharedMutationLock } from "./device-lab-shared-state.js";
 
 export const IDENTITY_CONTRACT_VERSION = "1";
@@ -78,7 +78,7 @@ function validatedImage(name: string, labels: Record<string, string>, identity: 
         if (image.Config?.User !== "ccc") return null;
         if (!Object.entries(labels).every(([key, value]) => image.Config.Labels?.[key] === value)) return null;
         const script = 'set -eu; test "$(id -un)" = ccc; test "$(getent passwd ccc | cut -d: -f6)" = /home/ccc; test "$(getent group ccc | cut -d: -f3)" = "$(id -g)"; sudo -n true; printf "%s:%s:%s:ccc\\n" "$(id -u)" "$(id -g)" "$HOME"';
-        const observed = checked(["run", "--rm", "--network", "none", "--user", "ccc", "--entrypoint", "/bin/sh", image.Id, "-c", script]);
+        const observed = checked(["run", "--rm", "--network", "none", ...runtimeExtraRunArgs(), "--user", "ccc", "--entrypoint", "/bin/sh", image.Id, "-c", script]);
         return observed === `${identity.uid}:${identity.gid}:/home/ccc:ccc` ? image.Id : null;
     } catch {
         return null;

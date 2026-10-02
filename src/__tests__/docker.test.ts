@@ -935,7 +935,7 @@ describe("docker.ts module exports", () => {
             mockExit.mockRestore();
         });
 
-        it("exits with error when pull fails with no image", () => {
+        it("throws an actionable error without exiting when pull fails with no image", () => {
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, ""))    // isImageExists -> false
                 .mockReturnValueOnce(makeResult(1));       // pullImage -> fail
@@ -943,8 +943,8 @@ describe("docker.ts module exports", () => {
             const mockExit = vi.spyOn(process, "exit").mockImplementation(() => {
                 throw new Error("process.exit");
             });
-            expect(() => ensureImage()).toThrow("process.exit");
-            expect(mockExit).toHaveBeenCalledWith(1);
+            expect(() => ensureImage()).toThrow(/Failed to pull.*build locally/);
+            expect(mockExit).not.toHaveBeenCalled();
             mockExit.mockRestore();
         });
     });
@@ -1038,9 +1038,9 @@ describe("docker.ts module exports", () => {
     });
 
     describe("fixSshPermissions", () => {
-        it("reads mounted credentials as root but keeps socket handling unprivileged", () => {
+        it("copies credentials without modifying the forwarded host agent socket", () => {
             fixSshPermissions("ccc-test");
-            expect(spawnSyncMock.mock.calls[0][1]).not.toContain("root");
+            expect(spawnSyncMock.mock.calls.some((call) => (call[1] as string[]).some((arg) => arg.includes("ssh-agent.sock")))).toBe(false);
             expect(spawnSyncMock).toHaveBeenCalledWith("docker", [
                 "exec", "--user", "root", "-w", "/", "ccc-test", "/usr/bin/env", "-i",
                 "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "/bin/bash", "-c", SSH_COPY_SCRIPT,
@@ -1048,7 +1048,6 @@ describe("docker.ts module exports", () => {
         });
 
         it.each([1, null])("reports copy failure without disclosing raw output (status %s)", (status) => {
-            spawnSyncMock.mockReturnValueOnce(makeResult(0));
             spawnSyncMock.mockReturnValueOnce({ ...makeResult(1), status, stderr: "secret sentinel" });
             fixSshPermissions("ccc-test");
             expect(console.error).toHaveBeenCalledWith(expect.stringContaining("unable to refresh SSH credentials"));
@@ -1058,8 +1057,7 @@ describe("docker.ts module exports", () => {
         it("does not copy keys when host SSH directory is absent", () => {
             mockExistsSync.mockReturnValue(false);
             fixSshPermissions("ccc-test");
-            expect(spawnSyncMock).toHaveBeenCalledTimes(1);
-            expect(spawnSyncMock.mock.calls[0][1]).not.toContain("root");
+            expect(spawnSyncMock).not.toHaveBeenCalled();
         });
     });
 
@@ -1070,6 +1068,36 @@ describe("docker.ts module exports", () => {
         beforeEach(() => {
             ensureDirs.mockReset();
             mockExistsSync.mockReturnValue(true);
+        });
+
+        it("unwinds startup after an initial pull failure and permits a successful retry", () => {
+            let locked = false;
+            mockStartupLock.mockImplementation((_path, action) => {
+                expect(locked).toBe(false);
+                locked = true;
+                try { return action(); } finally { locked = false; }
+            });
+            mockProjectRuntime();
+            const normal = spawnSyncMock.getMockImplementation()!;
+            spawnSyncMock.mockImplementation((command, rawArgs, ...rest) => {
+                const args = rawArgs as string[];
+                if (args[0] === "images") return makeResult(0, "");
+                if (args[0] === "pull") return makeResult(1);
+                return normal(command, rawArgs, ...rest);
+            });
+            const exit = vi.spyOn(process, "exit").mockImplementation(() => { throw new Error("unexpected exit"); });
+            expect(() => startProjectContainer(projectPath, ensureDirs)).toThrow(/Failed to pull/);
+            expect(exit).not.toHaveBeenCalled();
+            expect(locked).toBe(false);
+            mockProjectRuntime();
+            expect(startProjectContainer(projectPath, ensureDirs)).toBe(getContainerName(projectPath));
+            expect(locked).toBe(false);
+        });
+
+        it("uses the supported profile environment variable in recovery guidance", () => {
+            mockProjectRuntime({ exists: true, running: true, labels: {} });
+            expect(() => assertProjectContainerIdentity(getContainerName(projectPath, "work"), testIdentity))
+                .toThrow("CCC_PROFILE=<name> ccc stop");
         });
 
         it.each([

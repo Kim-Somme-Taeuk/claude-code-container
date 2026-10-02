@@ -18,6 +18,9 @@ reowning unrelated files. Retained lab volumes have a separate, bounded migratio
 described below.
 Verify the named user, primary group, HOME and final image user before reuse.
 Concurrent builds must serialize and failed builds must not publish valid caches.
+Validation containers use the same applicable runtime mapping and cgroup options
+as project containers. Image-download failure unwinds startup and session locks
+so retrying after recovery does not require manually removing a lock.
 
 Both image upgrade and mount-contract recreation must refuse to replace a
 running container whose identity contract differs. Explain that the user must
@@ -38,6 +41,8 @@ Mise cache volumes are scoped to the UID/GID and mapping contract. Existing
 cache volumes remain intact. Any retained per-container writable state must
 become usable by the replacement identity without changing live state or host
 credential ownership. Diagnostics must inspect the same cache used by startup.
+Forwarded SSH agent sockets keep their host permissions; startup must never
+broaden a socket's mode to make the agent accessible to other host users.
 
 Lab-volume migration runs only while that exact named volume has no running
 container users. Establish its previous ccc UID/GID from the old container's
