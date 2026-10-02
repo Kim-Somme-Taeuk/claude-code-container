@@ -68,7 +68,7 @@ import {
     removeProjectContainer,
     syncClipboardShims,
     getContainerStatus,
-    getCurrentImageId,
+    assertProjectContainerIdentity,
     resolveCredentialHostPath,
     prepareCodexConfigForContainer,
     restoreCodexConfigHostOwnership as restoreCodexConfigOwnership,
@@ -89,6 +89,8 @@ import {
     cleanupSession,
     setupSignalHandlers,
     setSession,
+    removeSessionLock,
+    clearSession,
 } from "./session.js";
 import { buildMcpConfig } from "./mcp-forward.js";
 import { setupLocalhostProxy } from "./localhost-proxy-setup.js";
@@ -314,7 +316,7 @@ export async function ensureMiseConfig(projectPath: string): Promise<void> {
     }
 }
 
-async function exec(
+export async function exec(
     projectPath: string,
     cmd: string[],
     options: { interactive?: boolean; env?: Record<string, string>; tool?: ToolDefinition } = {},
@@ -324,6 +326,10 @@ async function exec(
     ensureDockerRunning();
 
     const fullPath = resolve(projectPath);
+
+    // Reject a legacy live container before prompts, session registration or
+    // setup side effects. The startup path rechecks under its mutation lock.
+    assertProjectContainerIdentity(getContainerName(fullPath, profile));
 
     // Ensure directories exist before syncing credentials
     ensureDirs(profile);
@@ -366,33 +372,11 @@ async function exec(
         }
     }
 
-    // Single docker inspect to get container status (replaces 3-4 separate docker commands)
+    // Snapshot startup state to decide whether per-container setup is needed.
     const targetContainer = getContainerName(fullPath, profile);
     progress("Checking container...");
     const containerStatus = getContainerStatus(targetContainer);
     let wasAlreadyRunning = containerStatus.running;
-
-    // Auto-upgrade container if image has been rebuilt
-    if (containerStatus.exists) {
-        const currentImageId = getCurrentImageId();
-        if (currentImageId && containerStatus.imageId && containerStatus.imageId !== currentImageId) {
-            const activeSessions = getActiveSessionsForProject(projectId);
-            if (activeSessions.length <= 1) {
-                const oldImageId = containerStatus.imageId;
-
-                progress("Upgrading container to new image...");
-                spawnSync(runtimeCli(), ["stop", targetContainer], { stdio: "ignore" });
-                spawnSync(runtimeCli(), ["rm", targetContainer], { stdio: "ignore" });
-
-                // Remove old image (now dangling). Silently fails if still in use by other containers.
-                if (oldImageId) {
-                    spawnSync(runtimeCli(), ["rmi", oldImageId], { stdio: "ignore" });
-                }
-            } else {
-                console.log("Update available, but other sessions are active. Restart ccc after closing other sessions to upgrade.");
-            }
-        }
-    }
 
     // Start or get container (with extra mounts for worktree workspaces)
     if (!wasAlreadyRunning) progress("Starting container...");
@@ -400,18 +384,25 @@ async function exec(
     await prepareHostDeviceBroker(fullPath, profile).catch((error) => {
         console.warn(`[ccc] WARNING: device broker auto-start failed (${error instanceof Error ? error.message : String(error)}). Host-backed device MCP tools may be unavailable.`);
     });
-    const containerName = startProjectContainer(
-        fullPath,
-        () => ensureDirs(profile),
-        worktreeMounts.length > 0 ? worktreeMounts : undefined,
-        clipboardPortFile,
-        profile,
-        // When the container is recreated (missing mounts), its writable layer
-        // is fresh — npm tool wrappers, claude binary, etc. must be reinstalled.
-        // Force the post-startup setup path to run even though the *old*
-        // container was running when we snapshot-ed status above.
-        () => { wasAlreadyRunning = false; },
-    );
+    let containerName: string;
+    try {
+        containerName = startProjectContainer(
+            fullPath,
+            () => ensureDirs(profile),
+            worktreeMounts.length > 0 ? worktreeMounts : undefined,
+            clipboardPortFile,
+            profile,
+            // Replacement gives the container a fresh writable layer, so
+            // tools and per-container setup must run again.
+            () => { wasAlreadyRunning = false; },
+        );
+    } catch (error) {
+        // Ordinary cleanup can stop an existing container with no tracked
+        // sessions. A refused startup owns only its new session lock.
+        removeSessionLock(sessionLockFile);
+        clearSession();
+        throw error;
+    }
     // Skip heavy setup if container was already running (another session set it up)
     if (!wasAlreadyRunning) {
         // Ensure tools are installed (claude via curl + npm tools from registry).

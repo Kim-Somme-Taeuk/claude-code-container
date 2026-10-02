@@ -11,9 +11,10 @@ import {
     isImageExists,
     getImageLabel,
 } from "./docker.js";
-import { getProjectId, DATA_DIR, MISE_VOLUME_NAME, CLI_VERSION } from "./utils.js";
+import { getProjectId, DATA_DIR, CLI_VERSION } from "./utils.js";
 import { getActiveSessionsForProject } from "./session.js";
 import { getRuntimeInfo, runtimeCli } from "./container-runtime.js";
+import { getIdentityMiseVolumeName, resolveContainerIdentity } from "./container-identity.js";
 
 interface DoctorCheck {
     name: string;
@@ -124,24 +125,21 @@ export function runDoctor(projectPath: string): boolean {
         });
     }
 
-    // 4. Volume (mise cache)
-    const volResult = spawnSync(
-        runtimeCli(),
-        ["volume", "inspect", MISE_VOLUME_NAME, "--format", "{{.Mountpoint}}"],
-        { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-    );
-    if (volResult.status === 0) {
+    // 4. Volume (mise cache) uses exactly the startup identity policy.
+    try {
+        const volumeName = getIdentityMiseVolumeName(resolveContainerIdentity());
+        const volResult = spawnSync(
+            runtimeCli(),
+            ["volume", "inspect", volumeName, "--format", "{{.Mountpoint}}"],
+            { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+        );
         checks.push({
             name: "Mise cache",
-            status: "ok",
-            message: `Volume '${MISE_VOLUME_NAME}' exists`,
+            status: volResult.status === 0 ? "ok" : "warn",
+            message: volResult.status === 0 ? `Volume '${volumeName}' exists` : `Volume '${volumeName}' not created yet`,
         });
-    } else {
-        checks.push({
-            name: "Mise cache",
-            status: "warn",
-            message: "Volume not created yet",
-        });
+    } catch (error) {
+        checks.push({ name: "Container identity", status: "error", message: error instanceof Error ? error.message : String(error) });
     }
 
     // 5. Sessions

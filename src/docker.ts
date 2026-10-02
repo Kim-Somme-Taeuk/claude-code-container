@@ -18,7 +18,7 @@ import {
     getCodexConfigFile,
     IMAGE_NAME,
     CONTAINER_PID_LIMIT,
-    MISE_VOLUME_NAME,
+    DATA_DIR,
     CLI_VERSION,
     DOCKER_REGISTRY_IMAGE,
     CLIPBOARD_FILES_DIR,
@@ -39,6 +39,8 @@ import { getAllCredentialMounts } from "./tool-registry.js";
 import type { CredentialMount } from "./tool-registry.js";
 import { codexConfigFileAclScript } from "./codex-config-acl.js";
 import { SSH_COPY_SCRIPT } from "./ssh-credentials.js";
+import { ensureIdentityImage, getIdentityLabels, getIdentityMiseVolumeName, resolveContainerIdentity, type ContainerIdentity } from "./container-identity.js";
+import { withSharedMutationLock } from "./device-lab-shared-state.js";
 
 const MANAGED_MCP_BUNDLES = ["x11-mcp", "device-lab-mcp", "lab-mcp"] as const;
 const MANAGED_MCP_BUNDLE_MAX_BYTES = 32 * 1024 * 1024;
@@ -75,6 +77,7 @@ export interface DockerRunArgsOptions {
      * left unset on docker-native and rootful podman where it does.
      */
     proxyEnabled?: boolean;
+    identity?: ContainerIdentity;
 }
 
 export interface LabRunnerRunConfig {
@@ -207,6 +210,9 @@ export function buildDockerRunArgs(opts: DockerRunArgsOptions): string[] {
     }
 
     args.push(...getComposeLabels(opts.containerName, opts.fullPath));
+    for (const [key, value] of Object.entries(opts.identity ? getIdentityLabels(opts.identity) : {})) {
+        args.push("--label", `${key}=${value}`);
+    }
     args.push(opts.imageName);
     return args;
 }
@@ -580,6 +586,79 @@ export function getCurrentImageId(): string | null {
     return (result.stdout ?? "").trim() || null;
 }
 
+interface IdentityContainerInspection {
+    Image?: string;
+    State?: { Running?: boolean };
+    Config?: { User?: string; Labels?: Record<string, string> };
+}
+
+function inspectIdentityContainer(containerName: string): IdentityContainerInspection | null {
+    const result = spawnSync(runtimeCli(), ["inspect", "-f", "{{json .}}", containerName], {
+        encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
+    });
+    if (result.status !== 0) {
+        // Distinguish an absent container from a failed daemon query.
+        const listed = spawnSync(runtimeCli(), ["ps", "-a", "--format", "{{.Names}}"], { encoding: "utf-8" });
+        if (listed.status !== 0 || listed.stdout.split("\n").includes(containerName)) {
+            throw new Error(`Unable to inspect ${containerName}; existing work was left untouched.`);
+        }
+        return null;
+    }
+    try {
+        const inspected = JSON.parse(result.stdout);
+        if (typeof inspected?.State?.Running !== "boolean") throw new Error("Missing state");
+        return inspected;
+    } catch {
+        throw new Error(`Invalid container state for ${containerName}; existing work was left untouched.`);
+    }
+}
+
+function matchesIdentity(inspected: IdentityContainerInspection, identity: ContainerIdentity): boolean {
+    return inspected.Config?.User === "ccc" && Object.entries(getIdentityLabels(identity))
+        .every(([key, value]) => inspected.Config?.Labels?.[key] === value);
+}
+
+function identityTransitionError(containerName: string): Error {
+    return new Error(`Container ${containerName} is running with an older or different user identity. Finish its work, run 'ccc stop' in that project (with the same --profile if used), then retry. It has not been stopped or changed.`);
+}
+
+/** Safe before session registration: never stops or changes an existing container. */
+export function assertProjectContainerIdentity(containerName: string, identity = resolveContainerIdentity()): void {
+    const inspected = inspectIdentityContainer(containerName);
+    if (!inspected?.State?.Running) return;
+    if (!matchesIdentity(inspected, identity)) throw identityTransitionError(containerName);
+    const actual = spawnSync(runtimeCli(), ["exec", containerName, "/bin/sh", "-c", 'printf "%s:%s" "$(id -u)" "$(id -g)"'], { encoding: "utf-8" });
+    if (actual.status !== 0 || actual.stdout.trim() !== `${identity.uid}:${identity.gid}`) {
+        throw identityTransitionError(containerName);
+    }
+}
+
+function prepareLabStateOwnership(containerName: string, imageId: string, identity: ContainerIdentity, previousImage?: string): void {
+    const volume = getLabRunnerStateVolumeName(containerName);
+    const listed = spawnSync(runtimeCli(), ["volume", "ls", "--format", "{{.Name}}"], { encoding: "utf-8" });
+    if (listed.status !== 0) throw new Error("Unable to inspect lab state volumes.");
+    if (!listed.stdout.split("\n").includes(volume)) return;
+    const users = spawnSync(runtimeCli(), ["ps", "-q", "--filter", `volume=${volume}`], { encoding: "utf-8" });
+    if (users.status !== 0 || users.stdout.trim()) throw new Error(`Lab state volume ${volume} may be in use; finish its running work before retrying.`);
+    const runArgs = ["run", "--rm", "--network", "none", ...runtimeExtraRunArgs(), "--entrypoint", "/bin/sh"];
+    let oldUid = identity.uid;
+    let oldGid = identity.gid;
+    if (previousImage) {
+        const old = spawnSync(runtimeCli(), [...runArgs, "--user", "ccc", previousImage, "-c", 'printf "%s:%s" "$(id -u ccc)" "$(id -g ccc)"'], { encoding: "utf-8" });
+        const match = old.status === 0 ? /^(\d+):(\d+)$/.exec(old.stdout.trim()) : null;
+        if (!match || Number(match[1]) <= 0 || Number(match[2]) <= 0) throw new Error(`Cannot establish previous lab state owner for ${volume}; no ownership was changed.`);
+        oldUid = Number(match[1]);
+        oldGid = Number(match[2]);
+    }
+    // The helper receives only a named volume, never a host or credential bind.
+    // Without an old container/image, do not guess ownership from the volume root.
+    const script = previousImage
+        ? `set -eu; find -P /state -xdev -uid ${oldUid} -exec chown -h ${identity.uid} {} +; find -P /state -xdev -gid ${oldGid} -exec chgrp -h ${identity.gid} {} +; chown ${identity.uid}:${identity.gid} /state`
+        : `test "$(stat -c %u:%g /state)" = ${identity.uid}:${identity.gid}`;
+    const repaired = spawnSync(runtimeCli(), [...runArgs, "--user", "root", "--mount", `type=volume,source=${volume},target=/state`, imageId, "-c", script], { encoding: "utf-8" });
+    if (repaired.status !== 0) throw new Error(`Lab state ownership preparation failed for ${volume}. Existing data was retained; repair its ownership before retrying.`);
+}
+
 export function getImageLabel(imageName: string, label: string): string | null {
     try {
         const result = spawnSync(
@@ -721,6 +800,7 @@ function containerMatchesRunContract(
     containerName: string,
     requiredMounts: Array<{ hostPath: string; containerPath: string }>,
     labRunner: LabRunnerRunConfig,
+    miseVolumeName: string,
 ): boolean {
     const result = spawnSync(
         runtimeCli(),
@@ -731,11 +811,12 @@ function containerMatchesRunContract(
 
     try {
         const inspected = JSON.parse((result.stdout ?? "").trim()) as {
-            Mounts?: Array<{ Source: string; Destination: string }>;
+            Mounts?: Array<{ Source: string; Destination: string; Name?: string }>;
             Config?: { Env?: string[] };
             HostConfig?: { Devices?: unknown; GroupAdd?: unknown; Privileged?: boolean };
         };
         const mounts = inspected.Mounts || [];
+        if (!mounts.some((mount) => mount.Destination === "/home/ccc/.local/share/mise" && mount.Name === miseVolumeName)) return false;
         const env = envMap(inspected.Config?.Env);
         const devices = inspected.HostConfig?.Devices;
         const groupAdd = inspected.HostConfig?.GroupAdd;
@@ -938,10 +1019,13 @@ export function syncManagedMcpBundles(containerName: string): void {
 }
 
 function recreateContainer(containerName: string, reason: string, onRecreate?: () => void): void {
+    if (inspectIdentityContainer(containerName)?.State?.Running) {
+        throw new Error(`Container ${containerName} is running. Finish its work and run 'ccc stop' before retrying.`);
+    }
     console.log(`Recreating container (${reason})...`);
     const cli = runtimeCli();
-    spawnSync(cli, ["stop", containerName], { stdio: "ignore" });
-    spawnSync(cli, ["rm", containerName], { stdio: "ignore" });
+    const removed = spawnSync(cli, ["rm", containerName], { stdio: "ignore" });
+    if (removed.status !== 0) throw new Error(`Failed to remove stopped container ${containerName}.`);
     onRecreate?.();
 }
 
@@ -969,12 +1053,31 @@ export function startProjectContainer(
      */
     onRecreate?: () => void,
 ): string {
+    const containerName = getContainerName(resolve(projectPath), profile);
+    return withSharedMutationLock(join(DATA_DIR, "container-startup", `${containerName}.lock`), () =>
+        startProjectContainerLocked(projectPath, ensureDirs, extraMounts, clipboardPortFile, profile, onRecreate),
+    { waitMs: 600_000, reclaimStale: false });
+}
+
+function startProjectContainerLocked(
+    projectPath: string,
+    ensureDirs: () => void,
+    extraMounts?: Array<{ hostPath: string; containerPath: string }>,
+    clipboardPortFile?: string,
+    profile?: string,
+    onRecreate?: () => void,
+): string {
+    const fullPath = resolve(projectPath);
+    const containerName = getContainerName(fullPath, profile);
+    const identity = resolveContainerIdentity();
+    assertProjectContainerIdentity(containerName, identity);
     ensureDirs();
     mkdirSync(CLIPBOARD_FILES_DIR, { recursive: true });
     ensureImage();
-
-    const fullPath = resolve(projectPath);
-    const containerName = getContainerName(fullPath, profile);
+    const baseImage = getCurrentImageId();
+    if (!baseImage) throw new Error("Unable to resolve the CCC base image.");
+    const imageId = ensureIdentityImage(baseImage, identity);
+    const miseVolumeName = getIdentityMiseVolumeName(identity);
     const cli = runtimeCli();
     const deviceLabStateHostDir = join(homedir(), ".ccc", "devices");
 
@@ -985,7 +1088,8 @@ export function startProjectContainer(
     // codex, opencode) + any worktree git mounts the caller passed in.
     // Otherwise an old container created before a tool was added to the
     // registry would silently miss that tool's auth dir on subsequent runs.
-    if (isContainerExists(containerName)) {
+    const previous = inspectIdentityContainer(containerName);
+    if (previous) {
         const gitIdentityMounts = getHostGitIdentityMounts();
         const labRunner = buildContainerVmRunConfig(containerName);
         const requiredMounts: Array<{ hostPath: string; containerPath: string }> = [
@@ -1003,14 +1107,25 @@ export function startProjectContainer(
             hostPath: labRunner.stateVolumeName,
             containerPath: labRunner.stateContainerDir,
         });
-        if (!containerMatchesRunContract(containerName, requiredMounts, labRunner)) {
+        const runContractMatches = containerMatchesRunContract(containerName, requiredMounts, labRunner, miseVolumeName);
+        if (!matchesIdentity(previous, identity) || !runContractMatches || previous.Image !== imageId) {
+            if (previous.State?.Running) {
+                if (!matchesIdentity(previous, identity) || !runContractMatches) throw identityTransitionError(containerName);
+                // Updating an image is not permission to interrupt running work.
+                console.log("Image update available; finish this container's work and run 'ccc stop' before restarting to apply it.");
+                syncManagedMcpBundles(containerName);
+                syncHostGitConfig(containerName);
+                fixSshPermissions(containerName);
+                return containerName;
+            }
             if (debug) {
                 console.error(`[ccc:debug] Container ${containerName} missing required mounts or VM run contract:`);
                 for (const m of requiredMounts) {
                     console.error(`[ccc:debug]   required destination: ${m.containerPath}`);
                 }
             }
-            recreateContainer(containerName, "missing tool credential / git mounts", onRecreate);
+            prepareLabStateOwnership(containerName, imageId, identity, previous.Image);
+            recreateContainer(containerName, "image, user identity or mount contract changed", onRecreate);
         } else if (debug) {
             console.error(`[ccc:debug] Container ${containerName} has all required mounts`);
         }
@@ -1023,14 +1138,14 @@ export function startProjectContainer(
             fixSshPermissions(containerName);
             return containerName;
         }
-        recreateContainer(containerName, "container exec failed", onRecreate);
+        throw new Error(`Container ${containerName} is running but cannot execute commands. Inspect it and stop it explicitly before retrying.`);
     }
 
     if (isContainerExists(containerName)) {
         if (debug) console.error(`[ccc:debug] Container ${containerName} exists, restarting`);
         spawnSync(cli, ["start", containerName], { stdio: "inherit" });
         if (!canExecContainer(containerName)) {
-            recreateContainer(containerName, "container exec failed after restart", onRecreate);
+            throw new Error(`Container ${containerName} could not execute commands after restart. Inspect it and stop it explicitly before retrying.`);
         } else {
             syncManagedMcpBundles(containerName);
             syncHostGitConfig(containerName);
@@ -1040,14 +1155,14 @@ export function startProjectContainer(
     }
 
     if (isContainerExists(containerName)) {
-        console.error(`Failed to remove unhealthy container ${containerName}`);
-        process.exit(1);
+        throw new Error(`Failed to remove unhealthy container ${containerName}`);
     }
 
     if (debug) {
         console.error(`[ccc:debug] Container ${containerName} not found, creating`);
     }
     console.log("Creating container...");
+    prepareLabStateOwnership(containerName, imageId, identity);
 
     const projectId = getProjectId(fullPath);
     const projectMountPath = `/project/${projectId}`;
@@ -1085,9 +1200,10 @@ export function startProjectContainer(
         credentialMounts,
         gitIdentityMounts,
         claudeJsonFile: getClaudeJsonFile(profile),
-        miseVolumeName: MISE_VOLUME_NAME,
+        miseVolumeName,
         pidsLimit: CONTAINER_PID_LIMIT,
-        imageName: IMAGE_NAME,
+        imageName: imageId,
+        identity,
         hostSshDir: existsSync(hostSshDir) ? hostSshDir : null,
         sshAgentSocket,
         extraMounts,
@@ -1103,8 +1219,7 @@ export function startProjectContainer(
 
     const result = spawnSync(cli, args, { stdio: "inherit" });
     if (result.status !== 0) {
-        console.error("Failed to create container");
-        process.exit(1);
+        throw new Error("Failed to create container");
     }
 
     syncManagedMcpBundles(containerName);

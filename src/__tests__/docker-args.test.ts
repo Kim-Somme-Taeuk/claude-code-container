@@ -80,6 +80,28 @@ function extractLabels(args: string[]): Record<string, string> {
     return labels;
 }
 
+describe("project identity run contract", () => {
+    it("labels the numeric identity while preserving project and credential binds", () => {
+        const args = buildDockerRunArgs(makeOpts({
+            identity: { uid: 2345, gid: 3456, mapping: "host", contractVersion: "1" },
+            imageName: `sha256:${"b".repeat(64)}`,
+            miseVolumeName: "ccc-mise-cache-v1-host-2345-3456",
+        }));
+        expect(extractLabels(args)).toMatchObject({
+            "ccc.identity.version": "1",
+            "ccc.identity.uid": "2345",
+            "ccc.identity.gid": "3456",
+            "ccc.identity.mapping": "host",
+        });
+        expect(extractVolumeMounts(args)).toEqual(expect.arrayContaining([
+            "/home/user/myproject:/project/myproject-abc123",
+            "/home/user/.ccc/claude:/home/ccc/.claude",
+            "ccc-mise-cache-v1-host-2345-3456:/home/ccc/.local/share/mise",
+        ]));
+        expect(args.at(-1)).toBe(`sha256:${"b".repeat(64)}`);
+    });
+});
+
 // ===========================================================================
 // 1. SSH mount — core feature tests
 // ===========================================================================

@@ -52,6 +52,11 @@ vi.mock("../utils.js", () => ({
 }));
 
 // Import AFTER mocks
+const mockResolveIdentity = vi.fn(() => ({ uid: 2345, gid: 3456, mapping: "host" as const, contractVersion: "1" }));
+vi.mock("../container-identity.js", async (importOriginal) => ({
+    ...await importOriginal<typeof import("../container-identity.js")>(),
+    resolveContainerIdentity: () => mockResolveIdentity(),
+}));
 const { runDoctor } = await import("../doctor.js");
 
 function makeResult(
@@ -64,6 +69,7 @@ function makeResult(
 describe("runDoctor", () => {
     beforeEach(() => {
         spawnSyncMock.mockReset();
+        mockResolveIdentity.mockReset().mockReturnValue({ uid: 2345, gid: 3456, mapping: "host", contractVersion: "1" });
         mockExistsSync.mockReset().mockReturnValue(false);
         mockReaddirSync.mockReset().mockReturnValue([]);
         mockIsDockerRunning.mockReturnValue(true);
@@ -92,6 +98,11 @@ describe("runDoctor", () => {
         const result = runDoctor("/project/myproject");
 
         expect(result).toBe(true);
+        expect(spawnSyncMock).toHaveBeenCalledWith(
+            "docker",
+            ["volume", "inspect", "ccc-mise-cache-v1-host-2345-3456", "--format", "{{.Mountpoint}}"],
+            expect.any(Object),
+        );
     });
 
     it("returns false when Docker is not running", () => {
@@ -105,6 +116,14 @@ describe("runDoctor", () => {
             (c) => (c[1] as string[])?.includes("version"),
         );
         expect(dockerVersionCalls).toHaveLength(0);
+    });
+
+    it("reports unsupported identity without probing the old shared cache", () => {
+        mockResolveIdentity.mockImplementation(() => { throw new Error("Rootless Docker identity mapping is unsupported"); });
+        spawnSyncMock.mockReturnValue(makeResult(0, "27.3.1\n"));
+        expect(runDoctor("/project/myproject")).toBe(false);
+        expect(spawnSyncMock.mock.calls.some((call) => (call[1] as string[])[0] === "volume")).toBe(false);
+        expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Rootless Docker identity mapping is unsupported"));
     });
 
     it("returns false when image is not built", () => {
