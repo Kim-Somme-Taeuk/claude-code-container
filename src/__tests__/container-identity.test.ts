@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SpawnSyncReturns } from "child_process";
 import type { RuntimeInfo } from "../container-runtime.js";
+import type { ContainerIdentity } from "../container-identity.js";
 
 const mocks = vi.hoisted(() => ({
     spawn: vi.fn(),
@@ -121,7 +122,7 @@ describe("validated derived image cache", () => {
     const identity = { uid: 2002, gid: 3003, mapping: "host" as const, contractVersion: "1" };
     type Image = { Id: string; Config: { User: string; Labels: Record<string, string> } };
 
-    function imageFor(target = identity, base = baseId, id = builtId): Image {
+    function imageFor(target: ContainerIdentity = identity, base = baseId, id = builtId): Image {
         return { Id: id, Config: { User: "ccc", Labels: { ...getIdentityLabels(target), "ccc.identity.base": base } } };
     }
 
@@ -131,8 +132,9 @@ describe("validated derived image cache", () => {
         cachedAccountOutput?: string;
         buildFailure?: boolean;
         invalidBuild?: boolean;
-        target?: typeof identity;
+        target?: ContainerIdentity;
         base?: string;
+        builtId?: string;
     } = {}) {
         const images = new Map<string, Image>();
         let built = false;
@@ -142,7 +144,7 @@ describe("validated derived image cache", () => {
                 return image ? result(0, JSON.stringify([image])) : result(1, "", "No such image");
             }
             if (args[0] === "run") {
-                const imageId = args.find((arg) => arg.startsWith("sha256:"));
+                const imageId = args.find((arg) => /^(?:sha256:)?[a-f0-9]{64}$/.test(arg));
                 if (options.invalidRunIds?.has(imageId!) || (built && options.invalidBuild)) return result(1, "", "invalid account");
                 if (imageId === staleId && options.cachedAccountOutput !== undefined) return result(0, options.cachedAccountOutput);
                 const target = options.target ?? identity;
@@ -152,7 +154,7 @@ describe("validated derived image cache", () => {
                 expect(mocks.locked).toBe(true);
                 if (options.buildFailure) return result(1, "", "identity build failed");
                 built = true;
-                images.set(args[args.indexOf("-t") + 1], imageFor(options.target, options.base));
+                images.set(args[args.indexOf("-t") + 1], imageFor(options.target, options.base, options.builtId));
                 return result();
             }
             if (args[0] === "tag") return result();
@@ -168,6 +170,38 @@ describe("validated derived image cache", () => {
     function buildCalls() {
         return mocks.spawn.mock.calls.filter(([, args]) => args[0] === "build");
     }
+
+    it("builds and reuses Podman bare image IDs with one canonical base cache", () => {
+        _setRuntimeInfoForTest({ ...native, runtime: "podman", flavor: "podman-rootless", rootless: true });
+        const target = { ...identity, uid: 1000, gid: 1000, mapping: "podman-keep-id" as const };
+        const bareBuiltId = builtId.slice(7);
+        fakeRuntime({ target, builtId: bareBuiltId });
+        expect(ensureIdentityImage(baseId.slice(7), target)).toBe(bareBuiltId);
+        expect(ensureIdentityImage(baseId, target)).toBe(bareBuiltId);
+        expect(buildCalls()).toHaveLength(1);
+        expect(mocks.lock.mock.calls[0][0]).toBe(mocks.lock.mock.calls[1][0]);
+        const build = buildCalls()[0];
+        expect(build[2].input).toContain(`LABEL ccc.identity.base="${baseId}"`);
+        expect(mocks.spawn.mock.calls.every(([command]) => command === "podman")).toBe(true);
+        expect(mocks.spawn.mock.calls.filter(([, args]) => args[0] === "run").every(([, args]) => args.includes(bareBuiltId))).toBe(true);
+    });
+
+    it.each(["ccc:latest", "a".repeat(12), "a".repeat(63), "g".repeat(64), `sha512:${"a".repeat(64)}`])(
+        "rejects malformed base image ID %s before mutation", (invalidId) => {
+            expect(() => ensureIdentityImage(invalidId, identity)).toThrow(/immutable|sha256|image ID/i);
+            expect(mocks.spawn).not.toHaveBeenCalled();
+            expect(mocks.lock).not.toHaveBeenCalled();
+        },
+    );
+
+    it.each(["ccc:latest", "b".repeat(12), `sha256:${"g".repeat(64)}`])(
+        "rejects malformed cached image ID %s and builds a validated image", (invalidId) => {
+            fakeRuntime({ cached: imageFor(identity, baseId, invalidId) });
+            expect(ensureIdentityImage(baseId, identity)).toBe(builtId);
+            expect(buildCalls()).toHaveLength(1);
+            expect(mocks.spawn.mock.calls.filter(([, args]) => args[0] === "run").every(([, args]) => !args.includes(invalidId))).toBe(true);
+        },
+    );
 
     it("reuses only a validated cached image and returns its immutable ID", () => {
         fakeRuntime({ cached: imageFor() });

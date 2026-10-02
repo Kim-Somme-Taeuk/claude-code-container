@@ -161,9 +161,11 @@ function mockProjectRuntime(options: {
     labStateInUse?: boolean;
     previousOwner?: string;
     execFailure?: boolean;
+    podmanKeepId?: boolean;
 } = {}): void {
     let exists = options.exists ?? false;
     let running = options.running ?? false;
+    let configuredUser = "ccc";
     spawnSyncMock.mockImplementation((_command, rawArgs) => {
         const args = rawArgs as string[];
         if (args[0] === "images") return makeResult(0, baseImageId);
@@ -179,7 +181,7 @@ function mockProjectRuntime(options: {
                     ...contract,
                     State: { Running: running },
                     Image: options.imageId ?? derivedImageId,
-                    Config: { ...contract.Config, User: "ccc", Labels: options.labels ?? getIdentityLabels(testIdentity) },
+                    Config: { ...contract.Config, User: configuredUser, Labels: options.labels ?? getIdentityLabels(testIdentity) },
                 }));
             }
         }
@@ -196,7 +198,10 @@ function mockProjectRuntime(options: {
         if (args[0] === "run") {
             if (args.some((arg) => arg.includes("$(id -u ccc)"))) return makeResult(0, options.previousOwner ?? "1001:1002");
             if (options.runFailure) return makeResult(1);
-            if (args.includes("-d")) exists = running = true;
+            if (args.includes("-d")) {
+                exists = running = true;
+                configuredUser = args.includes("--user") ? args[args.indexOf("--user") + 1] : options.podmanKeepId ? "1000:1000" : "ccc";
+            }
             return makeResult(0, options.actualIdentity ?? "1000:1000");
         }
         return makeResult(0);
@@ -1109,6 +1114,34 @@ describe("docker.ts module exports", () => {
                 expect.any(Function),
                 expect.objectContaining({ reclaimStale: false }),
             );
+        });
+
+        it("starts rootless Podman with named ccc and reuses the new running container", () => {
+            _setRuntimeInfoForTest({ runtime: "podman", flavor: "podman-rootless", rootless: true });
+            mockProjectRuntime({ podmanKeepId: true, contract: fullCredentialMountsJson([], {
+                status: "unsupported",
+                unsupportedReason: "podman-rootless cannot safely expose /dev/kvm to the CCC container",
+                kvmDevice: false,
+                groupAdd: [],
+            }) });
+            const onRecreate = vi.fn();
+            startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, onRecreate);
+            startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, onRecreate);
+            const runs = spawnSyncMock.mock.calls.map((call) => call[1] as string[]).filter((args) => args[0] === "run" && args.includes("-d"));
+            expect(runs).toHaveLength(1);
+            expect(runs[0]).toContain("--userns=keep-id:uid=1000,gid=1000");
+            expect(runs[0][runs[0].indexOf("--user") + 1]).toBe("ccc");
+            expect(onRecreate).not.toHaveBeenCalled();
+            expect(spawnSyncMock.mock.calls.some((call) => ["stop", "rm"].includes((call[1] as string[])[0]))).toBe(false);
+        });
+
+        it.each([true, false])("reuses equivalent bare and prefixed image IDs (bare container ID: %s)", (bareContainerId) => {
+            mockEnsureIdentityImage.mockReturnValue(bareContainerId ? derivedImageId : derivedImageId.slice(7));
+            mockProjectRuntime({ exists: true, running: false, imageId: bareContainerId ? derivedImageId.slice(7) : derivedImageId });
+            const onRecreate = vi.fn();
+            startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, onRecreate);
+            expect(onRecreate).not.toHaveBeenCalled();
+            expect(spawnSyncMock.mock.calls.some((call) => ["stop", "rm", "run"].includes((call[1] as string[])[0]))).toBe(false);
         });
 
         it.each([true, false])("preserves a container when exec fails (initially running: %s)", (running) => {

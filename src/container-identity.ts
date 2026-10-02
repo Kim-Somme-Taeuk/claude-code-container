@@ -7,6 +7,13 @@ import { withSharedMutationLock } from "./device-lab-shared-state.js";
 
 export const IDENTITY_CONTRACT_VERSION = "1";
 
+/** Docker prefixes image IDs; Podman can report the same digest as bare hex. */
+export function normalizeImageId(imageId: string): string {
+    const match = /^(?:sha256:)?([a-f0-9]{64})$/.exec(imageId);
+    if (!match) throw new Error("Container identity requires an immutable sha256 image ID.");
+    return `sha256:${match[1]}`;
+}
+
 export interface ContainerIdentity {
     uid: number;
     gid: number;
@@ -67,7 +74,8 @@ function validatedImage(name: string, labels: Record<string, string>, identity: 
     if (result.error || result.status !== 0) return null;
     try {
         const [image] = JSON.parse(result.stdout);
-        if (!/^sha256:[a-f0-9]{64}$/.test(image.Id) || image.Config?.User !== "ccc") return null;
+        normalizeImageId(image.Id);
+        if (image.Config?.User !== "ccc") return null;
         if (!Object.entries(labels).every(([key, value]) => image.Config.Labels?.[key] === value)) return null;
         const script = 'set -eu; test "$(id -un)" = ccc; test "$(getent passwd ccc | cut -d: -f6)" = /home/ccc; test "$(getent group ccc | cut -d: -f3)" = "$(id -g)"; sudo -n true; printf "%s:%s:%s:ccc\\n" "$(id -u)" "$(id -g)" "$HOME"';
         const observed = checked(["run", "--rm", "--network", "none", "--user", "ccc", "--entrypoint", "/bin/sh", image.Id, "-c", script]);
@@ -79,13 +87,13 @@ function validatedImage(name: string, labels: Record<string, string>, identity: 
 
 /** Build-time account changes have no access to projects or credentials. */
 export function ensureIdentityImage(baseImageId: string, identity: ContainerIdentity): string {
-    if (!/^sha256:[a-f0-9]{64}$/.test(baseImageId)) throw new Error("Container identity requires an immutable sha256 base image ID.");
+    const canonicalBaseId = normalizeImageId(baseImageId);
     validateId(identity.uid, "UID");
     validateId(identity.gid, "GID");
     if (!/^[a-zA-Z0-9.-]+$/.test(identity.contractVersion) || !["host", "podman-keep-id", "desktop"].includes(identity.mapping)) {
         throw new Error("Invalid container identity contract.");
     }
-    const labels = { ...getIdentityLabels(identity), "ccc.identity.base": baseImageId };
+    const labels = { ...getIdentityLabels(identity), "ccc.identity.base": canonicalBaseId };
     const key = createHash("sha256").update(JSON.stringify(labels)).digest("hex");
     const name = `ccc-identity:${key}`;
     const lock = join(homedir(), ".ccc", "locks", `identity-${key}.lock`);
@@ -94,7 +102,7 @@ export function ensureIdentityImage(baseImageId: string, identity: ContainerIden
         if (cached) return cached;
         // FROM sha256:<id> is parsed as a registry name by some builders.
         // A content-addressed local tag works with Docker and Podman.
-        const baseTag = `ccc-identity-base:${baseImageId.slice(7)}`;
+        const baseTag = `ccc-identity-base:${canonicalBaseId.slice(7)}`;
         checked(["tag", baseImageId, baseTag]);
         const { uid, gid } = identity;
         const reconcile = [

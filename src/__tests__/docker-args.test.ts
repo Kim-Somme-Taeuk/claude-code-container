@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
+import { _setRuntimeInfoForTest, _resetRuntimeCacheForTest } from "../container-runtime.js";
 import { mkdirSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -81,6 +82,19 @@ function extractLabels(args: string[]): Record<string, string> {
 }
 
 describe("project identity run contract", () => {
+    afterEach(() => _resetRuntimeCacheForTest());
+
+    it("explicitly selects ccc while retaining rootless Podman keep-id mapping", () => {
+        _setRuntimeInfoForTest({ runtime: "podman", flavor: "podman-rootless", rootless: true });
+        const args = buildDockerRunArgs(makeOpts({
+            identity: { uid: 1000, gid: 1000, mapping: "podman-keep-id", contractVersion: "1" },
+        }));
+        expect(args).toContain("--userns=keep-id:uid=1000,gid=1000");
+        expect(args.filter((arg) => arg === "--user")).toHaveLength(1);
+        expect(args[args.indexOf("--user") + 1]).toBe("ccc");
+        expect(args.indexOf("--user")).toBeLessThan(args.length - 1);
+    });
+
     it("labels the numeric identity while preserving project and credential binds", () => {
         const args = buildDockerRunArgs(makeOpts({
             identity: { uid: 2345, gid: 3456, mapping: "host", contractVersion: "1" },

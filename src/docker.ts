@@ -39,7 +39,7 @@ import { getAllCredentialMounts } from "./tool-registry.js";
 import type { CredentialMount } from "./tool-registry.js";
 import { codexConfigFileAclScript } from "./codex-config-acl.js";
 import { SSH_COPY_SCRIPT } from "./ssh-credentials.js";
-import { ensureIdentityImage, getIdentityLabels, getIdentityMiseVolumeName, resolveContainerIdentity, type ContainerIdentity } from "./container-identity.js";
+import { ensureIdentityImage, getIdentityLabels, getIdentityMiseVolumeName, normalizeImageId, resolveContainerIdentity, type ContainerIdentity } from "./container-identity.js";
 import { withSharedMutationLock } from "./device-lab-shared-state.js";
 
 const MANAGED_MCP_BUNDLES = ["x11-mcp", "device-lab-mcp", "lab-mcp"] as const;
@@ -125,6 +125,9 @@ export function buildDockerRunArgs(opts: DockerRunArgsOptions): string[] {
         "seccomp=unconfined",
         "--cap-add",
         "NET_ADMIN",
+        // Podman keep-id otherwise overrides the image USER with numeric IDs.
+        "--user",
+        "ccc",
     ];
 
     // Bind mounts (runtime-aware: adds :Z on SELinux podman)
@@ -1108,7 +1111,8 @@ function startProjectContainerLocked(
             containerPath: labRunner.stateContainerDir,
         });
         const runContractMatches = containerMatchesRunContract(containerName, requiredMounts, labRunner, miseVolumeName);
-        if (!matchesIdentity(previous, identity) || !runContractMatches || previous.Image !== imageId) {
+        const sameImage = previous.Image !== undefined && normalizeImageId(previous.Image) === normalizeImageId(imageId);
+        if (!matchesIdentity(previous, identity) || !runContractMatches || !sameImage) {
             if (previous.State?.Running) {
                 if (!matchesIdentity(previous, identity) || !runContractMatches) throw identityTransitionError(containerName);
                 // Updating an image is not permission to interrupt running work.
