@@ -43,7 +43,7 @@ vi.mock("../docker.js", () => ({
     ensureDockerRunning: vi.fn(),
     getContainerName: vi.fn(() => "ccc-startup-test"),
     getContainerStatus: vi.fn(() => ({ exists: true, running: fixture.running, imageId: "image" })),
-    getCurrentImageId: vi.fn(() => "image"),
+    assertProjectContainerIdentity: vi.fn(),
     startProjectContainer: vi.fn(() => "ccc-startup-test"),
     isContainerRunning: vi.fn(() => true),
     resolveCredentialHostPath: vi.fn((mount: { hostDir: string }) => `/fixture/${mount.hostDir}`),
