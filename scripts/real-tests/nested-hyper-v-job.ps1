@@ -170,7 +170,7 @@ try {
     Clear-NestedCheckout $Source
     Remove-Item -LiteralPath $Archive -Force
     $Outcome = @{status='PASS';stage='complete';runId=$RunId;sourceSha256=$SourceSha}
-} catch { $Outcome = @{status='FAIL';stage=$Stage;runId=$RunId;error=$_.Exception.Message} }
+} catch { $Outcome = @{status='FAIL';stage=$Stage;runId=$RunId;sourceSha256=$SourceSha;error=$_.Exception.Message} }
 finally {
     if ($TranscriptStarted) { Stop-Transcript | Out-Null }
     $Pending = Join-Path $Run 'result.pending.json'

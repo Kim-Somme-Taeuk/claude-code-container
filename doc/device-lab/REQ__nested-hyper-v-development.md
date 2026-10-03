@@ -9,7 +9,19 @@ for Windows or other VMs. Unsupported hardware or
 host settings fail creation through the existing cleanup path. Reusing an existing
 ID with a different nesting setting must fail instead of silently reconfiguring it.
 
-The development workflow retains this outer VM across runs. It prepares Hyper-V
+The development workflow retains the outer VM disk, cache and logs across runs,
+but stops its exact incarnation without force after a confirmed terminal PASS/FAIL
+and the attempt to save/download artifacts, even if that attempt fails. A failure
+before job launch also stops it after acquiring its guest claim.
+Stop failure fails the runner and retains the original test failure separately.
+Uncertain launch, timeout, malformed/mismatched results, or failed claim acquisition
+must not authorize shutdown. Terminal results must match run ID and source hash.
+The guest claim remains held through shutdown: mark it completed under a guest
+mutex, then stop. Only a later boot may reclaim a validated completed claim;
+same-boot, active, legacy or ambiguous claims remain unavailable. This prevents
+another host from starting a run in the interval before shutdown.
+
+The development workflow prepares Hyper-V
 inside the guest, handles the feature-install reboot, transfers a current source
 snapshot, builds the candidate inside the guest and runs its own broker/MCP and
 inner Hyper-V tests. Test execution must not reuse the physical host broker as the

@@ -6,6 +6,7 @@ import { pathToFileURL } from "url";
 import { setTimeout as delay } from "timers/promises";
 import { repoRoot } from "./helpers.ts";
 import { lifecycleDevice, parseToolPayload, withDeviceLabMcp } from "./device-lab-mcp-client.ts";
+import { nestedClaimCommand, nestedCompleteClaimCommand } from "./nested-hyper-v-claim.ts";
 import { withExclusiveRealProviderRun } from "./exclusive-real-provider-run.ts";
 import { ensureHyperVWindowsDownloadDestination } from "./hyper-v-windows-vm-e2e.ts";
 import { buildLevel3Artifacts, ensureHostBrokerReady } from "./support/level3-host.ts";
@@ -97,21 +98,6 @@ export function nestedExecOutput(payload: any): string {
     return command.stdout.replace(/^\uFEFF/, "").trim();
 }
 
-export const NESTED_CLAIM_COMMAND = `$ErrorActionPreference='Stop'
-$root=${quote(ROOT)}
-if ((Test-Path -LiteralPath $root) -and ((Get-Item -LiteralPath $root -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'nested-root-reparse-point' }
-New-Item -ItemType Directory -Force -Path $root | Out-Null
-$acl=New-Object System.Security.AccessControl.DirectorySecurity
-$acl.SetAccessRuleProtection($true,$false)
-foreach($sid in @('S-1-5-18','S-1-5-32-544')) {
-  $identity=New-Object System.Security.Principal.SecurityIdentifier($sid)
-  $rule=New-Object System.Security.AccessControl.FileSystemAccessRule($identity,'FullControl','ContainerInherit,ObjectInherit','None','Allow')
-  $acl.AddAccessRule($rule)
-}
-Set-Acl -LiteralPath $root -AclObject $acl
-New-Item -ItemType Directory -Path (Join-Path $root 'active') | Out-Null
-Write-Output 'claimed'`;
-
 export const NESTED_PREPARE_COMMAND = `$ErrorActionPreference='Stop'
 if ((Get-CimInstance Win32_ComputerSystem).HypervisorPresent -and (Get-Service vmms -ErrorAction SilentlyContinue)) { @{reboot=$false} | ConvertTo-Json -Compress; return }
 if (Get-Command Install-WindowsFeature -ErrorAction SilentlyContinue) {
@@ -177,7 +163,7 @@ export async function runNestedDevelopment(call: Call, options: {
         const remote = `${ROOT}\\${runId}`;
         // An atomic guest directory claim prevents two hosts racing the same scheduled task.
         setStage("claim-guest");
-        await command(NESTED_CLAIM_COMMAND);
+        await command(nestedClaimCommand(runId));
         let launched = false;
         let completed = false;
         let primaryFailure: unknown;
@@ -219,7 +205,8 @@ export async function runNestedDevelopment(call: Call, options: {
                         await (options.sleep || delay)(15000);
                         continue;
                     }
-                    if (result.runId !== runId) throw new Error("nested-result-identity-mismatch");
+                    if (result.runId !== runId || result.sourceSha256 !== snapshot.sha256) throw new Error("nested-result-identity-mismatch");
+                    if (result.status !== "PASS" && result.status !== "FAIL") throw new Error("nested-result-status-invalid");
                     completed = true;
                     mkdirSync(options.outputRoot, { recursive: true });
                     writeFileSync(join(options.outputRoot, "result.json"), JSON.stringify(result, null, 2));
@@ -227,7 +214,7 @@ export async function runNestedDevelopment(call: Call, options: {
                     ensureHyperVWindowsDownloadDestination(options.outputRoot, join(options.outputRoot, "job.log"));
                     parseToolPayload(await call("download", { ...identity, remotePath: `${remote}\\job.log`, localPath: join(options.outputRoot, "job.log"), maxFileBytes: 16777216, timeoutMs: 300000 }));
                     setStage("validate-guest-result"); tool = undefined; payload = result;
-                    if (result.status !== "PASS" || result.sourceSha256 !== snapshot.sha256) throw new Error(`nested-development-failed: ${result.stage}: ${result.error || result.status}`);
+                    if (result.status !== "PASS") throw new Error(`nested-development-failed: ${result.stage}: ${result.error || result.status}`);
                     return { ...result, deviceId, guestRunPath: remote };
                 }
                 await (options.sleep || delay)(15000);
@@ -237,11 +224,16 @@ export async function runNestedDevelopment(call: Call, options: {
             primaryFailure = error instanceof Error ? error : new Error(String(error));
             throw primaryFailure;
         } finally {
-            // An uncertain running job keeps its claim. Never race a second iteration.
+            // Keep the claim through shutdown. Only a later boot may reclaim a completed
+            // claim, so another host cannot start a job between completion and stop.
             if (!launched || completed) {
                 const primaryContext = { stage, tool, payload };
-                setStage("release-guest-claim");
-                try { await command(`Remove-Item -LiteralPath ${quote(ROOT + "\\active")} -ErrorAction Stop; Write-Output 'released'`); }
+                setStage("complete-guest-claim");
+                try {
+                    await command(nestedCompleteClaimCommand(runId));
+                    setStage("stop-outer-vm");
+                    parseToolPayload(await call("stop", identity));
+                }
                 catch (error) {
                     if (!primaryFailure) throw error;
                     Object.assign(primaryFailure, { cleanupFailure: { stage, tool, ...nestedDiagnostic(error, payload) } });

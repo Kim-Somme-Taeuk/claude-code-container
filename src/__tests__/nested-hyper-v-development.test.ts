@@ -42,9 +42,9 @@ function scenario({ reboot = false, failed = false, pending = false, nested = tr
             expect(existsSync(args.localPath)).toBe(true);
             expect(readFileSync(args.localPath, "utf8")).toBe("");
         }
-        if (name === "create_windows_vm") return reply({ device: { id: args.deviceId, nestedVirtualization: nested, incarnationId: "a".repeat(32) } });
+        if (name === "create_windows_vm") return reply({ device: { deviceId: args.deviceId, nestedVirtualization: nested, incarnationId: "a".repeat(32) } });
         if (name === "exec") {
-            if (args.command.includes("-RunId ")) runId = /-RunId ([a-f0-9]{32})/.exec(args.command)![1];
+            if (args.command.includes("Register-ScheduledTask")) runId = /-RunId ([a-f0-9]{32})/.exec(args.command)![1];
             const output = args.command.includes("Get-Content -Raw") ? pending ? "pending" : JSON.stringify({ runId, status: failed ? "FAIL" : "PASS", stage: failed ? "build" : "complete", sourceSha256: "b".repeat(64) })
                 : args.command.includes("Install-WindowsFeature") ? JSON.stringify({ reboot }) : "ok";
             return reply({ result: { status: 0, stdout: output } });
@@ -74,21 +74,77 @@ describe("persistent nested Hyper-V development workflow", () => {
             force: true, waitForBoot: true, bootTimeoutMs: 1200000,
         });
         expect(calls.filter(c => c.name === "upload")).toHaveLength(2);
-        expect(calls.some(c => c.name === "delete" || c.name === "stop")).toBe(false);
-        expect(calls.at(-1)!.args.command).toContain("Remove-Item");
+        expect(calls.some(c => c.name === "delete")).toBe(false);
+        expect(calls.at(-2)!.args.command).toContain("-Operation 'complete'");
+        expect(calls.at(-1)).toEqual({ name: "stop", args: {
+            deviceId: "windows-nested-development", incarnationId: "a".repeat(32),
+        } });
+        expect(calls.findIndex(c => c.name === "download")).toBeLessThan(calls.length - 2);
     });
     it("refuses an outer broker that silently drops nested virtualization", async () => {
         await expect(withRun({ nested: false })).rejects.toThrow("outer-broker-nesting-not-confirmed");
     });
     it("propagates guest build failure instead of reporting a readiness pass", async () => {
-        await expect(withRun({ failed: true })).rejects.toThrow("nested-development-failed: build");
+        const failure = await withRun({ failed: true }).catch(error => error);
+        expect(failure.message).toContain("nested-development-failed: build");
+        expect(failure.calls.at(-1)).toMatchObject({ name: "stop", args: { incarnationId: "a".repeat(32) } });
     });
     it("keeps an indeterminate scheduled job claimed after the bounded wait", async () => {
         try { await withRun({ pending: true }); throw new Error("expected timeout"); }
         catch (error) {
             expect(error.message).toContain("nested-development-timeout");
-            expect(error.calls.at(-1).args.command).not.toContain("Remove-Item");
+            expect(error.calls.some((c: any) => c.name === "stop" || c.args.command?.includes("-Operation 'complete'"))).toBe(false);
         }
+    });
+    it.each(["PASS", "FAIL"])("stops after terminal %s and preserves primary failure when stop fails", async status => {
+        const outputRoot = mkdtempSync(join(tmpdir(), "ccc-nested-stop-"));
+        const normal = scenario({ failed: status === "FAIL" });
+        const stop = vi.fn(async () => reply({ ok: false, error: "hyper-v-stop-failed" }));
+        try {
+            await expect(runNestedDevelopment(async (name, args) => name === "stop" ? stop() : normal.call(name, args), {
+                outputRoot, jobPath: "unused", snapshot: () => ({ archive: "source", sha256: "b".repeat(64) }),
+            })).rejects.toThrow(status === "FAIL" ? "nested-development-failed: build" : "hyper-v-stop-failed");
+            expect(stop).toHaveBeenCalledOnce();
+            expect(existsSync(join(outputRoot, "result.json"))).toBe(true);
+            const failure = JSON.parse(readFileSync(join(outputRoot, "failure.json"), "utf8"));
+            expect(status === "FAIL" ? failure.cleanup : failure).toMatchObject({ stage: "stop-outer-vm", tool: "stop", code: "hyper-v-stop-failed" });
+            if (status === "FAIL") expect(failure.stage).toBe("validate-guest-result");
+        } finally { rmSync(outputRoot, { recursive: true, force: true }); }
+    });
+    it.each(["claim", "launch", "hash", "status", "runId"])("does not stop an uncertain or unowned run: %s", async fault => {
+        const outputRoot = mkdtempSync(join(tmpdir(), "ccc-nested-uncertain-"));
+        const normal = scenario();
+        const calls: string[] = [];
+        try {
+            await expect(runNestedDevelopment(async (name, args) => {
+                calls.push(name);
+                if (fault === "claim" && args.command?.includes("-Operation 'acquire'")) throw new Error("claim-conflict");
+                if (fault === "launch" && args.command?.includes("Register-ScheduledTask")) throw new Error("launch-uncertain");
+                const response = await normal.call(name, args);
+                if (name === "exec" && args.command.includes("Get-Content -Raw")) {
+                    const outer = JSON.parse(response.content[0].text);
+                    const terminal = JSON.parse(outer.result.stdout);
+                    terminal[fault === "hash" ? "sourceSha256" : fault] = "invalid";
+                    outer.result.stdout = JSON.stringify(terminal);
+                    return reply(outer);
+                }
+                return response;
+            }, { outputRoot, jobPath: "unused", snapshot: () => ({ archive: "source", sha256: "b".repeat(64) }) })).rejects.toThrow();
+            expect(calls).not.toContain("stop");
+            expect(normal.calls.some(c => c.args.command?.includes("-Operation 'complete'"))).toBe(false);
+        } finally { rmSync(outputRoot, { recursive: true, force: true }); }
+    });
+    it.each(["prepare", "download"])("stops the owned VM after safe %s failure", async fault => {
+        const outputRoot = mkdtempSync(join(tmpdir(), "ccc-nested-failure-stop-"));
+        const normal = scenario();
+        try {
+            await expect(runNestedDevelopment(async (name, args) => {
+                if ((fault === "prepare" && args.command?.includes("Install-WindowsFeature")) || (fault === "download" && name === "download")) throw new Error("test-operation-failed");
+                return normal.call(name, args);
+            }, { outputRoot, jobPath: "unused", snapshot: () => ({ archive: "source", sha256: "b".repeat(64) }) })).rejects.toThrow("test-operation-failed");
+            expect(normal.calls.at(-1)).toMatchObject({ name: "stop", args: { incarnationId: "a".repeat(32) } });
+            expect(normal.calls.at(-2)?.args.command).toContain("-Operation 'complete'");
+        } finally { rmSync(outputRoot, { recursive: true, force: true }); }
     });
     it("rejects failed guest commands and command injection before launch", () => {
         expect(() => nestedExecOutput({ result: { status: 1, stdout: "{}" } })).toThrow();
@@ -164,14 +220,14 @@ describe("nested run failure artifacts", () => {
         const normal = scenario();
         const call = async (name: string, args: any) => {
             if (args.command?.includes("Install-WindowsFeature")) throw primary;
-            if (args.command?.includes("Remove-Item")) throw new Error("nested-claim-release-failed");
+            if (args.command?.includes("-Operation 'complete'")) throw new Error("nested-claim-complete-failed");
             return normal.call(name, args);
         };
         try {
             await expect(runNestedDevelopment(call, { outputRoot, jobPath: "unused", snapshot: () => { throw new Error("unused"); } })).rejects.toBe(primary);
             const artifact = JSON.parse(readFileSync(join(outputRoot, "failure.json"), "utf8"));
             expect(artifact).toMatchObject({ stage: "prepare-nested-hyper-v", tool: "exec", code: "nested-feature-install-failed",
-                cleanup: { stage: "release-guest-claim", tool: "exec", code: "nested-claim-release-failed" } });
+                cleanup: { stage: "complete-guest-claim", tool: "exec", code: "nested-claim-complete-failed" } });
         } finally { rmSync(outputRoot, { recursive: true, force: true }); }
     });
     it("retains bounded command failure diagnostics without request material or credentials", () => {
@@ -304,7 +360,7 @@ describe("nested live progress", () => {
         let poll = 0;
         try {
             const result = await runNestedDevelopment(async (name, args) => {
-                if (args.command?.includes("-RunId ")) runId = /-RunId ([a-f0-9]{32})/.exec(args.command)![1];
+                if (args.command?.includes("Register-ScheduledTask")) runId = /-RunId ([a-f0-9]{32})/.exec(args.command)![1];
                 if (name === "exec" && args.command.includes("Get-Content -Raw") && poll++ < 2)
                     return reply({ result: { status: 0, stdout: JSON.stringify({ kind: "progress", runId, stage: poll === 1 ? "install" : "test" }) } });
                 return base.call(name, args);
@@ -356,7 +412,7 @@ describe("nested live progress", () => {
         const messages: string[] = [];
         try {
             await expect(runNestedDevelopment(async (name, args) => {
-                if (args.command?.includes("-RunId ")) runId = /-RunId ([a-f0-9]{32})/.exec(args.command)![1];
+                if (args.command?.includes("Register-ScheduledTask")) runId = /-RunId ([a-f0-9]{32})/.exec(args.command)![1];
                 if (name === "exec" && args.command.includes("Get-Content -Raw")) return reply({ result: { status: 0, stdout: JSON.stringify({ kind: "progress", runId: kind === "wrong-run" ? "0".repeat(32) : runId, stage: kind === "wrong-stage" ? "PASS secret" : "build" }) } });
                 return base.call(name, args);
             }, { outputRoot: root, jobPath: "job.ps1", snapshot: () => ({ archive: "source", sha256: "b".repeat(64) }),
@@ -364,7 +420,7 @@ describe("nested live progress", () => {
             expect(messages.some(m => m.includes("guest-build"))).toBe(kind === "valid");
             expect(messages.join(" ")).not.toContain("secret");
             expect(base.calls.some(c => c.name === "download")).toBe(false);
-            expect(base.calls.at(-1)?.args.command).not.toContain("Remove-Item");
+            expect(base.calls.some(c => c.name === "stop" || c.args.command?.includes("-Operation 'complete'"))).toBe(false);
         } finally { rmSync(root, { recursive: true, force: true }); }
     });
 });

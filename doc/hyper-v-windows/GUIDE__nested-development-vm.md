@@ -102,8 +102,20 @@ An atomic `C:\ccc-nested-development\active` directory claim prevents overlappin
 iterations. The scheduled task has a four-hour deadline. If the connection drops
 or launch outcome is uncertain, the claim is preserved. In L1, inspect the
 `CCC Nested Hyper-V Development` scheduled task and its per-run logs. Only after
-confirming the job has ended, remove the empty `active` directory and retry.
-No automatic cleanup deletes or stops L1 or unrelated devices.
+confirming the job has ended and no runner still owns it, inspect and remove its
+matching `active\claim.json`, then remove the empty `active` directory and retry.
+Legacy claims without a marker still require this explicit recovery; do not
+remove unknown files recursively.
+Completed runs stop L1 without deleting it, returning its 16 GiB RAM to the host.
+The runner marks its guest claim completed before stopping the exact VM incarnation;
+the next boot reclaims that completed claim. Completion is checked against both
+run ID and source hash. A stop failure makes the runner fail even after guest PASS.
+Once completion is confirmed, an artifact-save or log-download failure also
+triggers shutdown; the collection failure remains reported and guest files are kept.
+Failures before job launch also stop L1 after the runner acquired its claim.
+Unknown launch outcomes, incomplete results and timeouts retain the running VM
+and claim for inspection. After such an interruption, confirm the job has ended
+before manually recovering the claim. No unrelated device is stopped or deleted.
 
 The retained L1 uses 16 GiB while running. A separate host Level 3 Windows VM
 also needs its configured memory plus the host reserve (the larger of 2 GiB or
