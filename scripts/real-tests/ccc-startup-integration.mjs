@@ -50,7 +50,12 @@ try {
     writeFileSync(join(bin, 'docker'), `#!${process.execPath}\n` + String.raw`
 const {spawnSync}=require('node:child_process');
 const map=JSON.parse(process.env.CCC_FIXTURE_VOLUME_MAP);
-const args=process.argv.slice(2).map(a=>a==='ccc'?process.env.CCC_FIXTURE_IMAGE:map[a]||a.replace(/^(ccc-(?:mise-cache|codex-packages)-v1-host-\d+-\d+)(:.*)$/,(_,n,s)=>(map[n]||n)+s).replace(/(^|,)(?:src|source)=([^,]+)/g,(all,lead,n)=>map[n]?all.replace(n,map[n]):all));
+const original=process.argv.slice(2);
+const args=original.map((a,i)=>{
+ const imageOperand=(original[0]==='images'&&i===original.length-1)||(original[0]==='inspect'&&i===1)||(original[0]==='image'&&original[1]==='inspect'&&i===2);
+ if(a==='ccc'&&imageOperand) return process.env.CCC_FIXTURE_IMAGE;
+ return map[a]||a.replace(/^(ccc-(?:mise-cache|codex-packages)-v1-host-\d+-\d+)(:.*)$/,(_,n,s)=>(map[n]||n)+s).replace(/(^|,)(?:src|source)=([^,]+)/g,(all,lead,n)=>map[n]?all.replace(n,map[n]):all);
+});
 if(args[0]==='pull') { console.error('fixture refuses image pulls; compile/image versions must match'); process.exit(95); }
 const result=spawnSync(process.env.CCC_FIXTURE_DOCKER,args,{encoding:'utf8',stdio:['inherit','pipe','inherit'],maxBuffer:32*1024*1024});
 let output=result.stdout||'';
