@@ -125,14 +125,33 @@ const command=['codex','resume','--last']; const launch=prepareCodexLaunch('dock
 assert.equal(launch.ok,true,JSON.stringify(launch));
 assert.deepEqual(launch.command.filter(x=>x!=='--no-daemon'),command);
 console.log('PASS: real daemon preparation boundary '+JSON.stringify(launch));
+const sentinelPath='/home/ccc/.codex/ccc-startup-fixture-sentinel';
+const sentinel='retained Codex state before stopped handoff';
+exec(['exec',ready,'sh','-c','printf %s "$1" > "$2"','sh',sentinel,sentinelPath]);
 exec(['stop',ready]);
-d.startProjectContainer(project,ensureDirs,undefined,undefined,profile,undefined,undefined,id=>ready=id);
-assert.equal(ready,first); assert.equal(exec(['inspect','--format','{{.State.Running}}',ready]),'true');
+// As in the CLI, approve replacement only while this fixture's exact container
+// is stopped. Production rechecks the identity/state under its lifecycle guard.
+// Strict socket aliases may require replacement rather than same-ID restart.
+const approveStoppedReplacement=(replace)=>{
+ assert.equal(exec(['inspect','--format','{{.Id}}|{{.State.Running}}',name]),first+'|false');
+ replace();
+ return true;
+};
+let stoppedHandoff;
+d.startProjectContainer(project,ensureDirs,undefined,undefined,profile,undefined,approveStoppedReplacement,(id,handoff)=>{ready=id;stoppedHandoff=handoff;});
+assert.match(ready,/^[a-f0-9]{64}$/);
+assert.equal(exec(['inspect','--format','{{.Id}}|{{.State.Running}}',name]),ready+'|true');
+assert.equal(stoppedHandoff.startedByInvocation,true);
+assert.equal(exec(['exec',ready,'cat',sentinelPath]),sentinel);
+exec(['exec',ready,'sh','-c','printf %s "$1" >> "$2"','sh','; writable after stopped handoff',sentinelPath]);
+assert.equal(exec(['exec',ready,'cat',sentinelPath]),sentinel+'; writable after stopped handoff');
 assertCodexStateAccessible(ready,profile);
-console.log('PASS: stopped-container handoff retains ID and writable Codex state');
+console.log('PASS: stopped-container handoff pins running ID and retains writable Codex state');
 `);
     console.log(`START fixture ${prefix} on ${base}`);
-    const child = spawnSync(process.execPath, [childFile, root, project], { env, stdio: 'inherit', timeout: 1800000 });
+    // Three real lifecycle transitions plus fresh tool/bootstrap downloads can
+    // exceed 30 minutes on Docker Desktop; each individual operation stays bounded.
+    const child = spawnSync(process.execPath, [childFile, root, project], { env, stdio: 'inherit', timeout: 2700000 });
     assert.equal(child.error, undefined, child.error?.message); assert.equal(child.status, 0, 'real startup fixture failed');
     assert.equal(docker(['image', 'inspect', base, '--format', '{{.Id}}']), base);
     console.log('PASS: disposable startup boundaries');
