@@ -1468,7 +1468,9 @@ export function getConfirmedRunningContainerId(containerName: string): string | 
     return identity?.running ? identity.containerId : null;
 }
 
-export function canExecContainer(containerName: string, timeoutMs = 5000): boolean {
+const CONTAINER_EXEC_TIMEOUT_MS = 5000;
+
+export function canExecContainer(containerName: string, timeoutMs = CONTAINER_EXEC_TIMEOUT_MS): boolean {
     const result = spawnSync(
         runtimeCli(),
         ["exec", containerName, "true"],
@@ -1479,11 +1481,13 @@ export function canExecContainer(containerName: string, timeoutMs = 5000): boole
 
 function canExecContainerAfterBriefRetry(containerName: string): boolean {
     const sleeper = new Int32Array(new SharedArrayBuffer(4));
-    const deadline = Date.now() + 750;
+    // Docker exec startup can take longer than a subsecond readiness poll even
+    // when healthy. Use the normal probe budget, with one shared retry deadline.
+    const deadline = Date.now() + 3 * CONTAINER_EXEC_TIMEOUT_MS + 2 * 75;
     for (let attempt = 0; attempt < 3; attempt += 1) {
         const remainingMs = deadline - Date.now();
         if (remainingMs <= 0) break;
-        if (canExecContainer(containerName, Math.min(200, remainingMs))) return true;
+        if (canExecContainer(containerName, Math.min(CONTAINER_EXEC_TIMEOUT_MS, remainingMs))) return true;
         const sleepMs = Math.min(75, deadline - Date.now());
         if (attempt < 2 && sleepMs > 0) Atomics.wait(sleeper, 0, 0, sleepMs);
     }

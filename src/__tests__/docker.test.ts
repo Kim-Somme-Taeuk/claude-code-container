@@ -2780,6 +2780,41 @@ describe("docker.ts module exports", () => {
             if (initial === "running") expect(spawnSyncMock.mock.calls.some(([, args]) => ["start", "run", "stop", "rm"].includes(args[0]))).toBe(false);
         });
 
+        it.each([false, true])("uses the normal exec budget without destructive recovery (deadline exhausted=%s)", exhausted => {
+            const ready = vi.fn();
+            let elapsed = 0;
+            vi.spyOn(Date, "now").mockImplementation(() => 1_800_000_000_000 + elapsed);
+            const budgets: number[] = [];
+            spawnSyncMock.mockImplementation((_command: unknown, argsValue: unknown, optionsValue: unknown) => {
+                const args = argsValue as string[];
+                if (args[0] === "images") return makeResult(0, "sha256:abc\n");
+                if (args[0] === "image" && args[1] === "inspect") return makeResult(0, "<no value>\n");
+                if (args[0] === "ps" && ["-aq", "-q"].includes(args[1])) return makeResult(0, `${TEST_CONTAINER_ID}\n`);
+                if (args[0] === "inspect" && args.includes("{{.Id}}|{{.State.Running}}")) return makeResult(0, `${TEST_CONTAINER_ID}|true\n`);
+                if (args[0] === "inspect") return makeResult(0, fullCredentialMountsJson());
+                if (args[0] === "exec" && args.at(-1) === "true") {
+                    const budget = (optionsValue as { timeout: number }).timeout;
+                    budgets.push(budget);
+                    // A healthy runtime needs 600ms; 200ms probes incorrectly reject it.
+                    // Exhaustion also models host scheduling delay beyond the total deadline.
+                    elapsed += exhausted ? 15151 : Math.min(600, budget);
+                    return makeResult(!exhausted && budget >= 600 ? 0 : 1);
+                }
+                return makeResult(0);
+            });
+            const launch = () => startProjectContainer(projectPath, ensureDirs,
+                undefined, undefined, undefined, undefined, () => false, ready);
+            if (exhausted) {
+                expect(launch).toThrow("automatic destructive recovery was refused");
+                expect(ready).not.toHaveBeenCalled();
+            } else {
+                expect(launch()).toBe(getContainerName(projectPath));
+                expect(ready).toHaveBeenCalledWith(TEST_CONTAINER_ID, { startedByInvocation: false });
+            }
+            expect(budgets).toEqual([5000]);
+            expectNoContainerReplacement();
+        });
+
         it("requests untruncated IDs before comparing the listed and inspected identities", () => {
             const fullId = TEST_CONTAINER_ID;
             const ready = vi.fn();
@@ -2971,7 +3006,7 @@ describe("docker.ts module exports", () => {
                 return args?.[0] === "exec" && args?.at(-1) === "true";
             });
             expect(readinessCalls).toHaveLength(1);
-            expect((readinessCalls[0][2] as { timeout?: number }).timeout).toBeLessThanOrEqual(200);
+            expect((readinessCalls[0][2] as { timeout?: number }).timeout).toBe(5000);
             expect(spawnSyncMock.mock.calls.some((call: unknown[]) => {
                 const args = call[1] as string[];
                 return args?.[0] === "stop" || args?.[0] === "rm" || args?.[0] === "run";
@@ -4275,7 +4310,7 @@ describe("docker.ts module exports", () => {
             });
             expect(readinessCalls).toHaveLength(3);
             expect(readinessCalls.every((call: unknown[]) => (
-                ((call[2] as { timeout?: number }).timeout ?? Infinity) <= 200
+                ((call[2] as { timeout?: number }).timeout ?? Infinity) <= 5000
             ))).toBe(true);
 
             expect(spawnSyncMock.mock.calls.some((call: unknown[]) => {

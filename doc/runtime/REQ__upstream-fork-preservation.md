@@ -17,6 +17,10 @@ Supported Linux/WSL containers use the host effective UID and primary GID;
 Podman keep-id and desktop mappings retain their explicit semantics. Runtime
 identity must be checked before every running-container reuse/defer path.
 Running work is never stopped automatically to change identity or mounts.
+Reuse recognizes Docker tmpfs mounts reported in `HostConfig.Tmpfs` as well as
+ordinary mount entries. Healthy exec probes use the normal five-second timeout,
+with at most three attempts under a shared 15.15-second retry budget. Exhausted
+readiness checks refuse reuse without stopping or removing the running container.
 Mise and Codex package caches are scoped to runtime identity. Existing caches
 are not recursively reowned while in use or deleted during migration.
 
@@ -76,8 +80,10 @@ Remote cache identity comes from the remote image, never the local host UID.
 The first SSH refresh without valid provenance, or any change to authoritative
 known_hosts bytes or presence, resets container-learned trust. Users must verify
 those additional hosts again. This avoids guessing whether hashed or wildcard
-entries conflict with changed authority. An SSH entry larger than 16 MiB fails
-snapshot preparation; the incomplete snapshot is invalidated.
+entries conflict with changed authority. An authoritative regular `known_hosts`
+file larger than 16 MiB fails preparation and invalidates the incomplete snapshot.
+Oversized previous provenance or learned `known_hosts` instead discards learned
+trust and continues. This size limit does not apply to other copied SSH files.
 
 Opaque or unavailable runtime mount evidence defers clipboard daemon updates.
 An upgrade proceeds when running bind users can be excluded safely; authenticated
