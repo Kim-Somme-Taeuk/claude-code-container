@@ -7,6 +7,10 @@ import { type ChildProcess } from "child_process";
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 // Must be declared before import of the module under test.
 
+// Bind-user inspection is exercised with real daemon descriptors in clipboard-state
+// and runtime metadata cases in clipboard-bind-users.test.ts.
+vi.mock("../clipboard-bind-users.js", () => ({ clipboardPortMayHaveBindUsers: () => false }));
+
 // Track process.exit calls without actually exiting
 const mockProcessExit = vi.spyOn(process, "exit").mockImplementation((() => {}) as any);
 

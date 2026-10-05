@@ -28,6 +28,16 @@ describe.each(["legacy", "run"])("clipboard state across real daemon restarts (%
                 compilerOptions: { target: ScriptTarget.ES2022, module: ModuleKind.ES2022 },
             }).outputText);
         }
+        // Runtime metadata parsing has independent helper coverage. These real
+        // daemons isolate its result while proving held-descriptor preservation.
+        writeFileSync(join(fixtureRoot, "clipboard-bind-users.js"), `
+            import { existsSync, readFileSync } from "fs";
+            import { join } from "path";
+            export function clipboardPortMayHaveBindUsers() {
+                const control = join(process.env.CCC_CLIPBOARD_TEST_HOME, "bind-users");
+                return existsSync(control) && readFileSync(control, "utf8") !== "none";
+            }
+        `);
         writeFileSync(join(fixtureRoot, "home.cjs"), `
             require("os").homedir = () => process.env.CCC_CLIPBOARD_TEST_HOME;
             if (process.argv.includes("--serve")) {
@@ -272,6 +282,34 @@ describe.each(["legacy", "run"])("clipboard state across real daemon restarts (%
         expect(readFileSync(startingLock, "utf8")).toBe("successor-startup-lock");
         expect(JSON.parse(await send(successor, "/health")).valid).toBe(true);
     });
+
+    it.each(["active", "unknown"])("preserves a held legacy bind inode while %s container users prevent upgrade", async mode => {
+        const legacy = start("legacy-peer.js");
+        const old = await published();
+        const fd = openSync(portFile, "r");
+        descriptors.push(fd);
+        const before = fstatSync(fd);
+        writeFileSync(join(home, "bind-users"), mode);
+        const result = await start("driver.js", "ensure-exit").exited;
+        expect(result.code, result.stderr).toBe(0);
+        expect(result.stderr).toContain("Clipboard update deferred");
+        expect(Number(result.stdout.trim())).toBe(old.port);
+        expect(fstatSync(fd).ino).toBe(before.ino);
+        expect(statSync(portFile).ino).toBe(before.ino);
+        expect(readFileSync(fd, "utf8")).toBe(old.bytes);
+        expect(JSON.parse(await send(old, "/health")).valid).toBe(true);
+        expect(existsSync(join(home, ".ccc", layout === "run" ? "run" : "", "legacy-closing"))).toBe(false);
+        expect((await start("driver.js", "retire", portFile).exited).code).toBe(0);
+        expect(JSON.parse(await send(old, "/health")).valid).toBe(true);
+        expect((await start("driver.js", "stop", ownLock).exited).code).toBe(0);
+        expect(JSON.parse(await send(old, "/health")).valid).toBe(true);
+        writeFileSync(join(home, "bind-users"), "none");
+        const upgraded = await start("driver.js", "ensure-exit").exited;
+        expect(upgraded.code, upgraded.stderr).toBe(0);
+        const successor = await published(old.bytes);
+        expect(successor.bytes).not.toBe(old.bytes);
+        expect((await legacy.exited).code).toBe(0);
+    }, 45000);
 
     it("waits out legacy shutdown before publishing even when the upgrading caller exits immediately", async () => {
         const legacy = start("legacy-peer.js");

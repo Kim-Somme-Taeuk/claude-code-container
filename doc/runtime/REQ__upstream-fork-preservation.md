@@ -63,7 +63,14 @@ Clipboard port-file publication preserves a file bind mount's inode across
 normal stop/restart. Serialize legacy server retirement and replacement;
 authenticate live health rather than trusting a saved token. Preserve upstream
 clipboard text/image support and layout-aware paths. Unreadable mounted token
-files fall back to configured environment values. Probe proxy LISTEN state
+files fall back to configured environment values. Read a valid mounted port and
+token together so existing sessions follow a restarted server's new port while
+retaining their configured hostname. Do not shut down an unlinking legacy server
+while a running container may retain its port-file bind; background containers
+without session records count, and opaque or unavailable inspection defers the
+upgrade. Reuse the authenticated old endpoint and report the deferred update.
+Last-session stop and explicit retirement obey the same bind-user guard.
+Probe proxy LISTEN state
 without requiring ss or opening a connection to the proxy itself.
 
 Remember only explicit mise generation declines per project, including declines

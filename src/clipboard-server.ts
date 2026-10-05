@@ -29,6 +29,7 @@ import { platform } from "os";
 import { fileURLToPath } from "url";
 import { CLIPBOARD_FILES_CONTAINER_DIR } from "./utils.js";
 import { clipboardFilesDir, clipboardPortFile, clipboardStartingLock, clipboardStateDir, helperBinDir, locksDir } from "./home-layout.js";
+import { clipboardPortMayHaveBindUsers } from "./clipboard-bind-users.js";
 import { sessionLockLiveness } from "./session-lock-liveness.js";
 import { canonicalWindowsPowerShellPath, hiddenWindowsPowerShellArgs } from "@ccc/device-lab/windows-system-powershell.js";
 
@@ -1606,6 +1607,10 @@ export async function ensureClipboardServer(): Promise<number> {
             if (health.alive) {
                 if (health.version === SERVER_VERSION) return current.port;
                 if (health.version !== SERVER_VERSION) {
+                    if (clipboardPortMayHaveBindUsers(clipboardPortFile())) {
+                        console.warn("[ccc] Clipboard update deferred: running container bind users could not be excluded. Keeping the authenticated existing bridge; retry after its container users stop.");
+                        return current.port;
+                    }
                     if (!await shutdownServer(current.port, current.token)) {
                         throw new Error("Failed to acknowledge clipboard server shutdown for upgrade");
                     }
@@ -1681,6 +1686,7 @@ export function stopClipboardServerIfLast(hasOtherActiveSessions: boolean): void
     const info = readPortFile();
     if (!info) return;
 
+    if (clipboardPortMayHaveBindUsers(clipboardPortFile())) return;
     shutdownServer(info.port, info.token);
 
     // Keep the bind-mounted inode; authenticated health rejects stale state.
@@ -1689,7 +1695,7 @@ export function stopClipboardServerIfLast(hasOtherActiveSessions: boolean): void
 /** Ask the server recorded in a pre-layout port file to shut down. */
 export function retireClipboardServerFromPortFile(portFile: string): void {
     const info = readPortFile(portFile);
-    if (info) shutdownServer(info.port, info.token);
+    if (info && !clipboardPortMayHaveBindUsers(portFile)) shutdownServer(info.port, info.token);
 }
 
 // === Standalone Entry Point ===

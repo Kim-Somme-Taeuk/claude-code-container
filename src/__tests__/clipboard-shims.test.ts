@@ -14,8 +14,17 @@ const shims = [
     { name: "pbpaste", args: [] },
 ];
 
-describe.skipIf(process.platform === "win32").each(shims)("$name mounted clipboard token", ({ name, args }) => {
-    it.each(["readable", "unreadable", "missing", "a directory"])("preserves the correct token when the port file is %s", (state) => {
+const records = [
+    { state: "readable", record: "43123:mounted-file-token" },
+    { state: "unreadable", record: "43123:mounted-file-token" },
+    { state: "missing" },
+    { state: "a directory" },
+    ...["", "43123", "0:token", "65536:token", "999999999999:token", "abc:token", "43123:", "43123:bad token", "43123:token:extra", "43123:token\n43124:other", "43123:token\r"].map(record => ({ state: `invalid ${JSON.stringify(record)}`, record })),
+];
+const cases = ["clipboard.invalid", "172.28.96.1", "[fd00::1]"].flatMap(host => records.map(record => ({ ...record, host })));
+
+describe.skipIf(process.platform === "win32").each(shims)("$name mounted clipboard endpoint", ({ name, args }) => {
+    it.each(cases)("keeps URL and auth paired for $host when the port file is $state", ({ state, record, host }) => {
         const directory = mkdtempSync(join(tmpdir(), "ccc-clipboard-shim-"));
         const portFile = join(directory, "clipboard.port");
         const captureFile = join(directory, "authorization");
@@ -31,7 +40,7 @@ describe.skipIf(process.platform === "win32").each(shims)("$name mounted clipboa
             if (state === "a directory") {
                 mkdirSync(portFile);
             } else if (state !== "missing") {
-                writeFileSync(portFile, "43123:mounted-file-token", { mode: 0o644 });
+                writeFileSync(portFile, record!, { mode: 0o644 });
                 chmodSync(portFile, state === "unreadable" ? 0o000 : 0o644);
             }
 
@@ -50,7 +59,7 @@ case "$*" in *http_code*) /bin/cat >/dev/null; printf '200';; *) printf 'fixture
                     PATH: `${directory}:/usr/bin:/bin`,
                     ENV: "",
                     BASH_ENV: "",
-                    CCC_CLIPBOARD_URL: "http://clipboard.invalid:43123",
+                    CCC_CLIPBOARD_URL: `http://${host}:42000`,
                     CCC_CLIPBOARD_TOKEN: "current-session-token",
                     CCC_TEST_PORT_FILE: portFile,
                     CCC_TEST_AUTH_CAPTURE: captureFile,
@@ -74,6 +83,7 @@ case "$*" in *http_code*) /bin/cat >/dev/null; printf '200';; *) printf 'fixture
             expect(result.stderr).toBe("");
             const token = state === "readable" ? "mounted-file-token" : "current-session-token";
             expect(readFileSync(captureFile, "utf-8").split("\n")).toContain(`Authorization: Bearer ${token}`);
+            expect(readFileSync(captureFile, "utf-8").split("\n")).toContain(`http://${host}:${state === "readable" ? "43123" : "42000"}/clipboard/text`);
             expect(result.stdout).toBe(name === "wl-copy" ? "" : "fixture clipboard text");
         } finally {
             rmSync(directory, { recursive: true, force: true });
