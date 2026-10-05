@@ -38,6 +38,11 @@ import {
 
 import { ensureClipboardServer, hasAnyActiveSessionsExcept, retireClipboardServerFromPortFile } from "./clipboard-server.js";
 import { clipboardPortFile as clipboardPortFilePath, DEFAULT_PROFILE_NAME, defaultProfileDir, ensureDefaultProfileDir, migrateHomeLayout, normalizeProfile } from "./home-layout.js";
+import { withCodexConfigLock } from "./codex-config-lock.js";
+import { ensureCodexHarness } from "./codex-harness.js";
+import { assertCodexStateAccessible } from "./codex-state-ownership.js";
+import { hasLegacyHomeLayoutContainerMounts } from "./home-layout-container-guard.js";
+import { withSharedMutationLock } from "@ccc/device-lab/device-lab-shared-state.js";
 import { prepareCodexLaunch } from "./codex-launch.js";
 import { ContainerRestartRequiredError, formatContainerStartupError } from "./container-restart-guidance.js";
 import { buildCodexResumeRecoveryCommand } from "./codex-resume-recovery.js";
@@ -89,7 +94,6 @@ import {
     removeProjectContainer,
     syncClipboardShims,
     getContainerStatus,
-    getCurrentImageId,
     ensureCredentialHostDir,
     prepareCodexConfigForContainer,
     ensureContainerManagerSocketAccess,
@@ -475,10 +479,15 @@ export async function maybeAttachCodexClipboardImageForCommand(
 }
 
 // Check if mise.toml exists and offer to create if not
-async function ensureMiseConfig(projectPath: string): Promise<void> {
+export async function ensureMiseConfig(projectPath: string): Promise<void> {
     const miseConfigPath = join(projectPath, "mise.toml");
 
     if (existsSync(miseConfigPath) || existsSync(join(projectPath, ".mise.toml"))) {
+        return;
+    }
+
+    const skippedPath = join(DATA_DIR, "mise-prompt-skipped", getProjectId(projectPath));
+    if (existsSync(skippedPath)) {
         return;
     }
 
@@ -497,6 +506,15 @@ async function ensureMiseConfig(projectPath: string): Promise<void> {
         detectProjectToolsAndWriteMiseConfig(projectPath);
     } else {
         console.log("Skipping mise.toml creation.");
+        if (answer === "n" || answer === "no") {
+            try {
+                mkdirSync(dirname(skippedPath), {recursive: true});
+                writeFileSync(skippedPath, "");
+                console.log(`Remembered for this project. To ask again, delete: ${skippedPath}`);
+            } catch {
+                console.warn("Could not save mise prompt preference; you may be asked again next time.");
+            }
+        }
     }
 }
 
@@ -580,49 +598,9 @@ async function exec(
     const containerStatus = getContainerStatus(targetContainer);
     let wasAlreadyRunning = containerStatus.running;
     const sessionContainerPrefix = profile ? `${projectId}--p--${profile}` : projectId;
-    const recreateStoppedContainer = (recreate: (containerId: string) => void) => (
-        replaceStoppedContainerWithoutInterruptingSessions(
-            targetContainer,
-            sessionContainerPrefix,
-            sessionLockFile,
-            containerStatus.containerId!,
-            containerStatus.imageId!,
-            recreate,
-            recreateContainerWithoutInterruptingSessions,
-            getContainerStatus,
-            containerStatus.running,
-        )
-    );
-
-    // Auto-upgrade container if image has been rebuilt
-    if (containerStatus.exists) {
-        const currentImageId = getCurrentImageId();
-        if (
-            currentImageId
-            && containerStatus.containerId
-            && containerStatus.imageId
-            && containerStatus.imageId !== currentImageId
-        ) {
-            const recreated = recreateStoppedContainer((stoppedContainerId) => {
-                const oldImageId = containerStatus.imageId;
-
-                progress("Upgrading container to new image...");
-                const removed = spawnSync(runtimeCli(), ["rm", stoppedContainerId], { stdio: "ignore" });
-                if (removed.error || removed.status !== 0) {
-                    throw new Error("Container image upgrade aborted because the stopped container could not be removed.");
-                }
-                wasAlreadyRunning = false;
-
-                // Remove old image (now dangling). Silently fails if still in use by other containers.
-                if (oldImageId) {
-                    spawnSync(runtimeCli(), ["rmi", oldImageId], { stdio: "ignore" });
-                }
-            });
-            if (!recreated) {
-                console.log(containerUpdateDeferredMessage(containerStatus.running));
-            }
-        }
-    }
+    // Image and numeric-user upgrades are reconciled together by startProjectContainer.
+    // It retains the previous immutable image/mount evidence until Codex state
+    // migration completes, under the startup and existing session guards.
 
     // Start or get container (with extra mounts for worktree workspaces)
     if (!wasAlreadyRunning) progress("Starting container...");
@@ -694,7 +672,7 @@ async function exec(
     progress("Synchronizing container setup...");
     let containerName = await withContainerSetupReadiness(sessionContainerPrefix, async () => {
         let readyContainerName = startContainer();
-        restoreCodexConfigHostOwnership(readyContainerName);
+        withCodexConfigLock(() => restoreCodexConfigHostOwnership(readyContainerName, profile), profile);
 
         // Skip heavy setup if the container was already running before this
         // launch; the setup lock guarantees a simultaneous creator has finished
@@ -707,7 +685,7 @@ async function exec(
             ensureUvAvailable(readyContainerName);
 
             progress("Building MCP config...");
-            const forwardedMcp = await buildMcpConfig(profile);
+            const forwardedMcp = await buildMcpConfig(profile, () => restoreCodexConfigHostOwnership(readyContainerName, profile));
 
             progress("Setting up localhost proxy...");
             setupLocalhostProxy(readyContainerName);
@@ -723,7 +701,7 @@ async function exec(
             );
         } else {
             // Container already running — only rebuild MCP config (lightweight, may have changed)
-            const forwardedMcp = await buildMcpConfig(profile);
+            const forwardedMcp = await buildMcpConfig(profile, () => restoreCodexConfigHostOwnership(readyContainerName, profile));
             if (forwardedMcp.length > 0) {
                 console.error(`MCP forwarded: ${forwardedMcp.join(", ")}`);
             }
@@ -750,7 +728,9 @@ async function exec(
             // command path while setup owns the readiness lock.
             ensureClaudeInContainer(readyContainerName);
         } else if (commandTool?.name === "codex") {
-            prepareCodexConfigForContainer(readyContainerName);
+            withCodexConfigLock(() => prepareCodexConfigForContainer(readyContainerName, profile), profile);
+            assertCodexStateAccessible(readyContainerName, profile);
+            ensureCodexHarness(readyContainerName, profile);
         }
         progress("Syncing clipboard shims...");
         syncClipboardShims(readyContainerName, __dirname);
@@ -864,37 +844,47 @@ async function exec(
     const envFile = writeEnvFile(envEntries);
     execArgs.push("--env-file", envFile);
 
-    let preparationStatus: number | null = null;
-    if (commandTool?.name === "codex" && options.interactive !== false) {
-        const preparation = prepareCodexLaunch(runtimeCli(), [...execArgs, containerName], resolvedCmd);
-        if (!preparation.ok) {
-            console.error(`[ccc] ${preparation.error}`);
-            preparationStatus = preparation.status;
+    let resultStatus = 1;
+    try {
+        let preparationStatus: number | null = null;
+        if (commandTool?.name === "codex" && options.interactive !== false) {
+            const preparation = prepareCodexLaunch(runtimeCli(), [...execArgs, containerName], resolvedCmd);
+            if (!preparation.ok) {
+                console.error(`[ccc] ${preparation.error}`);
+                preparationStatus = preparation.status;
+            } else {
+                resolvedCmd = preparation.command;
+                if (preparation.notice) console.error(`[ccc] ${preparation.notice}`);
+            }
+        }
+
+        if (options.interactive !== false && process.stdin.isTTY && process.stdout.isTTY) {
+            execArgs.push("-it");
+            if (commandTool?.name === "codex" && preparationStatus === null) {
+                resolvedCmd = buildCodexResumeRecoveryCommand(resolvedCmd);
+            }
+        }
+
+        execArgs.push(containerName);
+
+        if (commandTool?.name === "claude") {
+            // Run claude directly (no shell wrapper — avoids mise interception)
+            execArgs.push(CLAUDE_BIN_PATH, ...cmd.slice(1));
         } else {
-            resolvedCmd = preparation.command;
-            if (preparation.notice) console.error(`[ccc] ${preparation.notice}`);
+            execArgs.push(...resolvedCmd);
+        }
+
+        resultStatus = preparationStatus ?? spawnSync(runtimeCli(), execArgs, { stdio: "inherit" }).status ?? 1;
+    } finally {
+        try {
+            withCodexConfigLock(() => restoreCodexConfigHostOwnership(containerName, profile), profile);
+        } catch (error) {
+            console.warn(`[ccc] Unable to restore Codex config access after command exit: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+            try { unlinkSync(envFile); } catch { /* ignore cleanup error */ }
+            cleanupSession();
         }
     }
-
-    if (options.interactive !== false && process.stdin.isTTY && process.stdout.isTTY) {
-        execArgs.push("-it");
-        if (commandTool?.name === "codex" && preparationStatus === null) {
-            resolvedCmd = buildCodexResumeRecoveryCommand(resolvedCmd);
-        }
-    }
-
-    execArgs.push(containerName);
-
-    if (commandTool?.name === "claude") {
-        // Run claude directly (no shell wrapper — avoids mise interception)
-        execArgs.push(CLAUDE_BIN_PATH, ...cmd.slice(1));
-    } else {
-        execArgs.push(...resolvedCmd);
-    }
-
-    const resultStatus = preparationStatus ?? spawnSync(runtimeCli(), execArgs, { stdio: "inherit" }).status ?? 1;
-    restoreCodexConfigHostOwnership(containerName);
-    try { unlinkSync(envFile); } catch { /* ignore cleanup error */ }
 
     if (process.env.DEBUG) {
         // Check conversation directory state after Claude exits
@@ -907,8 +897,6 @@ async function exec(
         console.error(`[ccc:debug] post-exit conversation check: ${output}`);
     }
 
-    // Cleanup on normal exit
-    cleanupSession();
     process.exit(resultStatus);
 }
 
@@ -1776,19 +1764,20 @@ export function informationalCommand(args: string[]): "help" | "version" | null 
 function migrateHostHomeLayout(): void {
     if (process.env[CONTAINER_ENV_KEY] === CONTAINER_ENV_VALUE) return;
     try {
-        migrateHomeLayout({
+        withSharedMutationLock(join(DATA_DIR, "codex-state.lock"), () => migrateHomeLayout({
             // Sessions of an older ccc use ~/.ccc/locks even when run/locks exists.
             hasLiveSessions: () => [join(DATA_DIR, "locks"), join(DATA_DIR, "run", "locks")]
                 .some((directory) => hasAnyActiveSessionsExcept(null, directory)),
             retireLegacyClipboard: retireClipboardServerFromPortFile,
-        });
+            hasContainerMounts: hasLegacyHomeLayoutContainerMounts,
+        }), { waitMs: 10_000, reclaimStale: false });
     } catch (error) {
         console.error(`ccc: ~/.ccc layout migration skipped (${(error as Error).message}); the old paths keep working.`);
     }
 }
 
 // === Main ===
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
     const args = process.argv.slice(2);
 
     // Unified parsing: @branch and remaining args
@@ -1805,6 +1794,29 @@ async function main(): Promise<void> {
         console.log(CLI_VERSION);
         return;
     }
+
+    // Resolve the runtime before inspecting containers for layout migration.
+    // An override may own stopped containers whose legacy bind paths must stay.
+    const extraEnv: Record<string, string> = {};
+    const cmdArgs: string[] = [];
+    for (let i = 0; i < filteredArgs.length; i++) {
+        if (filteredArgs[i] === "--env" && i + 1 < filteredArgs.length) {
+            const kv = filteredArgs[++i];
+            const eqIdx = kv.indexOf("=");
+            if (eqIdx > 0) extraEnv[kv.slice(0, eqIdx)] = kv.slice(eqIdx + 1);
+        } else if (filteredArgs[i] === "--runtime") {
+            try {
+                if (i + 1 >= filteredArgs.length) throw new Error("--runtime requires docker or podman");
+                setRuntimeOverride(filteredArgs[++i]);
+            } catch (e) {
+                console.error((e as Error).message);
+                process.exit(1);
+            }
+        } else {
+            cmdArgs.push(filteredArgs[i]);
+        }
+    }
+    const envOpt = Object.keys(extraEnv).length > 0 ? { env: extraEnv } : {};
 
     migrateHostHomeLayout();
 
@@ -1850,30 +1862,6 @@ async function main(): Promise<void> {
             return;
         }
     }
-
-    // Parse global flags before dispatching so they are removed from
-    // the command args and forwarded to exec() as options.env overrides.
-    const extraEnv: Record<string, string> = {};
-    const cmdArgs: string[] = [];
-    for (let i = 0; i < filteredArgs.length; i++) {
-        if (filteredArgs[i] === "--env" && i + 1 < filteredArgs.length) {
-            const kv = filteredArgs[i + 1];
-            const eqIdx = kv.indexOf("=");
-            if (eqIdx > 0) extraEnv[kv.slice(0, eqIdx)] = kv.slice(eqIdx + 1);
-            i++; // consume the value arg
-        } else if (filteredArgs[i] === "--runtime" && i + 1 < filteredArgs.length) {
-            try {
-                setRuntimeOverride(filteredArgs[i + 1]);
-            } catch (e) {
-                console.error((e as Error).message);
-                process.exit(1);
-            }
-            i++; // consume the value arg
-        } else {
-            cmdArgs.push(filteredArgs[i]);
-        }
-    }
-    const envOpt = Object.keys(extraEnv).length > 0 ? { env: extraEnv } : {};
 
     let command = cmdArgs[0];
     let cwd = process.cwd();

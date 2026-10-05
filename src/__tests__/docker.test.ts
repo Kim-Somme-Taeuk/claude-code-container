@@ -5,12 +5,42 @@ import { homedir } from "os";
 import { join } from "path";
 import { ContainerRestartRequiredError, formatContainerStartupError } from "../container-restart-guidance.js";
 
+// Image building and retained-state repair have dedicated shell/identity suites.
+// This lane exercises lifecycle decisions with explicit immutable image/user facts.
+const TEST_IDENTITY_IMAGE = `sha256:${"1".repeat(64)}`;
+const mockIdentity = { uid: 1000, gid: 1000, mapping: "host" as const, contractVersion: "1" };
+const mockEnsureIdentityImage = vi.fn((..._args: unknown[]) => TEST_IDENTITY_IMAGE);
+const mockPrepareCodexStateOwnership = vi.fn();
+const mockPrepareLabStateOwnership = vi.fn();
+const mockProveWslBindSourceIdentity = vi.fn<(...args: unknown[]) => boolean | null>(() => null);
+const mockSharedMutationLock = vi.fn((_path: string, operation: () => unknown) => operation());
+let effectiveContainerIdentity = "1000:1000:ccc:/home/ccc";
+vi.mock("../container-identity.js", async (importOriginal) => ({
+    ...await importOriginal<typeof import("../container-identity.js")>(),
+    resolveContainerIdentity: () => mockIdentity,
+    ensureIdentityImage: (...args: unknown[]) => mockEnsureIdentityImage(...args),
+}));
+vi.mock("../wsl-bind-source-proof.js", () => ({
+    proveWslBindSourceIdentity: (...args: unknown[]) => mockProveWslBindSourceIdentity(...args),
+}));
+vi.mock("../lab-state-ownership.js", () => ({
+    prepareLabStateOwnership: (...args: unknown[]) => mockPrepareLabStateOwnership(...args),
+}));
+vi.mock("../codex-state-ownership.js", () => ({
+    prepareCodexStateOwnership: (...args: unknown[]) => mockPrepareCodexStateOwnership(...args),
+}));
+vi.mock("@ccc/device-lab/device-lab-shared-state.js", async (importOriginal) => ({
+    ...await importOriginal<typeof import("@ccc/device-lab/device-lab-shared-state.js")>(),
+    withSharedMutationLock: (...args: [string, () => unknown]) => mockSharedMutationLock(...args),
+}));
+
 // Mock child_process before importing
 const spawnSyncMock = vi.fn<(...args: unknown[]) => SpawnSyncReturns<string>>();
 const TEST_CONTAINER_SHORT_ID = "abc123";
 const TEST_CONTAINER_ID = TEST_CONTAINER_SHORT_ID.padEnd(64, "a");
 const TEST_CREATED_CONTAINER_SHORT_ID = "c0ffee123456";
 const TEST_CREATED_CONTAINER_ID = TEST_CREATED_CONTAINER_SHORT_ID.padEnd(64, "e");
+let mockLifecycleImage = false;
 let expandShortContainerIds = false;
 let latestCreatedContainer: { id: string; runArgs: string[] } | null = null;
 let autoInspectCreatedContainer = true;
@@ -25,12 +55,19 @@ const mountMarkerReadAttempts = new Map<string, number>();
 const mountChallengeContainerIds = new Set<string>();
 const mountChallengePaths = new Set<string>();
 const mismatchingMountChallengeContainerIds = new Set<string>();
+let mismatchingMountChallengePathPrefix: string | undefined;
 vi.mock("child_process", async (importOriginal) => {
     const actual = (await importOriginal()) as Record<string, unknown>;
     return {
         ...actual,
         spawnSync: (...args: unknown[]) => {
             const argv = args[1] as string[];
+            if (mockLifecycleImage && argv?.[0] === "inspect" && argv[1] === "ccc" && argv.includes("{{.Id}}")) {
+                return makeResult(0, `sha256:${"2".repeat(64)}`);
+            }
+            if (argv?.[0] === "exec" && argv.at(-1) === 'printf "%s:%s:%s:%s" "$(id -u)" "$(id -g)" "$(id -un)" "$HOME"') {
+                return makeResult(0, effectiveContainerIdentity);
+            }
             if (autoInspectCreatedContainer
                 && latestCreatedContainer
                 && argv?.[0] === "inspect"
@@ -97,6 +134,7 @@ vi.mock("child_process", async (importOriginal) => {
                 return makeResult(
                     0,
                     mismatchingMountChallengeContainerIds.has(markerArgv[1])
+                        || (mismatchingMountChallengePathPrefix !== undefined && markerArgv[3].startsWith(mismatchingMountChallengePathPrefix))
                         ? "wrong-mounted-directory"
                         : mountMarkers.get(markerName) ?? "",
                 );
@@ -159,6 +197,7 @@ vi.mock("child_process", async (importOriginal) => {
 });
 
 // Mock fs for startProjectContainer
+const mockAccessSync = vi.fn();
 const mockExistsSync = vi.fn().mockReturnValue(true);
 const mockCloseSync = vi.fn();
 const mockFstatSync = vi.fn();
@@ -178,6 +217,7 @@ vi.mock("fs", async (importOriginal) => {
     const actual = (await importOriginal()) as Record<string, unknown>;
     return {
         ...actual,
+        accessSync: (...args: unknown[]) => mockAccessSync(...args),
         closeSync: (...args: unknown[]) => mockCloseSync(...args),
         existsSync: (...args: unknown[]) => mockExistsSync(...args),
         fstatSync: (...args: unknown[]) => mockFstatSync(...args),
@@ -253,6 +293,7 @@ const {
     stopProjectContainer,
     removeProjectContainer,
 } = await import("../docker.js");
+const { getIdentityLabels, getIdentityMiseVolumeName, getIdentityCodexPackagesVolumeName } = await import("../container-identity.js");
 const { clipboardFilesDir } = await import("../home-layout.js");
 
 const {
@@ -340,8 +381,8 @@ function fullCredentialMountsJson(
     ];
     const hostSshPath = join(homedir(), ".ssh");
     const coreMounts = [
-        { Source: MISE_VOLUME_NAME, Destination: "/home/ccc/.local/share/mise", Type: "volume", RW: true },
-        { Source: CODEX_PACKAGES_VOLUME_NAME, Destination: CODEX_PACKAGES_CONTAINER_DIR, Type: "volume", RW: true },
+        { Source: getIdentityMiseVolumeName(mockIdentity), Destination: "/home/ccc/.local/share/mise", Type: "volume", RW: true },
+        { Source: getIdentityCodexPackagesVolumeName(mockIdentity), Destination: CODEX_PACKAGES_CONTAINER_DIR, Type: "volume", RW: true },
         { Source: "/var/run/docker.sock", Destination: "/var/run/docker.sock", Type: "bind", RW: true },
         ...(mockExistsSync(hostSshPath)
             ? [{ Source: hostSshPath, Destination: "/home/ccc/.ssh", Type: "bind", RW: false }]
@@ -382,6 +423,7 @@ function fullCredentialMountsJson(
     const groupAdd = options.groupAdd ?? (status === "ready" && options.kvmDevice !== false ? ["108"] : []);
     return JSON.stringify({
         Id: "abc123",
+        Image: TEST_IDENTITY_IMAGE,
         Mounts: [
             claudeJsonMount,
             ...projectMounts,
@@ -396,6 +438,7 @@ function fullCredentialMountsJson(
         Config: {
             Env: env,
             Labels: {
+                ...getIdentityLabels(mockIdentity),
                 "ccc.managed": "true",
                 "ccc.project.path": "/home/user/my-project",
                 "ccc.project.mount-identity": defaultProjectMountIdentity(),
@@ -414,6 +457,17 @@ function fullCredentialMountsJson(
 
 describe("docker.ts module exports", () => {
     beforeEach(() => {
+        effectiveContainerIdentity = "1000:1000:ccc:/home/ccc";
+        mockIdentity.uid = 1000;
+        mockIdentity.gid = 1000;
+        mockEnsureIdentityImage.mockClear();
+        mockPrepareCodexStateOwnership.mockReset();
+        mockPrepareLabStateOwnership.mockReset();
+        mockProveWslBindSourceIdentity.mockReset().mockReturnValue(null);
+        mismatchingMountChallengePathPrefix = undefined;
+        mockSharedMutationLock.mockClear();
+        mockAccessSync.mockReset();
+        mockLifecycleImage = false;
         expandShortContainerIds = false;
         spawnSyncMock.mockReset();
         spawnSyncMock.mockReturnValue(makeResult(0));
@@ -447,6 +501,7 @@ describe("docker.ts module exports", () => {
             dev: 1,
             ino: 1,
             size: 1024,
+            uid: process.getuid?.() ?? 1000,
         });
         mockFstatSync.mockReset().mockReturnValue({
             isFile: () => true,
@@ -1162,105 +1217,80 @@ describe("docker.ts module exports", () => {
     });
 
     describe("Codex config ownership helpers", () => {
-        it("does not restore mounted Codex config ownership", () => {
+        it("leaves readable host config ownership untouched", () => {
             restoreCodexConfigHostOwnership("ccc-test");
-
+            expect(mockAccessSync).toHaveBeenCalled();
             expect(spawnSyncMock).not.toHaveBeenCalled();
         });
 
-        it("does not prepare mounted Codex config when the container user already has access", () => {
-            spawnSyncMock.mockReturnValueOnce(makeResult(0));
-
+        it("probes the credential directory before the config as the default user", () => {
             prepareCodexConfigForContainer("ccc-test");
-
-            expect(spawnSyncMock).toHaveBeenCalledTimes(1);
-            expect(spawnSyncMock).toHaveBeenCalledWith(
-                "docker",
-                expect.arrayContaining(["exec", "ccc-test"]),
-                { stdio: "ignore", timeout: CODEX_CONFIG_PREPARE_TIMEOUT_MS },
-            );
-            expect((spawnSyncMock.mock.calls[0][1] as string[]).at(-1))
-                .toContain("timeout -k 2s 10s");
-            expect((spawnSyncMock.mock.calls[0][1] as string[]).at(-1))
-                .toContain("[ -L /home/ccc/.codex/config.toml ]");
+            expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+            for (const call of spawnSyncMock.mock.calls) {
+                expect(call[1]).toEqual(expect.arrayContaining(["exec", "ccc-test"]));
+                expect(call[1]).not.toContain("--user");
+                expect(call[2]).toMatchObject({ timeout: CODEX_CONFIG_PREPARE_TIMEOUT_MS });
+                expect((call[1] as string[]).at(-1)).toContain("timeout -k 2s 10s");
+            }
+            expect((spawnSyncMock.mock.calls[0][1] as string[]).at(-1)).toContain('[ -x "$dir" ]');
+            expect((spawnSyncMock.mock.calls[1][1] as string[]).at(-1)).toContain('[ ! -L "$file" ]');
         });
 
-        it("rejects an unsafe Codex config entry before root repair", () => {
+        it("rejects an unsafe probe result before elevated repair", () => {
             spawnSyncMock.mockReturnValueOnce(makeResult(42));
-
-            expect(() => prepareCodexConfigForContainer("ccc-test")).toThrow(
-                "Codex config access probe failed",
-            );
+            expect(() => prepareCodexConfigForContainer("ccc-test")).toThrow("directory access check failed");
             expect(spawnSyncMock).toHaveBeenCalledTimes(1);
         });
 
-        it("prepares mounted Codex config for the in-container ccc user only after access check fails", () => {
-            spawnSyncMock
-                .mockReturnValueOnce(makeResult(1))
+        it("grants narrow file ACL only after access denial and verifies as the default user", () => {
+            spawnSyncMock.mockReturnValueOnce(makeResult(0)) // directory
+                .mockReturnValueOnce(makeResult(1)) // config
+                .mockReturnValueOnce(makeResult(0, "1000\n"))
+                .mockReturnValueOnce(makeResult(0)) // ACL
+                .mockReturnValueOnce(makeResult(0)); // verification
+            prepareCodexConfigForContainer("ccc-test");
+            expect(spawnSyncMock).toHaveBeenCalledTimes(5);
+            const repair = spawnSyncMock.mock.calls[3][1] as string[];
+            expect(repair).toEqual(expect.arrayContaining(["exec", "--user", "root", "ccc-test"]));
+            expect(repair.at(-1)).toContain("os.setxattr");
+            expect(repair.at(-1)).toContain("O_NOFOLLOW");
+            expect(repair.at(-1)).not.toContain("chown");
+            expect(repair.at(-1)).not.toContain("chmod");
+            expect(spawnSyncMock.mock.calls[4][1]).not.toContain("--user");
+        });
+
+        it("repairs a denied directory before checking the config", () => {
+            spawnSyncMock.mockReturnValueOnce(makeResult(1))
+                .mockReturnValueOnce(makeResult(0, "1000\n"))
+                .mockReturnValueOnce(makeResult(0))
                 .mockReturnValueOnce(makeResult(0))
                 .mockReturnValueOnce(makeResult(0));
-
-            prepareCodexConfigForContainer("ccc-test");
-
-            expect(spawnSyncMock).toHaveBeenCalledTimes(3);
-            expect(spawnSyncMock).toHaveBeenCalledWith(
-                "docker",
-                expect.arrayContaining(["exec", "--user", "root", "ccc-test"]),
-                { stdio: "ignore", timeout: CODEX_CONFIG_PREPARE_TIMEOUT_MS },
-            );
-            const args = spawnSyncMock.mock.calls[1][1] as string[];
-            expect(args.at(-1)).toContain("chown -h ccc:docker /home/ccc/.codex/config.toml");
-            expect(args.at(-1)).not.toContain("chmod");
-            expect(args.at(-1)).toContain("timeout -k 2s 10s");
-            const finalizeArgs = spawnSyncMock.mock.calls[2][1] as string[];
-            expect(finalizeArgs).not.toContain("--user");
-            expect(finalizeArgs.at(-1)).toContain("[ -L /home/ccc/.codex/config.toml ]");
-            expect(finalizeArgs.at(-1)).toContain("chmod 600 /home/ccc/.codex/config.toml");
+            prepareCodexConfigForContainer("ccc-test", "work");
+            expect(spawnSyncMock).toHaveBeenCalledTimes(5);
+            expect((spawnSyncMock.mock.calls[2][1] as string[]).at(-1)).toContain("os.setxattr");
+            expect(mockLstatSync).toHaveBeenCalledWith(expect.stringContaining("profiles/work/codex"));
         });
 
-        it("fails immediately when the Codex config access probe times out", () => {
-            spawnSyncMock.mockReturnValueOnce({
-                ...makeResult(0),
-                status: null,
-                error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
-            });
-
-            expect(() => prepareCodexConfigForContainer("ccc-test")).toThrow(
-                "Codex config access probe timed out",
-            );
-            expect(spawnSyncMock).toHaveBeenCalledTimes(1);
-        });
-
-        it.each([124, 137])("classifies inner Codex config timeout status %s", (status) => {
+        it.each([124, 137])("aborts an inner probe timeout (%s) without repair", status => {
             spawnSyncMock.mockReturnValueOnce(makeResult(status));
-
-            expect(() => prepareCodexConfigForContainer("ccc-test")).toThrow(
-                "Codex config access probe timed out",
-            );
+            expect(() => prepareCodexConfigForContainer("ccc-test")).toThrow(`directory access check failed (exit ${status})`);
             expect(spawnSyncMock).toHaveBeenCalledTimes(1);
         });
 
-        it("fails when Codex config repair fails", () => {
-            spawnSyncMock
-                .mockReturnValueOnce(makeResult(1))
-                .mockReturnValueOnce(makeResult(1));
-
-            expect(() => prepareCodexConfigForContainer("ccc-test")).toThrow(
-                "Codex config repair failed",
-            );
-            expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+        it("aborts a host-side probe timeout without repair", () => {
+            spawnSyncMock.mockReturnValueOnce({ ...makeResult(null), error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }) });
+            expect(() => prepareCodexConfigForContainer("ccc-test")).toThrow("directory access check failed (timed out)");
+            expect(spawnSyncMock).toHaveBeenCalledTimes(1);
         });
 
-        it("fails when the unprivileged Codex config finalization rejects the entry", () => {
-            spawnSyncMock
+        it.each(["grant", "verification"])("aborts when config ACL %s fails", stage => {
+            spawnSyncMock.mockReturnValueOnce(makeResult(0))
                 .mockReturnValueOnce(makeResult(1))
-                .mockReturnValueOnce(makeResult(0))
+                .mockReturnValueOnce(makeResult(0, "1000\n"))
+                .mockReturnValueOnce(makeResult(stage === "grant" ? 1 : 0))
                 .mockReturnValueOnce(makeResult(42));
-
-            expect(() => prepareCodexConfigForContainer("ccc-test")).toThrow(
-                "Codex config repair failed",
-            );
-            expect(spawnSyncMock).toHaveBeenCalledTimes(3);
+            expect(() => prepareCodexConfigForContainer("ccc-test")).toThrow(stage === "grant" ? "config ACL grant failed" : "config access verification failed");
+            expect(spawnSyncMock).toHaveBeenCalledTimes(stage === "grant" ? 4 : 5);
         });
     });
 
@@ -1856,7 +1886,7 @@ describe("docker.ts module exports", () => {
             mockExit.mockRestore();
         });
 
-        it("exits with error when pull fails with no image", () => {
+        it("throws without terminating the process when pull fails with no image", () => {
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, ""))    // isImageExists -> false
                 .mockReturnValueOnce(makeResult(1));       // pullImage -> fail
@@ -1864,8 +1894,8 @@ describe("docker.ts module exports", () => {
             const mockExit = vi.spyOn(process, "exit").mockImplementation(() => {
                 throw new Error("process.exit");
             });
-            expect(() => ensureImage()).toThrow("process.exit");
-            expect(mockExit).toHaveBeenCalledWith(1);
+            expect(() => ensureImage()).toThrow("Failed to pull");
+            expect(mockExit).not.toHaveBeenCalled();
             mockExit.mockRestore();
         });
     });
@@ -1995,6 +2025,8 @@ describe("docker.ts module exports", () => {
 
         type TestRunContract = {
             State: { Running: boolean };
+            Image: string;
+            HostConfig: { Init: boolean };
             Mounts: Array<{
                 Source: string;
                 Destination: string;
@@ -2026,7 +2058,7 @@ describe("docker.ts module exports", () => {
 
         function mockReplacementRuntime(
             contractJson: string,
-            options: { identityRunning?: boolean; stopStatus?: number } = {},
+            options: { identityRunning?: boolean } = {},
         ): void {
             const identityRunning = options.identityRunning ?? true;
             let removed = false;
@@ -2045,9 +2077,7 @@ describe("docker.ts module exports", () => {
                     return makeResult(0, !removed && identityRunning ? "abc123\n" : "");
                 }
                 if (args[0] === "stop") {
-                    return options.stopStatus && options.stopStatus !== 0
-                        ? makeResult(options.stopStatus, "", "stop failed")
-                        : makeResult(0, "abc123\n");
+                    return makeResult(0, "abc123\n");
                 }
                 if (args[0] === "rm") {
                     removed = true;
@@ -2059,6 +2089,7 @@ describe("docker.ts module exports", () => {
         }
 
         beforeEach(() => {
+            mockLifecycleImage = true;
             expandShortContainerIds = true;
             ensureDirs.mockReset();
             mockExistsSync.mockReturnValue(true);
@@ -2142,21 +2173,55 @@ describe("docker.ts module exports", () => {
         it("returns container name when container is already running", () => {
             // Call sequence (no extraMounts):
             // #1 isImageExists, #2 getImageLabel (dev build), #3 isContainerExists,
-            // #4 docker inspect (credential-mount drift check), #5 isContainerRunning -> true
+            // #4 previous provenance, #5 contract inspect, #6 isContainerRunning -> true
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))           // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))           // getImageLabel -> dev build
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))               // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson())) // previous immutable provenance
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson())) // inspect -> all cred mounts present
                 .mockReturnValueOnce(makeResult(0, "abc123\n"));              // isContainerRunning -> running
 
             const name = startProjectContainer(projectPath, ensureDirs);
             expect(name).toMatch(/^ccc-/);
             expect(ensureDirs).toHaveBeenCalled();
+            expect(mockPrepareCodexStateOwnership).not.toHaveBeenCalled();
+            expect(mockPrepareLabStateOwnership).not.toHaveBeenCalled();
             expect(spawnSyncMock.mock.calls.filter((call: unknown[]) => {
                 const args = call[1] as string[];
                 return args[0] === "cp" && args[2]?.startsWith("abc123:/tmp/ccc-managed-");
             })).toHaveLength(1);
+        });
+
+        it.each(["verified", "mismatch", "unavailable", "host swap", "live challenge mismatch"])("checks opaque WSL filesystem alias: %s", outcome => {
+            const inspected = JSON.parse(makeDriftedRunningContract(() => undefined));
+            const mount = inspected.Mounts.find((item: { Destination: string }) => item.Destination === "/home/ccc/.claude");
+            const hostPath = mount.Source;
+            const opaque = `/run/desktop/mnt/host/wsl/docker-desktop-bind-mounts/Ubuntu/${"a".repeat(64)}`;
+            mount.Source = opaque;
+            mockReplacementRuntime(JSON.stringify(inspected));
+            const baselineStat = mockLstatSync();
+            let swapped = false;
+            mockLstatSync.mockImplementation((path: string) => ({ ...baselineStat, ino: swapped && path === hostPath ? 2 : 1 }));
+            mockProveWslBindSourceIdentity.mockImplementation(() => {
+                if (outcome === "host swap") swapped = true;
+                return outcome === "mismatch" ? false : outcome === "unavailable" ? null : true;
+            });
+            if (outcome === "live challenge mismatch") mismatchingMountChallengePathPrefix = "/home/ccc/.claude/.ccc-mount-identity-";
+            const guard = vi.fn(() => false);
+            const start = () => startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, undefined, guard);
+            if (outcome === "verified") {
+                expect(start()).toBe(getContainerName(projectPath));
+                expect(guard).not.toHaveBeenCalled();
+                expect([...mountChallengePaths].some(path => path.startsWith("/home/ccc/.claude/.ccc-mount-identity-"))).toBe(true);
+            } else {
+                expect(start).toThrow(outcome === "unavailable" ? /temporarily unavailable/ : /identity|safety|source/);
+                if (outcome === "unavailable" || outcome === "host swap") expect(guard).not.toHaveBeenCalled();
+            }
+            expect(mockProveWslBindSourceIdentity).toHaveBeenCalledWith(opaque,
+                { realpath: hostPath, dev: "1", ino: "1" }, `sha256:${"2".repeat(64)}`);
+            expectNoContainerReplacement();
         });
 
         it("joins a macOS credential bind alias after live proof without invoking replacement guard", () => {
@@ -2727,7 +2792,9 @@ describe("docker.ts module exports", () => {
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))           // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))           // getImageLabel
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))               // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson())) // previous immutable provenance
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson())) // inspect -> all cred mounts present
                 .mockReturnValueOnce(makeResult(0, ""))                       // isContainerRunning -> false
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))               // isContainerExists -> true
@@ -2750,15 +2817,20 @@ describe("docker.ts module exports", () => {
             mockExistsSync.mockReturnValue(false);
 
             // Existing container only has the old claude-only mounts → drift detected → recreate.
-            const driftMountsJson = JSON.stringify([
-                { Source: "/host/.claude", Destination: "/home/ccc/.claude" },
-            ]);
+            const driftMountsJson = JSON.stringify({
+                ...JSON.parse(fullCredentialMountsJson()),
+                State: { Running: false },
+                Mounts: [{ Source: "/host/.claude", Destination: "/home/ccc/.claude", Type: "bind", RW: true }],
+            });
 
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))   // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))   // getImageLabel
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))       // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, driftMountsJson)) // previous immutable provenance
                 .mockReturnValueOnce(makeResult(0, driftMountsJson))  // inspect -> missing codex/gemini/opencode mounts
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
                 .mockReturnValueOnce(makeResult(0))                    // docker rm
                 .mockReturnValueOnce(makeResult(0, ""))                // isContainerRunning -> false
@@ -2776,13 +2848,17 @@ describe("docker.ts module exports", () => {
 
         it("refuses contract-drift replacement when the caller omits the session guard", () => {
             mockExistsSync.mockReturnValue(false);
-            const driftMountsJson = JSON.stringify([
-                { Source: "/host/.claude", Destination: "/home/ccc/.claude" },
-            ]);
+            const driftMountsJson = JSON.stringify({
+                ...JSON.parse(fullCredentialMountsJson()),
+                State: { Running: false },
+                Mounts: [{ Source: "/host/.claude", Destination: "/home/ccc/.claude", Type: "bind", RW: true }],
+            });
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, driftMountsJson))
                 .mockReturnValueOnce(makeResult(0, driftMountsJson));
 
             expect(() => startProjectContainer(projectPath, ensureDirs)).toThrow(
@@ -2804,6 +2880,8 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, driftMountsJson))
                 .mockReturnValueOnce(makeResult(0, driftMountsJson))
                 .mockReturnValueOnce(makeResult(0, "abc123|true\n"))
                 .mockReturnValueOnce(makeResult(0, driftMountsJson))
@@ -3137,6 +3215,93 @@ describe("docker.ts module exports", () => {
             expectNoContainerReplacement();
         });
 
+        it.each([
+            "1001:1000:ccc:/home/ccc",
+            "1000:1001:ccc:/home/ccc",
+            "1000:1000:other:/home/ccc",
+            "1000:1000:ccc:/root",
+        ])("refuses safe defer when effective execution identity is %s", observed => {
+            mockReplacementRuntime(makeDriftedRunningContract(contract => { contract.HostConfig.Init = false; }));
+            effectiveContainerIdentity = observed;
+            expect(() => startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, undefined, () => false))
+                .toThrow(/identity|UID|GID/);
+            expectNoContainerReplacement();
+        });
+
+        it("replaces a stopped image only through the guard and retains old provenance for state migration", () => {
+            const previousImage = `sha256:${"3".repeat(64)}`;
+            const contract = makeDriftedRunningContract(value => { value.Image = previousImage; }, false);
+            mockReplacementRuntime(contract, { identityRunning: false });
+            const guard = vi.fn((replace: () => void) => { replace(); return true; });
+            expect(startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, undefined, guard))
+                .toBe(getContainerName(projectPath));
+            expect(guard).toHaveBeenCalledOnce();
+            expect(mockPrepareCodexStateOwnership).toHaveBeenCalledWith(
+                expect.objectContaining({ Image: previousImage, Id: TEST_CONTAINER_ID }),
+                TEST_IDENTITY_IMAGE, mockIdentity, undefined, expect.any(Function),
+            );
+            const runIndex = spawnSyncMock.mock.calls.findIndex(call => (call[1] as string[])[0] === "run");
+            expect(runIndex).toBeGreaterThan(-1);
+            const runArgs = spawnSyncMock.mock.calls[runIndex][1] as string[];
+            expect(runArgs).toContain(TEST_IDENTITY_IMAGE);
+            expect(runArgs).toContain(`${getIdentityMiseVolumeName(mockIdentity)}:/home/ccc/.local/share/mise`);
+            expect(runArgs).toContain(`${getIdentityCodexPackagesVolumeName(mockIdentity)}:${CODEX_PACKAGES_CONTAINER_DIR}`);
+            expect(mockPrepareCodexStateOwnership.mock.invocationCallOrder[0])
+                .toBeLessThan(spawnSyncMock.mock.invocationCallOrder[runIndex]);
+            const removeIndex = spawnSyncMock.mock.calls.findIndex(call => (call[1] as string[])[0] === "rm");
+            expect(removeIndex).toBeGreaterThan(-1);
+            expect(mockPrepareCodexStateOwnership.mock.invocationCallOrder[0])
+                .toBeLessThan(spawnSyncMock.mock.invocationCallOrder[removeIndex]);
+            expect(spawnSyncMock.mock.calls.some(call => (call[1] as string[])[0] === "stop")).toBe(false);
+            expect(mockSharedMutationLock.mock.calls[0][0]).toMatch(/codex-state\.lock$/);
+        });
+
+        it.each(["mismatched ID", "missing image", "missing mounts", "non-array mounts", "unavailable"])("rejects unusable previous provenance (%s) without migration or replacement", fault => {
+            const snapshot = JSON.parse(makeDriftedRunningContract(() => undefined, false));
+            if (fault === "mismatched ID") snapshot.Id = "b".repeat(64);
+            if (fault === "missing image") delete snapshot.Image;
+            if (fault === "missing mounts") delete snapshot.Mounts;
+            if (fault === "non-array mounts") snapshot.Mounts = {};
+            mockReplacementRuntime(fault === "unavailable" ? "{malformed-json" : JSON.stringify(snapshot), { identityRunning: false });
+            const guard = vi.fn((replace: () => void) => { replace(); return true; });
+            expect(() => startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, undefined, guard))
+                .toThrow(/Previous container.*provenance|temporarily unavailable/);
+            expect(guard).not.toHaveBeenCalled();
+            expect(mockPrepareCodexStateOwnership).not.toHaveBeenCalled();
+            expect(mockPrepareLabStateOwnership).not.toHaveBeenCalled();
+            expectNoContainerReplacement();
+        });
+
+        it("keeps the stopped previous container when retained-state migration fails", () => {
+            mockReplacementRuntime(makeDriftedRunningContract(value => { value.Image = `sha256:${"3".repeat(64)}`; }, false), { identityRunning: false });
+            mockPrepareCodexStateOwnership.mockImplementationOnce(() => { throw new Error("retained state refused"); });
+            const guard = vi.fn((replace: () => void) => { replace(); return true; });
+            expect(() => startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, undefined, guard))
+                .toThrow("retained state refused");
+            expect(guard).toHaveBeenCalledOnce();
+            expect(mockPrepareCodexStateOwnership).toHaveBeenCalledOnce();
+            expectNoContainerReplacement();
+        });
+
+        it("refuses an already-running wrong-UID container before an approving replacement guard", () => {
+            mockReplacementRuntime(makeDriftedRunningContract(value => { value.Image = `sha256:${"3".repeat(64)}`; }));
+            effectiveContainerIdentity = "1001:1001:ccc:/home/ccc";
+            const guard = vi.fn((replace: () => void) => { replace(); return true; });
+            expect(() => startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, undefined, guard)).toThrow(/UID|identity/);
+            expect(guard).not.toHaveBeenCalled();
+            expectNoContainerReplacement();
+            expect(mockPrepareCodexStateOwnership).not.toHaveBeenCalled();
+        });
+
+        it("preserves an image-changed stopped container when replacement is denied", () => {
+            mockReplacementRuntime(makeDriftedRunningContract(value => { value.Image = `sha256:${"3".repeat(64)}`; }, false), { identityRunning: false });
+            const guard = vi.fn(() => false);
+            expect(() => startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, undefined, guard)).toThrow();
+            expect(guard).toHaveBeenCalledOnce();
+            expectNoContainerReplacement();
+            expect(mockPrepareCodexStateOwnership).not.toHaveBeenCalled();
+        });
+
         it("defers a new identity-fenced worktree metadata file mount for a running older container", () => {
             const inspected = JSON.parse(fullCredentialMountsJson());
             const compatibilityMount = {
@@ -3388,8 +3553,11 @@ describe("docker.ts module exports", () => {
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected))) // previous immutable provenance
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected))) // inspect -> foreign lab volume
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
                 .mockReturnValueOnce(makeResult(0))                  // docker rm
                 .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
@@ -3752,9 +3920,11 @@ describe("docker.ts module exports", () => {
 
         it("executes stopped-container contract replacement only inside an approving session guard", () => {
             let removed = false;
-            const driftMountsJson = JSON.stringify([
-                { Source: "/host/.claude", Destination: "/home/ccc/.claude" },
-            ]);
+            const driftMountsJson = JSON.stringify({
+                ...JSON.parse(fullCredentialMountsJson()),
+                State: { Running: false },
+                Mounts: [{ Source: "/host/.claude", Destination: "/home/ccc/.claude", Type: "bind", RW: true }],
+            });
             spawnSyncMock.mockImplementation((_command: unknown, argsValue: unknown) => {
                 const args = argsValue as string[];
                 if (args[0] === "images") return makeResult(0, "sha256:abc\n");
@@ -3784,121 +3954,89 @@ describe("docker.ts module exports", () => {
             expect(spawnSyncMock.mock.calls.some((call: unknown[]) => (call[1] as string[])?.[0] === "rm")).toBe(true);
         });
 
-        it("stops and replaces an exact running container when the lifecycle guard approves idle recovery", () => {
-            const driftContractJson = makeCredentialSourceDriftContract();
+        it.each([true, false])("preserves unsafe running mounts even when the guard approves (initial snapshot=%s)", initiallyRunning => {
             makeMountedBindProofDisagree();
-            mockReplacementRuntime(driftContractJson);
-            const guard = vi.fn((replace: () => void) => {
-                expectNoContainerReplacement();
-                replace();
-                return true;
-            });
-
-            startProjectContainer(
-                projectPath,
-                ensureDirs,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                guard,
-                undefined,
-                TEST_CONTAINER_ID,
-            );
-
+            mockReplacementRuntime(makeCredentialSourceDriftContract());
+            const guard = vi.fn((replace: () => void) => { replace(); return true; });
+            expect(() => startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined,
+                undefined, guard, undefined, initiallyRunning ? TEST_CONTAINER_ID : undefined))
+                .toThrow(/contract failed safety validation/);
             expect(guard).toHaveBeenCalledOnce();
-            const destructiveCalls = spawnSyncMock.mock.calls
-                .map((call: unknown[]) => call[1] as string[])
-                .filter((args) => args[0] === "stop" || args[0] === "rm");
-            expect(destructiveCalls).toEqual([
-                ["stop", "abc123"],
-                ["rm", "abc123"],
-            ]);
+            expectNoContainerReplacement();
+            expect(mockPrepareCodexStateOwnership).not.toHaveBeenCalled();
         });
 
-        it("replaces an idle running container with the obsolete host-stage gitconfig mount", () => {
-            const driftContractJson = makeDriftedRunningContract((contract) => {
-                contract.Mounts.push({
-                    Source: "/host/.gitconfig",
-                    Destination: "/host-stage/gitconfig",
-                    Type: "bind",
-                    RW: false,
-                });
-            });
-            mockReplacementRuntime(driftContractJson);
-
-            startProjectContainer(
-                projectPath,
-                ensureDirs,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                (replace) => {
-                    replace();
-                    return true;
-                },
-                undefined,
-                TEST_CONTAINER_ID,
-            );
-
-            expect(spawnSyncMock.mock.calls
-                .map((call: unknown[]) => call[1] as string[])
-                .filter((args) => args[0] === "stop" || args[0] === "rm"))
-                .toEqual([["stop", "abc123"], ["rm", "abc123"]]);
+        it("preserves a running container with an obsolete host-stage credential mount", () => {
+            const contract = makeDriftedRunningContract(value => value.Mounts.push({
+                Source: "/host/.gitconfig", Destination: "/host-stage/gitconfig", Type: "bind", RW: false,
+            }));
+            mockReplacementRuntime(contract);
+            const guard = vi.fn((replace: () => void) => { replace(); return true; });
+            expect(() => startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined,
+                undefined, guard, undefined, TEST_CONTAINER_ID)).toThrow(/contract failed safety validation/);
+            expectNoContainerReplacement();
         });
 
-        it("replaces an idle running container that was created without an init process", () => {
-            const driftContractJson = makeDriftedRunningContract((contract) => {
-                contract.HostConfig.Init = null;
+        it.each(["init", "image"])("defers safe %s drift without stopping an idle running container", kind => {
+            const contract = makeDriftedRunningContract(value => {
+                if (kind === "init") value.HostConfig.Init = false;
+                else value.Image = `sha256:${"9".repeat(64)}`;
             });
-            mockReplacementRuntime(driftContractJson);
-
-            startProjectContainer(
-                projectPath,
-                ensureDirs,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                (replace) => {
-                    replace();
-                    return true;
-                },
-                undefined,
-                TEST_CONTAINER_ID,
-            );
-
-            const calls = spawnSyncMock.mock.calls.map((call: unknown[]) => call[1] as string[]);
-            expect(calls.filter((args) => args[0] === "stop" || args[0] === "rm"))
-                .toEqual([["stop", "abc123"], ["rm", "abc123"]]);
-            expect(calls.find((args) => args[0] === "run")).toContain("--init");
+            mockReplacementRuntime(contract);
+            const guard = vi.fn((replace: () => void) => { replace(); return true; });
+            const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+            expect(startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined,
+                undefined, guard, undefined, TEST_CONTAINER_ID)).toBe(getContainerName(projectPath));
+            expect(warn).toHaveBeenCalledWith(expect.stringContaining("update deferred"));
+            expectNoContainerReplacement();
+            expect(mockPrepareCodexStateOwnership).not.toHaveBeenCalled();
         });
 
-        it("fails closed without remove when an approved idle container cannot be stopped", () => {
-            const driftContractJson = makeCredentialSourceDriftContract();
-            makeMountedBindProofDisagree();
-            mockReplacementRuntime(driftContractJson, { stopStatus: 1 });
-            const guard = vi.fn((replace: () => void) => {
-                replace();
-                return true;
-            });
+        it("preserves a stopped container which was running at invocation startup", () => {
+            mockReplacementRuntime(makeDriftedRunningContract(value => {
+                value.HostConfig.Init = false;
+            }, false), { identityRunning: false });
+            const guard = vi.fn((replace: () => void) => { replace(); return true; });
+            expect(() => startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined,
+                undefined, guard, undefined, TEST_CONTAINER_ID)).toThrow(/automatic replacement was not authorized/);
+            expectNoContainerReplacement();
+            expect(mockPrepareCodexStateOwnership).not.toHaveBeenCalled();
+        });
 
-            expect(() => startProjectContainer(
-                projectPath,
-                ensureDirs,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                guard,
-                undefined,
-                TEST_CONTAINER_ID,
-            )).toThrow("idle running container could not be stopped");
-            expect(spawnSyncMock.mock.calls.some((call: unknown[]) => {
-                const args = call[1] as string[];
-                return args[0] === "rm" || args[0] === "run";
-            })).toBe(false);
+        it.each(["started", "successor", "unavailable"])("rechecks stopped identity inside the guard before migration after %s race", race => {
+            mockReplacementRuntime(makeDriftedRunningContract(value => { value.HostConfig.Init = false; }, false),
+                { identityRunning: false });
+            const original = spawnSyncMock.getMockImplementation()!;
+            let guarded = false;
+            spawnSyncMock.mockImplementation((...args: unknown[]) => {
+                const argv = args[1] as string[];
+                if (guarded && argv[0] === "inspect" && argv.includes("{{.Id}}|{{.State.Running}}")) {
+                    return race === "unavailable" ? makeResult(1)
+                        : makeResult(0, race === "started" ? "abc123|true\n" : "successor456|false\n");
+                }
+                return original(...args);
+            });
+            const guard = vi.fn((replace: () => void) => { guarded = true; replace(); return true; });
+            expect(() => startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined,
+                undefined, guard)).toThrow(/automatic replacement was not authorized/);
+            expect(guard).toHaveBeenCalledOnce();
+            expectNoContainerReplacement();
+            expect(mockPrepareCodexStateOwnership).not.toHaveBeenCalled();
+            expect(mockPrepareLabStateOwnership).not.toHaveBeenCalled();
+        });
+
+        it("does not stop a running container whose exec remains unready despite an approving guard", () => {
+            mockReplacementRuntime(makeDriftedRunningContract(value => { value.HostConfig.Init = false; }));
+            const original = spawnSyncMock.getMockImplementation()!;
+            spawnSyncMock.mockImplementation((...args: unknown[]) => {
+                const argv = args[1] as string[];
+                if (argv[0] === "exec" && argv.at(-1) === "true") return makeResult(1);
+                return original(...args);
+            });
+            const guard = vi.fn((replace: () => void) => { replace(); return true; });
+            expect(() => startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined,
+                undefined, guard, undefined, TEST_CONTAINER_ID)).toThrow(/unavailable; automatic destructive recovery was refused/);
+            expectNoContainerReplacement();
         });
 
         it("does not stop or remove a foreign same-name running container even when the lifecycle guard approves", () => {
@@ -3983,9 +4121,11 @@ describe("docker.ts module exports", () => {
         });
 
         it("does not apply an inspected contract decision to a same-name successor", () => {
-            const driftMountsJson = JSON.stringify([
-                { Source: "/host/.claude", Destination: "/home/ccc/.claude" },
-            ]);
+            const driftMountsJson = JSON.stringify({
+                ...JSON.parse(fullCredentialMountsJson()),
+                State: { Running: false },
+                Mounts: [{ Source: "/host/.claude", Destination: "/home/ccc/.claude", Type: "bind", RW: true }],
+            });
             spawnSyncMock.mockImplementation((_command: unknown, argsValue: unknown) => {
                 const args = argsValue as string[];
                 if (args[0] === "images") return makeResult(0, "sha256:abc\n");
@@ -4011,9 +4151,11 @@ describe("docker.ts module exports", () => {
         });
 
         it("aborts replacement without stop when a confirmed-stopped container starts before rm", () => {
-            const driftMountsJson = JSON.stringify([
-                { Source: "/host/.claude", Destination: "/home/ccc/.claude" },
-            ]);
+            const driftMountsJson = JSON.stringify({
+                ...JSON.parse(fullCredentialMountsJson()),
+                State: { Running: false },
+                Mounts: [{ Source: "/host/.claude", Destination: "/home/ccc/.claude", Type: "bind", RW: true }],
+            });
             spawnSyncMock.mockImplementation((_command: unknown, argsValue: unknown) => {
                 const args = argsValue as string[];
                 if (args[0] === "images") return makeResult(0, "sha256:abc\n");
@@ -4046,6 +4188,8 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson()))
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson()))
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 .mockReturnValueOnce(makeResult(1))
@@ -4306,7 +4450,10 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
+                .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n"))
                 .mockReturnValueOnce(makeResult(0))
                 .mockReturnValueOnce(makeResult(0, ""))
@@ -4334,7 +4481,10 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
+                .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n"))
                 .mockReturnValueOnce(makeResult(0))
                 .mockReturnValueOnce(makeResult(0, ""))
@@ -4358,7 +4508,10 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
+                .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n"))
                 .mockReturnValueOnce(makeResult(0))
                 .mockReturnValueOnce(makeResult(0, ""))
@@ -4380,7 +4533,10 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
+                .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n"))
                 .mockReturnValueOnce(makeResult(0))
                 .mockReturnValueOnce(makeResult(0, ""))
@@ -4585,7 +4741,10 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
+                .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n"))
                 .mockReturnValueOnce(makeResult(0))
                 .mockReturnValueOnce(makeResult(0, ""))
@@ -5254,8 +5413,7 @@ describe("docker.ts module exports", () => {
                     && (c[1] as string[])[0] === "exec"
                     && (c[1] as string[]).at(-1)?.includes("chmod 666 /tmp/ssh-agent.sock")
             );
-            expect(execCall).toBeDefined();
-            expect((execCall![1] as string[])).toContain("sh");
+            expect(execCall).toBeUndefined();
 
             const sshCopyIndex = spawnSyncMock.mock.calls.findIndex(
                 (c: unknown[]) => c[0] === "docker"
@@ -5357,15 +5515,20 @@ describe("docker.ts module exports", () => {
 
         it("recreates container when extraMounts are missing (containerHasMounts returns false)", () => {
             const extraMounts = [{ hostPath: "/host/repo/.git", containerPath: "/project/repo/.git" }];
-            const missingMountsJson = JSON.stringify([]); // empty mounts -> missing required
+            const missingMountsJson = JSON.stringify({
+                ...JSON.parse(fullCredentialMountsJson()), State: { Running: false }, Mounts: [],
+            }); // authentic previous snapshot with empty mounts -> missing required
 
             mockExistsSync.mockReturnValue(false);
 
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists (extraMounts guard) -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, missingMountsJson)) // previous immutable provenance
                 .mockReturnValueOnce(makeResult(0, missingMountsJson)) // docker inspect (containerHasMounts)
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
                 .mockReturnValueOnce(makeResult(0))                  // docker rm
                 .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
@@ -5394,8 +5557,11 @@ describe("docker.ts module exports", () => {
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, missingGitIdentityMountsJson)) // previous immutable provenance
                 .mockReturnValueOnce(makeResult(0, missingGitIdentityMountsJson)) // inspect -> missing git identity mount
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
                 .mockReturnValueOnce(makeResult(0))                  // docker rm
                 .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
@@ -5426,8 +5592,11 @@ describe("docker.ts module exports", () => {
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected))) // previous immutable provenance
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected))) // inspect -> pre-init container
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
                 .mockReturnValueOnce(makeResult(0))                  // docker rm
                 .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
@@ -5461,8 +5630,11 @@ describe("docker.ts module exports", () => {
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected))) // previous immutable provenance
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected))) // inspect -> no packages volume
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
                 .mockReturnValueOnce(makeResult(0))                  // docker rm
                 .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
@@ -5475,7 +5647,7 @@ describe("docker.ts module exports", () => {
                 (c: unknown[]) => c[0] === "docker" && (c[1] as string[])[0] === "run"
             );
             expect(runCall).toBeDefined();
-            expect(runCall![1]).toContain(`${CODEX_PACKAGES_VOLUME_NAME}:${CODEX_PACKAGES_CONTAINER_DIR}`);
+            expect(runCall![1]).toContain(`${getIdentityCodexPackagesVolumeName(mockIdentity)}:${CODEX_PACKAGES_CONTAINER_DIR}`);
         });
 
         it("recreates existing default container when durable lab state mount is missing", () => {
@@ -5492,8 +5664,11 @@ describe("docker.ts module exports", () => {
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], { labState: false }))) // previous immutable provenance
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], { labState: false }))) // inspect -> missing lab state mount
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
                 .mockReturnValueOnce(makeResult(0))                  // docker rm
                 .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
@@ -5526,8 +5701,11 @@ describe("docker.ts module exports", () => {
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], { deviceLabState: false }))) // previous immutable provenance
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], { deviceLabState: false }))) // inspect -> missing device state mount
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
                 .mockReturnValueOnce(makeResult(0))                  // docker rm
                 .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
@@ -5560,12 +5738,19 @@ describe("docker.ts module exports", () => {
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], {
+                    status: "unsupported",
+                    unsupportedReason: "/dev/kvm is not available on the container host",
+                    kvmDevice: false,
+                })))     // isContainerExists -> exists
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], {
                     status: "unsupported",
                     unsupportedReason: "/dev/kvm is not available on the container host",
                     kvmDevice: false,
                 }))) // inspect -> stale unsupported VM contract
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
                 .mockReturnValueOnce(makeResult(0))                  // docker rm
                 .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
@@ -5593,8 +5778,11 @@ describe("docker.ts module exports", () => {
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson())) // previous immutable provenance
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson())) // inspect -> stale ready VM contract
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
                 .mockReturnValueOnce(makeResult(0))                  // docker rm
                 .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
@@ -5623,8 +5811,11 @@ describe("docker.ts module exports", () => {
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], { groupAdd: ["108", "999"] }))) // previous immutable provenance
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], { groupAdd: ["108", "999"] }))) // inspect -> extra group-add
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
                 .mockReturnValueOnce(makeResult(0))                  // docker rm
                 .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
@@ -5653,13 +5844,21 @@ describe("docker.ts module exports", () => {
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], {
+                    devices: [
+                        { PathOnHost: "/dev/kvm", PathInContainer: "/dev/kvm" },
+                        { PathOnHost: "/dev/net/tun", PathInContainer: "/dev/net/tun" },
+                    ],
+                })))     // isContainerExists -> exists
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], {
                     devices: [
                         { PathOnHost: "/dev/kvm", PathInContainer: "/dev/kvm" },
                         { PathOnHost: "/dev/net/tun", PathInContainer: "/dev/net/tun" },
                     ],
                 }))) // inspect -> extra device
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
                 .mockReturnValueOnce(makeResult(0))                  // docker rm
                 .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
@@ -5687,13 +5886,21 @@ describe("docker.ts module exports", () => {
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], {
+                    status: "unsupported",
+                    unsupportedReason: "/dev/kvm is not available on the container host",
+                    groupAdd: [],
+                    devices: [{ PathOnHost: "/dev/net/tun", PathInContainer: "/dev/net/tun" }],
+                })))     // isContainerExists -> exists
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], {
                     status: "unsupported",
                     unsupportedReason: "/dev/kvm is not available on the container host",
                     groupAdd: [],
                     devices: [{ PathOnHost: "/dev/net/tun", PathInContainer: "/dev/net/tun" }],
                 }))) // inspect -> unsupported but stale device
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
                 .mockReturnValueOnce(makeResult(0))                  // docker rm
                 .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
@@ -5722,8 +5929,11 @@ describe("docker.ts module exports", () => {
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], { privileged: true }))) // previous immutable provenance
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], { privileged: true }))) // inspect -> privileged
+                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
                 .mockReturnValueOnce(makeResult(0))                  // docker rm
                 .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
@@ -5747,7 +5957,9 @@ describe("docker.ts module exports", () => {
             spawnSyncMock
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))
+                // Immutable provenance read precedes contract verification.
+                .mockReturnValueOnce(makeResult(0, mountsJson)) // previous immutable provenance
                 .mockReturnValueOnce(makeResult(0, mountsJson))     // docker inspect -> all present
                 .mockReturnValueOnce(makeResult(0, "abc123\n"));    // isContainerRunning -> true
 

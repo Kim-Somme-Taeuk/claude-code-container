@@ -8,6 +8,7 @@
 import { spawnSync } from "child_process";
 import { createHash, randomBytes } from "crypto";
 import {
+    accessSync,
     closeSync,
     constants as fsConstants,
     existsSync,
@@ -25,16 +26,16 @@ import { homedir } from "os";
 import { dirname, join, normalize, posix, resolve } from "path";
 import { fileURLToPath } from "url";
 import { ContainerRestartRequiredError } from "./container-restart-guidance.js";
-import { clipboardFilesDir } from "./home-layout.js";
+import { cccHome, clipboardFilesDir } from "./home-layout.js";
 import {
     getProjectId,
     projectPathsEquivalent,
     getClaudeDir,
     getClaudeJsonFile,
     getCodexDir,
+    getCodexConfigFile,
     IMAGE_NAME,
     CONTAINER_PID_LIMIT,
-    MISE_VOLUME_NAME,
     CODEX_PACKAGES_VOLUME_NAME,
     CODEX_PACKAGES_CONTAINER_DIR,
     CLI_VERSION,
@@ -50,6 +51,13 @@ import {
     isContainerHostRemote,
     getRuntimeInfo,
 } from "./container-runtime.js";
+import { ensureIdentityImage, getIdentityLabels, getIdentityMiseVolumeName, getIdentityCodexPackagesVolumeName, normalizeImageId, resolveContainerIdentity, type ContainerIdentity as ContainerUserIdentity } from "./container-identity.js";
+import { withSharedMutationLock } from "@ccc/device-lab/device-lab-shared-state.js";
+import { codexConfigFileAclScript, codexConfigDirectoryAclScript } from "./codex-config-acl.js";
+import { proveWslBindSourceIdentity } from "./wsl-bind-source-proof.js";
+import { prepareLabStateOwnership } from "./lab-state-ownership.js";
+import { prepareCodexStateOwnership } from "./codex-state-ownership.js";
+import { SSH_KNOWN_HOSTS_PROVENANCE_SCRIPT } from "./ssh-known-hosts.js";
 import { cleanupOwnerDevices } from "./device-lab-admin.js";
 import { deviceLabContainerName, deviceLabOwnerId } from "@ccc/device-lab/device-lab-owner.js";
 import { getAllCredentialMounts } from "./tool-registry.js";
@@ -465,6 +473,17 @@ function bindSourceIsTrustedFilesystemAlias(
             canonicalizationUnavailable ||= code !== "ENOENT" && code !== "ENOTDIR";
         }
     }
+    // Docker Desktop may retain an opaque WSL daemon path for an older bind.
+    // Resolve it by object identity, never by guessing a host path translation.
+    if (/^\/run\/desktop\/mnt\/host\/wsl\/docker-desktop-bind-mounts\//.test(observedSource)) {
+        const before = observeBindMountSourceIdentity(hostPath, expected);
+        if (before.kind !== "verified") return before.kind === "retryable" ? "retryable" : "mismatch";
+        const image = getCurrentImageId();
+        const proof = image ? proveWslBindSourceIdentity(observedSource, expected, image) : null;
+        const after = observeBindMountSourceIdentity(hostPath, expected);
+        if (after.kind !== "verified") return after.kind === "retryable" ? "retryable" : "mismatch";
+        return proof === true ? "match" : proof === false ? "mismatch" : "retryable";
+    }
     return canonicalizationUnavailable ? "retryable" : "mismatch";
 }
 
@@ -670,6 +689,8 @@ export interface DockerRunArgsOptions {
     gitIdentityMounts?: Array<{ hostPath: string; containerPath: string }>;
     claudeJsonFile: string;
     miseVolumeName: string;
+    codexPackagesVolumeName?: string;
+    identity?: ContainerUserIdentity;
     pidsLimit: string;
     imageName: string;
     hostSshDir: string | null;
@@ -793,7 +814,7 @@ export function buildDockerRunArgs(opts: DockerRunArgsOptions): string[] {
     }
     // Named volume — never gets :Z (mount helper auto-detects host-path vs name)
     args.push(...bindMountArgs(opts.miseVolumeName, "/home/ccc/.local/share/mise"));
-    args.push(...bindMountArgs(CODEX_PACKAGES_VOLUME_NAME, CODEX_PACKAGES_CONTAINER_DIR));
+    args.push(...bindMountArgs(opts.codexPackagesVolumeName ?? CODEX_PACKAGES_VOLUME_NAME, CODEX_PACKAGES_CONTAINER_DIR));
     if (opts.labRunner) {
         // Lab state only matters where container-QEMU labs can run (REQ__lab-state-volume.md).
         if (opts.labRunner.status === "ready") {
@@ -877,6 +898,11 @@ export function buildDockerRunArgs(opts: DockerRunArgsOptions): string[] {
         opts.projectMountIdentity,
         opts.profile,
     ));
+    if (opts.identity) {
+        for (const [key, value] of Object.entries(getIdentityLabels(opts.identity))) {
+            args.push("--label", `${key}=${value}`);
+        }
+    }
     if (opts.deviceLabMountIdentity) {
         args.push("--label", `${DEVICE_LAB_MOUNT_IDENTITY_LABEL}=${opts.deviceLabMountIdentity}`);
     }
@@ -1130,8 +1156,62 @@ export function ensureCredentialHostDir(mount: CredentialMount, profile?: string
     return hostPath;
 }
 
-export function restoreCodexConfigHostOwnership(containerName: string): void {
-    void containerName;
+function getCodexContainerUid(containerName: string): string {
+    const result = spawnSync(runtimeCli(), ["exec", containerName, "sh", "-c", "id -u"], { encoding: "utf-8", timeout: CODEX_CONFIG_PREPARE_TIMEOUT_MS });
+    if (result.error || result.status !== 0) {
+        throw new Error(`Unable to prepare Codex credentials: container user lookup failed (${result.error?.message ?? (result.stderr?.trim() || `exit ${result.status ?? "unknown"}`)})`);
+    }
+    const uid = result.stdout.trim();
+    if (!/^\d+$/.test(uid) || Number(uid) >= 0xffffffff) {
+        throw new Error("Unable to prepare Codex credentials: invalid container user identity");
+    }
+    return uid;
+}
+
+// Retain the historical API name; access is now shared without changing owners.
+export function restoreCodexConfigHostOwnership(containerName: string, profile?: string): void {
+    const configFile = getCodexConfigFile(profile);
+    const accessMode = fsConstants.R_OK | fsConstants.W_OK;
+    const warn = (reason: unknown): void => {
+        console.warn(`[ccc] Unable to restore host access to ${configFile}: ${reason instanceof Error ? reason.message : String(reason)}`);
+    };
+    try {
+        accessSync(configFile, accessMode);
+        return;
+    } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return;
+        if (code !== "EACCES" && code !== "EPERM") {
+            warn(error);
+            return;
+        }
+    }
+
+    // Repair only an inaccessible file, never the credential tree. The parent
+    // must represent the invoking host user before it can identify the ACL user.
+    // Raw host IDs cannot be used inside rootless Podman's user namespace.
+    try {
+        if (typeof process.getuid !== "function") {
+            throw new Error("host user identity is unavailable; automatic access repair skipped");
+        }
+        const parent = lstatSync(dirname(configFile));
+        const config = lstatSync(configFile);
+        if (!parent.isDirectory() || parent.uid !== process.getuid() || !config.isFile()) {
+            throw new Error("automatic repair requires a regular config file in a non-symlink directory owned by the host user");
+        }
+        const repaired = spawnSync(runtimeCli(), [
+            "exec", "--user", "root", containerName, "sh", "-c",
+            codexConfigMutation(codexConfigFileAclScript(getCodexContainerUid(containerName))),
+        ], { encoding: "utf-8", timeout: CODEX_CONFIG_PREPARE_TIMEOUT_MS });
+        if (repaired.error || repaired.status !== 0) {
+            throw new Error(`container ACL repair failed (${repaired.error?.message ?? (repaired.stderr?.trim() || `exit ${repaired.status ?? "unknown"}`)})`);
+        }
+        accessSync(configFile, accessMode);
+    } catch (error) {
+        // MCP generation still reports an actionable error if access is denied.
+        // A post-exit repair failure must not prevent session/env-file cleanup.
+        warn(error);
+    }
 }
 
 const SOCKET_ACCESS_TIMEOUT_MS = 10_000;
@@ -1189,52 +1269,64 @@ export function resetContainerManagerSocketAccessWarningForTest(): void {
     socketAccessWarned = false;
 }
 
-export function prepareCodexConfigForContainer(containerName: string): void {
-    const accessCheck = spawnSync(runtimeCli(), [
-        "exec", containerName,
-        "sh", "-c",
-        codexConfigMutation("if [ -L /home/ccc/.codex/config.toml ] || { [ -e /home/ccc/.codex/config.toml ] && [ ! -f /home/ccc/.codex/config.toml ]; }; then exit 42; fi; test ! -e /home/ccc/.codex/config.toml || test -r /home/ccc/.codex/config.toml -a -w /home/ccc/.codex/config.toml"),
-    ], { stdio: "ignore", timeout: CODEX_CONFIG_PREPARE_TIMEOUT_MS });
-    if (accessCheck.status === 0) return;
-    if ((accessCheck.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT"
-        || accessCheck.status === 124
-        || accessCheck.status === 137) {
-        throw new Error("Codex config access probe timed out");
-    }
-    if (accessCheck.error || (accessCheck.status !== 0 && accessCheck.status !== 1)) {
-        throw new Error("Codex config access probe failed");
+export function prepareCodexConfigForContainer(containerName: string, profile?: string): void {
+    const configFile = getCodexConfigFile(profile);
+    const directoryGuard = 'dir=/home/ccc/.codex; [ ! -L "$dir" ] && [ -d "$dir" ]';
+    const directoryProbe = `${directoryGuard} && [ -r "$dir" ] && [ -w "$dir" ] && [ -x "$dir" ]`;
+    const configGuard = `${directoryGuard} && file="$dir/config.toml" && [ ! -L "$file" ]`;
+    const configProbe = `${configGuard} && { [ ! -e "$file" ] || { [ -f "$file" ] && [ -r "$file" ] && [ -w "$file" ]; }; }`;
+    const run = (operation: string, script: string, root = false, probe = false, timeout = CODEX_CONFIG_PREPARE_TIMEOUT_MS) => {
+        const result = spawnSync(runtimeCli(), [
+            "exec", ...(root ? ["--user", "root"] : []), containerName, "sh", "-c", codexConfigMutation(script),
+        ], { encoding: "utf-8", timeout });
+        if (result.error || (result.status !== 0 && !(probe && result.status === 1))) {
+            throw new Error(`Unable to prepare Codex credentials at ${dirname(configFile)}: ${operation} failed (${result.error?.message ?? (result.stderr?.trim() || `exit ${result.status ?? "unknown"}`)})`);
+        }
+        return result;
+    };
+    const validateHostDirectory = (): void => {
+        if (typeof process.getuid !== "function") {
+            throw new Error("Unable to prepare Codex credentials: host user identity is unavailable");
+        }
+        const parent = lstatSync(dirname(configFile));
+        if (!parent.isDirectory() || parent.uid !== process.getuid()) {
+            throw new Error("Unable to prepare Codex credentials: automatic repair requires a non-symlink directory owned by the host user");
+        }
+    };
+    const validateHostConfig = (allowAbsent = false): void => {
+        try {
+            if (!lstatSync(configFile).isFile()) {
+                throw new Error("Unable to prepare Codex credentials: automatic repair requires a regular non-symlink config file");
+            }
+        } catch (error) {
+            if (allowAbsent && (error as NodeJS.ErrnoException).code === "ENOENT") return;
+            throw error;
+        }
+    };
+    let containerUid: string | undefined;
+    const getContainerUid = (): string => {
+        if (containerUid === undefined) {
+            containerUid = getCodexContainerUid(containerName);
+        }
+        return containerUid;
+    };
+
+    // Check the parent first: an inaccessible 0700 directory can make a
+    // config-only existence test incorrectly report that config.toml is absent.
+    if (run("directory access check", directoryProbe, false, true).status !== 0) {
+        validateHostDirectory();
+        validateHostConfig(true);
+        const uid = getContainerUid();
+        run("directory ACL grant", codexConfigDirectoryAclScript(uid), true);
+        run("directory access verification", directoryProbe);
     }
 
-    const repair = spawnSync(runtimeCli(), [
-        "exec", "--user", "root", containerName,
-        "sh", "-c",
-        codexConfigMutation("if [ -e /home/ccc/.codex/config.toml ] || [ -L /home/ccc/.codex/config.toml ]; then chown -h ccc:docker /home/ccc/.codex/config.toml 2>/dev/null || chown -h ccc:ccc /home/ccc/.codex/config.toml; fi"),
-    ], { stdio: "ignore", timeout: CODEX_CONFIG_PREPARE_TIMEOUT_MS });
-    if ((repair.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT"
-        || repair.status === 124
-        || repair.status === 137) {
-        throw new Error("Codex config repair timed out");
-    }
-    if (repair.error || repair.status !== 0) {
-        throw new Error("Codex config repair failed");
-    }
-
-    // Root may change only the directory entry ownership without following a
-    // symlink. Permission mutation and the final identity/access proof run as
-    // the unprivileged container user, limiting any concurrent path swap to
-    // files that user could already modify.
-    const finalize = spawnSync(runtimeCli(), [
-        "exec", containerName,
-        "sh", "-c",
-        codexConfigMutation("if [ -L /home/ccc/.codex/config.toml ] || { [ -e /home/ccc/.codex/config.toml ] && [ ! -f /home/ccc/.codex/config.toml ]; }; then exit 42; fi; if [ -e /home/ccc/.codex/config.toml ]; then chmod 600 /home/ccc/.codex/config.toml && test -r /home/ccc/.codex/config.toml -a -w /home/ccc/.codex/config.toml; fi"),
-    ], { stdio: "ignore", timeout: CODEX_CONFIG_PREPARE_TIMEOUT_MS });
-    if ((finalize.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT"
-        || finalize.status === 124
-        || finalize.status === 137) {
-        throw new Error("Codex config repair timed out");
-    }
-    if (finalize.error || finalize.status !== 0) {
-        throw new Error("Codex config repair failed");
+    if (run("config access check", configProbe, false, true).status !== 0) {
+        validateHostDirectory();
+        validateHostConfig();
+        const uid = getContainerUid();
+        run("config ACL grant", codexConfigFileAclScript(uid), true);
+        run("config access verification", configProbe);
     }
 }
 
@@ -1561,9 +1653,8 @@ export function ensureImage(): void {
         return;
     }
 
-    console.error(`Error: Failed to pull ${remoteRef}.`);
-    console.error(`You can build locally instead: ${runtimeCli()} build -t ccc .`);
-    process.exit(1);
+    // Unwind startup locks before the CLI reports failure.
+    throw new Error(`Failed to pull ${remoteRef}. You can build locally instead: ${runtimeCli()} build -t ccc .`);
 }
 
 // === Clipboard Shim Sync ===
@@ -1939,6 +2030,8 @@ function containerMatchesRunContract(
     deviceLabMountIdentity: string,
     projectPath: string,
     projectMountIdentity: string,
+    desiredImageId: string,
+    identity: ContainerUserIdentity,
     reportMismatch: (reason: string) => void = () => undefined,
 ): boolean | null {
     const inspectedResult = inspectContainerJsonWithRetry(containerName);
@@ -1959,6 +2052,10 @@ function containerMatchesRunContract(
             Config?: { Env?: string[]; Labels?: Record<string, string> };
             HostConfig?: { Devices?: unknown; DeviceRequests?: unknown; GroupAdd?: unknown; Privileged?: boolean; Init?: unknown };
         };
+        if (normalizeImageId(String(inspectedResult.Image)) !== normalizeImageId(desiredImageId)
+            || !Object.entries(getIdentityLabels(identity)).every(([key, value]) => inspected.Config?.Labels?.[key] === value)) {
+            return failContract("image or user identity changed");
+        }
         const mounts = inspected.Mounts || [];
         const env = envMap(inspected.Config?.Env);
         const hostConfig = inspectedHostConfig(inspected.HostConfig);
@@ -2049,12 +2146,14 @@ function containerRunContractIsSafeToDefer(
     labRunner: LabRunnerRunConfig,
     projectPath: string,
     projectMountIdentity: string,
+    identity: ContainerUserIdentity,
     reportUnsafe: (reason: string) => void = () => undefined,
 ): boolean {
     const unsafe = (reason: string) => {
         reportUnsafe(reason);
         return false;
     };
+    if (!containerExecIdentityMatches(containerName, identity)) return unsafe("container UID/GID does not match the host identity");
     const inspectedResult = inspectContainerJsonWithRetry(containerName);
     if (!inspectedResult) return unsafe("container contract inspection failed");
     try {
@@ -2221,6 +2320,10 @@ export function sshCredentialCopyShell(privilegedRead = false): string {
         "  rm -rf -- \"$copy_stage\" \"$copied_ssh_root\"",
         "  exit 1",
         "fi",
+        "if ! /usr/bin/python3 -I - \"$copied_ssh_root\" \"$copy_stage\" <<'CCC_KNOWN_HOSTS'",
+        SSH_KNOWN_HOSTS_PROVENANCE_SCRIPT,
+        "CCC_KNOWN_HOSTS",
+        "then rm -rf -- \"$copy_stage\" \"$copied_ssh_root\"; exit 1; fi",
         "if ! find \"$copy_stage\" -type d -exec chmod 700 {} + || ! find \"$copy_stage\" -type f -exec chmod 600 {} + || ! find \"$copy_stage\" -type f -name '*.pub' -exec chmod 644 {} +; then",
         "  rm -rf -- \"$copy_stage\" \"$copied_ssh_root\"",
         "  exit 1",
@@ -2251,12 +2354,6 @@ export function sshCredentialCopyShell(privilegedRead = false): string {
 function fixSshPermissions(containerName: string): void {
     const hostSshDir = join(homedir(), ".ssh");
     const cli = runtimeCli();
-
-    spawnSync(
-        cli,
-        ["exec", containerName, "sh", "-c", "chmod 666 /tmp/ssh-agent.sock 2>/dev/null; true"],
-        { stdio: "ignore" },
-    );
 
     const copied = spawnSync(
         cli,
@@ -2377,6 +2474,7 @@ interface ContainerReplacementContext {
     expectedContainerId?: string;
     managedProjectPath?: string;
     initiallyRunningContainerId?: string;
+    beforeRemove?: () => void;
 }
 
 function recreateContainerWithSessionGuard(
@@ -2395,32 +2493,31 @@ function recreateContainerWithSessionGuard(
     if (initialIdentity.containerId !== pinnedContainerId) return false;
     let replacementConfirmed = false;
     const guarded = guard(() => {
-        const startupAuthorizedRunningRecovery = context.initiallyRunningContainerId === pinnedContainerId;
-        if (startupAuthorizedRunningRecovery) {
-            if (!context.managedProjectPath) return;
-            const currentIdentity = getManagedProjectContainerIdentity(
-                pinnedContainerId,
-                context.managedProjectPath,
-            );
-            if (!currentIdentity || currentIdentity.containerId !== pinnedContainerId) return;
-            if (currentIdentity.running) {
-                const stopped = spawnSync(runtimeCli(), ["stop", pinnedContainerId], {
-                    encoding: "utf-8",
-                    stdio: ["ignore", "pipe", "pipe"],
-                });
-                if (stopped.error || stopped.status !== 0) {
-                    throw new Error("Container replacement aborted because the idle running container could not be stopped.");
-                }
-            }
-        } else if (initialIdentity.running) {
-            // This invocation did not observe the container running at startup.
-            // A later external start must retain the stopped-path no-stop fence.
-            return;
-        }
+        // A sole CLI session does not prove there is no background work.
+        // Never stop a container automatically, even if it stopped after startup.
+        if (context.initiallyRunningContainerId === pinnedContainerId || initialIdentity.running) return;
+        const currentIdentity = getContainerIdentity(pinnedContainerId);
+        if (!currentIdentity || currentIdentity.containerId !== pinnedContainerId || currentIdentity.running) return;
+        context.beforeRemove?.();
         recreateContainer(pinnedContainerId, reason, onRecreate);
         replacementConfirmed = true;
     });
     return guarded && replacementConfirmed;
+}
+
+/** Validate the effective exec user, never infer it from mutable labels alone. */
+function containerExecIdentityMatches(containerId: string, identity: ContainerUserIdentity): boolean {
+    const result = spawnSync(runtimeCli(), ["exec", containerId, "sh", "-c",
+        'printf "%s:%s:%s:%s" "$(id -u)" "$(id -g)" "$(id -un)" "$HOME"'],
+        { encoding: "utf-8", timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
+    return !result.error && result.status === 0
+        && result.stdout.trim() === `${identity.uid}:${identity.gid}:ccc:/home/ccc`;
+}
+
+/** One host-wide fence covers retained state migration through container start. */
+export function startProjectContainer(...args: Parameters<typeof startProjectContainerLocked>): string {
+    return withSharedMutationLock(join(cccHome(), "codex-state.lock"),
+        () => startProjectContainerLocked(...args), { waitMs: 600_000, reclaimStale: false });
 }
 
 // === Container Lifecycle ===
@@ -2433,7 +2530,7 @@ function cleanupDevicesBestEffort(projectPath: string, profile?: string): void {
     }
 }
 
-export function startProjectContainer(
+function startProjectContainerLocked(
     projectPath: string,
     ensureDirs: () => void,
     extraMounts?: Array<{
@@ -2465,6 +2562,12 @@ export function startProjectContainer(
     ensureDirs();
     mkdirSync(clipboardFilesDir(), { recursive: true, mode: 0o700 });
     ensureImage();
+    const identity = resolveContainerIdentity();
+    const baseImageId = getCurrentImageId();
+    if (!baseImageId) throw new Error("Cannot resolve the current CCC base image.");
+    const imageId = ensureIdentityImage(baseImageId, identity);
+    const miseVolumeName = getIdentityMiseVolumeName(identity);
+    const codexPackagesVolumeName = getIdentityCodexPackagesVolumeName(identity);
 
     const fullPath = resolve(projectPath);
     const projectMountSourceIdentity = captureBindMountSourceIdentity(fullPath);
@@ -2558,14 +2661,14 @@ export function startProjectContainer(
         },
         filesystemBind(clipboardFilesDir(), CLIPBOARD_FILES_CONTAINER_DIR, false),
         {
-            hostPath: MISE_VOLUME_NAME,
+            hostPath: miseVolumeName,
             containerPath: "/home/ccc/.local/share/mise",
             readonly: false,
             type: "volume",
             presence: "additive",
         },
         {
-            hostPath: CODEX_PACKAGES_VOLUME_NAME,
+            hostPath: codexPackagesVolumeName,
             containerPath: CODEX_PACKAGES_CONTAINER_DIR,
             readonly: false,
             type: "volume",
@@ -2631,11 +2734,41 @@ export function startProjectContainer(
     // registry would silently miss that tool's auth dir on subsequent runs.
     const listedContainer = getListedContainerId(containerName);
     let lifecycleContainerId = listedContainer.containerId;
+    // Retain immutable provenance before a guarded replacement removes the old container.
+    const previousContainer = listedContainer.containerId
+        ? inspectContainerJsonWithRetry(listedContainer.containerId) : null;
+    if (previousContainer && (previousContainer.Id !== listedContainer.containerId
+        || typeof previousContainer.Image !== "string" || !Array.isArray(previousContainer.Mounts))) {
+        throw new Error("Previous container identity or state provenance could not be verified; the container was preserved.");
+    }
+    let retainedStatePrepared = false;
+    const prepareRetainedState = () => {
+        if (retainedStatePrepared) return;
+        if (listedContainer.containerId && !previousContainer) {
+            throw new Error("Previous container state provenance is unavailable; refusing unproven Codex state migration.");
+        }
+        if (previousContainer) {
+            const codexRoot = getCodexDir(profile);
+            const codexSource = captureBindMountSourceIdentity(codexRoot);
+            prepareCodexStateOwnership(previousContainer, imageId, identity, profile,
+                (source) => bindSourceIsTrustedFilesystemAlias(source, codexRoot, codexSource) === "match");
+        }
+        prepareLabStateOwnership(labRunner.stateVolumeName, imageId, identity,
+            typeof previousContainer?.Image === "string" ? previousContainer.Image : undefined);
+        retainedStatePrepared = true;
+    };
+    if ((previousContainer?.State as { Running?: boolean } | undefined)?.Running
+        && !containerExecIdentityMatches(listedContainer.containerId!, identity)) {
+        throw new ContainerRestartRequiredError("container UID/GID does not match the host identity", fullPath, cli, profile);
+    }
     const markRecreated = () => {
         lifecycleContainerId = null;
         onRecreate?.();
     };
     const finish = (containerId: string): string => {
+        if (!containerExecIdentityMatches(containerId, identity)) {
+            throw new Error("Container UID/GID validation failed; refusing a session that could change host project ownership.");
+        }
         assertPreparedProjectMountSources();
         assertRequiredFilesystemMountSources();
         if (onContainerReady) {
@@ -2668,6 +2801,8 @@ export function startProjectContainer(
             preparedDeviceLabSources.contractIdentity,
             fullPath,
             projectMountIdentity,
+            imageId,
+            identity,
             (reason) => { contractMismatchReason = reason; },
         );
         assertPreparedProjectMountSources();
@@ -2696,6 +2831,7 @@ export function startProjectContainer(
                         expectedContainerId: listedContainer.containerId,
                         managedProjectPath: fullPath,
                         initiallyRunningContainerId,
+                        beforeRemove: prepareRetainedState,
                     },
                 );
                 if (!recreated) {
@@ -2706,6 +2842,7 @@ export function startProjectContainer(
                         labRunner,
                         fullPath,
                         projectMountIdentity,
+                        identity,
                         (reason) => { unsafeDeferReason = reason; },
                     )) {
                         throw new ContainerRestartRequiredError(unsafeDeferReason, fullPath, runtimeCli(), profile);
@@ -2746,6 +2883,7 @@ export function startProjectContainer(
                             expectedContainerId: lifecycleContainerId,
                             managedProjectPath: fullPath,
                             initiallyRunningContainerId,
+                        beforeRemove: prepareRetainedState,
                         },
                     );
                     if (!recreated) {
@@ -2769,6 +2907,7 @@ export function startProjectContainer(
                             expectedContainerId: lifecycleContainerId,
                             managedProjectPath: fullPath,
                             initiallyRunningContainerId,
+                        beforeRemove: prepareRetainedState,
                         },
                     );
                     if (!recreated) {
@@ -2789,6 +2928,7 @@ export function startProjectContainer(
                         expectedContainerId: lifecycleContainerId,
                         managedProjectPath: fullPath,
                         initiallyRunningContainerId,
+                        beforeRemove: prepareRetainedState,
                     },
                 );
                 if (!recreated) {
@@ -2813,6 +2953,7 @@ export function startProjectContainer(
                     expectedContainerId: lifecycleContainerId,
                     managedProjectPath: fullPath,
                     initiallyRunningContainerId,
+                    beforeRemove: prepareRetainedState,
                 },
             );
             if (!recreated) {
@@ -2865,6 +3006,7 @@ export function startProjectContainer(
         if (debug) {
             console.error(`[ccc:debug] Container ${containerName} not found, creating`);
         }
+        prepareRetainedState();
         console.log("Creating container...");
 
         if (isLabRunnerProfile(profile) && labRunner.status === "unsupported") {
@@ -2880,9 +3022,11 @@ export function startProjectContainer(
             credentialMounts,
             gitIdentityMounts,
             claudeJsonFile: getClaudeJsonFile(profile),
-            miseVolumeName: MISE_VOLUME_NAME,
+            miseVolumeName,
+            codexPackagesVolumeName,
+            identity,
             pidsLimit: CONTAINER_PID_LIMIT,
-            imageName: IMAGE_NAME,
+            imageName: imageId,
             hostSshDir,
             sshAgentSocket,
             extraMounts: preparedExtraMounts,
