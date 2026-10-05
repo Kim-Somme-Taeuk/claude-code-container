@@ -53,10 +53,12 @@ try {
     // Missing provenance must never guess the previous owner from retained data.
     assert.notEqual(prepare(retained, identity, null).status, 0);
     assert.equal(run(inspect, mount(retained)), before);
-    assert.equal(prepare(retained, identity).status, 0);
+    const migrated = prepare(retained, identity);
+    assert.equal(migrated.status, 0, migrated.stderr);
     const after = run(inspect, mount(retained));
     assert.match(after, new RegExp(`^${identity.uid}:${identity.gid}:755\\n${identity.uid}:${identity.gid}:640\\n34567:45678:644\\n${identity.uid}:${identity.gid}:777\\npreservedforeign`));
-    assert.equal(prepare(retained, identity, null).status, 0);
+    const reused = prepare(retained, identity, null);
+    assert.equal(reused.status, 0, reused.stderr);
     assert.equal(run(inspect, mount(retained)), after);
     console.log('PASS: old owners migrated, foreign owners/content/modes preserved, symlink target unchanged, absent provenance refused, compatible state reused');
     const busy = `${runId}-busy`; containers.push(busy); record();
@@ -66,7 +68,8 @@ try {
     assert.equal(run(inspect, mount(retained)), after);
     docker(['rm', '-f', busy]);
     const missing = `${runId}-missing`;
-    assert.equal(prepare(missing, identity).status, 0);
+    const absent = prepare(missing, identity);
+    assert.equal(absent.status, 0, absent.stderr);
     assert.notEqual(spawnSync('docker', ['volume', 'inspect', missing], { stdio: 'ignore' }).status, 0);
     assert.equal(docker(['image', 'inspect', base, '--format', '{{.Id}}']), originalId);
     console.log('PASS: active volume refused without writes; missing volume not created; immutable base preserved');
