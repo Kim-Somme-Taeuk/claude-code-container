@@ -137,9 +137,13 @@ try {
     assert.deepEqual(readFileSync(join(fixture, "dist/device-lab-mcp/server.mjs")), deviceLabBundle);
     rmSync(preserved);
     const report = JSON.parse(run(process.execPath, [npmCli, "pack", "--ignore-scripts", "--json", "--pack-destination", temporary], fixture));
-    const filename = report?.[0]?.filename;
+    const reports = Array.isArray(report) ? report : Object.values(report);
+    assert.equal(reports.length, 1, "expected one packed workspace distribution");
+    const [packedReport] = reports;
+    const filename = packedReport?.filename;
     assert.ok(typeof filename === "string" && /^[A-Za-z0-9._-]+\.tgz$/.test(filename));
-    assert.ok(report[0].files.every(({ path }) => !/^(?:dist\/)?x11-mcp(?:\/|$)/.test(path)),
+    assert.ok(Array.isArray(packedReport.files), "npm pack did not report package files");
+    assert.ok(packedReport.files.every(({ path }) => !/^(?:dist\/)?x11-mcp(?:\/|$)/.test(path)),
         "npm package contains standalone X11 artifacts");
     run(process.platform === "win32" ? "tar.exe" : "tar", ["-xzf", join(temporary, filename), "-C", temporary]);
     const packed = join(temporary, "package");
