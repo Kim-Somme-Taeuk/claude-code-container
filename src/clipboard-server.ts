@@ -28,7 +28,8 @@ import { join, dirname, basename } from "path";
 import { platform } from "os";
 import { fileURLToPath } from "url";
 import { CLIPBOARD_FILES_CONTAINER_DIR } from "./utils.js";
-import { clipboardFilesDir, clipboardPortFile, clipboardStartingLock, clipboardStateDir, helperBinDir, locksDir } from "./home-layout.js";
+import { clipboardFilesDir, clipboardPortFile, clipboardStartingLock, helperBinDir, locksDir } from "./home-layout.js";
+import { tryAcquireClipboardStartupLock, recoverDeadClipboardStartupLock, releaseClipboardStartupLock } from "./clipboard-startup-lock.js";
 import { clipboardPortMayHaveBindUsers } from "./clipboard-bind-users.js";
 import { sessionLockLiveness } from "./session-lock-liveness.js";
 import { canonicalWindowsPowerShellPath, hiddenWindowsPowerShellArgs } from "@ccc/device-lab/windows-system-powershell.js";
@@ -1570,14 +1571,9 @@ export async function ensureClipboardServer(): Promise<number> {
         if (health.alive && health.version === SERVER_VERSION) return existing.port;
     }
 
-    // Atomic startup lock to prevent race condition
-    let lockFd: number | null = null;
-    try {
-        mkdirSync(clipboardStateDir(), { recursive: true, mode: 0o700 });
-        lockFd = openSync(clipboardStartingLock(), "wx");
-        closeSync(lockFd);
-    } catch {
-        // Another process is starting the server - wait for port file
+    const lockPath = clipboardStartingLock();
+    let lock = tryAcquireClipboardStartupLock(lockPath);
+    if (!lock) {
         const deadline = Date.now() + STARTUP_LOCK_TIMEOUT_MS;
         while (Date.now() < deadline) {
             await new Promise((r) => setTimeout(r, STARTUP_POLL_INTERVAL_MS));
@@ -1586,16 +1582,19 @@ export async function ensureClipboardServer(): Promise<number> {
                 const health = await checkServerHealth(info.port, info.token, bindAddr);
                 if (health.alive && health.version === SERVER_VERSION) return info.port;
             }
+            lock = tryAcquireClipboardStartupLock(lockPath);
+            if (lock) break;
+            if (recoverDeadClipboardStartupLock(lockPath)) {
+                lock = tryAcquireClipboardStartupLock(lockPath);
+                if (lock) {
+                    // A killed owner may already have sent legacy shutdown.
+                    // Wait for delayed cleanup before successor publication.
+                    await new Promise((r) => setTimeout(r, UPGRADE_SHUTDOWN_GRACE_MS));
+                    break;
+                }
+            }
         }
-        // Timeout - try to start ourselves (delete stale lock)
-        try { unlinkSync(clipboardStartingLock()); } catch { /* ignore */ }
-        try {
-            mkdirSync(clipboardStateDir(), { recursive: true, mode: 0o700 });
-            lockFd = openSync(clipboardStartingLock(), "wx");
-            closeSync(lockFd);
-        } catch {
-            throw new Error("Failed to acquire clipboard server startup lock");
-        }
+        if (!lock) throw new Error(`Clipboard startup is still owned or its owner cannot be verified: ${lockPath}. Retry after the owner finishes; inspect empty or malformed legacy locks before removing them.`);
     }
 
     // Keep upgrade shutdown, legacy grace and publication under the v2 lock.
@@ -1644,7 +1643,7 @@ export async function ensureClipboardServer(): Promise<number> {
 
         throw new Error("Clipboard server failed to start within timeout");
     } finally {
-        try { unlinkSync(clipboardStartingLock()); } catch { /* ignore */ }
+        releaseClipboardStartupLock(lock);
     }
 }
 
@@ -1717,7 +1716,6 @@ if (isMainModule && process.argv.includes("--serve")) {
     start(bindAddr)
         .then((port) => {
             writePortFile(port, token);
-            try { unlinkSync(clipboardStartingLock()); } catch { /* ignore */ }
         })
         .catch((err) => {
             console.error("Failed to start clipboard server:", err);

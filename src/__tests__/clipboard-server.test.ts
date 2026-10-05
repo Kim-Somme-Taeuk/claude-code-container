@@ -11,6 +11,16 @@ import { type ChildProcess } from "child_process";
 // and runtime metadata cases in clipboard-bind-users.test.ts.
 vi.mock("../clipboard-bind-users.js", () => ({ clipboardPortMayHaveBindUsers: () => false }));
 
+// Filesystem ownership is tested with real descriptors in startup-lock/state suites.
+vi.mock("../clipboard-startup-lock.js", () => ({
+    tryAcquireClipboardStartupLock: (path: string) => {
+        try { const fd = mockOpenSync(path, "wx"); mockCloseSync(fd); return { path, fd }; }
+        catch { return null; }
+    },
+    recoverDeadClipboardStartupLock: () => false,
+    releaseClipboardStartupLock: (lock: { path: string }) => mockUnlinkSync(lock.path),
+}));
+
 // Track process.exit calls without actually exiting
 const mockProcessExit = vi.spyOn(process, "exit").mockImplementation((() => {}) as any);
 
@@ -3807,7 +3817,7 @@ describe("clipboard-server", () => {
                 throw new Error("EEXIST: file exists");
             });
 
-            await expect(mod.ensureClipboardServer()).rejects.toThrow("Failed to acquire clipboard server startup lock");
+            await expect(mod.ensureClipboardServer()).rejects.toThrow("still owned or its owner cannot be verified");
         }, 15000);
 
         it("covers race path: openSync throws, port appears but health check dead, then timeout", async () => {

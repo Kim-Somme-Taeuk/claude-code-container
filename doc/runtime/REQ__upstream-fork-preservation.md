@@ -51,17 +51,11 @@ unchanged. Host key rotation or deletion must not restore superseded trust,
 including hashed or wildcard entries. Never chmod the forwarded host
 agent socket. Existing valid host keys remain usable across UID mismatch.
 
-### Known ceiling
-
-The first refresh without valid provenance, or any change to authoritative
-known_hosts bytes or presence, resets container-learned trust. Users must verify
-those additional hosts again. This avoids guessing whether hashed or wildcard
-entries conflict with changed authority. An SSH entry larger than 16 MiB fails
-snapshot preparation; the incomplete snapshot is invalidated.
-
 Clipboard port-file publication preserves a file bind mount's inode across
 normal stop/restart. Serialize legacy server retirement and replacement;
-authenticate live health rather than trusting a saved token. Preserve upstream
+never reclaim a live startup owner's lock merely because its wait budget
+elapsed, and release only the acquiring invocation's lock identity.
+Authenticate live health rather than trusting a saved token. Preserve upstream
 clipboard text/image support and layout-aware paths. Unreadable mounted token
 files fall back to configured environment values. Read a valid mounted port and
 token together so existing sessions follow a restarted server's new port while
@@ -76,6 +70,18 @@ without requiring ss or opening a connection to the proxy itself.
 Remember only explicit mise generation declines per project, including declines
 saved by the prior layout. Existing project tool configuration still applies.
 Remote cache identity comes from the remote image, never the local host UID.
+
+### Known ceiling
+
+The first SSH refresh without valid provenance, or any change to authoritative
+known_hosts bytes or presence, resets container-learned trust. Users must verify
+those additional hosts again. This avoids guessing whether hashed or wildcard
+entries conflict with changed authority. An SSH entry larger than 16 MiB fails
+snapshot preparation; the incomplete snapshot is invalidated.
+
+Opaque or unavailable runtime mount evidence defers clipboard daemon updates.
+An upgrade proceeds when running bind users can be excluded safely; authenticated
+legacy service remains available while the update is deferred.
 
 ## Harness boundary
 

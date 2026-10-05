@@ -22,7 +22,7 @@ describe.each(["legacy", "run"])("clipboard state across real daemon restarts (%
         fixtureRoot = mkdtempSync(join(tmpdir(), "ccc-clipboard-state-"));
         writeFileSync(join(fixtureRoot, "package.json"), '{"type":"module"}');
         symlinkSync(fileURLToPath(new URL("../../node_modules", import.meta.url)), join(fixtureRoot, "node_modules"), "junction");
-        for (const name of ["clipboard-server", "utils", "home-layout", "session-lock-liveness"]) {
+        for (const name of ["clipboard-server", "clipboard-startup-lock", "utils", "home-layout", "session-lock-liveness"]) {
             const source = readFileSync(fileURLToPath(new URL(`../${name}.ts`, import.meta.url)), "utf8");
             writeFileSync(join(fixtureRoot, `${name}.js`), transpileModule(source, {
                 compilerOptions: { target: ScriptTarget.ES2022, module: ModuleKind.ES2022 },
@@ -35,7 +35,13 @@ describe.each(["legacy", "run"])("clipboard state across real daemon restarts (%
             import { join } from "path";
             export function clipboardPortMayHaveBindUsers() {
                 const control = join(process.env.CCC_CLIPBOARD_TEST_HOME, "bind-users");
-                return existsSync(control) && readFileSync(control, "utf8") !== "none";
+                const mode = existsSync(control) ? readFileSync(control, "utf8") : "none";
+                if (mode === "delayed") {
+                    const wait = new Int32Array(new SharedArrayBuffer(4));
+                    Atomics.wait(wait, 0, 0, 17000);
+                    return true;
+                }
+                return mode !== "none";
             }
         `);
         writeFileSync(join(fixtureRoot, "home.cjs"), `
@@ -282,6 +288,25 @@ describe.each(["legacy", "run"])("clipboard state across real daemon restarts (%
         expect(readFileSync(startingLock, "utf8")).toBe("successor-startup-lock");
         expect(JSON.parse(await send(successor, "/health")).valid).toBe(true);
     });
+
+    it("does not reclaim a live owner during delayed bind inspection", async () => {
+        start("legacy-peer.js");
+        const old = await published();
+        writeFileSync(join(home, "bind-users"), "delayed");
+        const first = start("driver.js", "ensure-exit");
+        await waitFor(() => existsSync(startingLock) && readFileSync(startingLock, "utf8").includes('"nonce"'));
+        const before = statSync(startingLock);
+        const ownership = readFileSync(startingLock, "utf8");
+        const second = await start("driver.js", "ensure-exit").exited;
+        expect(second.code).not.toBe(0);
+        expect(second.stderr).toContain("still owned or its owner cannot be verified");
+        expect(statSync(startingLock).ino).toBe(before.ino);
+        expect(readFileSync(startingLock, "utf8")).toBe(ownership);
+        expect(readFileSync(portFile, "utf8")).toBe(old.bytes);
+        expect((await first.exited).code).toBe(0);
+        expect(existsSync(startingLock)).toBe(false);
+        expect(JSON.parse(await send(old, "/health")).valid).toBe(true);
+    }, 45000);
 
     it.each(["active", "unknown"])("preserves a held legacy bind inode while %s container users prevent upgrade", async mode => {
         const legacy = start("legacy-peer.js");
