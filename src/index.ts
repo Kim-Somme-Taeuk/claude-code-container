@@ -122,6 +122,7 @@ import {
     setupSignalHandlers,
     setSession,
     setSessionContainerId,
+    setSessionCleanupEnabled,
 } from "./session.js";
 
 export const RUNNING_CONTAINER_UPDATE_DEFERRED_MESSAGE = "Update available; deferred because the existing container is running. It will be applied after the container stops.";
@@ -571,6 +572,7 @@ async function exec(
         )
         : createSessionLock(projectId, profile);
     setSession(sessionLockFile, fullPath, profile, (commandTool ?? options.tool)?.name ?? "command");
+    setSessionCleanupEnabled(false);
     setupSignalHandlers();
 
     // Start clipboard server early — must complete before container creation so
@@ -624,6 +626,7 @@ async function exec(
         recreate();
         return true;
     };
+    const invocationStartedContainers = new Set<string>();
     const startContainer = (
         mounts = worktreeMounts.length > 0 ? worktreeMounts : undefined,
         portFile: string | undefined = clipboardPortFile,
@@ -639,9 +642,11 @@ async function exec(
                 profile,
                 onRecreate,
                 recreateInsideLifecycleLock,
-                (containerId) => {
+                (containerId, handoff) => {
                     readyContainerId = containerId;
                     setSessionContainerId(containerId);
+                    if (handoff.startedByInvocation) invocationStartedContainers.add(containerId);
+                    setSessionCleanupEnabled(invocationStartedContainers.has(containerId));
                 },
                 containerStatus.running ? containerStatus.containerId ?? undefined : undefined,
             );
@@ -874,7 +879,12 @@ async function exec(
             execArgs.push(...resolvedCmd);
         }
 
-        resultStatus = preparationStatus ?? spawnSync(runtimeCli(), execArgs, { stdio: "inherit" }).status ?? 1;
+        if (preparationStatus === null) {
+            setSessionCleanupEnabled(true);
+            resultStatus = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" }).status ?? 1;
+        } else {
+            resultStatus = preparationStatus;
+        }
     } finally {
         try {
             withCodexConfigLock(() => restoreCodexConfigHostOwnership(containerName, profile), profile);
@@ -2100,9 +2110,9 @@ export async function main(): Promise<void> {
     }
 }
 
-// Run main only when executed directly (not when imported by test frameworks)
-if (!process.env.VITEST) {
-    main().catch((err) => {
+/** The CLI error boundary also releases claims from failed startup. */
+export function runCli(): Promise<void> {
+    return main().catch((err) => {
         try { cleanupSession(); } catch (cleanupError) {
             console.error(`[ccc] cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
         }
@@ -2110,3 +2120,6 @@ if (!process.env.VITEST) {
         process.exit(1);
     });
 }
+
+// Run only when executed directly (not when imported by test frameworks).
+if (!process.env.VITEST) void runCli();

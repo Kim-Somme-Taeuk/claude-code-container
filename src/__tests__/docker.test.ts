@@ -2707,7 +2707,7 @@ describe("docker.ts module exports", () => {
             );
 
             expect(ready).toHaveBeenCalledOnce();
-            expect(ready).toHaveBeenCalledWith(TEST_CONTAINER_ID);
+            expect(ready).toHaveBeenCalledWith(TEST_CONTAINER_ID, { startedByInvocation: false });
             const targeted = spawnSyncMock.mock.calls.filter((call: unknown[]) => {
                 const args = call[1] as string[];
                 return ["exec", "cp", "start"].includes(args[0]);
@@ -2716,6 +2716,27 @@ describe("docker.ts module exports", () => {
             expect(targeted.every((call: unknown[]) => (call[1] as string[]).includes("abc123")
                 || (call[1] as string[]).some((arg) => arg.startsWith("abc123:")))).toBe(true);
             expect(targeted.flatMap((call: unknown[]) => call[1] as string[])).not.toContain(name);
+        });
+
+        it.each(["running", "stopped", "missing"])("reports lifecycle cleanup authority for %s handoff", (initial) => {
+            const ready = vi.fn();
+            let exists = initial !== "missing";
+            let running = initial === "running";
+            spawnSyncMock.mockImplementation((_command: unknown, argsValue: unknown) => {
+                const args = argsValue as string[];
+                if (args[0] === "images") return makeResult(0, "sha256:abc\n");
+                if (args[0] === "image" && args[1] === "inspect") return makeResult(0, "<no value>\n");
+                if (args[0] === "ps" && args[1] === "-aq") return makeResult(0, exists ? `${TEST_CONTAINER_ID}\n` : "");
+                if (args[0] === "ps" && args[1] === "-q") return makeResult(0, running ? `${TEST_CONTAINER_ID}\n` : "");
+                if (args[0] === "inspect" && args.includes("{{.Id}}|{{.State.Running}}")) return makeResult(0, `${TEST_CONTAINER_ID}|${running}\n`);
+                if (args[0] === "inspect") return makeResult(0, JSON.stringify({ ...JSON.parse(fullCredentialMountsJson()), State: { Running: running } }));
+                if (args[0] === "start") { running = true; return makeResult(0, TEST_CONTAINER_ID); }
+                if (args[0] === "run") { exists = true; running = true; return makeResult(0, TEST_CONTAINER_ID); }
+                return makeResult(0);
+            });
+            startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, undefined, undefined, ready);
+            expect(ready).toHaveBeenCalledWith(TEST_CONTAINER_ID, { startedByInvocation: initial !== "running" });
+            if (initial === "running") expect(spawnSyncMock.mock.calls.some(([, args]) => ["start", "run", "stop", "rm"].includes(args[0]))).toBe(false);
         });
 
         it("requests untruncated IDs before comparing the listed and inspected identities", () => {
@@ -2738,7 +2759,7 @@ describe("docker.ts module exports", () => {
                 projectPath, ensureDirs, undefined, undefined, undefined, undefined, undefined, ready,
             );
 
-            expect(ready).toHaveBeenCalledWith(fullId);
+            expect(ready).toHaveBeenCalledWith(fullId, { startedByInvocation: false });
             const listCalls = spawnSyncMock.mock.calls.filter((call: unknown[]) => {
                 const args = call[1] as string[];
                 return args[0] === "ps" && args[1] === "-aq";

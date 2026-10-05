@@ -61,6 +61,7 @@ let currentProjectPath: string | null = null;
 let currentProfile: string | undefined = undefined;
 let currentToolName: string | null = null;
 let currentContainerId: string | null = null;
+let sessionCleanupEnabled = true;
 
 export function setSession(lockFile: string, projectPath: string, profile?: string, toolName?: string): void {
     currentSessionLockFile = lockFile;
@@ -68,6 +69,12 @@ export function setSession(lockFile: string, projectPath: string, profile?: stri
     currentProfile = profile;
     currentToolName = toolName ?? "claude";
     currentContainerId = null;
+    sessionCleanupEnabled = true;
+}
+
+/** A failed join must release its claim without stopping existing background work. */
+export function setSessionCleanupEnabled(enabled: boolean): void {
+    sessionCleanupEnabled = enabled;
 }
 
 export function setSessionContainerId(containerId: string | null): void {
@@ -85,6 +92,7 @@ export function clearSession(): void {
     currentToolName = null;
     currentContainerId = null;
     cleanedUp = false;
+    sessionCleanupEnabled = true;
 }
 
 export function createSessionLock(projectId: string, profile?: string): string {
@@ -333,7 +341,7 @@ export function cleanupSession(): void {
     withContainerLifecycleLock(containerPrefix, () => {
         const hasOthers = hasOtherSessionClaims(containerPrefix, currentSessionLockFile!);
         removeSessionLock(currentSessionLockFile!);
-        if (!hasOthers) {
+        if (!hasOthers && sessionCleanupEnabled) {
             cleanupDevicesBestEffort(currentProjectPath!, currentProfile);
             if (currentContainerId) {
                 spawnSync(runtimeCli(), ["stop", currentContainerId], { stdio: "ignore" });

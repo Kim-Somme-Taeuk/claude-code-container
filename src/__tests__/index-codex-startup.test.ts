@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const f = vi.hoisted(() => ({
-    events: [] as string[], running: false, profile: undefined as string | undefined,
+    events: [] as string[], running: false, exists: true, profile: undefined as string | undefined,
+    handoffStarted: undefined as boolean | undefined,
+    realCleanup: false, devices: vi.fn(),
     locked: false, failPostExitLock: false, failTool: false, failState: false, launchFailure: false,
-    spawn: vi.fn(), start: vi.fn(), prepare: vi.fn(), restore: vi.fn(), state: vi.fn(), harness: vi.fn(),
+    probeRunning: vi.fn(), spawn: vi.fn(), start: vi.fn(), prepare: vi.fn(), restore: vi.fn(), state: vi.fn(), harness: vi.fn(),
 }));
 vi.mock("child_process", async original => ({ ...await original<typeof import("child_process")>(), spawnSync: f.spawn }));
-vi.mock("fs", async original => ({ ...await original<typeof import("fs")>(), existsSync: () => true, mkdirSync: vi.fn(), writeFileSync: vi.fn(), unlinkSync: () => f.events.push("unlink") }));
+vi.mock("fs", async original => ({ ...await original<typeof import("fs")>(), existsSync: () => true, mkdirSync: vi.fn(), readdirSync: () => [], lstatSync: () => ({ isDirectory: () => true, isSymbolicLink: () => false }), chmodSync: vi.fn(), writeFileSync: vi.fn(), unlinkSync: () => f.events.push("unlink") }));
 vi.mock("../utils.js", async original => ({
     ...await original<typeof import("../utils.js")>(),
     collectForwardedEnv: () => ({ forwarded: [], skippedDueToLimit: [], totalBytes: 0 }),
@@ -13,8 +15,8 @@ vi.mock("../utils.js", async original => ({
 }));
 vi.mock("../docker.js", () => ({
     ensureDockerRunning: vi.fn(), ensureCredentialHostDir: vi.fn(),
-    getContainerName: () => "ccc-fixture", getContainerStatus: () => ({ exists: true, running: f.running, imageId: "sha256:old", containerId: "old-id" }),
-    startProjectContainer: f.start, isContainerRunning: () => true,
+    getContainerName: () => "ccc-fixture", getContainerStatus: () => ({ exists: f.exists, running: f.running, imageId: "sha256:old", containerId: "old-id" }),
+    startProjectContainer: f.start, isContainerRunning: f.probeRunning,
     restoreCodexConfigHostOwnership: f.restore, prepareCodexConfigForContainer: f.prepare,
     syncClipboardShims: () => f.events.push("clipboard"), ensureContainerManagerSocketAccess: vi.fn(),
 }));
@@ -26,12 +28,15 @@ vi.mock("../home-layout.js", async original => ({ ...await original<typeof impor
 vi.mock("../home-layout-container-guard.js", () => ({ hasLegacyHomeLayoutContainerMounts: () => false }));
 vi.mock("@ccc/device-lab/device-lab-shared-state.js", async original => ({ ...await original<typeof import("@ccc/device-lab/device-lab-shared-state.js")>(), withSharedMutationLock: (_key: string, operation: () => unknown) => operation() }));
 vi.mock("@ccc/device-lab/device-lab-broker.js", () => ({ DEVICE_BROKER_DEFAULT_HOST: "127.0.0.1", ensureHostDeviceBroker: async () => ({ ok: true }) }));
-vi.mock("../session.js", () => ({
-    createSessionLock: () => "/fixture/session.lock", setSession: vi.fn(), setSessionContainerId: vi.fn(), setupSignalHandlers: vi.fn(),
-    getActiveSessionsForContainer: () => [], cleanupSession: () => f.events.push("cleanup"),
+vi.mock("../device-lab-admin.js", () => ({ cleanupOwnerDevices: f.devices }));
+vi.mock("../session.js", async original => {
+    const actual = await original<typeof import("../session.js")>();
+    return { ...actual,
+    createSessionLock: () => "/fixture/session.lock", setupSignalHandlers: vi.fn(),
+    getActiveSessionsForContainer: () => [], cleanupSession: () => { f.events.push("cleanup"); if (f.realCleanup) actual.cleanupSession(); },
     withContainerLifecycleLock: (_key: string, operation: () => unknown) => operation(),
     withContainerSetupLockAsync: async (_key: string, operation: () => unknown) => operation(),
-}));
+}; });
 vi.mock("../container-setup.js", () => ({
     CLAUDE_BIN_PATH: "/home/ccc/.local/bin/claude", ensureUvAvailable: () => f.events.push("uv"),
     ensureTools: (id: string, tool: {name: string}) => { expect(id).toBe("final-id"); f.events.push(`tool:${tool.name}`); if (f.failTool) throw new Error("tool unavailable"); },
@@ -53,16 +58,19 @@ vi.mock("../codex-launch.js", () => ({ prepareCodexLaunch: (_runtime: string, ar
     expect(args).toContain("final-id"); f.events.push("launch-preparation");
     return f.launchFailure ? { ok: false, status: 9, error: "daemon unavailable" } : { ok: true, command };
 } }));
-import { main } from "../index.js";
+import { clearSession, getCurrentSession } from "../session.js";
+import { main, runCli } from "../index.js";
 class Exit extends Error { constructor(readonly status: number) { super(`exit ${status}`); } }
 const originalArgv = process.argv;
 beforeEach(() => {
+    clearSession(); f.realCleanup = false; f.handoffStarted = undefined;
     vi.clearAllMocks(); vi.stubEnv("CCC_PROFILE", ""); vi.stubEnv("DEBUG", ""); vi.stubEnv("container", "");
     process.argv = [process.execPath, "ccc", "codex", "resume", "--last"];
-    f.events = []; f.running = false; f.profile = undefined; f.locked = false; f.failPostExitLock = false; f.failTool = false; f.failState = false; f.launchFailure = false;
+    f.events = []; f.running = false; f.exists = true; f.profile = undefined; f.locked = false; f.failPostExitLock = false; f.failTool = false; f.failState = false; f.launchFailure = false;
     vi.spyOn(process, "exit").mockImplementation(code => { throw new Exit(Number(code)); });
     vi.spyOn(process.stderr, "write").mockReturnValue(true); vi.spyOn(console, "error").mockImplementation(() => {});
-    f.start.mockImplementation((...args: unknown[]) => { f.events.push("start"); (args[7] as (id: string) => void)("final-id"); return "ccc-fixture"; });
+    f.probeRunning.mockReturnValue(true);
+    f.start.mockImplementation((...args: unknown[]) => { f.events.push("start"); (args[7] as (id: string, handoff: { startedByInvocation: boolean }) => void)("final-id", { startedByInvocation: f.handoffStarted ?? !f.running }); return "ccc-fixture"; });
     f.restore.mockImplementation((id, profile) => { expect(id).toBe("final-id"); expect(profile).toBe(f.profile); expect(f.locked).toBe(true); f.events.push("restore"); });
     f.prepare.mockImplementation((id, profile) => { expect(id).toBe("final-id"); expect(profile).toBe(f.profile); expect(f.locked).toBe(true); f.events.push("prepare"); });
     f.state.mockImplementation((id, profile) => { expect(id).toBe("final-id"); expect(profile).toBe(f.profile); f.events.push("state"); if (f.failState) throw new Error("state inaccessible"); });
@@ -109,4 +117,57 @@ it("normalizes CCC_PROFILE=default before selecting config/state/Harness", async
     expect(f.prepare).toHaveBeenCalledWith("final-id", undefined);
     expect(f.state).toHaveBeenCalledWith("final-id", undefined);
     expect(f.harness).toHaveBeenCalledWith("final-id", undefined);
+});
+
+// Exercise the actual CLI catch and real session cleanup; Docker/filesystem effects remain bounded fixtures.
+it.each(["tool", "state", "config", "restore", "daemon"])("CLI error cleanup preserves existing running work after %s startup failure", async failure => {
+    f.realCleanup = true; f.running = true;
+    f.failTool = failure === "tool"; f.failState = failure === "state"; f.launchFailure = failure === "daemon";
+    if (failure === "restore") f.restore.mockImplementation(() => { throw new Error("restore denied"); });
+    if (failure === "config") f.prepare.mockImplementation(() => { throw new Error("config denied"); });
+    await expect(runCli()).rejects.toMatchObject({ status: 1 });
+    expect(f.events).not.toContain("command");
+    expect(f.events).toContain("unlink");
+    expect(getCurrentSession().lockFile).toBeNull();
+    expect(f.devices).not.toHaveBeenCalled();
+    expect(f.spawn.mock.calls.some(([, args]) => args[0] === "stop")).toBe(false);
+});
+it("CLI startup failure still cleans a container started by this invocation", async () => {
+    f.realCleanup = true; f.failState = true;
+    await expect(runCli()).rejects.toMatchObject({ status: 1 });
+    expect(f.devices).toHaveBeenCalledOnce();
+    expect(f.spawn).toHaveBeenCalledWith("docker", ["stop", "final-id"], { stdio: "ignore" });
+    expect(getCurrentSession().lockFile).toBeNull();
+});
+it("a successfully launched session retains normal final container/device cleanup", async () => {
+    f.realCleanup = true; f.running = true;
+    await expect(main()).rejects.toMatchObject({ status: 0 });
+    expect(f.events).toContain("command");
+    expect(f.devices).toHaveBeenCalledOnce();
+    expect(f.spawn).toHaveBeenCalledWith("docker", ["stop", "final-id"], { stdio: "ignore" });
+});
+
+it.each([false, true])("preserves another caller's running container after initial exists=%s", async exists => {
+    f.realCleanup = true; f.running = false; f.exists = exists; f.handoffStarted = false; f.failState = true;
+    await expect(runCli()).rejects.toMatchObject({ status: 1 });
+    expect(f.start).toHaveBeenCalledOnce();
+    expect(getCurrentSession().lockFile).toBeNull();
+    expect(f.events).toContain("unlink");
+    expect(f.devices).not.toHaveBeenCalled();
+    expect(f.spawn.mock.calls.some(([, args]) => args[0] === "stop")).toBe(false);
+});
+
+it("retains this invocation's start authority across a later same-ID readiness handoff", async () => {
+    f.realCleanup = true; f.failState = true;
+    f.probeRunning.mockReturnValueOnce(false).mockReturnValue(true);
+    f.start.mockImplementation((...args: unknown[]) => {
+        (args[7] as (id: string, handoff: { startedByInvocation: boolean }) => void)("final-id", {
+            startedByInvocation: f.start.mock.calls.length === 1,
+        });
+        return "ccc-fixture";
+    });
+    await expect(runCli()).rejects.toMatchObject({ status: 1 });
+    expect(f.start).toHaveBeenCalledTimes(2);
+    expect(f.devices).toHaveBeenCalledOnce();
+    expect(f.spawn).toHaveBeenCalledWith("docker", ["stop", "final-id"], { stdio: "ignore" });
 });

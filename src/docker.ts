@@ -2554,8 +2554,8 @@ function startProjectContainerLocked(
      * live or indeterminate CCC session owns the container.
      */
     recreateRunningContainer?: (recreate: () => void) => boolean,
-    /** Receives the exact running container ID before the lifecycle lock is released. */
-    onContainerReady?: (containerId: string) => void,
+    /** Receives the pinned ID and this lifecycle operation's start authority, under its lock. */
+    onContainerReady?: (containerId: string, handoff: { startedByInvocation: boolean }) => void,
     /** Existing container ID observed running before this lifecycle operation began. */
     initiallyRunningContainerId?: string,
 ): string {
@@ -2765,7 +2765,7 @@ function startProjectContainerLocked(
         lifecycleContainerId = null;
         onRecreate?.();
     };
-    const finish = (containerId: string): string => {
+    const finish = (containerId: string, startedByInvocation: boolean): string => {
         if (!containerExecIdentityMatches(containerId, identity)) {
             throw new Error("Container UID/GID validation failed; refusing a session that could change host project ownership.");
         }
@@ -2776,7 +2776,7 @@ function startProjectContainerLocked(
             if (!finalIdentity?.running || finalIdentity.containerId !== containerId) {
                 throw new Error("Container identity changed before session handoff; refusing to join.");
             }
-            onContainerReady(containerId);
+            onContainerReady(containerId, { startedByInvocation });
         }
         return containerName;
     };
@@ -2856,7 +2856,7 @@ function startProjectContainerLocked(
                     console.warn(`[ccc] Container update deferred (${contractMismatchReason}) because the existing container is running. It will be applied after the container stops.`);
                     fixSshPermissions(listedContainer.containerId);
                     syncHostGitConfig(listedContainer.containerId);
-                    return finish(listedContainer.containerId);
+                    return finish(listedContainer.containerId, false);
                 }
             } else {
                 recreateContainerWithSessionGuard(containerName, contractMismatchReason, onRecreate, undefined);
@@ -2896,7 +2896,7 @@ function startProjectContainerLocked(
                 syncManagedMcpBundles(lifecycleContainerId);
                 fixSshPermissions(lifecycleContainerId);
                 syncHostGitConfig(lifecycleContainerId);
-                if (preparedDeviceLabMountSourcesMatch(preparedDeviceLabSources)) return finish(lifecycleContainerId);
+                if (preparedDeviceLabMountSourcesMatch(preparedDeviceLabSources)) return finish(lifecycleContainerId, false);
                 if (recreateRunningContainer) {
                     const recreated = recreateContainerWithSessionGuard(
                         containerName,
@@ -2975,7 +2975,7 @@ function startProjectContainerLocked(
                 syncManagedMcpBundles(lifecycleContainerId);
                 fixSshPermissions(lifecycleContainerId);
                 syncHostGitConfig(lifecycleContainerId);
-                if (preparedDeviceLabMountSourcesMatch(preparedDeviceLabSources)) return finish(lifecycleContainerId);
+                if (preparedDeviceLabMountSourcesMatch(preparedDeviceLabSources)) return finish(lifecycleContainerId, true);
                 throw new Error(
                     "Device-lab mount source changed during restart; preserving the restarted container without replacement.",
                 );
@@ -3105,7 +3105,7 @@ function startProjectContainerLocked(
         fixSshPermissions(createdContainerId);
         syncHostGitConfig(createdContainerId);
 
-        return finish(createdContainerId);
+        return finish(createdContainerId, true);
     });
 }
 
