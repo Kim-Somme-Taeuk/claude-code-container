@@ -457,6 +457,7 @@ describe("container-setup.ts module", () => {
         it("installs only the requested npm tool", () => {
             const geminiTool = getToolByName("gemini")!;
             spawnSyncMock.mockReturnValueOnce(makeResult(0, "gemini\n"));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "MISSING\n")); // persisted binary probe
             // cleanup partial install dirs
             spawnSyncMock.mockReturnValueOnce(makeResult(0));
             // stale shim nuke
@@ -471,11 +472,11 @@ describe("container-setup.ts module", () => {
             spawnSyncMock.mockReturnValueOnce(makeResult(0));
             ensureTools(container, geminiTool);
             // check + cleanup + shim-nuke + install + reshim + wrapper + proof
-            expect(spawnSyncMock).toHaveBeenCalledTimes(7);
-            const geminiWrapperCall = spawnSyncMock.mock.calls[5];
+            expect(spawnSyncMock).toHaveBeenCalledTimes(8);
+            const geminiWrapperCall = spawnSyncMock.mock.calls[6];
             const geminiCmd = (geminiWrapperCall[1] as string[]).at(-1) as string;
             expect(geminiCmd).toContain("gemini");
-            const installCmd = (spawnSyncMock.mock.calls[3][1] as string[]).at(-1) as string;
+            const installCmd = (spawnSyncMock.mock.calls[4][1] as string[]).at(-1) as string;
             expect(installCmd).toContain("@google/gemini-cli");
             expect(installCmd).not.toContain("@openai/codex");
             expect(installCmd).not.toContain("opencode-ai");
@@ -484,6 +485,7 @@ describe("container-setup.ts module", () => {
         it("fails closed when npm install leaves the requested tool unavailable", () => {
             const geminiTool = getToolByName("gemini")!;
             spawnSyncMock.mockReturnValueOnce(makeResult(0, "gemini\n"));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "MISSING\n")); // persisted binary probe
             // cleanup
             spawnSyncMock.mockReturnValueOnce(makeResult(0));
             // stale shim nuke
@@ -494,22 +496,23 @@ describe("container-setup.ts module", () => {
                 "Container gemini installation failed",
             );
             // Later mutations and readiness proof must not run.
-            expect(spawnSyncMock).toHaveBeenCalledTimes(4);
+            expect(spawnSyncMock).toHaveBeenCalledTimes(5);
         });
 
         it("stops before installation when cleanup times out", () => {
             const codexTool = getToolByName("codex")!;
             spawnSyncMock.mockReturnValueOnce(makeResult(0, "codex\n"));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "MISSING\n")); // persisted binary probe
             spawnSyncMock.mockReturnValueOnce(makeResult(124));
 
             expect(() => ensureTools(container, codexTool)).toThrow(
                 "Container codex cleanup timed out",
             );
-            expect(spawnSyncMock).toHaveBeenCalledTimes(2);
-            const cleanupCommand = (spawnSyncMock.mock.calls[1][1] as string[]).at(-1) as string;
+            expect(spawnSyncMock).toHaveBeenCalledTimes(3);
+            const cleanupCommand = (spawnSyncMock.mock.calls[2][1] as string[]).at(-1) as string;
             expect(cleanupCommand).toContain("timeout -k 2s 8s");
             expect(cleanupCommand).not.toContain("npm install -g");
-            expect(spawnSyncMock.mock.calls[1][2]).toEqual(
+            expect(spawnSyncMock.mock.calls[2][2]).toEqual(
                 expect.objectContaining({ timeout: CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS }),
             );
         });
@@ -517,6 +520,7 @@ describe("container-setup.ts module", () => {
         it("stops before wrapper creation when reshim fails", () => {
             const codexTool = getToolByName("codex")!;
             spawnSyncMock.mockReturnValueOnce(makeResult(0, "codex\n"));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "MISSING\n")); // persisted binary probe
             spawnSyncMock.mockReturnValueOnce(makeResult(0));
             spawnSyncMock.mockReturnValueOnce(makeResult(0));
             spawnSyncMock.mockReturnValueOnce(makeResult(0));
@@ -525,7 +529,7 @@ describe("container-setup.ts module", () => {
             expect(() => ensureTools(container, codexTool)).toThrow(
                 "Container codex reshim failed",
             );
-            expect(spawnSyncMock).toHaveBeenCalledTimes(5);
+            expect(spawnSyncMock).toHaveBeenCalledTimes(6);
         });
 
         it("does not inspect or install inactive npm tools", () => {
