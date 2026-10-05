@@ -21,7 +21,7 @@ import {
     getCodexConfigFile,
 } from '../utils.js';
 import { homedir, tmpdir } from 'os';
-import { mkdtempSync } from 'fs';
+import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 
 // readline mock (hoisted at module level)
@@ -39,9 +39,21 @@ vi.mock('readline', () => ({
 
 describe('utils constants', () => {
     const originalEnv = { ...process.env };
+    const temporaryHomes: string[] = [];
+    const isolateHome = () => {
+        const home = mkdtempSync(join(tmpdir(), 'ccc-utils-home-'));
+        temporaryHomes.push(home);
+        process.env.HOME = home;
+        process.env.USERPROFILE = home;
+        expect(homedir()).toBe(home);
+        return home;
+    };
 
     afterEach(() => {
-        process.env = { ...originalEnv };
+        // Keep Node's native environment object: os.homedir reads the native HOME.
+        for (const key of Object.keys(process.env)) if (!(key in originalEnv)) delete process.env[key];
+        Object.assign(process.env, originalEnv);
+        for (const home of temporaryHomes.splice(0)) rmSync(home, { recursive: true, force: true });
     });
 
     it('DATA_DIR should be ~/.ccc', () => {
@@ -69,8 +81,8 @@ describe('utils constants', () => {
 
     it('uses the default profile credential paths on the host', () => {
         delete process.env.container;
-        process.env.HOME = mkdtempSync(join(tmpdir(), 'ccc-utils-home-'));
-        const profileRoot = join(homedir(), '.ccc', 'profiles', 'default');
+        const home = isolateHome();
+        const profileRoot = join(home, '.ccc', 'profiles', 'default');
         expect(getClaudeDir()).toBe(join(profileRoot, 'claude'));
         expect(getClaudeJsonFile()).toBe(join(profileRoot, 'claude.json'));
         expect(getCodexDir()).toBe(join(profileRoot, 'codex'));
@@ -80,8 +92,8 @@ describe('utils constants', () => {
 
     it('uses per-profile claude and codex paths for a named profile', () => {
         delete process.env.container;
-        process.env.HOME = mkdtempSync(join(tmpdir(), 'ccc-utils-home-'));
-        const profileRoot = join(homedir(), '.ccc', 'profiles', 'work');
+        const home = isolateHome();
+        const profileRoot = join(home, '.ccc', 'profiles', 'work');
         expect(getClaudeDir('work')).toBe(join(profileRoot, 'claude'));
         expect(getClaudeJsonFile('work')).toBe(join(profileRoot, 'claude.json'));
         expect(getCodexDir('work')).toBe(join(profileRoot, 'codex'));
@@ -104,8 +116,8 @@ describe('utils constants', () => {
     it('keeps host-style credential paths inside Vitest even when container env is set', () => {
         process.env.container = CONTAINER_ENV_VALUE;
         process.env.VITEST_POOL_ID = '1';
-        process.env.HOME = mkdtempSync(join(tmpdir(), 'ccc-utils-home-'));
-        const profileRoot = join(homedir(), '.ccc', 'profiles', 'default');
+        const home = isolateHome();
+        const profileRoot = join(home, '.ccc', 'profiles', 'default');
 
         expect(getClaudeDir()).toBe(join(profileRoot, 'claude'));
         expect(getClaudeJsonFile()).toBe(join(profileRoot, 'claude.json'));
