@@ -1,9 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { hashPath } from '../utils.js'
-import { getProjectHash, getMutagenSessionName, checkTailscale, checkMutagen, isHostReachable, getMutagenSyncStatus, isValidEnvKey, shellEscapeArg, isValidHostOrUser, remoteSetup, remoteCheck, remoteTerminate, remoteExec } from '../remote.js'
+import { getProjectHash, getMutagenSessionName, checkTailscale, checkMutagen, isHostReachable, getMutagenSyncStatus, isValidEnvKey, shellEscapeArg, isValidHostOrUser, remoteSetup, remoteCheck, remoteTerminate, remoteExec, remoteStopShell, remoteClaudeDirScript } from '../remote.js'
 import * as childProcess from 'child_process'
 import * as fs from 'fs'
 import * as utils from '../utils.js'
+
+const remoteSessionMocks = vi.hoisted(() => ({
+  createSessionLock: vi.fn(() => '/locks/remote.lock'),
+  removeSessionLock: vi.fn(),
+  withContainerLifecycleLock: vi.fn((_prefix: string, operation: () => unknown) => operation()),
+  withContainerLifecycleLockAsync: vi.fn((_prefix: string, operation: () => unknown) => operation()),
+}))
+
+vi.mock('../session.js', () => remoteSessionMocks)
 
 vi.mock('child_process', async () => {
   const actual = await vi.importActual<typeof childProcess>('child_process')
@@ -19,9 +28,15 @@ vi.mock('fs', async () => {
   return {
     ...actual,
     existsSync: vi.fn(),
-    readFileSync: vi.fn(),
+    readFileSync: vi.fn((...args: Parameters<typeof actual.readFileSync>) => {
+            // Package metadata is real; each test still controls its simulated filesystem.
+            const [file] = args;
+            return file instanceof URL && file.href === new URL('../../packages/device-lab/package.json', import.meta.url).href
+                ? actual.readFileSync(...args) : undefined;
+        }),
     writeFileSync: vi.fn(),
-    mkdirSync: vi.fn()
+    mkdirSync: vi.fn(),
+    renameSync: vi.fn()
   }
 })
 
@@ -64,6 +79,28 @@ describe('getProjectHash', () => {
   })
 })
 
+describe('remote stop identity fencing', () => {
+  it('loads the start-time container ID before removing its reservation', () => {
+    const shell = remoteStopShell('ccc-project-safe', 'a'.repeat(32), 'c'.repeat(64))
+    const readAt = shell.indexOf('read -r _ccc_own_expiry _ccc_container_id')
+    const removeMarkerAt = shell.indexOf('rm -f "$_ccc_marker"')
+
+    expect(readAt).toBeGreaterThan(-1)
+    expect(readAt).toBeLessThan(removeMarkerAt)
+    expect(shell).toContain('docker stop "$_ccc_container_id"')
+    expect(shell).not.toContain('docker stop ccc-project-safe')
+    expect(shell).toContain('docker inspect --format')
+    expect(shell).toContain('"$_ccc_actual_name" = "$_ccc_expected_name"')
+    expect(shell).toContain("*[!a-fA-F0-9]*")
+  })
+
+  it('does not use the container name as a stop target', () => {
+    const shell = remoteStopShell("ccc-name'; touch /tmp/unsafe; '", 'b'.repeat(32), 'd'.repeat(64))
+    expect(shell).not.toContain(shellEscapeArg("ccc-name'; touch /tmp/unsafe; '"))
+    expect(shell).toContain('docker stop "$_ccc_container_id"')
+  })
+})
+
 describe('getMutagenSessionName', () => {
   it('generates correct session name format', () => {
     const result = getMutagenSessionName('/home/user/my-project')
@@ -87,6 +124,9 @@ describe('checkTool helper (via checkTailscale/checkMutagen)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    remoteSessionMocks.createSessionLock.mockReturnValue('/locks/remote.lock')
+    remoteSessionMocks.withContainerLifecycleLock.mockImplementation((_prefix: string, operation: () => unknown) => operation())
+    remoteSessionMocks.withContainerLifecycleLockAsync.mockImplementation((_prefix: string, operation: () => unknown) => operation())
   })
 
   afterEach(() => {
@@ -447,6 +487,35 @@ describe('loadRemoteConfig (via remoteCheck side effects)', () => {
 
     expect(logs.some(l => l.includes('my-desktop'))).toBe(true)
     expect(logs.some(l => l.includes('john'))).toBe(true)
+
+    vi.restoreAllMocks()
+  })
+
+  it('prefers the config.json entry and falls back to the pre-layout remote/<hash>.json', async () => {
+    const projectHash = getProjectHash('/home/user/project')
+    const byPath = (files: Record<string, string>) => {
+      mockExistsSync.mockImplementation((p) => Object.keys(files).some((suffix) => String(p).endsWith(suffix)))
+      mockReadFileSync.mockImplementation(((p: string) => {
+        const match = Object.keys(files).find((suffix) => String(p).endsWith(suffix))
+        if (!match) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+        return files[match]
+      }) as any)
+    }
+    const logs: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((...args) => { logs.push(args.join(' ')) })
+
+    byPath({
+      'config.json': JSON.stringify({ remote: { [projectHash]: { host: 'from-config', user: 'u', remotePath: '' } } }),
+      [`${projectHash}.json`]: JSON.stringify({ host: 'from-legacy', user: 'u', remotePath: '' }),
+    })
+    await remoteCheck('/home/user/project')
+    expect(logs.some(l => l.includes('from-config'))).toBe(true)
+    expect(logs.some(l => l.includes('from-legacy'))).toBe(false)
+
+    logs.length = 0
+    byPath({ [`${projectHash}.json`]: JSON.stringify({ host: 'from-legacy', user: 'u', remotePath: '' }) })
+    await remoteCheck('/home/user/project')
+    expect(logs.some(l => l.includes('from-legacy'))).toBe(true)
 
     vi.restoreAllMocks()
   })
@@ -950,7 +1019,7 @@ describe('remoteExec', () => {
         status: 0, stdout: 'sha256abc\n', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // startRemoteContainer: ssh docker run
-        status: 0, stdout: 'container-id\n', stderr: '', pid: 0, output: [], signal: null
+        status: 0, stdout: 'ccc-container-id=abcdef1234567890\n', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // createContainerProjectDir: ssh docker exec mkdir
         status: 0, stdout: '', stderr: '', pid: 0, output: [], signal: null
@@ -1020,6 +1089,17 @@ describe('remoteExec', () => {
 
     const logs = (console.log as any).mock.calls.map((c: any[]) => c.join(' '))
     expect(logs.some((l: string) => l.includes('saved-host'))).toBe(true)
+    const remoteMkdir = mockSpawnSync.mock.calls.find((call) => call[0] === 'ssh'
+      && (call[1] as string[]).some((arg) => arg.includes('docker exec abcdef1234567890 mkdir -p')))
+    expect(remoteMkdir).toBeTruthy()
+    const mutagenCreate = mockSpawnSync.mock.calls.find((call) => call[0] === 'mutagen'
+      && (call[1] as string[])[1] === 'create')
+    expect(mutagenCreate?.[1]).toEqual(expect.arrayContaining([
+      expect.stringContaining('saveduser@saved-host:docker://abcdef1234567890/project/'),
+    ]))
+    const remoteExecCall = mockSpawn.mock.calls.find((call) => call[0] === 'ssh')
+    expect((remoteExecCall?.[1] as string[])[2]).toContain('abcdef1234567890')
+    expect((remoteExecCall?.[1] as string[])[2]).not.toContain('docker exec  -it ccc-')
   })
 
   it('saves new config when host is provided and host is reachable', async () => {
@@ -1042,7 +1122,7 @@ describe('remoteExec', () => {
         status: 0, stdout: 'sha256abc\n', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // startRemoteContainer
-        status: 0, stdout: 'container-id\n', stderr: '', pid: 0, output: [], signal: null
+        status: 0, stdout: 'ccc-container-id=abcdef1234567890\n', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // createContainerProjectDir
         status: 0, stdout: '', stderr: '', pid: 0, output: [], signal: null
@@ -1071,12 +1151,20 @@ describe('remoteExec', () => {
 
     await expect(remoteExec('/home/user/project', 'new-host')).rejects.toThrow('exit:0')
 
-    expect(mockWriteFileSync).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.stringContaining('new-host'),
-      expect.objectContaining({ mode: 0o600 })
-    )
+    // Saved under config.json "remote", written atomically (doc/common/REQ__ccc-home-layout.md).
+    const configWrite = mockWriteFileSync.mock.calls.find(([path]) => /config\.json\.\d+\.tmp$/.test(String(path)))
+    expect(configWrite).toBeDefined()
+    expect(configWrite![2]).toEqual({ mode: 0o600 })
+    const saved = JSON.parse(String(configWrite![1]))
+    expect(Object.values(saved.remote)).toEqual([expect.objectContaining({ host: 'new-host', user: 'testuser' })])
+    expect(vi.mocked(fs.renameSync)).toHaveBeenCalledWith(configWrite![0], expect.stringMatching(/\.ccc[\\/]config\.json$/))
     expect(mockMkdirSync).toHaveBeenCalled()
+
+    // The remote container mounts the claude folder the remote host resolves itself
+    // (behavior covered in home-layout.test.ts "remote claude folder script").
+    const runCommand = mockSpawnSync.mock.calls.map((call) => (call[1] as string[]).join(' ')).find((cmd) => cmd.includes('docker run'))
+    expect(runCommand).toContain(`${remoteClaudeDirScript()}; _ccc_container_id=`)
+    expect(runCommand).toContain(`-v "$_ccc_claude_dir:/home/ccc/.claude"`)
   })
 
   it('exits with code 1 when host is not reachable', async () => {
@@ -1158,6 +1246,25 @@ describe('remoteExec', () => {
 
     await expect(remoteExec('/home/user/project')).rejects.toThrow('exit:1')
     expect(exitMock).toHaveBeenCalledWith(1)
+    expect(mockSpawnSync.mock.calls.some((call) => call[0] === 'ssh'
+      && (call[1] as string[]).some((arg) => arg.includes('_ccc_sessions=$_ccc_runtime/sessions-')
+        && arg.includes('_ccc_assert_private \"$_ccc_sessions\"')))).toBe(true)
+  })
+
+  it('exits with code 1 when preparing the pinned remote container fails', async () => {
+    mockSpawnSync
+      .mockReturnValueOnce({ status: 0, stdout: 'mutagen version 0.17.0\n', stderr: '', pid: 0, output: [], signal: null })
+      .mockReturnValueOnce({ status: 0, stdout: 'sha256abc\n', stderr: '', pid: 0, output: [], signal: null })
+      .mockReturnValueOnce({ status: 0, stdout: 'ccc-container-id=abcdef1234567890\n', stderr: '', pid: 0, output: [], signal: null })
+      .mockReturnValueOnce({ status: 1, stdout: '', stderr: 'container disappeared', pid: 0, output: [], signal: null })
+    mockExistsSync.mockReturnValue(true)
+    mockReadFileSync.mockReturnValue(JSON.stringify({ host: 'myhost', user: 'myuser', remotePath: '' }) as any)
+    const exitMock = vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('exit:1') })
+
+    await expect(remoteExec('/home/user/project')).rejects.toThrow('exit:1')
+    expect(exitMock).toHaveBeenCalledWith(1)
+    expect(mockSpawn).not.toHaveBeenCalled()
+    expect(mockSpawnSync.mock.calls.some((call) => call[0] === 'mutagen' && (call[1] as string[])[0] === 'sync')).toBe(false)
   })
 
   it('resumes paused sync session when it exists as paused', async () => {
@@ -1169,7 +1276,7 @@ describe('remoteExec', () => {
         status: 0, stdout: 'sha256abc\n', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // startRemoteContainer
-        status: 0, stdout: 'container-id\n', stderr: '', pid: 0, output: [], signal: null
+        status: 0, stdout: 'ccc-container-id=abcdef1234567890\n', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // createContainerProjectDir
         status: 0, stdout: '', stderr: '', pid: 0, output: [], signal: null
@@ -1178,13 +1285,13 @@ describe('remoteExec', () => {
         status: 0, stdout: '', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // getMutagenSyncStatus -> paused
-        status: 0, stdout: 'Status: Paused\n', stderr: '', pid: 0, output: [], signal: null
+        status: 0, stdout: 'Beta:\n\tURL: user@host:docker://abcdef1234567890/project/project\nStatus: Paused\n', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // mutagen sync resume
         status: 0, stdout: '', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // waitForSync getMutagenSyncStatus -> watching
-        status: 0, stdout: 'Status: Watching for changes\n', stderr: '', pid: 0, output: [], signal: null
+        status: 0, stdout: 'Beta:\n\tURL: user@host:docker://abcdef1234567890/project/project\nStatus: Watching for changes\n', stderr: '', pid: 0, output: [], signal: null
       })
 
     mockExistsSync.mockReturnValue(true)
@@ -1212,7 +1319,7 @@ describe('remoteExec', () => {
         status: 0, stdout: 'sha256abc\n', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // startRemoteContainer
-        status: 0, stdout: 'container-id\n', stderr: '', pid: 0, output: [], signal: null
+        status: 0, stdout: 'ccc-container-id=abcdef1234567890\n', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // createContainerProjectDir
         status: 0, stdout: '', stderr: '', pid: 0, output: [], signal: null
@@ -1221,7 +1328,7 @@ describe('remoteExec', () => {
         status: 0, stdout: '', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // getMutagenSyncStatus -> already watching
-        status: 0, stdout: 'Status: Watching for changes\n', stderr: '', pid: 0, output: [], signal: null
+        status: 0, stdout: 'Beta:\n\tURL: user@host:docker://abcdef1234567890/project/project\nStatus: Watching for changes\n', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // waitForSync getMutagenSyncStatus -> watching
         status: 0, stdout: 'Status: Watching for changes\n', stderr: '', pid: 0, output: [], signal: null
@@ -1243,8 +1350,40 @@ describe('remoteExec', () => {
     expect(logCalls.some((l: string) => l.includes('Sync already running'))).toBe(true)
   })
 
+  it('replaces an existing sync session that targets a different container ID', async () => {
+    mockSpawnSync
+      .mockReturnValueOnce({ status: 0, stdout: 'mutagen version 0.17.0\n', stderr: '', pid: 0, output: [], signal: null })
+      .mockReturnValueOnce({ status: 0, stdout: 'sha256abc\n', stderr: '', pid: 0, output: [], signal: null })
+      .mockReturnValueOnce({ status: 0, stdout: 'ccc-container-id=abcdef1234567890\n', stderr: '', pid: 0, output: [], signal: null })
+      .mockReturnValueOnce({ status: 0, stdout: '', stderr: '', pid: 0, output: [], signal: null })
+      .mockReturnValueOnce({ status: 0, stdout: '', stderr: '', pid: 0, output: [], signal: null })
+      .mockReturnValueOnce({ status: 0, stdout: 'Beta:\n\tURL: user@host:docker://1111111111111111/project/project\nStatus: Watching for changes\n', stderr: '', pid: 0, output: [], signal: null })
+      .mockReturnValueOnce({ status: 0, stdout: '', stderr: '', pid: 0, output: [], signal: null })
+      .mockReturnValueOnce({ status: 0, stdout: '', stderr: '', pid: 0, output: [], signal: null })
+      .mockReturnValueOnce({ status: 0, stdout: 'Status: Watching for changes\n', stderr: '', pid: 0, output: [], signal: null })
+    mockExistsSync.mockReturnValue(true)
+    mockReadFileSync.mockReturnValue(JSON.stringify({ host: 'myhost', user: 'myuser', remotePath: '' }) as any)
+    mockSpawn.mockReturnValue(makeSpawnMock(0) as any)
+    mockPrompt.mockResolvedValue('n')
+    const exitMock = vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('exit:0') })
+
+    await expect(remoteExec('/home/user/project')).rejects.toThrow('exit:0')
+
+    expect(mockSpawnSync.mock.calls.some((call) => call[0] === 'mutagen'
+      && (call[1] as string[]).join(' ') === `sync terminate ${getMutagenSessionName('/home/user/project')}`)).toBe(true)
+    const createCall = mockSpawnSync.mock.calls.find((call) => call[0] === 'mutagen'
+      && (call[1] as string[])[1] === 'create')
+    expect(createCall?.[1]).toEqual(expect.arrayContaining([
+      expect.stringContaining('docker://abcdef1234567890/project/'),
+    ]))
+    expect(exitMock).toHaveBeenCalledWith(0)
+  })
+
   it('pauses sync and stops container when user says yes on exit', async () => {
     setupSuccessfulSpawnSyncs()
+    mockSpawnSync.mockReturnValue({
+      status: 0, stdout: '', stderr: '', pid: 0, output: [], signal: null
+    })
     mockExistsSync.mockReturnValue(true)
     const config = { host: 'myhost', user: 'myuser', remotePath: '' }
     mockReadFileSync.mockReturnValue(JSON.stringify(config) as any)
@@ -1266,6 +1405,36 @@ describe('remoteExec', () => {
       (c) => c[0] === 'ssh' && Array.isArray(c[1]) && c[1].some((a: string) => a.includes('docker stop'))
     )
     expect(sshStopCalls.length).toBeGreaterThan(0)
+    expect(sshStopCalls[0][1][1]).toContain('$_ccc_runtime/lifecycle-')
+    expect(sshStopCalls[0][2]).toMatchObject({ timeout: 60000 })
+    expect(sshStopCalls[0][1][1]).toContain('_ccc_expiry')
+    expect(sshStopCalls[0][1][1]).toContain('date +%s')
+    expect(remoteSessionMocks.withContainerLifecycleLock).toHaveBeenCalledTimes(1)
+    expect(remoteSessionMocks.withContainerLifecycleLockAsync).toHaveBeenCalledTimes(1)
+    expect(remoteSessionMocks.removeSessionLock).toHaveBeenCalledWith('/locks/remote.lock')
+    expect(remoteSessionMocks.removeSessionLock.mock.invocationCallOrder[0]).toBeLessThan(exitMock.mock.invocationCallOrder[0])
+  })
+
+  it('keeps the remote container and sync running while another remote session is active', async () => {
+    setupSuccessfulSpawnSyncs()
+    mockExistsSync.mockReturnValue(true)
+    mockReadFileSync.mockReturnValue(JSON.stringify({ host: 'myhost', user: 'myuser', remotePath: '' }) as any)
+    mockSpawn.mockReturnValue(makeSpawnMock(0) as any)
+    mockPrompt.mockResolvedValue('y')
+    mockSpawnSync.mockReturnValue({
+      status: 42, stdout: 'ccc-remote-sessions-active\n', stderr: '', pid: 0, output: [], signal: null
+    })
+    const exitMock = vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('exit:0') })
+
+    await expect(remoteExec('/home/user/project')).rejects.toThrow('exit:0')
+
+    expect(mockSpawnSync.mock.calls.some((call) => call[0] === 'mutagen' && (call[1] as string[])[1] === 'pause')).toBe(false)
+    const stopCall = mockSpawnSync.mock.calls.find((call) => call[0] === 'ssh' && (call[1] as string[]).some((arg) => arg.includes('docker stop')))
+    expect(stopCall).toBeTruthy()
+    expect((stopCall![1] as string[])[1]).toContain('ccc-remote-sessions-active')
+    expect((stopCall![1] as string[])[1]).toContain('_ccc_expiry')
+    expect(console.log).toHaveBeenCalledWith('Remote container remains running: another CCC remote session is active.')
+    expect(remoteSessionMocks.removeSessionLock.mock.invocationCallOrder[0]).toBeLessThan(exitMock.mock.invocationCallOrder[0])
   })
 
   it('does not pause/stop when user says no on exit', async () => {
@@ -1309,6 +1478,41 @@ describe('remoteExec', () => {
 
     await expect(remoteExec('/home/user/project')).rejects.toThrow('exit:1')
     expect(exitMock).toHaveBeenCalledWith(1)
+    expect(remoteSessionMocks.removeSessionLock.mock.invocationCallOrder[0]).toBeLessThan(exitMock.mock.invocationCallOrder[0])
+  })
+
+  it('removes the session lock before forwarding termination signals', async () => {
+    setupSuccessfulSpawnSyncs()
+    mockExistsSync.mockReturnValue(true)
+    mockReadFileSync.mockReturnValue(JSON.stringify({ host: 'myhost', user: 'myuser', remotePath: '' }) as any)
+    mockPrompt.mockResolvedValue('n')
+    let closeCallback: ((code: number) => void) | undefined
+    const emitter: any = {
+      kill: vi.fn(() => true),
+      on: vi.fn((event: string, callback: (code: number) => void) => {
+        if (event === 'close') closeCallback = callback
+        return emitter
+      })
+    }
+    mockSpawn.mockReturnValue(emitter)
+    const killMock = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    const exitMock = vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('exit:0') })
+
+    const execution = remoteExec('/home/user/project')
+    for (let attempt = 0; attempt < 10 && !closeCallback; attempt += 1) await Promise.resolve()
+    expect(closeCallback).toBeTypeOf('function')
+    process.emit('SIGTERM')
+
+    expect(emitter.kill).toHaveBeenCalledWith('SIGTERM')
+    expect(remoteSessionMocks.removeSessionLock).not.toHaveBeenCalled()
+    expect(killMock).not.toHaveBeenCalled()
+
+    closeCallback!(0)
+    await execution
+    expect(exitMock).not.toHaveBeenCalled()
+    expect(remoteSessionMocks.removeSessionLock).toHaveBeenCalledTimes(1)
+    expect(remoteSessionMocks.removeSessionLock.mock.invocationCallOrder[0]).toBeLessThan(killMock.mock.invocationCallOrder[0])
+    expect(killMock).toHaveBeenCalledWith(process.pid, 'SIGTERM')
   })
 
   it('throws error in waitForSync when sync status is null', async () => {
@@ -1320,7 +1524,7 @@ describe('remoteExec', () => {
         status: 0, stdout: 'sha256abc\n', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // startRemoteContainer
-        status: 0, stdout: 'container-id\n', stderr: '', pid: 0, output: [], signal: null
+        status: 0, stdout: 'ccc-container-id=abcdef1234567890\n', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // createContainerProjectDir
         status: 0, stdout: '', stderr: '', pid: 0, output: [], signal: null
@@ -1357,7 +1561,7 @@ describe('remoteExec', () => {
         status: 0, stdout: 'sha256abc\n', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // startRemoteContainer
-        status: 0, stdout: 'container-id\n', stderr: '', pid: 0, output: [], signal: null
+        status: 0, stdout: 'ccc-container-id=abcdef1234567890\n', stderr: '', pid: 0, output: [], signal: null
       })
       .mockReturnValueOnce({ // createContainerProjectDir
         status: 0, stdout: '', stderr: '', pid: 0, output: [], signal: null
@@ -1385,7 +1589,7 @@ describe('remoteExec', () => {
     expect(exitMock).toHaveBeenCalledWith(1)
   })
 
-  it('passes extra args to claude command via SSH', async () => {
+  it('encodes extra args before crossing the remote shell boundary', async () => {
     setupSuccessfulSpawnSyncs()
     mockExistsSync.mockReturnValue(true)
     const config = { host: 'myhost', user: 'myuser', remotePath: '' }
@@ -1397,12 +1601,28 @@ describe('remoteExec', () => {
 
     const exitMock = vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('exit:0') })
 
-    await expect(remoteExec('/home/user/project', undefined, ['--continue'])).rejects.toThrow('exit:0')
+    const malicious = '$(touch /tmp/ccc-injected)"`whoami`'
+    await expect(remoteExec('/home/user/project', undefined, ['--continue', malicious])).rejects.toThrow('exit:0')
 
     const spawnCall = mockSpawn.mock.calls[0]
     expect(spawnCall[0]).toBe('ssh')
     // spawn("ssh", ["-t", "user@host", execCmd], ...)
     const execCmd = spawnCall[1][2] as string
-    expect(execCmd).toContain("'--continue'")
+    expect(execCmd).not.toContain(malicious)
+    expect(execCmd).not.toContain('touch /tmp/ccc-injected')
+    const decodedPrograms = (execCmd.match(/[A-Za-z0-9+/=]{40,}/g) || [])
+      .map((candidate) => Buffer.from(candidate, 'base64').toString('utf8'))
+    expect(decodedPrograms.some((program) => program.includes("exec claude '--continue'") && program.includes(malicious))).toBe(true)
+    const startCall = mockSpawnSync.mock.calls.find((call) => call[0] === 'ssh' && (call[1] as string[]).some((arg) => arg.includes('docker run -d')))
+    expect(startCall).toBeTruthy()
+    const startCommand = (startCall![1] as string[])[1]
+    expect(startCommand).toContain('$HOME/.ccc')
+    expect(startCommand).toContain('remote-runtime')
+    expect(startCommand).toContain('ln \"$_ccc_candidate\" \"$_ccc_lock\"')
+    expect(startCommand).not.toContain('/tmp/ccc-remote-')
+    expect(startCommand).toContain('chmod 700')
+    expect(startCommand).toContain('_ccc_owner_token')
+    expect(startCommand).toContain('_ccc_now=$(date +%s)')
+    expect(startCommand.indexOf('sessions-')).toBeLessThan(startCommand.indexOf('docker run -d'))
   })
 })

@@ -110,7 +110,8 @@ function httpPost(port: number, path: string, headers?: Record<string, string>):
 }
 
 // ─── Constants derived from source (mirror calculation) ──────────────────────
-const DATA_DIR = join("/home/testuser", ".ccc");
+// Runtime files live under ~/.ccc/run (doc/common/REQ__ccc-home-layout.md).
+const DATA_DIR = join("/home/testuser", ".ccc", "run");
 const LOCKS_DIR = join(DATA_DIR, "locks");
 const PORT_FILE = join(DATA_DIR, "clipboard.port");
 const STARTING_LOCK = join(DATA_DIR, "clipboard.starting");
@@ -866,14 +867,10 @@ describe("clipboard-server", () => {
                 expect(result!.imageBmp).toBeNull();
             });
 
-            it("should parse MARK-only JSON with changeCount", () => {
+            it("rejects MARK-only JSON as an incomplete READ snapshot", () => {
                 const result = parseDarwinHelperOutput(JSON.stringify({ changeCount: "456" }));
 
-                expect(result).not.toBeNull();
-                expect(result!.marker).toBe("456");
-                expect(result!.targets).toEqual([]);
-                expect(result!.text).toBeNull();
-                expect(result!.imagePng).toBeNull();
+                expect(result).toBeNull();
             });
 
             it("should parse JSON with text only", () => {
@@ -899,10 +896,12 @@ describe("clipboard-server", () => {
             });
 
             it("should handle scalar targets (single-element array serialization)", () => {
-                const json = JSON.stringify({ targets: "image/png", imagePng: "iVBOR" });
+                const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+                const json = JSON.stringify({ targets: "image/png", imagePng: pngBytes.toString("base64") });
                 const result = parseDarwinHelperOutput(json);
                 expect(result).not.toBeNull();
                 expect(result!.targets).toEqual(["image/png"]);
+                expect(result!.imagePng).toEqual(pngBytes);
             });
 
             it("orders advertised alternate image MIME types after preferred PNG", () => {
@@ -975,8 +974,8 @@ describe("clipboard-server", () => {
             });
 
             it("parses single image path text from Windows, macOS, Linux, and file URI clipboards", () => {
-                expect(parseClipboardImagePathText('"C:\\Users\\Luxus\\Desktop\\page-concepts\\consumer-pages-ops-set.png"')).toEqual([
-                    "C:\\Users\\Luxus\\Desktop\\page-concepts\\consumer-pages-ops-set.png",
+                expect(parseClipboardImagePathText('"C:\\Users\\TestUser\\Desktop\\page-concepts\\consumer-pages-ops-set.png"')).toEqual([
+                    "C:\\Users\\TestUser\\Desktop\\page-concepts\\consumer-pages-ops-set.png",
                 ]);
                 expect(parseClipboardImagePathText("/Users/me/Pictures/clip.webp")).toEqual(["/Users/me/Pictures/clip.webp"]);
                 expect(parseClipboardImagePathText("file:///home/me/Pictures/clip.avif")).toEqual(["/home/me/Pictures/clip.avif"]);
@@ -984,7 +983,7 @@ describe("clipboard-server", () => {
 
             it("does not treat normal text or non-image paths as image path text", () => {
                 expect(parseClipboardImagePathText("hello world")).toEqual([]);
-                expect(parseClipboardImagePathText("C:\\Users\\Luxus\\Desktop\\notes.txt")).toEqual([]);
+                expect(parseClipboardImagePathText("C:\\Users\\TestUser\\Desktop\\notes.txt")).toEqual([]);
                 expect(parseClipboardImagePathText("C:\\one.png\nC:\\two.png")).toEqual([]);
             });
 
@@ -1122,7 +1121,7 @@ describe("clipboard-server", () => {
             it("should return binary path when binary exists on darwin", () => {
                 mockPlatform.mockReturnValue("darwin");
                 mockExistsSync.mockReturnValue(true);
-                const binaryPath = "/home/testuser/.ccc/bin/clipboard-helper-darwin";
+                const binaryPath = "/home/testuser/.ccc/run/bin/clipboard-helper-darwin";
                 const plat = mockPlatform();
                 const binaryExists = mockExistsSync(binaryPath);
                 const result = plat !== "darwin" ? null : !binaryExists ? null : binaryPath;
@@ -3123,6 +3122,26 @@ describe("clipboard-server", () => {
             const mod = await import("../clipboard-server.js");
             expect(typeof mod.hasAnyActiveSessionsExcept).toBe("function");
         });
+
+        it("bounds orphan clipboard server lifetime while preserving active sessions", async () => {
+            const mod = await import("../clipboard-server.js");
+            const started = mod.clipboardServerOrphanWatchdogState(1000, null, false);
+            expect(started).toEqual({ noActiveSessionsSince: 1000, shouldShutdown: false });
+            expect(mod.clipboardServerOrphanWatchdogState(
+                1000 + mod.CLIPBOARD_SERVER_ORPHAN_GRACE_MS - 1,
+                started.noActiveSessionsSince,
+                false,
+            )).toEqual({ noActiveSessionsSince: 1000, shouldShutdown: false });
+            expect(mod.clipboardServerOrphanWatchdogState(
+                1000 + mod.CLIPBOARD_SERVER_ORPHAN_GRACE_MS,
+                started.noActiveSessionsSince,
+                false,
+            )).toEqual({ noActiveSessionsSince: 1000, shouldShutdown: true });
+            expect(mod.clipboardServerOrphanWatchdogState(20000, 1000, true)).toEqual({
+                noActiveSessionsSince: null,
+                shouldShutdown: false,
+            });
+        });
     });
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -3136,7 +3155,11 @@ describe("clipboard-server", () => {
         });
 
         it("returns false when locks dir does not exist", async () => {
-            mockExistsSync.mockImplementation(() => false);
+            mockReaddirSync.mockImplementation(() => {
+                const error = new Error("missing") as NodeJS.ErrnoException;
+                error.code = "ENOENT";
+                throw error;
+            });
             const result = mod.hasAnyActiveSessionsExcept(null);
             expect(result).toBe(false);
         });
@@ -3149,6 +3172,16 @@ describe("clipboard-server", () => {
             mockReaddirSync.mockReturnValue([]);
             const result = mod.hasAnyActiveSessionsExcept(null);
             expect(result).toBe(false);
+        });
+
+        it("fails closed when the lock directory cannot be enumerated", async () => {
+            mockExistsSync.mockReturnValue(true);
+            mockReaddirSync.mockImplementation(() => {
+                throw new Error("sharing violation");
+            });
+
+            expect(mod.hasAnyActiveSessionsExcept(null)).toBe(true);
+            expect(mockUnlinkSync).not.toHaveBeenCalled();
         });
 
         it("returns false when only non-.lock files exist", async () => {
@@ -3169,7 +3202,7 @@ describe("clipboard-server", () => {
             expect(result).toBe(false);
         });
 
-        it("returns false when other lock has invalid (NaN) PID", async () => {
+        it("preserves another malformed lock as potentially active", async () => {
             mockExistsSync.mockImplementation(() => true);
             mockReaddirSync.mockReturnValue(["other.lock"]);
             mockReadFileSync.mockImplementation((p: string) => {
@@ -3179,7 +3212,8 @@ describe("clipboard-server", () => {
             });
             mockUnlinkSync.mockImplementation(() => {});
             const result = mod.hasAnyActiveSessionsExcept(null);
-            expect(result).toBe(false);
+            expect(result).toBe(true);
+            expect(mockUnlinkSync).not.toHaveBeenCalled();
         });
 
         it("returns true when other lock has alive PID", async () => {
@@ -3195,6 +3229,32 @@ describe("clipboard-server", () => {
             expect(result).toBe(true);
         });
 
+        it("preserves a live v2 JSON lock and never parses it as a legacy PID", async () => {
+            mockExistsSync.mockImplementation(() => true);
+            mockReaddirSync.mockReturnValue(["other.lock"]);
+            mockReadFileSync.mockImplementation((p: string) => {
+                if (typeof p === "string" && p.endsWith("other.lock")) {
+                    return JSON.stringify({
+                        version: 2,
+                        pid: 4242,
+                        startToken: "linux:live-start",
+                    });
+                }
+                if (p === "/proc/4242/stat") {
+                    const fields = Array.from(
+                        { length: 20 },
+                        (_, index) => index === 19 ? "live-start" : "0",
+                    );
+                    return `4242 (node) ${fields.join(" ")}`;
+                }
+                if (p === "/fake/clipboard-server.js") return "content";
+                throw new Error(`unexpected: ${p}`);
+            });
+
+            expect(mod.hasAnyActiveSessionsExcept(null)).toBe(true);
+            expect(mockUnlinkSync).not.toHaveBeenCalled();
+        });
+
         it("returns false when other lock has dead PID (stale)", async () => {
             // PID 999999999 is virtually guaranteed to be dead
             const deadPid = 999999999;
@@ -3208,9 +3268,10 @@ describe("clipboard-server", () => {
             mockUnlinkSync.mockImplementation(() => {});
             const result = mod.hasAnyActiveSessionsExcept(null);
             expect(result).toBe(false);
+            expect(mockUnlinkSync).not.toHaveBeenCalled();
         });
 
-        it("returns false when readFileSync throws on lock file", async () => {
+        it("preserves another unreadable lock as potentially active", async () => {
             mockExistsSync.mockImplementation(() => true);
             mockReaddirSync.mockReturnValue(["bad.lock"]);
             mockReadFileSync.mockImplementation((p: string) => {
@@ -3220,7 +3281,8 @@ describe("clipboard-server", () => {
             });
             mockUnlinkSync.mockImplementation(() => {});
             const result = mod.hasAnyActiveSessionsExcept(null);
-            expect(result).toBe(false);
+            expect(result).toBe(true);
+            expect(mockUnlinkSync).not.toHaveBeenCalled();
         });
 
         it("handles null currentLockFile (uses empty string as name)", async () => {
@@ -3249,19 +3311,13 @@ describe("clipboard-server", () => {
         });
 
         it("returns early without shutdown when other sessions exist", async () => {
-            const alivePid = process.pid;
-            // Set up two locks (one other = hasAnyActiveSessionsExcept returns true)
-            mockExistsSync.mockImplementation(() => true);
-            mockReaddirSync.mockReturnValue(["other.lock"]);
-            mockReadFileSync.mockImplementation((p: string) => {
-                if (typeof p === "string" && p.endsWith("other.lock")) return String(alivePid);
-                if (p === "/fake/clipboard-server.js") return "content";
-                throw new Error(`unexpected: ${p}`);
+            mockReaddirSync.mockImplementation(() => {
+                throw new Error("clipboard shutdown must not rescan session locks");
             });
-            const ownLock = join(LOCKS_DIR, "my.lock");
-            mod.stopClipboardServerIfLast(ownLock);
+            mod.stopClipboardServerIfLast(true);
             // No unlink of PORT_FILE because we returned early
             expect(mockUnlinkSync).not.toHaveBeenCalledWith(PORT_FILE);
+            expect(mockReaddirSync).not.toHaveBeenCalled();
         });
 
         it("returns early when no port file exists", async () => {
@@ -3277,7 +3333,7 @@ describe("clipboard-server", () => {
                 throw new Error(`unexpected: ${p}`);
             });
             // Should not throw
-            mod.stopClipboardServerIfLast(null);
+            mod.stopClipboardServerIfLast(false);
             expect(mockUnlinkSync).not.toHaveBeenCalled();
         });
 
@@ -3298,7 +3354,7 @@ describe("clipboard-server", () => {
             // shutdownServer makes a real HTTP request to port 54321, which will fail (connection refused)
             // but it silently ignores errors. We just need to ensure no throw.
             await new Promise<void>((resolve) => {
-                mod.stopClipboardServerIfLast(null);
+                mod.stopClipboardServerIfLast(false);
                 // Give async HTTP request a moment to fire and fail
                 setTimeout(resolve, 100);
             });
@@ -3618,7 +3674,7 @@ describe("clipboard-server", () => {
 
             // stopClipboardServerIfLast calls readPortFile internally
             await new Promise<void>((resolve) => {
-                mod.stopClipboardServerIfLast(null);
+                mod.stopClipboardServerIfLast(false);
                 setTimeout(resolve, 150);
             });
 
@@ -3640,7 +3696,7 @@ describe("clipboard-server", () => {
             });
 
             // readPortFile returns null (no colon) → stopClipboardServerIfLast returns early
-            mod.stopClipboardServerIfLast(null);
+            mod.stopClipboardServerIfLast(false);
             expect(mockUnlinkSync).not.toHaveBeenCalledWith(PORT_FILE);
         });
 
@@ -3659,7 +3715,7 @@ describe("clipboard-server", () => {
             });
 
             // readPortFile returns null (NaN port) → stopClipboardServerIfLast returns early
-            mod.stopClipboardServerIfLast(null);
+            mod.stopClipboardServerIfLast(false);
             expect(mockUnlinkSync).not.toHaveBeenCalledWith(PORT_FILE);
         });
 
@@ -3678,7 +3734,7 @@ describe("clipboard-server", () => {
             });
 
             // readPortFile returns null (empty token) → stopClipboardServerIfLast returns early
-            mod.stopClipboardServerIfLast(null);
+            mod.stopClipboardServerIfLast(false);
             expect(mockUnlinkSync).not.toHaveBeenCalledWith(PORT_FILE);
         });
 
@@ -3697,7 +3753,7 @@ describe("clipboard-server", () => {
             });
 
             // readPortFile catches exception, returns null → stopClipboardServerIfLast returns early
-            mod.stopClipboardServerIfLast(null);
+            mod.stopClipboardServerIfLast(false);
             expect(mockUnlinkSync).not.toHaveBeenCalled();
         });
     });

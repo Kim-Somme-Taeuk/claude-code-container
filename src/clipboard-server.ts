@@ -4,9 +4,10 @@
 // 1. Standalone entry point: when spawned as detached process, starts HTTP server
 // 2. Library: exports ensureClipboardServer() and stopClipboardServerIfLast() for index.ts
 
-import { createServer, request as httpRequest, type Server } from "http";
+import { createServer, request as httpRequest, type IncomingMessage, type Server } from "http";
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from "child_process";
 import { randomBytes, createHash, timingSafeEqual } from "crypto";
+import { StringDecoder } from "string_decoder";
 import {
     existsSync,
     readFileSync,
@@ -19,9 +20,12 @@ import {
     mkdirSync,
 } from "fs";
 import { join, dirname, basename } from "path";
-import { homedir, platform } from "os";
+import { platform } from "os";
 import { fileURLToPath } from "url";
-import { CLIPBOARD_FILES_CONTAINER_DIR, CLIPBOARD_FILES_DIR } from "./utils.js";
+import { CLIPBOARD_FILES_CONTAINER_DIR } from "./utils.js";
+import { clipboardFilesDir, clipboardPortFile, clipboardStartingLock, clipboardStateDir, helperBinDir, locksDir } from "./home-layout.js";
+import { sessionLockLiveness } from "./session-lock-liveness.js";
+import { canonicalWindowsPowerShellPath, hiddenWindowsPowerShellArgs } from "@ccc/device-lab/windows-system-powershell.js";
 
 // === Version (for auto-restart on upgrade) ===
 // Uses content hash of the compiled server file so ANY code change triggers restart
@@ -35,24 +39,26 @@ function getServerHash(): string {
 const SERVER_VERSION = getServerHash();
 
 // === Constants ===
-const DATA_DIR = join(homedir(), ".ccc");
-const LOCKS_DIR = join(DATA_DIR, "locks");
-const PORT_FILE = join(DATA_DIR, "clipboard.port");
-const STARTING_LOCK = join(DATA_DIR, "clipboard.starting");
-const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+// Paths resolve on every use: the ~/.ccc layout can migrate after this module loads
+// (doc/common/REQ__ccc-home-layout.md).
+export const CLIPBOARD_SERVER_ORPHAN_GRACE_MS = 15000;
+const CLIPBOARD_SERVER_ORPHAN_CHECK_INTERVAL_MS = 5000;
 const HEALTH_CHECK_TIMEOUT_MS = 2000;
 const STARTUP_POLL_INTERVAL_MS = 100;
 const STARTUP_POLL_TIMEOUT_MS = 5000;
 const PS_MARKER = "<<<CCC_CB_DONE>>>";
+export const MAX_CLIPBOARD_TEXT_BYTES = 1048576;
+const CLIPBOARD_WRITE_TIMEOUT_MS = 5000;
 
 // === Security Helpers ===
 function safeCompare(a: string, b: string): boolean {
-    if (a.length !== b.length) return false;
-    return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+    const left = Buffer.from(a);
+    const right = Buffer.from(b);
+    return left.length === right.length && timingSafeEqual(left, right);
 }
 
 // === Platform Detection ===
-type ClipboardPlatform = "darwin" | "linux-x11" | "linux-wayland" | "wsl" | "windows" | "unsupported";
+export type ClipboardPlatform = "darwin" | "linux-x11" | "linux-wayland" | "wsl" | "windows" | "unsupported";
 
 function detectPlatform(): ClipboardPlatform {
     const plat = platform();
@@ -81,11 +87,24 @@ function detectPlatform(): ClipboardPlatform {
     return "unsupported";
 }
 
+function clipboardPowerShellPath(): string | null {
+    if (process.platform === "win32") return canonicalWindowsPowerShellPath();
+    if (process.platform !== "linux") return null;
+    try {
+        if (!/microsoft|wsl/i.test(readFileSync("/proc/version", "utf8"))) return null;
+    } catch {
+        return null;
+    }
+    return canonicalWindowsPowerShellPath("/mnt/c/Windows");
+}
+
 function canRunPowerShellExe(): boolean {
     try {
-        const result = spawnSync("powershell.exe", [
+        const powershell = clipboardPowerShellPath();
+        if (!powershell) return false;
+        const result = spawnSync(powershell, hiddenWindowsPowerShellArgs([
             "-NoProfile", "-NoLogo", "-NonInteractive", "-Command", "exit 0",
-        ], {
+        ]), {
             timeout: 1000,
             stdio: "ignore",
             windowsHide: true,
@@ -94,6 +113,133 @@ function canRunPowerShellExe(): boolean {
     } catch {
         return false;
     }
+}
+
+/** Write text as stdin data, never as shell or PowerShell source. */
+export async function writeClipboardText(text: string, plat: ClipboardPlatform): Promise<void> {
+    const bytes = Buffer.from(text, "utf8");
+    if (bytes.length > MAX_CLIPBOARD_TEXT_BYTES || text.includes("\0") || bytes.toString("utf8") !== text) {
+        throw new Error("Invalid clipboard text");
+    }
+    let command: string;
+    let args: string[];
+    let input = bytes;
+    switch (plat) {
+        case "darwin":
+            command = "pbcopy";
+            args = [];
+            break;
+        case "linux-x11":
+            command = "xclip";
+            args = ["-selection", "clipboard", "-in", "-target", "UTF8_STRING"];
+            break;
+        case "linux-wayland":
+            command = "wl-copy";
+            args = ["--type", "text/plain;charset=utf-8"];
+            break;
+        case "windows":
+        case "wsl": {
+            const powershell = clipboardPowerShellPath();
+            if (!powershell) throw new Error("Clipboard writer unavailable");
+            command = powershell;
+            args = hiddenWindowsPowerShellArgs([
+                "-STA", "-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference = 'Stop'; try { " +
+                "Add-Type -AssemblyName System.Windows.Forms; " +
+                "$text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())); " +
+                "if ($text.Length -eq 0) { [Windows.Forms.Clipboard]::Clear() } " +
+                "else { [Windows.Forms.Clipboard]::SetText($text) }; exit 0 " +
+                "} catch { exit 1 }",
+            ]);
+            input = Buffer.from(bytes.toString("base64"), "ascii");
+            break;
+        }
+        default:
+            throw new Error("Clipboard writer unavailable");
+    }
+
+    invalidateClipboardCache();
+    try {
+        await new Promise<void>((resolve, reject) => {
+            const child = spawn(command, args, {
+                stdio: ["pipe", "ignore", "ignore"],
+                windowsHide: true,
+                ...(plat === "darwin" ? { env: { ...process.env, LC_CTYPE: "UTF-8" } } : {}),
+            });
+            let settled = false;
+            const finish = (success: boolean) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                if (success) resolve();
+                else reject(new Error("Clipboard write failed"));
+            };
+            const timer = setTimeout(() => {
+                child.kill("SIGKILL");
+                finish(false);
+            }, CLIPBOARD_WRITE_TIMEOUT_MS);
+            child.once("error", () => finish(false));
+            // Clipboard tools fork a selection owner; inherited pipes must not
+            // keep a completed upload waiting for that owner to exit.
+            child.once("exit", (code) => finish(code === 0));
+            child.stdin!.on("error", () => {
+                child.kill("SIGKILL");
+                finish(false);
+            });
+            child.stdin!.end(input);
+        });
+    } finally {
+        // Also discard reads started while the native command was running.
+        invalidateClipboardCache();
+    }
+}
+
+class ClipboardUploadError extends Error {
+    constructor(readonly status: number) {
+        super("Invalid clipboard upload");
+    }
+}
+
+function readClipboardUpload(req: IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        let settled = false;
+        const finish = (error?: ClipboardUploadError, text?: string) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            req.removeListener("data", onData);
+            req.removeListener("end", onEnd);
+            req.removeListener("aborted", onAbort);
+            if (error) {
+                req.pause();
+                reject(error);
+            } else resolve(text!);
+        };
+        const onData = (chunk: Buffer) => {
+            size += chunk.length;
+            if (size > MAX_CLIPBOARD_TEXT_BYTES) finish(new ClipboardUploadError(413));
+            else chunks.push(chunk);
+        };
+        const onEnd = () => {
+            if (!req.complete) return finish(new ClipboardUploadError(400));
+            try {
+                // Preserve an initial UTF-8 BOM as well as all whitespace.
+                const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks));
+                if (text.includes("\0")) return finish(new ClipboardUploadError(400));
+                finish(undefined, text);
+            } catch {
+                finish(new ClipboardUploadError(400));
+            }
+        };
+        const onAbort = () => finish(new ClipboardUploadError(400));
+        const timer = setTimeout(() => finish(new ClipboardUploadError(408)), CLIPBOARD_WRITE_TIMEOUT_MS);
+        req.on("data", onData);
+        req.once("end", onEnd);
+        req.once("aborted", onAbort);
+        req.once("error", onAbort);
+    });
 }
 
 // === AppleScript Data Parsing ===
@@ -129,10 +275,13 @@ export function parseAppleScriptImageData(buf: Buffer): Buffer | null {
 // Mirrors the Windows PowerShell pattern: one persistent process for fast clipboard reads.
 // Uses a compiled Objective-C binary that accesses NSPasteboard directly (~5ms per read).
 
-const DARWIN_HELPER_SOURCE_HASH_FILE = join(DATA_DIR, "bin", "clipboard-helper-darwin.hash");
-const DARWIN_HELPER_BINARY = join(DATA_DIR, "bin", "clipboard-helper-darwin");
-const DARWIN_MARKER = PS_MARKER; // Same protocol as Windows
+function darwinHelperSourceHashFile(): string {
+    return join(helperBinDir(), "clipboard-helper-darwin.hash");
+}
 
+function darwinHelperBinary(): string {
+    return join(helperBinDir(), "clipboard-helper-darwin");
+}
 let persistentDarwin: ChildProcess | null = null;
 
 /**
@@ -143,17 +292,20 @@ export function parseDarwinHelperOutput(output: string): Omit<ClipboardSnapshot,
     if (!output) return null;
     try {
         const json = JSON.parse(output);
+        if (!validNativeSnapshotShape(json)) return null;
         const rawTargets = json.targets;
         const targets = Array.isArray(rawTargets) ? rawTargets
             : typeof rawTargets === "string" ? [rawTargets]
             : [];
+        const imagePng = decodeClipboardImage(json.imagePng);
+        if (json.imagePng && !imagePng) return null;
         return {
             marker: typeof json.changeCount === "number" || typeof json.changeCount === "string"
                 ? String(json.changeCount)
                 : null,
-            targets,
+            targets: capturedClipboardTargets(targets, imagePng, json.text),
             text: json.text ? Buffer.from(json.text, "utf-8") : null,
-            imagePng: json.imagePng ? Buffer.from(json.imagePng, "base64") : null,
+            imagePng,
             imageBmp: null,
         };
     } catch {
@@ -167,8 +319,8 @@ export function parseDarwinHelperOutput(output: string): Omit<ClipboardSnapshot,
  */
 function isDarwinHelperReady(): string | null {
     if (platform() !== "darwin") return null;
-    if (!existsSync(DARWIN_HELPER_BINARY)) return null;
-    return DARWIN_HELPER_BINARY;
+    if (!existsSync(darwinHelperBinary())) return null;
+    return darwinHelperBinary();
 }
 
 /**
@@ -186,24 +338,24 @@ function compileDarwinHelperAsync(): void {
         const sourceHash = createHash("sha256").update(sourceContent).digest("hex").slice(0, 16);
 
         // Already up-to-date?
-        if (existsSync(DARWIN_HELPER_BINARY)) {
+        if (existsSync(darwinHelperBinary())) {
             try {
-                const existingHash = readFileSync(DARWIN_HELPER_SOURCE_HASH_FILE, "utf-8").trim();
+                const existingHash = readFileSync(darwinHelperSourceHashFile(), "utf-8").trim();
                 if (existingHash === sourceHash) return;
             } catch { /* recompile */ }
         }
 
-        const binDir = join(DATA_DIR, "bin");
+        const binDir = helperBinDir();
         mkdirSync(binDir, { recursive: true });
 
         const child = spawn("cc", [
             "-framework", "AppKit", "-framework", "Foundation",
-            "-O2", "-o", DARWIN_HELPER_BINARY, sourcePath,
+            "-O2", "-o", darwinHelperBinary(), sourcePath,
         ], { stdio: "ignore" });
 
         child.on("close", (code) => {
             if (code === 0) {
-                try { writeFileSync(DARWIN_HELPER_SOURCE_HASH_FILE, sourceHash); } catch { /* ignore */ }
+                try { writeFileSync(darwinHelperSourceHashFile(), sourceHash); } catch { /* ignore */ }
             }
         });
     } catch { /* compilation unavailable — osascript fallback will be used */ }
@@ -228,55 +380,19 @@ function ensurePersistentDarwin(): ChildProcess | null {
     });
 
     child.stderr?.on("data", () => { /* drain */ });
+    child.on("error", () => { if (persistentDarwin === child) persistentDarwin = null; });
+    child.stdin?.on("error", () => { /* active frame handles failure */ });
     child.on("exit", () => { if (persistentDarwin === child) persistentDarwin = null; });
 
     persistentDarwin = child;
     return persistentDarwin;
 }
 
-function runDarwinCommand(command = "READ", timeout = 5000): Promise<string> {
-    return new Promise((resolve) => {
-        let helper: ChildProcess | null;
-        try {
-            helper = ensurePersistentDarwin();
-        } catch {
-            resolve("");
-            return;
-        }
-        if (!helper || !helper.stdin?.writable) {
-            resolve("");
-            return;
-        }
-
-        let output = "";
-
-        const timer = setTimeout(() => {
-            helper!.stdout!.removeListener("data", onData);
-            try { helper!.kill(); } catch { /* ignore */ }
-            persistentDarwin = null;
-            resolve("");
-        }, timeout);
-
-        const onData = (chunk: Buffer) => {
-            output += chunk.toString("utf-8");
-            const idx = output.indexOf(DARWIN_MARKER);
-            if (idx !== -1) {
-                clearTimeout(timer);
-                helper!.stdout!.removeListener("data", onData);
-                resolve(output.substring(0, idx).trim());
-            }
-        };
-
-        helper.stdout!.on("data", onData);
-
-        try {
-            helper.stdin!.write(`${command}\n`);
-        } catch {
-            clearTimeout(timer);
-            helper.stdout!.removeListener("data", onData);
-            resolve("");
-        }
-    });
+async function runDarwinCommand(command = "READ", timeout = 5000): Promise<string | null> {
+    let helper: ChildProcess | null;
+    try { helper = ensurePersistentDarwin(); } catch { throw new ClipboardReadError(); }
+    if (!helper) return null; // Native helper not installed; use the existing fallback.
+    return readNativeFrame(helper, `${command}\n`, timeout, killPersistentDarwin);
 }
 
 function killPersistentDarwin(): void {
@@ -358,14 +474,18 @@ function ensurePersistentPS(): ChildProcess {
     persistentPS = null;
     psAssemblyLoaded = false;
 
-    const ps = spawn("powershell.exe", [
-        "-NoProfile", "-NoLogo", "-NonInteractive", "-Command", "-",
-    ], {
+    const powershell = clipboardPowerShellPath();
+    if (!powershell) throw new Error("trusted Windows PowerShell is unavailable");
+    const ps = spawn(powershell, hiddenWindowsPowerShellArgs([
+        "-STA", "-NoProfile", "-NoLogo", "-NonInteractive", "-Command", "-",
+    ]), {
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
     });
 
     ps.stderr?.on("data", () => { /* drain stderr */ });
+    ps.on("error", () => { if (persistentPS === ps) { persistentPS = null; psAssemblyLoaded = false; } });
+    ps.stdin?.on("error", () => { /* active frame handles failure */ });
     // Guard: only null the reference if this is still the active process (avoids race with replacement)
     ps.on("exit", () => { if (persistentPS === ps) { persistentPS = null; psAssemblyLoaded = false; } });
 
@@ -374,77 +494,67 @@ function ensurePersistentPS(): ChildProcess {
     return persistentPS;
 }
 
-function runPSCommand(command: string, timeout = 8000): Promise<string> {
-    return new Promise((resolve) => {
-        function attempt(isRetry: boolean): void {
-            let ps: ChildProcess;
-            try {
-                ps = ensurePersistentPS();
-            } catch {
-                resolve("");
-                return;
-            }
+// PowerShell 5.1 stdin/stdout inherit host code pages. Keep source ASCII on
+// the wire and explicitly encode responses for readNativeFrame's UTF-8 decoder.
+export function windowsClipboardCommand(command: string): string {
+    const encoded = Buffer.from(command, "utf16le").toString("base64");
+    return `[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); $OutputEncoding = [Console]::OutputEncoding; . ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encoded}'))))`;
+}
 
-            // Check if process is healthy before using it
-            if (ps.killed || ps.exitCode !== null || !ps.stdin?.writable) {
-                if (!isRetry) {
-                    // Kill and recreate, then retry once
-                    try { ps.kill(); } catch { /* ignore */ }
-                    persistentPS = null;
-                    psAssemblyLoaded = false;
-                    attempt(true);
-                } else {
-                    resolve("");
-                }
-                return;
-            }
+async function runPSCommand(command: string, timeout = 8000): Promise<string> {
+    let ps: ChildProcess;
+    try { ps = ensurePersistentPS(); } catch { throw new ClipboardReadError(); }
+    const prefix = psAssemblyLoaded ? "" : "Add-Type -AssemblyName System.Windows.Forms\nAdd-Type -AssemblyName System.Drawing\n";
+    const output = await readNativeFrame(ps, `${windowsClipboardCommand(prefix + command)}\n'${PS_MARKER}'\n`, psAssemblyLoaded ? timeout : 8000, killPersistentPS);
+    psAssemblyLoaded = true;
+    return output;
+}
 
-            let output = "";
+class ClipboardReadError extends Error {
+    constructor() { super("Clipboard read unavailable"); }
+}
 
-            const timer = setTimeout(() => {
-                ps.stdout!.removeListener("data", onData);
-                // Kill the PS process to prevent leftover output from
-                // contaminating the next command's stdout
-                try { ps.kill(); } catch { /* ignore */ }
-                persistentPS = null;
-                psAssemblyLoaded = false;
-                resolve(output.trim());
-            }, timeout);
-
-            const onData = (chunk: Buffer) => {
-                output += chunk.toString("utf-8");
-                const idx = output.indexOf(PS_MARKER);
-                if (idx !== -1) {
-                    clearTimeout(timer);
-                    ps.stdout!.removeListener("data", onData);
-                    resolve(output.substring(0, idx).trim());
-                }
-            };
-
-            ps.stdout!.on("data", onData);
-
-            // First call: load clipboard/image assemblies (only once)
-            const prefix = psAssemblyLoaded ? "" : "Add-Type -AssemblyName System.Windows.Forms\nAdd-Type -AssemblyName System.Drawing\n";
-            psAssemblyLoaded = true;
-
-            try {
-                ps.stdin!.write(`${prefix}${command}\n'${PS_MARKER}'\n`);
-            } catch {
-                clearTimeout(timer);
-                ps.stdout!.removeListener("data", onData);
-                if (!isRetry) {
-                    // stdin write failed - process may have died; kill and retry once
-                    try { ps.kill(); } catch { /* ignore */ }
-                    persistentPS = null;
-                    psAssemblyLoaded = false;
-                    attempt(true);
-                } else {
-                    resolve("");
-                }
-            }
+// getCachedClipboard serializes whole transactions, so only one command owns
+// each helper's stdout. A delimiter must occupy a complete line: clipboard
+// text containing its literal spelling is ordinary JSON data.
+function readNativeFrame(child: ChildProcess, command: string, timeout: number, reset: () => void): Promise<string> {
+    return new Promise((resolve, reject) => {
+        if (!child.stdin?.writable || !child.stdout || child.killed || child.exitCode !== null) {
+            reset();
+            reject(new ClipboardReadError());
+            return;
         }
-
-        attempt(false);
+        const decoder = new StringDecoder("utf8");
+        let output = "";
+        let settled = false;
+        const finish = (body?: string) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            child.stdout!.removeListener("data", onData);
+            child.stdout!.removeListener("end", onFailure);
+            child.removeListener("exit", onFailure);
+            child.removeListener("error", onFailure);
+            child.stdin!.removeListener("error", onFailure);
+            if (body === undefined) {
+                try { child.kill(); } catch { /* ignore */ }
+                reset();
+                reject(new ClipboardReadError());
+            } else resolve(body);
+        };
+        const onFailure = () => finish();
+        const onData = (chunk: Buffer) => {
+            output += decoder.write(chunk);
+            const match = /(?:^|\r?\n)<<<CCC_CB_DONE>>>\r?\n/.exec(output);
+            if (match) finish(output.slice(0, match.index).trim());
+        };
+        const timer = setTimeout(onFailure, timeout);
+        child.stdout.on("data", onData);
+        child.stdout.once("end", onFailure);
+        child.once("exit", onFailure);
+        child.once("error", onFailure);
+        child.stdin.once("error", onFailure);
+        try { child.stdin.write(command); } catch { onFailure(); }
     });
 }
 
@@ -467,6 +577,13 @@ interface ClipboardSnapshot {
     imageBmp: Buffer | null;
 }
 let clipboardCache: ClipboardSnapshot | null = null;
+let clipboardCacheGeneration = 0;
+let clipboardReadQueue: Promise<unknown> = Promise.resolve();
+
+function invalidateClipboardCache(): void {
+    clipboardCacheGeneration += 1;
+    clipboardCache = null;
+}
 
 export function shouldReuseClipboardCache(
     cache: Pick<ClipboardSnapshot, "timestamp" | "marker"> | null,
@@ -530,9 +647,9 @@ function copiedClipboardFileContainerPath(destName: string): string {
 function copyImageFileToClipboardShare(filePath: string): Buffer | null {
     if (!isImageFilePath(filePath) || !existsSync(filePath)) return null;
     try {
-        mkdirSync(CLIPBOARD_FILES_DIR, { recursive: true });
+        mkdirSync(clipboardFilesDir(), { recursive: true });
         const destName = `${Date.now()}-${randomBytes(4).toString("hex")}-${basename(filePath)}`;
-        copyFileSync(filePath, join(CLIPBOARD_FILES_DIR, destName));
+        copyFileSync(filePath, join(clipboardFilesDir(), destName));
         return Buffer.from(copiedClipboardFileContainerPath(destName), "utf-8");
     } catch {
         return null;
@@ -622,16 +739,18 @@ export function parseWindowsClipboardSnapshot(output: string): Omit<ClipboardSna
     if (!output) return null;
     try {
         const json = JSON.parse(output);
+        if (!validNativeSnapshotShape(json)) return null;
         const rawTargets = json.targets;
         const targets = Array.isArray(rawTargets) ? rawTargets
             : typeof rawTargets === "string" ? [rawTargets]
             : [];
-        const imagePng = json.imagePng ? Buffer.from(json.imagePng, "base64") : null;
+        const imagePng = decodeClipboardImage(json.imagePng);
+        if (json.imagePng && !imagePng) return null;
         return {
             marker: typeof json.marker === "number" || typeof json.marker === "string"
                 ? String(json.marker)
                 : null,
-            targets,
+            targets: capturedClipboardTargets(targets, imagePng, imagePng ? null : json.text),
             text: imagePng ? null : json.text ? Buffer.from(json.text, "utf-8") : null,
             imagePng,
             imageBmp: null,
@@ -639,6 +758,30 @@ export function parseWindowsClipboardSnapshot(output: string): Omit<ClipboardSna
     } catch {
         return null;
     }
+}
+
+function validNativeSnapshotShape(value: unknown): value is { targets: string | string[]; text?: string | null; imagePng?: string | null; marker?: unknown; changeCount?: unknown } {
+    if (!value || typeof value !== "object") return false;
+    const json = value as Record<string, unknown>;
+    return (typeof json.targets === "string" || (Array.isArray(json.targets) && json.targets.every(t => typeof t === "string")))
+        && (json.text == null || typeof json.text === "string")
+        && (json.imagePng == null || typeof json.imagePng === "string");
+}
+
+function decodeClipboardImage(value: string | null | undefined): Buffer | null {
+    if (!value) return null;
+    const bytes = Buffer.from(value, "base64");
+    return bytes.length > 0 && bytes.toString("base64") === value ? bytes : null;
+}
+
+function capturedClipboardTargets(targets: string[], image: Buffer | null, text: string | null | undefined): string[] {
+    const captured = targets.filter(target => {
+        if (isSupportedImageTarget(target)) return image !== null;
+        if (target.includes("text/plain") || target === "STRING" || target === "UTF8_STRING") return Boolean(text);
+        return true;
+    });
+    if (image && !captured.includes("image/png")) captured.push("image/png");
+    return captured;
 }
 
 function psSingleQuote(value: string): string {
@@ -657,13 +800,16 @@ export function buildWindowsClipboardChangeMarkerCommand(): string {
 }
 
 export function buildWindowsClipboardReadCommand(
-    sharedHostDir = CLIPBOARD_FILES_DIR,
+    sharedHostDir = clipboardFilesDir(),
     sharedContainerDir = CLIPBOARD_FILES_CONTAINER_DIR,
 ): string {
     const extensions = WINDOWS_IMAGE_FILE_EXTENSIONS.map(psSingleQuote).join(",");
     const sharedHost = psSingleQuote(sharedHostDir);
     const sharedContainer = psSingleQuote(sharedContainerDir);
     return [
+        "$previousErrorActionPreference = $ErrorActionPreference",
+        "$ErrorActionPreference = 'Stop'",
+        "try {",
         `if (-not (${psSingleQuote(WINDOWS_CLIPBOARD_SEQUENCE_TYPE)} -as [type])) {`,
         "  Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class CCCClipboardSequence { [DllImport(\"user32.dll\")] public static extern uint GetClipboardSequenceNumber(); }'",
         "}",
@@ -788,6 +934,7 @@ export function buildWindowsClipboardReadCommand(
         "}",
         "if ($text -and !$r.imagePng -and !$r.text) { $r.targets += 'text/plain'; $r.text = $text }",
         "$r | ConvertTo-Json -Compress",
+        "} catch { '{\"error\":\"clipboard-read-failed\"}' } finally { $ErrorActionPreference = $previousErrorActionPreference }",
     ].join("; ");
 }
 
@@ -799,9 +946,27 @@ export function buildWindowsClipboardReadCommand(
 async function readAllClipboardDarwin(): Promise<Omit<ClipboardSnapshot, "timestamp">> {
     // Try native helper first (persistent process, ~5ms per read)
     const nativeOutput = await runDarwinCommand();
-    if (nativeOutput) {
+    if (nativeOutput !== null) {
         const parsed = parseDarwinHelperOutput(nativeOutput);
-        if (parsed) return parsed;
+        if (!parsed) throw new ClipboardReadError();
+        if (parsed.imagePng) return parsed;
+
+        // A successful native read may contain only a file reference or an
+        // image representation that NSImage could not decode. Do not bypass
+        // the existing fallbacks just because the helper is installed.
+        const converted = execCommand("pngpaste", ["-"]);
+        if (converted.status === 0 && converted.stdout.length > 0) {
+            return { ...parsed, targets: [...new Set([...parsed.targets, "image/png"])], imagePng: converted.stdout };
+        }
+        const fileFallback = readDarwinClipboardImageFileFallback();
+        if (fileFallback.targets.length > 0) return { ...fileFallback, marker: parsed.marker };
+        if (parsed.text) {
+            const textFallback = buildImageFileClipboardFallbackFromPaths(
+                parseClipboardImagePathText(parsed.text.toString("utf8")),
+            );
+            if (textFallback.targets.length > 0) return { ...textFallback, marker: parsed.marker };
+        }
+        return parsed;
     }
 
     // Fallback: parallel osascript + pbpaste (~250ms)
@@ -810,6 +975,7 @@ async function readAllClipboardDarwin(): Promise<Omit<ClipboardSnapshot, "timest
             'try\nset d to the clipboard as «class PNGf»\nreturn d\nend try']),
         execCommandAsync("pbpaste", []),
     ]);
+    if (imgResult.status !== 0 || textResult.status !== 0) throw new ClipboardReadError();
 
     const targets: string[] = [];
     let imagePng: Buffer | null = null;
@@ -853,31 +1019,32 @@ async function readAllClipboardDarwin(): Promise<Omit<ClipboardSnapshot, "timest
 async function readAllClipboardWindows(): Promise<Omit<ClipboardSnapshot, "timestamp">> {
     // Single-line command: PS interactive stdin (-Command -) without a console
     // cannot handle multi-line continuation blocks (if { ... } across lines).
-    mkdirSync(CLIPBOARD_FILES_DIR, { recursive: true });
+    mkdirSync(clipboardFilesDir(), { recursive: true });
     const command = buildWindowsClipboardReadCommand();
 
     const output = await runPSCommand(command);
-    if (!output) return { targets: [], text: null, imagePng: null, imageBmp: null };
-
-    return parseWindowsClipboardSnapshot(output) ?? { targets: [], text: null, imagePng: null, imageBmp: null };
+    const snapshot = parseWindowsClipboardSnapshot(output);
+    if (!snapshot) throw new ClipboardReadError();
+    return snapshot;
 }
 
 async function readWindowsClipboardChangeMarker(): Promise<string | null> {
     const output = await runPSCommand(buildWindowsClipboardChangeMarkerCommand(), 2000);
     const marker = output.trim();
-    return marker.length > 0 ? marker : null;
+    if (!/^\d+$/.test(marker) || Number(marker) <= 0) throw new ClipboardReadError();
+    return marker;
 }
 
 async function readDarwinClipboardChangeMarker(): Promise<string | null> {
     const output = await runDarwinCommand("MARK", 1000);
-    if (!output) return null;
+    if (output === null) return null;
     try {
         const json = JSON.parse(output);
-        if (typeof json.changeCount === "number" || typeof json.changeCount === "string") {
+        if ((typeof json.changeCount === "number" || typeof json.changeCount === "string") && /^\d+$/.test(String(json.changeCount))) {
             return String(json.changeCount);
         }
     } catch { /* helper without MARK support or invalid output */ }
-    return null;
+    throw new ClipboardReadError();
 }
 
 async function readClipboardChangeMarker(plat: ClipboardPlatform): Promise<string | null> {
@@ -919,26 +1086,46 @@ function readLinuxClipboardImageFileFallback(plat: ClipboardPlatform, targets: s
     return buildImageFileClipboardFallbackFromPaths(readLinuxClipboardUriList(plat, targets));
 }
 
-async function getCachedClipboard(plat: ClipboardPlatform, forceRefresh = false): Promise<ClipboardSnapshot> {
+function getCachedClipboard(plat: ClipboardPlatform, forceRefresh = false): Promise<ClipboardSnapshot> {
+    const read = clipboardReadQueue.then(() => readAndCacheClipboard(plat, forceRefresh));
+    clipboardReadQueue = read.catch(() => {});
+    return read;
+}
+
+async function readAndCacheClipboard(plat: ClipboardPlatform, forceRefresh: boolean): Promise<ClipboardSnapshot> {
+    // A native read can finish after a successful POST. Never publish its old
+    // snapshot into the cache or return it to a waiting HTTP reader.
+    while (true) {
+        const generation = clipboardCacheGeneration;
+        const snapshot = await readClipboardSnapshot(plat, forceRefresh);
+        if (generation !== clipboardCacheGeneration) continue;
+        clipboardCache = snapshot;
+        return snapshot;
+    }
+}
+
+async function readClipboardSnapshot(plat: ClipboardPlatform, forceRefresh: boolean): Promise<ClipboardSnapshot> {
     const now = Date.now();
-    const marker = forceRefresh ? null : await readClipboardChangeMarker(plat);
+    const marker = await readClipboardChangeMarker(plat);
     const cached = clipboardCache;
-    if (cached && !forceRefresh && shouldReuseClipboardCache(cached, now, marker)) {
+    const negativeCacheFresh = cached && (cached.imagePng || cached.imageBmp || now - cached.timestamp < CACHE_TTL_MS);
+    if (cached && negativeCacheFresh && !forceRefresh && shouldReuseClipboardCache(cached, now, marker)) {
         return cached;
     }
 
-    // Windows/WSL: persistent PowerShell process
-    if (plat === "windows" || plat === "wsl") {
-        const snapshot = await readAllClipboardWindows();
-        clipboardCache = { timestamp: now, ...snapshot, marker: snapshot.marker ?? marker };
-        return clipboardCache;
-    }
-
-    // macOS: parallel reads (skip clipboard info, infer targets from actual data)
-    if (plat === "darwin") {
-        const snapshot = await readAllClipboardDarwin();
-        clipboardCache = { timestamp: now, ...snapshot, marker: snapshot.marker ?? marker };
-        return clipboardCache;
+    if (plat === "windows" || plat === "wsl" || plat === "darwin") {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+            const snapshot = plat === "darwin" ? await readAllClipboardDarwin() : await readAllClipboardWindows();
+            const after = await readClipboardChangeMarker(plat);
+            // macOS without its optional helper retains the legacy fallback,
+            // but never borrows an unrelated marker for those separate reads.
+            if (snapshot.marker == null) {
+                if (plat !== "darwin" || marker !== null || after !== null) throw new ClipboardReadError();
+                return { timestamp: Date.now(), ...snapshot, marker: null };
+            }
+            if (snapshot.marker === after) return { timestamp: Date.now(), ...snapshot };
+        }
+        throw new ClipboardReadError();
     }
 
     // Linux: individual calls
@@ -952,12 +1139,11 @@ async function getCachedClipboard(plat: ClipboardPlatform, forceRefresh = false)
     if (!imagePng && !imageBmp) {
         const fileFallback = readLinuxClipboardImageFileFallback(plat, targets);
         if (fileFallback.targets.length > 0) {
-            clipboardCache = {
+            return {
                 timestamp: now,
                 marker: null,
                 ...fileFallback,
             };
-            return clipboardCache;
         }
 
         if (text) {
@@ -965,12 +1151,11 @@ async function getCachedClipboard(plat: ClipboardPlatform, forceRefresh = false)
                 parseClipboardImagePathText(text.toString("utf-8")),
             );
             if (textPathFallback.targets.length > 0) {
-                clipboardCache = {
+                return {
                     timestamp: now,
                     marker: null,
                     ...textPathFallback,
                 };
-                return clipboardCache;
             }
         }
     }
@@ -983,7 +1168,7 @@ async function getCachedClipboard(plat: ClipboardPlatform, forceRefresh = false)
         return true;
     });
 
-    clipboardCache = {
+    return {
         timestamp: now,
         marker: null,
         targets: filteredTargets,
@@ -991,7 +1176,6 @@ async function getCachedClipboard(plat: ClipboardPlatform, forceRefresh = false)
         imagePng,
         imageBmp,
     };
-    return clipboardCache;
 }
 
 function readClipboardTargets(plat: ClipboardPlatform): string[] {
@@ -1042,8 +1226,6 @@ function readClipboardText(plat: ClipboardPlatform): Buffer | null {
 
 function readClipboardImage(plat: ClipboardPlatform, format: "png" | "bmp", targets: string[] = []): Buffer | null {
     let r: { stdout: Buffer; status: number };
-    const mimeType = format === "png" ? "image/png" : "image/bmp";
-
     switch (plat) {
         case "darwin": {
             if (format === "png") {
@@ -1092,10 +1274,23 @@ function gracefulShutdown(server: Server, idleTimer?: ReturnType<typeof setInter
     setTimeout(() => process.exit(0), 3000);
 }
 
+export function clipboardServerOrphanWatchdogState(
+    now: number,
+    noActiveSessionsSince: number | null,
+    hasActiveSessions: boolean,
+): { noActiveSessionsSince: number | null; shouldShutdown: boolean } {
+    if (hasActiveSessions) return { noActiveSessionsSince: null, shouldShutdown: false };
+    const since = noActiveSessionsSince ?? now;
+    return {
+        noActiveSessionsSince: since,
+        shouldShutdown: now - since >= CLIPBOARD_SERVER_ORPHAN_GRACE_MS,
+    };
+}
+
 // === HTTP Server ===
 
-function createClipboardServer(token: string, plat: ClipboardPlatform): { server: Server; start: (bindAddr: string) => Promise<number> } {
-    let lastRequestTime = Date.now();
+export function createClipboardServer(token: string, plat: ClipboardPlatform): { server: Server; start: (bindAddr: string) => Promise<number> } {
+    let noActiveSessionsSince: number | null = null;
     let idleTimer: ReturnType<typeof setInterval>;
 
     // Pre-warm persistent PowerShell on Windows/WSL
@@ -1104,8 +1299,6 @@ function createClipboardServer(token: string, plat: ClipboardPlatform): { server
     }
 
     const server = createServer(async (req, res) => {
-        lastRequestTime = Date.now();
-
         const url = req.url ?? "";
         const method = req.method ?? "GET";
 
@@ -1133,6 +1326,34 @@ function createClipboardServer(token: string, plat: ClipboardPlatform): { server
                 res.writeHead(200, { "Content-Type": "text/plain" });
                 res.end("shutting down");
                 gracefulShutdown(server, idleTimer);
+                return;
+            }
+
+            if (method === "POST" && url === "/clipboard/text") {
+                // Close rejected uploads rather than draining unbounded bodies.
+                const rejectUpload = (status: number) => {
+                    res.writeHead(status, { "Content-Type": "text/plain", "Connection": "close" });
+                    res.end("Clipboard upload failed");
+                    res.once("finish", () => req.destroy());
+                };
+                const contentType = req.headers["content-type"] ?? "";
+                if (!/^text\/plain(?:\s*;\s*charset\s*=\s*(?:utf-8|"utf-8"))?\s*$/i.test(contentType)) {
+                    rejectUpload(415);
+                    return;
+                }
+                const length = req.headers["content-length"];
+                if (length !== undefined && Number(length) > MAX_CLIPBOARD_TEXT_BYTES) {
+                    rejectUpload(413);
+                    return;
+                }
+                try {
+                    const text = await readClipboardUpload(req);
+                    await writeClipboardText(text, plat);
+                    res.writeHead(204);
+                    res.end();
+                } catch (error) {
+                    rejectUpload(error instanceof ClipboardUploadError ? error.status : 500);
+                }
                 return;
             }
 
@@ -1180,23 +1401,26 @@ function createClipboardServer(token: string, plat: ClipboardPlatform): { server
 
             res.writeHead(404, { "Content-Type": "text/plain" });
             res.end("Not Found");
-        } catch {
+        } catch (error) {
             if (!res.headersSent) {
-                res.writeHead(500);
-                res.end("Internal error");
+                res.writeHead(error instanceof ClipboardReadError ? 503 : 500);
+                res.end(error instanceof ClipboardReadError ? "Clipboard read unavailable" : "Internal error");
             }
         }
     });
 
-    // Idle timeout: self-terminate after 30 minutes of no requests,
-    // but ONLY if no active CCC sessions (lock files) exist.
+    // A detached server may outlive a crashed CLI. Active session locks keep it
+    // alive; an empty/stale lock set starts a short grace period before exit.
     idleTimer = setInterval(() => {
-        if (Date.now() - lastRequestTime > IDLE_TIMEOUT_MS) {
-            // Check for active sessions — don't die while someone is using CCC
-            if (hasAnyActiveSessionsExcept(null)) return;
-            gracefulShutdown(server, idleTimer);
-        }
-    }, 60000);
+        const state = clipboardServerOrphanWatchdogState(
+            Date.now(),
+            noActiveSessionsSince,
+            hasAnyActiveSessionsExcept(null),
+        );
+        noActiveSessionsSince = state.noActiveSessionsSince;
+        if (state.shouldShutdown) gracefulShutdown(server, idleTimer);
+    }, CLIPBOARD_SERVER_ORPHAN_CHECK_INTERVAL_MS);
+    server.once("close", () => clearInterval(idleTimer));
 
     const start = (bindAddr: string): Promise<number> => {
         return new Promise((resolve, reject) => {
@@ -1216,16 +1440,16 @@ function createClipboardServer(token: string, plat: ClipboardPlatform): { server
 }
 
 function cleanupStateFiles(): void {
-    try { if (existsSync(PORT_FILE)) unlinkSync(PORT_FILE); } catch { /* ignore */ }
-    try { if (existsSync(STARTING_LOCK)) unlinkSync(STARTING_LOCK); } catch { /* ignore */ }
+    try { if (existsSync(clipboardPortFile())) unlinkSync(clipboardPortFile()); } catch { /* ignore */ }
+    try { if (existsSync(clipboardStartingLock())) unlinkSync(clipboardStartingLock()); } catch { /* ignore */ }
 }
 
 // === Port File Management ===
 
-function readPortFile(): { port: number; token: string } | null {
+function readPortFile(portFile = clipboardPortFile()): { port: number; token: string } | null {
     try {
-        if (!existsSync(PORT_FILE)) return null;
-        const content = readFileSync(PORT_FILE, "utf-8").trim();
+        if (!existsSync(portFile)) return null;
+        const content = readFileSync(portFile, "utf-8").trim();
         const colonIdx = content.indexOf(":");
         if (colonIdx === -1) return null;
         const portStr = content.substring(0, colonIdx);
@@ -1239,8 +1463,8 @@ function readPortFile(): { port: number; token: string } | null {
 }
 
 function writePortFile(port: number, token: string): void {
-    mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
-    writeFileSync(PORT_FILE, `${port}:${token}`, { mode: 0o600 });
+    mkdirSync(clipboardStateDir(), { recursive: true, mode: 0o700 });
+    writeFileSync(clipboardPortFile(), `${port}:${token}`, { mode: 0o600 });
 }
 
 // === Server Shutdown (used for version upgrade restart) ===
@@ -1316,8 +1540,8 @@ export async function ensureClipboardServer(): Promise<number> {
     // Atomic startup lock to prevent race condition
     let lockFd: number | null = null;
     try {
-        mkdirSync(DATA_DIR, { recursive: true });
-        lockFd = openSync(STARTING_LOCK, "wx");
+        mkdirSync(clipboardStateDir(), { recursive: true, mode: 0o700 });
+        lockFd = openSync(clipboardStartingLock(), "wx");
         closeSync(lockFd);
     } catch {
         // Another process is starting the server - wait for port file
@@ -1333,8 +1557,8 @@ export async function ensureClipboardServer(): Promise<number> {
         // Timeout - try to start ourselves (delete stale lock)
         cleanupStateFiles();
         try {
-            mkdirSync(DATA_DIR, { recursive: true });
-            lockFd = openSync(STARTING_LOCK, "wx");
+            mkdirSync(clipboardStateDir(), { recursive: true, mode: 0o700 });
+            lockFd = openSync(clipboardStartingLock(), "wx");
             closeSync(lockFd);
         } catch {
             throw new Error("Failed to acquire clipboard server startup lock");
@@ -1361,7 +1585,7 @@ export async function ensureClipboardServer(): Promise<number> {
             if (info) {
                 const health = await checkServerHealth(info.port, info.token, bindAddr);
                 if (health.alive) {
-                    try { unlinkSync(STARTING_LOCK); } catch { /* ignore */ }
+                    try { unlinkSync(clipboardStartingLock()); } catch { /* ignore */ }
                     return info.port;
                 }
             }
@@ -1369,7 +1593,7 @@ export async function ensureClipboardServer(): Promise<number> {
 
         throw new Error("Clipboard server failed to start within timeout");
     } catch (err) {
-        try { unlinkSync(STARTING_LOCK); } catch { /* ignore */ }
+        try { unlinkSync(clipboardStartingLock()); } catch { /* ignore */ }
         throw err;
     }
 }
@@ -1377,41 +1601,37 @@ export async function ensureClipboardServer(): Promise<number> {
 /**
  * Check if there are any active CCC sessions besides the given lock file.
  */
-export function hasAnyActiveSessionsExcept(currentLockFile: string | null): boolean {
-    if (!existsSync(LOCKS_DIR)) return false;
+export function hasAnyActiveSessionsExcept(currentLockFile: string | null, directory: string = locksDir()): boolean {
     const currentLockName = currentLockFile ? basename(currentLockFile) : "";
-    const locks = readdirSync(LOCKS_DIR).filter((f) => f.endsWith(".lock"));
+    let locks: string[];
+    try {
+        locks = readdirSync(directory).filter((f) => f.endsWith(".lock"));
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        // Failure to enumerate locks is not proof that no sessions exist.
+        return true;
+    }
     return locks.some((f) => {
         if (f === currentLockName) return false;
-        // Validate PID liveness — delete stale lock files from crashed sessions
-        const lockPath = join(LOCKS_DIR, f);
+        // Use the same conservative lock identity rules as container cleanup.
+        const lockPath = join(directory, f);
         try {
             const content = readFileSync(lockPath, "utf-8").trim();
-            const pid = parseInt(content, 10);
-            if (isNaN(pid)) {
-                try { unlinkSync(lockPath); } catch { /* ignore */ }
-                return false;
-            }
-            try {
-                process.kill(pid, 0);
-                return true; // PID is alive
-            } catch {
-                try { unlinkSync(lockPath); } catch { /* ignore */ }
-                return false; // PID is dead — stale lock
-            }
+            const liveness = sessionLockLiveness(content);
+            return liveness !== "stale";
         } catch {
-            try { unlinkSync(lockPath); } catch { /* ignore */ }
-            return false;
+            // A read failure is not proof that the owning session exited.
+            return true;
         }
     });
 }
 
 /**
- * Stop the clipboard server if this is the last active CCC session.
- * Call BEFORE removing the current session's lock file.
+ * Stop the clipboard server when the session module has atomically established
+ * that no other session owns the shared container.
  */
-export function stopClipboardServerIfLast(currentLockFile: string | null): void {
-    if (hasAnyActiveSessionsExcept(currentLockFile)) return;
+export function stopClipboardServerIfLast(hasOtherActiveSessions: boolean): void {
+    if (hasOtherActiveSessions) return;
 
     const info = readPortFile();
     if (!info) return;
@@ -1419,7 +1639,13 @@ export function stopClipboardServerIfLast(currentLockFile: string | null): void 
     shutdownServer(info.port, info.token);
 
     // Clean up port file
-    try { unlinkSync(PORT_FILE); } catch { /* ignore */ }
+    try { unlinkSync(clipboardPortFile()); } catch { /* ignore */ }
+}
+
+/** Ask the server recorded in a pre-layout port file to shut down. */
+export function retireClipboardServerFromPortFile(portFile: string): void {
+    const info = readPortFile(portFile);
+    if (info) shutdownServer(info.port, info.token);
 }
 
 // === Standalone Entry Point ===
@@ -1441,7 +1667,7 @@ if (isMainModule && process.argv.includes("--serve")) {
     start(bindAddr)
         .then((port) => {
             writePortFile(port, token);
-            try { unlinkSync(STARTING_LOCK); } catch { /* ignore */ }
+            try { unlinkSync(clipboardStartingLock()); } catch { /* ignore */ }
         })
         .catch((err) => {
             console.error("Failed to start clipboard server:", err);

@@ -1,0 +1,708 @@
+# GUIDE — an errno's `path` is not the path you asked for
+
+**Status:** current
+**Applies to:** any code in `src/` that reports a filesystem failure to an
+operator, or asserts on one in a test.
+
+## The trap
+
+`fs.realpathSync` walks the path component by component in its JS
+implementation, and reports **the first component that is missing** as
+`error.path`. It is not the path passed in.
+
+This is specific to `realpathSync`. Measured on Node v22.23.1, all four given
+the same missing four-component path:
+
+    realpathSync   ENOENT  path "/nosuchroot-zzz"
+    lstatSync      ENOENT  path "/nosuchroot-zzz/services/x/.git"
+    statSync       ENOENT  path "/nosuchroot-zzz/services/x/.git"
+    readFileSync   ENOENT  path "/nosuchroot-zzz/services/x/.git"
+
+So `lstat`, `stat` and `readFile` report the path you asked about and their
+`error.path` is exact. Only `realpathSync` truncates, and what it truncates to
+depends on **which ancestors happen to exist on the machine running the call**
+— so the same input yields different output on a developer's container, on a
+Windows host, and on a CI runner. Do not generalise the warning to every
+syscall: distrusting an exact value is its own kind of wrong.
+
+## How it bit us
+
+`warnUnreachableNestedRepository` in `src/worktree.ts` printed a NOTE saying
+*"its Git metadata names 'X', which does not exist here"* and filled `X` from
+`error.path`. Two failures followed from one mistake:
+
+1. **The operator got the wrong path.** For a worktree registered inside the
+   container, the recorded path is
+   `/project/<workspace>-<hash>/services/<repo>/.git`. On a host without
+   `C:\project` the NOTE collapses to `C:\project` — dropping the
+   workspace-and-hash, which is the only part that tells the operator *which*
+   worktree to repair. The operator's own output is the demonstration — from
+   the abort that preceded the NOTE, whose cause line read `ENOENT: lstat
+   'C:\project\catchy-secrets--kjkim9-a78536cd7627'`. The walk gave up at the
+   workspace component, two of five, dropping `\services\catchy-api\.git`. So
+   `C:\project` did exist on that machine, and the recorded path still was not
+   the value that surfaced.
+
+2. **The regression test passed only inside a ccc container.** It asserted
+   `toContain("/project/unreachable-workspace-abc123")`, which holds because
+   `/project` is this container's mount root. CI runs the `test` job on
+   `ubuntu-latest`, which has no `/project`, so `error.path` would have been
+   `"/project"` and the assertion would have failed on the next push. A green
+   local run proved nothing about the machine that would actually run it.
+
+Note that the two failures are the same defect wearing different clothes. The
+test could not catch the NOTE bug because both read the same wrong value.
+
+## The rule
+
+When you need to tell someone *what a file recorded*, carry that string from
+the place that read it. Do not recover it from the error afterwards.
+
+    // at the failure site, where registeredGitFile is still in scope
+    throw Object.assign(
+        new Error("worktree registration names a path that cannot be resolved here", { cause: error }),
+        { recordedGitPath: registeredGitFile },
+    );
+
+Then read `recordedGitPath` off the cause chain. `src/worktree.ts` does this
+with `unreachableRecordedGitPath`, which deliberately never falls back to
+`error.path` — a wrong-but-plausible path is worse than none, because the
+operator cannot tell it is wrong.
+
+## Corollary — diagnoses need their evidence
+
+The same NOTE appended *"a worktree registered inside the container records a
+container path, which the host cannot resolve, and the reverse"* to **every**
+skip. That sentence is a diagnosis, and it was printed for causes that had
+nothing to do with the mount boundary — sending someone with merely malformed
+submodule metadata to look for a mount problem they did not have. Print a
+diagnosis only on the branch where its evidence exists; otherwise state the
+errno and stop.
+
+## Second corollary — the values in an operator message are attacker-controlled
+
+The same NOTE interpolates two repository-controlled strings. Submodule names
+reach it from `git ls-files -z`, which is **unquoted by design**, and the
+recorded path is the content of a file inside `.git`. Measured end to end: an
+ESC sequence, a BEL and U+202E placed in a submodule name all arrived at the
+terminal raw.
+
+That matters more than usual here, because the NOTE exists to tell an operator
+*which directory ccc declined to manage*. A right-to-left override reverses the
+path they are about to act on; an ESC sequence can rewrite the line entirely.
+`terminalSafe` quotes with `JSON.stringify` and then escapes what that leaves
+raw — escaped rather than stripped, since the operator still has to identify
+the directory. Three separate things had to be right, and escaping control
+characters was only the first:
+
+- `\p{Cc}` alone is not enough. The bidi overrides are `\p{Cf}`, and
+  `JSON.stringify` does not touch them, nor C1.
+- **The delimiter has to be escaped too.** Before `JSON.stringify` was added,
+  a name could close the field and open a plausible replacement — `api":
+  names "/innocent/path` reads as a second field of the message itself.
+- **So does the escape character.** Without escaping the backslash, a
+  directory literally *named* `svc\u001b[31m` rendered identically to a real
+  ESC that this code had escaped. The operator could not tell which had
+  happened — the escaping was honest and unreadable at the same time.
+
+Worth knowing which inputs actually reach it: a tracked path containing `"` is
+already refused upstream by `trackedGitlinkPaths`. The **recorded path is the
+one with no validation at all** — it is the content of a file — so that is
+where the forgery test drives, and where any similar test should.
+
+To be clear about ownership: the forgeable field was **new code**, introduced
+by the NOTE this task added, not inherited. What *is* inherited, and still
+open: the thrown errors in the same file (`Nested Git repository escapes its
+parent repository: ${candidatePath}` and its neighbours) interpolate the same
+untrusted paths and are printed by the CLI.
+
+## Third corollary — a repository you decline to manage is not one you may delete
+
+Degrading an abort into a skip moves the candidate out of every set the abort
+used to protect. `removeWorkspace` builds its `:(exclude,literal)` pathspecs
+from the scan, so a skipped nested repository stopped being excluded and its
+contents read as ordinary root content — which `ccc rm --force` then swept,
+reporting success while destroying another repository's uncommitted work.
+Measured A/B on the same fixture: before the skip, forced removal threw and the
+work survived; after it, `{"removed":[...],"errors":[]}` and the work was gone.
+
+`removeWorkspace` collects skipped candidates from the scan and refuses,
+naming them — **without `--force`.** The rule is that unmanaged means ccc will
+not delete it *silently*, not that ccc will not delete it.
+
+An earlier version of this guard held under `--force` too, on the argument that
+`--force` means "delete my modified and untracked files" and not "delete a
+repository you could not inspect". That argument was this file's, and the
+repository owner overruled it: a command that removes a workspace removes what
+is inside it, and `--force` is where the operator says they know. Holding the
+veto there left `ccc rm -f` with no way through on a workspace the owner wanted
+gone — including one produced by a failed repair, which is how it was found.
+
+So the whole safety story is the no-force path: it must name the repository, it
+must say what is at that path, and it must name `-f` as the way through.
+Silently deleting is the failure; refusing to delete is a different failure, and
+between the two the operator only ever gets one chance to be told.
+
+Do not mistake an incidental throw for a backstop. Removing the guard does not
+lose data in *every* shape: where the source-side copy is an ordinary clone and
+only the workspace-side one is a registered worktree, a later `gitLinkKind`
+call resolves far enough to throw before anything is deleted. That is a
+consequence of topology, not a designed second line of defence, and it is
+absent from the shape the operator actually hit — there, removing the guard
+destroys the work. Two people measured this and got opposite answers from
+different fixtures; the guard is what makes the outcome not depend on which.
+
+**Know the guard's reach, and do not overstate it.** It runs
+`scanUnifiedNestedRepositories(wsPath, …)`, so it covers the unified removal
+path. In multi-repo mode `wsPath` is not a Git repository, that scan yields no
+candidates at all, and the guard protects nothing — the below-top-level
+deletion there is still open, and is pre-existing rather than caused by the
+skip. Counting the *call sites* that delete is not the same as checking which
+of them the guard's scan can actually see; the first reading of this said both
+modes were covered, and only measuring showed otherwise.
+
+The general lesson: when you turn a failure into a skip, enumerate what the
+failure was protecting. The refusals themselves stayed intact here; the set
+they policed silently shrank.
+
+## Fourth corollary — key a skip on what it is *for*, not on what it *looks like*
+
+The first version of the skip keyed on "an ENOENT/ENOTDIR appears anywhere in
+the error's cause chain". That is a description of the symptom, and it was much
+wider than the situation the skip exists for. `gitLinkKind` establishes
+ownership with bare filesystem calls, so an errno can be raised *while a
+judgement is still being made*, before the judgement can run. Measured: a
+`commondir` naming a repository with no `worktrees` directory makes
+`lstat(managementRootPath)` throw at exactly the point where `worktree
+management entry is outside its source repository` was about to be decided —
+turning an ownership refusal into a silent skip.
+
+The refusal was intact and unreachable, which is the worst combination: it
+reads as safe in the source and never runs.
+
+The fix is to key on evidence attached at the one site that knows what the
+failure is about. `recordedGitPath` is set only where the registration
+back-pointer fails to resolve, so requiring it — *and* an errno meaning
+absence, so a symlink loop still aborts — makes the skip exactly as wide as
+the portability case. It also made the NOTE's "could not be inspected" branch
+unreachable, and it was deleted rather than left as untested prose.
+
+## Fifth corollary — an accurate diagnosis is not automatically a place to abort
+
+`Tracked submodule repository is not initialized` is true when it fires. It was
+still wrong to abort on, because it fired on the path that OPENS an existing
+workspace, and `ccc` was then the only tool that could have repaired the state
+it was complaining about. The operator hit it three times in one session and
+every recovery was a `Move-Item` dictated over chat.
+
+The distinction that matters is not skip-versus-abort, it is **create versus
+open**:
+
+- Creating a workspace whose branch tracks a submodule that is not initialized
+  produces a half checkout the operator would not notice. Keep aborting. There
+  is a test that pins this on purpose.
+- Opening a workspace that already exists cannot make it any worse, and
+  refusing removes the only way back. Skip, and say so.
+
+Ask, of any abort: does the operator have a way out that does not require
+somebody else to dictate shell commands? If the answer is no and the state is
+repairable, the abort is in the wrong place. Note the state here is also
+perfectly ordinary — clone without `--recursive`, or interrupt a `submodule
+update` — so this was never only about a bug upstream of it.
+
+**Count what you were asked about, not what is easy to count.** Asked whether
+the relaxation flag was absent from every scan that can run during CREATION, the
+answer given was "all four flagged scans target the workspace, so none is
+creation-reachable". That answers a different question: `src/index.ts:1172` runs
+on both arms of the create/open branch, so three of the flagged scans *are*
+creation-reachable — they are simply reached with a workspace that already
+exists. The half checkout is prevented somewhere else entirely
+(`assertWorkspaceOwnership`'s source loop, and `repairWorkspace`'s scan). Twice
+in one change the substitute question was the tempting one: callers-instead-of-
+control-flow, then target-instead-of-reachability.
+
+**One relaxed call is almost never enough, and a unit test will not tell you.**
+Six sites had to move in total. Four sit on the journey a plain `ccc` inside the
+workspace takes: the workspace scan `detectWorktreeWorkspaceBranch` reaches
+through `branchRepositories`, the tracked-gitlink walk in
+`trackedWorktreeGitFiles`, and — both inside `workspaceWorktreeGitFiles` — its
+own scan and its metadata check. The other two are the workspace scan in
+`assertWorkspaceOwnership`, on the `ccc @<branch>` path, and the removal guard's
+own scan.
+Relaxing only the first made things *worse* — detection now succeeded, printed
+a NOTE promising the workspace would open, and then died in a later function
+with a message naming neither the submodule nor a remedy. A test that stopped
+at `detectWorktreeWorkspaceBranch` passed the whole time. Drive the test
+through the call the caller actually makes next, not the one you changed.
+
+**And check the remedy you print by running it.** The first version of this
+NOTE told the operator to run `git submodule update --init`. Measured, that
+clones a plain submodule where a linked worktree belongs and leaves a workspace
+ccc cannot open at all — the advice was worse than the problem. The remedy that
+works is running `ccc` again, which repairs the worktree itself.
+
+Where the line was NOT moved: `branchRepositories` and `assertWorkspaceOwnership`
+each scan TWICE — the workspace, which is relaxed, and the source, which is not.
+Both names therefore appear on both lists above, and the source scans still
+abort. They are create-time
+protection — `assertWorkspaceBranch` runs at `src/index.ts:1172`, which sits
+after the create/open branch in `prepareWorktreeUnlocked` and therefore executes
+on both arms, so `branchRepositories` is reached on the creation path.
+
+An earlier version of this paragraph asserted the opposite, on the strength of
+listing `branchRepositories`' two callers and stopping there. Listing callers is
+not tracing control flow: the call that mattered was several frames up and
+unconditional after an `if`/`else`. The claim was written into this file as
+verified. **A "who calls this" grep answers a different question than "can this
+run during X", and only the second one licenses moving a guard.**
+
+The residue: a source-side deinit still reproduces this trap, and blocks opening
+as well as creating. That is recorded rather than fixed, because relaxing
+creation-time protection is a separate decision needing its own measurement.
+
+And the same pairing applies as in the third corollary: what is skipped is
+registered with the removal guard, so it is not deleted without the operator
+being told. Told, not stopped — `--force` goes through.
+The implemented condition is presence, not content: everything except an absent
+path is registered. Absent is excluded because refusing to delete what is
+already gone hands the operator a remedy they cannot perform. An EMPTY directory
+*is* registered even though it holds nothing — `rmdir` is a remedy they can
+perform, and without the guard that shape died later with an unrelated message
+about a race that had not happened.
+
+A directory that cannot be READ registers too. The first version of that check
+caught every error and returned "nothing here", which is the
+errno-swallows-a-judgement mistake yet again, in the one function whose job is
+to decide whether there is anything worth protecting. Not knowing is the
+strongest reason to refuse.
+
+The decision and the sentence explaining it come from one observation of the
+path (`pathContent`). Two functions each reading it separately left room for the
+refusal to be decided from one read and described from another, and produced a
+message claiming "a nested Git repository ccc could not inspect" for an empty
+directory — where there is no repository, and the read that recognised the state
+succeeded. That is the first corollary above, broken by a branch added to serve
+this one.
+
+## Sixth corollary — the boundary also leaves the branch held
+
+Reading the recorded path correctly was only half of it. The source repository
+is the same directory on both sides of the container mount, so it keeps ONE
+worktree registration, recorded against whichever path the side that created it
+could see. That registration still holds the branch. Git says so plainly:
+
+```
+worktree /project/catchy-secrets-415bfb4fdb76/services/catchy-api
+branch refs/heads/feature-x
+prunable gitdir file points to non-existent location
+
+$ git worktree add <dest> feature-x
+fatal: 'feature-x' is already used by worktree at '/project/.../services/catchy-api'
+```
+
+So `ccc` printed a NOTE that read the path correctly, offered the repair,
+and the repair failed — every time, with `failed to fix (content unchanged)`,
+which names no cause.
+
+**The first version of this corollary got the safety argument wrong, and it is
+worth keeping the wrong version visible.** It said: git refuses two worktrees on
+one branch, so at most one registration holds it, and one whose path does not
+resolve cannot be a live checkout on this machine. Both halves are false.
+
+- `git worktree add --force` creates a second worktree on the same branch.
+  Measured against git 2.43.0. So "at most one holder" is not an invariant, and
+  a second holder is not evidence of corruption — it is evidence that the code
+  cannot tell which entry to displace, which is still a reason to refuse, but a
+  different one.
+- **"Cannot be reached here" is not "is not a live checkout."** An unmounted
+  removable volume, a network share that is offline, an autofs mount not yet
+  triggered, a path behind a symlink that currently dangles — every one answers
+  ENOENT exactly the way a container path does. A review reproduced the
+  consequence: the operator's staged index, HEAD, per-worktree refs and reflog
+  all live in the management directory being displaced, and deleting it
+  destroyed them, took `git worktree lock` with them, and freed the name so the
+  new worktree resolved to the same gitdir as the live checkout — two working
+  trees sharing one index, a state git never produces.
+
+What replaced it, and why each part is defensible on its own:
+
+- **Honour `git worktree lock`.** Git's manual names this exact case: "a linked
+  worktree stored on a portable device or network share which is not always
+  mounted". The contract ccc can defend is that it does what `git worktree
+  prune` would do to an unlocked prunable entry, and stops where prune stops.
+- **Displace, but never delete.** The entry is moved into a quarantine and the
+  operator is told the path. What we cannot reach, we cannot prove is dead.
+  The quarantine goes in the common git directory, NOT in `.git/worktrees` —
+  that is the directory git enumerates as its registry, and `git worktree
+  prune` (which `git gc --auto` runs on its own) deletes anything there without
+  a gitdir file, expiry window or not. A promise that a background command
+  silently cancels is not a promise. Moving it out cost one thing worth
+  recording: `.git/worktrees` then becomes empty and git removes it, so the
+  restore path has to recreate it.
+- **Say what displacement actually did.** The name is freed, so the new worktree
+  takes it, and the working tree at the recorded path — whose own `.git` file
+  still names that entry — now resolves to the NEW worktree's index and HEAD.
+  "Moved aside rather than deleted" reads as "deregistered, contents kept",
+  which is half of it. The NOTE says the other half and names `git worktree
+  repair` as the fix.
+- **An error that is not a clean absence counts as reachable.** EACCES means the
+  answer is unavailable, not that the path is gone. This is the load-bearing
+  claim in a destructive decision, so it has its own test — a mutation making
+  every error read as "absent" passed the entire suite before that test existed.
+
+Two more things follow, and the second is the expensive one:
+
+1. **A failed repair must carry the reason.** git wrote it; discarding it cost
+   a round trip through a screenshot to find out that a registration was the
+   obstacle.
+2. **Relax at a choke point, not at the site that happens to throw next.**
+   This abort lived in six places. Each fix removed the one the operator hit,
+   and the next attempt died one call further along with a different message —
+   `Tracked submodule repository is not initialized`, then `Unable to inspect
+   tracked Git link worktree`, then `Managed nested worktree ownership could
+   not be verified`, then `Required worktree metadata is invalid`. The sixth
+   was fixed by filtering unreachable entries out of
+   `workspaceWorktreeGitFiles`' return value, so every consumer downstream may
+   now assume what it had each been checking for itself. The workspace's own
+   root `.git` stays exempt, and a review measured a seventh site behind that
+   exemption: a workspace created *entirely* inside the container still aborts
+   with `Required worktree metadata is invalid`. Recorded, not fixed — deciding
+   what to mount for a workspace whose own registration is unportable is a
+   different question from skipping a nested one.
+
+## Seventh corollary — a refusal that starts deleting is worse than a refusal
+
+Removing a veto moves a path from "returns early" into "begins a destructive
+sequence", and those are not the same risk. `ccc rm -f` was made to override an
+unmanaged-path refusal. On a nested directory with **no read bit**, the
+sequence it then entered could not finish — `rm -rf` cannot enumerate a
+directory it cannot list — but it got through the workspace root first. A
+review measured the outcome: `.git` gone, tracked files gone, the operator's
+uncommitted work in the root gone, `errors` reporting a failure so the run
+looked like a no-op, and ccc afterwards refusing to touch the remains at all.
+The refusal it replaced had returned before anything was quarantined.
+
+So the rule is not "force overrides refusals". It is:
+
+> Force overrides refusals that are **policy**. It does not override the ones
+> that are **arithmetic** — where the operation provably cannot complete, and
+> the only thing starting it can do is destroy what it passes on the way.
+
+The unreadable case is arithmetic, and refusing it under `-f` says so:
+`ccc cannot delete a directory it cannot read: <path> — make it readable, then
+re-run with -f`. That remedy works; the previous behaviour offered none.
+
+An unreadable nested directory is not exotic in this codebase's own domain — a
+container/host uid mismatch produces one, which is a thing ccc exists to manage.
+
+### Two facts worth recording rather than discovering
+
+Both measured, both intended, neither obvious from the code:
+
+1. **A multi-repo workspace whose every nested repository is unreachable opens
+   with ZERO git mounts.** "The workspace still opens" holds — that is the
+   point — but git does not work inside the container for any of them, and the
+   only explanation the operator gets is the skip NOTE. That is the design, not
+   a bug, and it should be a recorded fact rather than a surprise.
+2. **A message must not name a command whose effect depends on a premise the
+   message cannot check.** The displaced-registration NOTE's first version said
+   "run `git worktree repair` there". QA ran it. Because the source repository
+   is the same directory on both sides of the mount — this feature's whole
+   premise — repair rewrote the one registration back to the other side,
+   un-repaired the workspace, aborted `ccc` again, and left both working trees
+   on one gitdir. The advice is only correct when the other side has its own
+   separate source repository, which the message has no way to know. Name the
+   state and the artefact instead.
+
+### Run it in both layouts, or you have tested half of it
+
+`ccc` has two workspace shapes and they take different code paths: **unified**,
+where the source root is a git repository and nested repositories are its
+submodules, and **multi-repo**, where the root is not a repository at all and
+each child is its own checkout. Three separate defects in one task shipped from
+being measured in one of them:
+
+1. A test named "multi-repo" that called `initRepo` on the root — which makes
+   `hasGitMetadata` true and routes the whole thing to the unified path. It
+   pinned unified behaviour under a multi-repo name, which is worse than no
+   test: the next reader trusts it.
+2. A force gate added to multi-repo's copy of a veto that nothing reaches,
+   because an ownership assert raises first. Removing the gate entirely left
+   the suite green.
+3. An operator remedy — "delete the workspace directory yourself, then run
+   `git worktree prune` in each nested repository" — validated in multi-repo,
+   where it terminates. In unified the workspace root is **itself** a linked
+   worktree of the source root, so hand-deleting it always leaves a
+   registration there and nothing among the nested repositories can clear it.
+   The operator followed the sentence exactly and landed on the outcome its own
+   last clause promised they were avoiding.
+
+The rule that follows is cheap: **anything touching removal, repair or an
+operator message runs in both layouts before it ships**, and the test that
+proves a remedy is the one that executes it and asserts where the operator ends
+up — not the one that asserts the message contains the word `prune`.
+
+### Bind the test to the call site, not to something that resembles it
+
+Three fixes in this task were pinned by tests that passed with the fix reverted,
+each for the same reason: the test re-created the behaviour beside the code
+instead of driving the code.
+
+- A remedy test that pruned `[source, ...nested]` from a hardcoded list. Reword
+  the remedy back to "each nested repository" and the sequence still terminated,
+  because the test never read the sentence it was validating. Fixed by deriving
+  the prune targets from the note the removal actually produces.
+- An assert-parity test that called `assertWorkspaceBranch(..., {
+  allowTrackedGitlinks: true })` with the options spelled out beside it. That
+  passes whatever `src/index.ts` does. Fixed by extracting
+  `assertRemovableWorkspace` and having both the CLI and the test call it.
+- A message test that called the relay helper directly. Reverting the removal
+  loop to the raw relay left it green. Fixed by driving `removeWorkspace` on a
+  two-submodule fixture with one dirty, and asserting on the error it returns.
+
+**Measure the baseline green first, or the count is fiction.** Twice in this task a
+mutation was reported as killing 4 tests and 2 tests when it killed 1 and 0 — the rest were
+pre-existing failures the working tree already had, counted as if the mutation caused them.
+One of those was the reassuring direction on a guard that in fact nothing defended: reworded
+to the OPPOSITE meaning, it shipped green. A mutation count is only evidence if the run it is
+compared against was clean.
+
+**A `not.toContain` whose needle the code never emits is always true.** The first
+defect found in this task was a pair of them that let `ccc rm -f` ship broken
+through a whole suite; the last was one more, a needle of `fatal: ''` — an empty
+quoted path git does not produce — written while trying to pin the rule that
+kept escaping. Prefer `toContain` on what the code SHOULD say. When an absence
+is genuinely what matters, assert a presence beside it, and check that the
+needle appears in the failing variant before trusting the passing one.
+
+**A surviving mutation can mean the fixture never reaches the mutated line.**
+Three assertions in a row survived one mutation, and the reason was not the
+assertions: the fixture had two registrations and the rule under test needs
+three, because one is filtered out before the count. No rewording would have
+fixed that. When an assertion survives twice, stop rewriting it and go and
+check the mutated line actually runs.
+
+The check is mechanical and cheap: **revert the fix and run the test.** If it
+still passes, the test is describing the fix rather than depending on it. A
+mutation result is only worth what the verification of its application is worth
+— and an applied mutation that changes nothing is the test telling you it was
+never attached.
+
+Revert the thing the DEFECT was, not the thing the fix became. A fourth
+instance made that distinction the whole point: extracting
+`assertRemovableWorkspace` made the options testable and left the call site
+unpinned, so reverting the option inside the helper failed a test while
+reverting `src/index.ts` to the original four-argument call shipped green. The
+defect was never "the helper has the wrong options" — the helper did not exist.
+When the fix moves code, the mutation has to go back to the shape the bug
+actually had.
+
+When the call site is not exported, run the entry point. `tsx src/index.ts` runs
+the real CLI from source in about two seconds — no `dist/` to go stale — and
+that is the only thing that binds an unexported caller. Strip `NODE_OPTIONS`
+and `VITEST*` from the child environment first: inherited, they make it exit 0
+having printed nothing, which reads exactly like a passing preflight. Assert
+both that the bad output is absent AND that the expected output is present, or
+silence passes.
+
+### A test that runs the product must not run it in your home directory
+
+The CLI test spawns the real `ccc`, which takes a lifecycle lock under
+`join(homedir(), ".ccc")/locks`. Pointed at the developer's home it wrote one
+guard file per run into their ACTUAL `~/.ccc/locks` and never removed it —
+nineteen strays on one machine, which `ccc doctor` reports as stale locks.
+
+The race is the real cost. `vitest.config.ts` runs files in parallel workers and
+more than ten test files read homedir-scoped `~/.ccc` state, so this test was
+creating and deleting entries in a directory others were reading. That produces
+a single unexplained failure that passes on the next two runs — which is exactly
+what this suite did once, and what nearly got rounded to green.
+
+`os.homedir()` honours `` on POSIX and `USERPROFILE` on Windows, so setting
+both in the child environment moves `DATA_DIR` into the fixture. Hermetic, not
+merely tidy.
+
+**A green you have not earned is worth less than a red you cannot explain.**
+Reporting the unexplained failure instead of the two clean reruns is what made
+the mechanism worth looking for.
+
+### Mirror the question, including the outcome where it refuses to answer
+
+The same rule cost three findings at three depths in one commit lineage:
+
+1. A guard matching one call site's literal sentence rather than the class of
+   sentences its asserts produce.
+2. A test probe resolving the container runtime docker-first-by-liveness where
+   `resolveRuntime()` resolves podman-first-by-PATH-presence. It agrees with the
+   product on most machines and disagrees on an ordinary one — Podman Desktop
+   installed and stopped beside a running Docker.
+3. The same probe collapsing `resolveRuntime()`'s THIRD outcome — it throws
+   when neither runtime is on PATH — into "docker", so on a machine with
+   neither, the test reported that the run never reached the runtime check when
+   it had reached it and been told there is nothing to reach.
+
+Ask the question the product asks, in its order, by its predicate, and with all
+of its outcomes. A mirror that covers the common cases is an approximation, and
+the case it drops is the one someone is standing in.
+
+### A guard written against one message is not written against the class
+
+`workspaceRemovalFailureNote` matched `"is not owned by its source repository"`
+and silently missed `"Workspace is not owned by source repository '<path>'"` —
+same class, same need, one word apart. Match the narrowest substring the whole
+class shares, or give the asserts a typed error and match on that. A string
+literal copied from one call site is the same mistake as measuring one layout.
+
+### The same defect, three times in one session
+
+Each of these was a message pointing at something that does not work:
+
+- the no-force refusal advertising `-f` while a second veto refused `-f`;
+- the no-force refusal advertising `-f` on an unreadable path, where `-f`
+  refuses until a `chmod`;
+- `ccc rm -f` crashing outright on the workspace whose refusal had just
+  advertised it.
+
+Plus two standing lines that contradicted the specific line printed directly
+above them: `Use -f to force` under a refusal `-f` cannot lift, and
+`Nothing was removed` under the CLI's own `removed: services/api`. Both are
+`forceWouldNotHelp` — the flag deleted for being exactly this — wearing new
+clothes. **A summary line that cannot see the result it summarises is a guess,
+and it will eventually be printed under the sentence that disproves it.**
+
+## The pattern behind three of these
+
+Three separate defects here were the same mistake: **a list of remembered
+characters or symptoms standing in for a category.** The redaction that missed
+U+2028; the escaping that covered `Cc`/`Cf` and missed `Zl`/`Zp`; the skip
+keyed on errnos rather than on what the errno was about. Each time the list was
+right about everything on it. Prefer the category — a Unicode property, a
+marker attached at the deciding site — and assert its premise.
+
+## The text ccc prints is code, and it was the part no test read
+
+Four defects in this task were defects in a *sentence*, and all four shipped
+green: `git worktree prune` for a registration a lock makes prune-proof;
+`git worktree unlock` with no argument (exit 129); `git worktree unlock <the
+first locked path>` plus "prune there" when the notice had just listed two
+repositories; and a skip NOTE promising a repair that raises in the layout it
+was printed in. The unit tests covered the function that *produced the data*
+for each message and never the message.
+
+Three rules came out of it:
+
+- **If the product prints a remedy, a test runs the remedy.** Not "contains
+  the word prune" — `spawnSync` the exact lines, from an unrelated cwd, then
+  re-ask the question that produced the notice and assert it is now empty.
+  That single assertion is what caught "clears one of the two listed
+  repositories"; no `toContain` on the text would have.
+- **A message with more than one subject cannot say "there".** The moment a
+  notice lists N things, every command it gives needs its own target — `git -C
+  <repo>` rather than a sentence that assumes the reader is standing in the
+  one repository the author had in mind.
+- **Escaping for a terminal and quoting for a shell are different rules, and a
+  command line needs the second.** Three wrong answers in a row here, each
+  shipped as a confident comment:
+  1. *Print it raw.* `C:\Users\Kyeong Jae\catchy` stops at the space —
+     `fatal: cannot change to '...\Kyeong'`. Ordinary on macOS and Windows.
+  2. *Escape it like the NOTE does.* That form is `JSON.stringify`, which
+     doubles the separators in a Windows path; what the operator pastes is no
+     longer the path.
+  3. *Escape only the unquotable ones.* `JSON.stringify` is double quotes, and
+     `$( )` and a backtick substitute inside double quotes in bash, zsh and
+     PowerShell. The comment said "printed as escaped data instead"; the line
+     it emitted ran `id` on paste. Measured — the test for it asserts what a
+     shell sees after reading the argument, not what the string looks like.
+
+  What holds, as a table, because prose kept getting it wrong — measured in
+  bash, reasoned for cmd and PowerShell and labelled as such:
+
+  | value | bare | double quotes | single quotes |
+  |---|---|---|---|
+  | `/src/api` | ok | ok | ok |
+  | `/home/kj/My Projects` | splits | ok | ok |
+  | `C:\dev\proj` | `C:devproj` | ok | ok |
+  | `\\server\share\repo` | `\serversharerepo` | one separator eaten | ok |
+  | `C:\dev\proj\` | eats the next word | `unexpected EOF` | ok |
+  | `/project/$(id)/api` | substitutes | substitutes | ok |
+
+  So: bare only for a value with no backslash and nothing else special; double
+  quotes for the rest, the one form all three shells read alike (they also make
+  `;`, `|`, `&` and `#` inert); single quotes when the value carries `$`, a
+  backtick, a `"`, a doubled backslash or a trailing one. Single quotes cost
+  cmd, which has no such form, and the trade is deliberate: a path that does
+  not run in cmd beats a path that runs something else in bash. A value
+  carrying a control character has no runnable form at all — escape it for
+  display and do not call it a command. `%VAR%` in cmd expands inside double
+  quotes exactly as it does bare, so it is beyond reach there — a fact about
+  cmd, not a knob. Taking `%` out of the bare set to "handle" it changed
+  which quotes were emitted and nothing else; it went back in.
+
+  And one that is not about shells at all: a fix can be correct and still not
+  apply. The registry dedupe first probed `git rev-parse --path-format=absolute
+  --git-common-dir`. That flag landed in git 2.31; Debian 11 ships 2.30.2, one
+  patch release under the line — and this runs on the HOST, not in the
+  container, so the image's modern git is not what answers. Older git exits
+  non-zero, the key comes back empty, and the dedupe turns itself off silently.
+  The flag was not needed: plain `--git-common-dir` answers `.git` from a
+  repository root and an absolute path from a linked worktree, and resolving
+  against the repository normalises both on every version. **Before reaching
+  for a flag, check when it was added — and prefer the form that needs no
+  floor.**
+
+  Two entries in this table were wrong for a whole round because of HOW they
+  were measured. `\` was in the bare-word set on the strength of "a Windows
+  path must not be JSON-doubled" — true, and not an argument for bare — and the
+  suite never caught it because every Windows path in the table happened to
+  contain a space, so all of them took the quoted branch and the bare exception
+  written for them was never exercised. **A row that cannot reach the branch it
+  was written for is not a test of that branch.** The trailing-backslash case
+  is the sharpest consequence: bare, `git -C C:\dev\proj\ worktree prune`
+  reaches git as argv `[C:devproj worktree]` `[prune]`, so it silently runs
+  `git prune` — object-database GC — instead of `git worktree prune`.
+
+  And the shell is not the only reader. `git worktree unlock -foo` answers
+  `error: unknown switch 'f'` and a usage line, exit 129 — the exact failure
+  the notice was rewritten to stop producing — because the shell hands git an
+  argv git then parses as options. A recorded path begins wherever a gitdir
+  file says it begins, including with a dash, so every such argument takes a
+  `--` separator. Measuring `git -C -foo` and concluding "safe" was measuring
+  the wrong position: `-C` consumes its next element whatever it looks like,
+  and the value is emitted in two positions, not one.
+
+  The general rule underneath: **when the question is "what will the shell do
+  with this", the assertion belongs in a shell.** `expect(text).toContain(...)`
+  cannot tell a quoted path from a substitution that has not run yet.
+
+And a corollary about *which* boolean a message branches on: the skip NOTE
+chose its arm from the workspace's layout while the claims it made were decided
+by the source's. They agree in the two ordinary layouts and come apart in a
+real one — a workspace whose root `.git` was removed by a partial removal, with
+a unified source still holding the branch at its root. **When a message makes a
+claim about what another function will do, branch on the input that function
+branches on, or say something true under both.**
+
+## Testing note
+
+A test that asserts on a path is only as portable as the ancestors that path
+assumes. Either assert on a value the fixture itself wrote (as the regression
+test now does), or run it once against a root that does not exist to prove the
+assertion does not depend on the host. The second check takes one edit and
+would have caught this immediately.
+
+## Related
+
+- `src/worktree.ts` — `gitLinkKind` (the throw site that attaches
+  `recordedGitPath`), `unreachableRecordedGitPath` (the two-condition key),
+  `warnUnreachableNestedRepository`, `terminalSafe`, `terminalSafeLiteral`,
+  `pasteableArgument`
+- `src/__tests__/worktree.test.ts` — "skips a nested repository whose Git
+  metadata names an unreachable path"
+- `doc/harness/tasks/TASK__worktree-nested-gitlink-unreachable-path/PLAN.md`
+- `src/worktree.ts` — `unreachableRegistrationPathHoldingBranch` (which
+  registration may be displaced), `recordedGitPathUnreachableHere` (the single
+  reader the choke-point filter asks), `warnWorktreeRepairFailure`
+- `src/__tests__/worktree.test.ts` — "the stranded-branch notice, run as
+  printed", "the skip NOTE, in both layouts", "a worktree registered on the other side
+  of the container boundary"
+- `doc/harness/tasks/TASK__worktree-repair-past-a-container-registration/PLAN.md`

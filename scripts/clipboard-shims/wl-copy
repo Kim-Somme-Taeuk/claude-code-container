@@ -1,6 +1,5 @@
 #!/bin/sh
-# wl-copy shim - clipboard copy direction (not yet implemented)
-# Silently consumes stdin to avoid errors
+# wl-copy shim - copies UTF-8 text to the CCC host clipboard
 
 if [ -z "$CCC_CLIPBOARD_URL" ]; then
     echo "wl-copy: clipboard not available (not running in CCC session)" >&2
@@ -12,6 +11,62 @@ if [ -f /run/ccc/clipboard.port ]; then
     CCC_CLIPBOARD_TOKEN=$(cut -d: -f2- /run/ccc/clipboard.port)
 fi
 
-# Consume stdin silently (copy not yet implemented)
-cat > /dev/null
-exit 0
+_usage_error() {
+    echo "wl-copy: unsupported clipboard option or text type" >&2
+    exit 1
+}
+
+TYPE="text/plain"
+CLEAR=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --type|-t)
+            [ $# -ge 2 ] || _usage_error
+            TYPE="$2"
+            shift 2
+            ;;
+        --type=*)
+            TYPE=${1#--type=}
+            shift
+            ;;
+        --clear|-c)
+            CLEAR=1
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*) _usage_error ;;
+        *) break ;;
+    esac
+done
+
+case "$TYPE" in
+    text/plain|text/plain\;charset=utf-8|text/plain\;\ charset=utf-8|text/plain\;charset=UTF-8|text/plain\;\ charset=UTF-8) ;;
+    *) _usage_error ;;
+esac
+[ "$CLEAR" = 0 ] || [ $# -eq 0 ] || _usage_error
+
+_copy_text() {
+    _status=$(curl -fs --connect-timeout 3 --max-time 10 \
+        -H "Authorization: Bearer $CCC_CLIPBOARD_TOKEN" \
+        -H "Content-Type: text/plain;charset=utf-8" \
+        --data-binary @- -o /dev/null -w '%{http_code}' \
+        "$CCC_CLIPBOARD_URL/clipboard/text") || {
+        echo "wl-copy: clipboard server error" >&2
+        return 1
+    }
+    case "$_status" in
+        2??) return 0 ;;
+        *) echo "wl-copy: clipboard server error" >&2; return 1 ;;
+    esac
+}
+
+if [ "$CLEAR" = 1 ]; then
+    _copy_text < /dev/null
+elif [ $# -gt 0 ]; then
+    printf '%s' "$*" | _copy_text
+else
+    _copy_text
+fi

@@ -141,7 +141,7 @@ describe("buildMcpConfig", () => {
     }
 
     function getWrittenCodexConfig(): string {
-        const call = writeFileSync.mock.calls.find(([path]) => String(path).endsWith(".ccc/codex/config.toml"));
+        const call = writeFileSync.mock.calls.find(([path]) => String(path).endsWith(".ccc/profiles/default/codex/config.toml"));
         expect(call).toBeDefined();
         return call![1] as string;
     }
@@ -171,16 +171,45 @@ describe("buildMcpConfig", () => {
         expect(entry.command).toBe("mise");
         expect(entry.args.slice(0, 3)).toEqual(["--no-config", "exec", "node@22"]);
         expect(entry.args).toContain("--executablePath=/usr/bin/chromium");
+        expect(entry.args).toContain("--chromeArg=--no-sandbox");
+        expect(entry.args).toContain("--chromeArg=--disable-setuid-sandbox");
+        expect(entry.args).toContain("--chromeArg=--disable-dev-shm-usage");
+        expect(entry.args.some((arg) => arg.startsWith("--chromeArg=--host-resolver-rules="))).toBe(false);
     });
 
-    it("always includes x11-display with the expected direct-spawn shape", () => {
+    it("does not include the retired standalone x11-display server", () => {
         buildMcpConfig();
         const config = getWrittenConfig();
         const servers = config.mcpServers as Record<string, unknown>;
-        expect(servers["x11-display"]).toEqual({
+        expect(servers["x11-display"]).toBeUndefined();
+    });
+
+    it("uses the container image device-lab MCP bundle", () => {
+        existsSync.mockImplementation((p: string) => p.endsWith("/dist/device-lab-mcp/server.mjs"));
+        buildMcpConfig();
+        const config = getWrittenConfig();
+        const servers = config.mcpServers as Record<string, unknown>;
+        expect(servers["device-lab"]).toEqual({
             command: "mise",
-            args: ["--no-config", "exec", "node@22", "--", "node", "/opt/ccc/x11-mcp/server.mjs"],
+            args: ["--no-config", "exec", "node@22", "--", "node", "/opt/ccc/dist/device-lab-mcp/server.mjs"],
+            env: { CCC_DEVICE_BROKER_AUTH_FILE: "/run/ccc-device-broker-auth/owner.json" },
         });
+    });
+
+    it("never writes a host checkout path when host dist is unavailable", () => {
+        buildMcpConfig();
+        const config = getWrittenConfig();
+        const servers = config.mcpServers as Record<string, unknown>;
+        const entry = servers["device-lab"] as { command: string; args: string[] };
+        expect(entry.command).toBe("mise");
+        expect(entry.args).toContain("/opt/ccc/dist/device-lab-mcp/server.mjs");
+    });
+
+    it("does not register a standalone lab MCP server", () => {
+        buildMcpConfig();
+        const config = getWrittenConfig();
+        const servers = config.mcpServers as Record<string, unknown>;
+        expect(servers["lab"]).toBeUndefined();
     });
 
     it("writes ccc-managed MCP servers to Codex config.toml", () => {
@@ -191,9 +220,27 @@ describe("buildMcpConfig", () => {
         expect(codexConfig).toContain('command = "mise"');
         expect(codexConfig).toContain('"--no-config"');
         expect(codexConfig).toContain('"--executablePath=/usr/bin/chromium"');
-        expect(codexConfig).toContain("[mcp_servers.x11-display]");
-        expect(codexConfig).toContain('"/opt/ccc/x11-mcp/server.mjs"');
+        expect(codexConfig).not.toContain("--host-resolver-rules");
+        expect(codexConfig).not.toContain("[mcp_servers.x11-display]");
+        expect(codexConfig).not.toContain('"/opt/ccc/x11-mcp/server.mjs"');
+        expect(codexConfig).toContain("[mcp_servers.device-lab]");
+        expect(codexConfig).toContain('"/opt/ccc/dist/device-lab-mcp/server.mjs"');
+        expect(codexConfig).toContain('CCC_DEVICE_BROKER_AUTH_FILE');
+        expect(codexConfig).toContain('"/run/ccc-device-broker-auth/owner.json"');
+        expect(codexConfig).not.toContain("[mcp_servers.lab]");
+        expect(codexConfig).not.toContain("/dist/lab-mcp/server.mjs");
         expect(codexConfig).toContain("# ccc-managed-mcp end");
+    });
+
+    it("writes bundled MCP server paths to Codex config.toml when available", () => {
+        existsSync.mockImplementation((p: string) => p.endsWith("/dist/device-lab-mcp/server.mjs"));
+
+        buildMcpConfig();
+
+        const codexConfig = getWrittenCodexConfig();
+        expect(codexConfig).toContain("/dist/device-lab-mcp/server.mjs");
+        expect(codexConfig).not.toContain("/dist/lab-mcp/server.mjs");
+        expect(codexConfig).not.toContain('"/opt/ccc/device-lab-mcp/server.mjs"');
     });
 
     it("does not rewrite Codex config.toml when the generated config is unchanged", () => {
@@ -201,22 +248,22 @@ describe("buildMcpConfig", () => {
         const existingCodexConfig = getWrittenCodexConfig();
 
         vi.clearAllMocks();
-        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/codex/config.toml"));
+        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/profiles/default/codex/config.toml"));
         readFileSync.mockImplementation((p: string) => {
-            if (p.endsWith(".ccc/codex/config.toml")) return existingCodexConfig;
+            if (p.endsWith(".ccc/profiles/default/codex/config.toml")) return existingCodexConfig;
             return "{}";
         });
 
         buildMcpConfig();
 
-        const codexWrites = writeFileSync.mock.calls.filter(([path]) => String(path).endsWith(".ccc/codex/config.toml"));
+        const codexWrites = writeFileSync.mock.calls.filter(([path]) => String(path).endsWith(".ccc/profiles/default/codex/config.toml"));
         expect(codexWrites).toHaveLength(0);
     });
 
     it("throws an actionable error when existing Codex config cannot be read", () => {
-        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/codex/config.toml"));
+        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/profiles/default/codex/config.toml"));
         readFileSync.mockImplementation((p: string) => {
-            if (p.endsWith(".ccc/codex/config.toml")) {
+            if (p.endsWith(".ccc/profiles/default/codex/config.toml")) {
                 const error = new Error("permission denied") as NodeJS.ErrnoException;
                 error.code = "EACCES";
                 throw error;
@@ -224,19 +271,19 @@ describe("buildMcpConfig", () => {
             return "{}";
         });
 
-        expect(() => buildMcpConfig()).toThrow(/sudo chown -R "\$USER:\$USER" ~\/\.ccc\/codex/);
+        expect(() => buildMcpConfig()).toThrow(/sudo chown -R "\$USER:\$USER" "\/home\/testuser\/\.ccc\/profiles\/default\/codex"/);
     });
 
     it("throws an actionable error when Codex config cannot be written", () => {
         writeFileSync.mockImplementation((p: string) => {
-            if (p.endsWith(".ccc/codex/config.toml")) {
+            if (p.endsWith(".ccc/profiles/default/codex/config.toml")) {
                 const error = new Error("permission denied") as NodeJS.ErrnoException;
                 error.code = "EACCES";
                 throw error;
             }
         });
 
-        expect(() => buildMcpConfig()).toThrow(/Unable to write Codex config.*sudo chown -R "\$USER:\$USER" ~\/\.ccc\/codex/);
+        expect(() => buildMcpConfig()).toThrow(/Unable to write Codex config.*sudo chown -R "\$USER:\$USER" "\/home\/testuser\/\.ccc\/profiles\/default\/codex"/);
     });
 
     it("writes Codex TOML arrays in the exact order needed for MCP startup", () => {
@@ -246,14 +293,16 @@ describe("buildMcpConfig", () => {
             'args = ["--no-config", "exec", "node@22", "--", "npx", "-y", "chrome-devtools-mcp"',
         );
         expect(codexConfig).toContain(
-            'args = ["--no-config", "exec", "node@22", "--", "node", "/opt/ccc/x11-mcp/server.mjs"]',
+            'args = ["--no-config", "exec", "node@22", "--", "node", "/opt/ccc/dist/device-lab-mcp/server.mjs"]',
         );
+        expect(codexConfig).not.toContain("/opt/ccc/x11-mcp/server.mjs");
+        expect(codexConfig).not.toContain("/dist/lab-mcp/server.mjs");
     });
 
     it("preserves user Codex config while replacing the prior ccc-managed block", () => {
-        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/codex/config.toml"));
+        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/profiles/default/codex/config.toml"));
         readFileSync.mockImplementation((p: string) => {
-            if (p.endsWith(".ccc/codex/config.toml")) {
+            if (p.endsWith(".ccc/profiles/default/codex/config.toml")) {
                 return [
                     'model = "gpt-5.2-codex"',
                     "",
@@ -280,9 +329,9 @@ describe("buildMcpConfig", () => {
     });
 
     it("removes legacy unmarked ccc-managed Codex MCP tables before writing", () => {
-        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/codex/config.toml"));
+        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/profiles/default/codex/config.toml"));
         readFileSync.mockImplementation((p: string) => {
-            if (p.endsWith(".ccc/codex/config.toml")) {
+            if (p.endsWith(".ccc/profiles/default/codex/config.toml")) {
                 return [
                     'model = "gpt-5.2-codex"',
                     "",
@@ -291,6 +340,14 @@ describe("buildMcpConfig", () => {
                     'args = ["old"]',
                     "",
                     "[mcp_servers.x11-display]",
+                    'command = "mise"',
+                    'args = ["old"]',
+                    "",
+                    "[mcp_servers.device-lab]",
+                    'command = "mise"',
+                    'args = ["old"]',
+                    "",
+                    "[mcp_servers.lab]",
                     'command = "mise"',
                     'args = ["old"]',
                     "",
@@ -307,10 +364,237 @@ describe("buildMcpConfig", () => {
         buildMcpConfig();
         const codexConfig = getWrittenCodexConfig();
         expect(codexConfig.match(/\[mcp_servers\.chrome-devtools\]/g)).toHaveLength(1);
-        expect(codexConfig.match(/\[mcp_servers\.x11-display\]/g)).toHaveLength(1);
+        expect(codexConfig.match(/\[mcp_servers\.x11-display\]/g)).toBeNull();
+        expect(codexConfig.match(/\[mcp_servers\.device-lab\]/g)).toHaveLength(1);
+        expect(codexConfig.match(/\[mcp_servers\.lab\]/g)).toBeNull();
         expect(codexConfig).not.toContain('args = ["old"]');
         expect(codexConfig).toContain("[mcp_servers.user-server]");
         expect(codexConfig).toContain('[projects."/project/example"]');
+    });
+
+    it("removes quoted and unquoted legacy env subtables without orphaning configuration", () => {
+        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/profiles/default/codex/config.toml"));
+        readFileSync.mockReturnValue([
+            'model = "gpt-5.2-codex"',
+            "[mcp_servers.x11-display.env] # old managed environment",
+            'ORPHAN_X11 = "remove"',
+            '[mcp_servers."x11-display"]',
+            'command = "mise"',
+            '[mcp_servers."device-lab".env]',
+            'OLD_DEVICE_ENV = "remove"',
+            '["mcp_servers"."x11-display"."env"]',
+            'QUOTED_ORPHAN_X11 = "remove"',
+            "[mcp_servers.device-lab]",
+            'command = "old-device-lab"',
+            '[mcp_servers."chrome-devtools".env]',
+            'OLD_CHROME_ENV = "remove"',
+            "[mcp_servers.lab.env]",
+            'OLD_LAB_ENV = "remove"',
+            "[mcp_servers.user-tool]",
+            'command = "user-tool"',
+            '[mcp_servers."user-tool".env]',
+            'KEEP_USER_ENV = "yes"',
+            '[mcp_servers."custom]name"]',
+            'command = "keep-special-name"',
+            '[projects."/project/example"]',
+            'trust_level = "trusted"',
+        ].join("\n"));
+
+        buildMcpConfig();
+        const config = getWrittenCodexConfig();
+        for (const oldValue of ["ORPHAN_X11", "QUOTED_ORPHAN_X11", "OLD_DEVICE_ENV", "OLD_CHROME_ENV", "OLD_LAB_ENV"]) {
+            expect(config).not.toContain(oldValue);
+        }
+        expect(config).toContain('[mcp_servers."user-tool".env]');
+        expect(config).toContain('KEEP_USER_ENV = "yes"');
+        expect(config).toContain('[mcp_servers."custom]name"]');
+        expect(config).toContain('[projects."/project/example"]');
+        expect(config.match(/\[mcp_servers\.device-lab\]/g)).toHaveLength(1);
+        expect(config).not.toContain("mcp_servers.x11-display");
+        expect(config).not.toContain('mcp_servers."x11-display"');
+    });
+
+    it("removes exact CCC X11 path aliases while preserving unrelated Codex X11 servers", () => {
+        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/profiles/default/codex/config.toml"));
+        readFileSync.mockReturnValue([
+            '[mcp_servers."legacy display".env]',
+            'OLD_ALIAS_ENV = "remove"',
+            '[mcp_servers."legacy display"]',
+            'command = "node"',
+            "args = [",
+            '  "/opt/ccc/x11-mcp/server.mjs",',
+            "]",
+            "[mcp_servers.old-bundle]",
+            "command = '/opt/ccc/dist/x11-mcp/server.mjs'",
+            "[mcp_servers.old-bundle.env]",
+            'OLD_BUNDLE_ENV = "remove"',
+            "[mcp_servers.x11]",
+            'command = "user-x11"',
+            'args = ["/custom/x11-mcp/server.mjs"]',
+            '[mcp_servers."x11".env]',
+            'KEEP_CUSTOM_X11 = "yes"',
+            "[mcp_servers.path-prefix]",
+            'args = ["/opt/ccc/x11-mcp/server.mjs.custom"]',
+            "[mcp_servers.path-suffix]",
+            'args = ["/custom/opt/ccc/dist/x11-mcp/server.mjs"]',
+            "[mcp_servers.reference-only]",
+            'command = "other-tool" # "/opt/ccc/x11-mcp/server.mjs"',
+            'args = ["--safe"] # "/opt/ccc/dist/x11-mcp/server.mjs"',
+            "[mcp_servers.reference-only.env]",
+            'EXAMPLE = "/opt/ccc/x11-mcp/server.mjs"',
+        ].join("\n"));
+
+        buildMcpConfig();
+        const config = getWrittenCodexConfig();
+        expect(config).not.toContain('mcp_servers."legacy display"');
+        expect(config).not.toContain("mcp_servers.old-bundle");
+        expect(config).not.toContain("OLD_ALIAS_ENV");
+        expect(config).not.toContain("OLD_BUNDLE_ENV");
+        for (const customName of ["x11", "path-prefix", "path-suffix", "reference-only"]) {
+            expect(config).toContain(`[mcp_servers.${customName}]`);
+        }
+        expect(config).toContain('[mcp_servers."x11".env]');
+        expect(config).toContain('KEEP_CUSTOM_X11 = "yes"');
+        expect(config).toContain("[mcp_servers.reference-only.env]");
+    });
+
+    it.each(['"""', "'''"])("preserves table and managed-marker text inside %s multiline environment strings", (quote) => {
+        const retained = [
+            "[mcp_servers.custom]",
+            'command = "user-tool"',
+            "[mcp_servers.custom.env]",
+            `NOTES = ${quote}`,
+            "[mcp_servers.x11-display.env]",
+            'EXAMPLE = "keep this text"',
+            "# ccc-managed-mcp begin",
+            "[mcp_servers.device-lab]",
+            "# ccc-managed-mcp end",
+            quote,
+        ].join("\n");
+        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/profiles/default/codex/config.toml"));
+        readFileSync.mockReturnValue(`${retained}\n\n[mcp_servers.x11-display]\ncommand = "old-x11"\n`);
+
+        buildMcpConfig();
+        const config = getWrittenCodexConfig();
+        expect(config.startsWith(retained)).toBe(true);
+        expect(config).not.toContain('command = "old-x11"');
+        expect(config).toContain('"/opt/ccc/dist/device-lab-mcp/server.mjs"');
+    });
+
+    it.each(['"""', "'''"])("ignores command/args text inside %s multiline inline environment values", (quote) => {
+        const retained = [
+            "[mcp_servers.custom]",
+            'command = "user-tool"',
+            `env = { NOTES = ${quote}`,
+            'command = "/opt/ccc/x11-mcp/server.mjs"',
+            'args = ["/opt/ccc/dist/x11-mcp/server.mjs"]',
+            `${quote} }`,
+            "[mcp_servers.custom.env_extra]",
+            'KEEP = "yes"',
+        ].join("\n");
+        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/profiles/default/codex/config.toml"));
+        readFileSync.mockReturnValue(retained);
+
+        buildMcpConfig();
+        expect(getWrittenCodexConfig().startsWith(retained)).toBe(true);
+    });
+
+    it.each([
+        ['"command"', '"/opt/ccc/x11-mcp/server.mjs"'],
+        ["'command'", "'/opt/ccc/dist/x11-mcp/server.mjs'"],
+        ['"args"', '["node", "/opt/ccc/dist/x11-mcp/server.mjs"]'],
+        ["'args'", "['node', '/opt/ccc/x11-mcp/server.mjs']"],
+    ])("removes an exact retired alias using the quoted %s assignment key", (key, value) => {
+        const retained = '[mcp_servers.x11]\ncommand = "custom-x11"\n[mcp_servers.x11.env]\nKEEP = "yes"';
+        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/profiles/default/codex/config.toml"));
+        readFileSync.mockReturnValue([
+            "[mcp_servers.old-alias.env]",
+            'OLD_ENV = "remove"',
+            "[mcp_servers.old-alias]",
+            `${key} = ${value}`,
+            retained,
+        ].join("\n"));
+
+        buildMcpConfig();
+        const config = getWrittenCodexConfig();
+        expect(config).not.toContain("mcp_servers.old-alias");
+        expect(config).not.toContain("OLD_ENV");
+        expect(config).toContain(retained);
+    });
+
+    it.each(['"', "'"])("preserves an args token with two literal %s suffix quotes", (quote) => {
+        const retained = [
+            "[mcp_servers.custom]",
+            'command = "user-tool"',
+            `args = [${quote.repeat(3)}/opt/ccc/x11-mcp/server.mjs${quote.repeat(5)}]`,
+            "[mcp_servers.custom.env]",
+            'KEEP = "yes"',
+        ].join("\n");
+        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/profiles/default/codex/config.toml"));
+        readFileSync.mockReturnValue(retained);
+
+        buildMcpConfig();
+        expect(getWrittenCodexConfig().startsWith(retained)).toBe(true);
+    });
+
+    it.each(['"', "'"])("removes exact retired command and args aliases written with multiline %s strings", (quote) => {
+        const triple = quote.repeat(3);
+        const retained = '[mcp_servers.custom]\ncommand = "user-tool"';
+        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/profiles/default/codex/config.toml"));
+        readFileSync.mockReturnValue([
+            "[mcp_servers.old-command]",
+            `command = ${triple}\n/opt/ccc/x11-mcp/server.mjs${triple}`,
+            "[mcp_servers.old-command.env]",
+            'OLD_COMMAND = "remove"',
+            "[mcp_servers.old-args]",
+            `args = [${triple}\n/opt/ccc/dist/x11-mcp/server.mjs${triple}]`,
+            "[mcp_servers.old-args.env]",
+            'OLD_ARGS = "remove"',
+            retained,
+        ].join("\n"));
+
+        buildMcpConfig();
+        const config = getWrittenCodexConfig();
+        expect(config).not.toContain("mcp_servers.old-command");
+        expect(config).not.toContain("mcp_servers.old-args");
+        expect(config).not.toContain("OLD_COMMAND");
+        expect(config).not.toContain("OLD_ARGS");
+        expect(config).toContain(retained);
+    });
+
+    it("decodes Unicode key components and paths while preserving escaped backslashes", () => {
+        const retained = String.raw`[mcp_servers.custom]
+command = "user-tool"
+args = ["/opt/ccc/\\U00000078\\u0031\\u0031-mcp/server.mjs"]
+[mcp_servers.custom.env]
+KEEP = "yes"`;
+        existsSync.mockImplementation((p: string) => p.endsWith(".ccc/profiles/default/codex/config.toml"));
+        readFileSync.mockReturnValue([
+            String.raw`[mcp_servers."\U00000064evice-lab"]`,
+            'command = "old-device-lab"',
+            String.raw`[mcp_servers."\U00000064evice-lab".env]`,
+            'OLD_NAME_ENV = "remove"',
+            String.raw`["mcp\u005fservers".x11-display]`,
+            'command = "old-x11"',
+            String.raw`["mcp\u005fservers".x11-display.env]`,
+            'OLD_PREFIX_ENV = "remove"',
+            "[mcp_servers.old-escaped-path]",
+            String.raw`"\U00000061rgs" = ["/opt/ccc/\U00000078\u0031\u0031-mcp/server.mjs"]`,
+            "[mcp_servers.old-escaped-path.env]",
+            'OLD_PATH_ENV = "remove"',
+            retained,
+        ].join("\n"));
+
+        buildMcpConfig();
+        const config = getWrittenCodexConfig();
+        expect(config).not.toContain("old-device-lab");
+        expect(config).not.toContain("old-x11");
+        expect(config).not.toContain("OLD_NAME_ENV");
+        expect(config).not.toContain("OLD_PREFIX_ENV");
+        expect(config).not.toContain("OLD_PATH_ENV");
+        expect(config).not.toContain("mcp_servers.old-escaped-path");
+        expect(config).toContain(retained);
+        expect(config.match(/\[mcp_servers\.device-lab\]/g)).toHaveLength(1);
     });
 
     it("forwards host MCP servers (stdio)", () => {
@@ -356,6 +640,99 @@ describe("buildMcpConfig", () => {
         // ccc's own chrome-devtools should be present, not host's version
         const entry = servers["chrome-devtools"] as { command: string };
         expect(entry.command).toBe("mise");
+    });
+
+    it("does not forward host device-lab (ccc manages its own)", () => {
+        existsSync.mockImplementation((p: string) => {
+            if (p.endsWith(".claude.json")) return true;
+            return false;
+        });
+        readFileSync.mockImplementation((p: string) => {
+            if (p.endsWith(".claude.json")) {
+                return JSON.stringify({
+                    mcpServers: {
+                        "device-lab": { command: "host-device-lab", args: [] },
+                    },
+                });
+            }
+            return "{}";
+        });
+        buildMcpConfig();
+        const config = getWrittenConfig();
+        const servers = config.mcpServers as Record<string, unknown>;
+        const entry = servers["device-lab"] as { command: string; args: string[] };
+        expect(entry.command).toBe("mise");
+        expect(entry.args).toContain("/opt/ccc/dist/device-lab-mcp/server.mjs");
+    });
+
+    it("does not forward host x11-display after retiring the standalone entry", () => {
+        existsSync.mockImplementation((p: string) => {
+            if (p.endsWith(".claude.json")) return true;
+            return false;
+        });
+        readFileSync.mockImplementation((p: string) => {
+            if (p.endsWith(".claude.json")) {
+                return JSON.stringify({
+                    mcpServers: {
+                        "x11-display": { command: "host-x11", args: [] },
+                    },
+                });
+            }
+            return "{}";
+        });
+        buildMcpConfig();
+        const config = getWrittenConfig();
+        const servers = config.mcpServers as Record<string, unknown>;
+        expect(servers["x11-display"]).toBeUndefined();
+        expect(servers["device-lab"]).toBeDefined();
+    });
+
+    it("filters only exact CCC-owned X11 host aliases and forwards custom X11 servers", () => {
+        const customServers = {
+            x11: { command: "user-x11", args: ["/custom/x11-mcp/server.mjs"] },
+            "x11-custom": { command: "node", args: ["/opt/ccc/x11-mcp/server.mjs.custom"] },
+            "x11-reference": { command: "other-tool", args: [], env: { EXAMPLE: "/opt/ccc/x11-mcp/server.mjs" } },
+        };
+        existsSync.mockImplementation((p: string) => p.endsWith(".claude.json"));
+        readFileSync.mockReturnValue(JSON.stringify({
+            mcpServers: {
+                "old-source": { command: "node", args: ["/opt/ccc/x11-mcp/server.mjs"] },
+                "old-bundle": { command: "/opt/ccc/dist/x11-mcp/server.mjs", args: [] },
+                ...customServers,
+            },
+        }));
+
+        const forwarded = buildMcpConfig();
+        const servers = getWrittenConfig().mcpServers as Record<string, unknown>;
+        expect(servers["old-source"]).toBeUndefined();
+        expect(servers["old-bundle"]).toBeUndefined();
+        expect(forwarded).toEqual(Object.keys(customServers));
+        for (const [name, server] of Object.entries(customServers)) expect(servers[name]).toEqual(server);
+        const codexConfig = getWrittenCodexConfig();
+        expect(codexConfig).toContain("[mcp_servers.x11]");
+        expect(codexConfig).not.toContain("mcp_servers.old-source");
+        expect(codexConfig).not.toContain("mcp_servers.old-bundle");
+    });
+
+    it("does not forward the retired host lab MCP name", () => {
+        existsSync.mockImplementation((p: string) => {
+            if (p.endsWith(".claude.json")) return true;
+            return false;
+        });
+        readFileSync.mockImplementation((p: string) => {
+            if (p.endsWith(".claude.json")) {
+                return JSON.stringify({
+                    mcpServers: {
+                        lab: { command: "host-lab", args: [] },
+                    },
+                });
+            }
+            return "{}";
+        });
+        buildMcpConfig();
+        const config = getWrittenConfig();
+        const servers = config.mcpServers as Record<string, unknown>;
+        expect(servers["lab"]).toBeUndefined();
     });
 
     it("does not forward playwright (legacy, removed)", () => {
@@ -482,10 +859,9 @@ describe("buildMcpConfig", () => {
     it("buildMcpConfig() with no profile writes to default CLAUDE_JSON_FILE path", () => {
         existsSync.mockReturnValue(false);
         buildMcpConfig();
-        // Should write to ~/.ccc/claude.json (default path, not profiles dir)
+        // Should write to the default profile's claude.json
         const writePath = writeFileSync.mock.calls[writeFileSync.mock.calls.length - 1][0] as string;
-        expect(writePath).toContain(".ccc");
-        expect(writePath).not.toContain("profiles");
+        expect(writePath).toBe("/home/testuser/.ccc/profiles/default/claude.json");
         expect(writePath).toMatch(/claude\.json$/);
     });
 

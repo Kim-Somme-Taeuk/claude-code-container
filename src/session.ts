@@ -1,26 +1,77 @@
 import { spawnSync } from "child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { randomBytes } from "crypto";
-import { getProjectId, DATA_DIR } from "./utils.js";
-import { getContainerName, isContainerRunning } from "./docker.js";
-import { saveClaudeBinaryToVolume } from "./container-setup.js";
-import { stopClipboardServerIfLast } from "./clipboard-server.js";
+import { getProjectId } from "./utils.js";
+import { locksDir } from "./home-layout.js";
 import { runtimeCli } from "./container-runtime.js";
+import { cleanupOwnerDevices } from "./device-lab-admin.js";
+import { withSharedMutationLock, withSharedMutationLockAsync } from "@ccc/device-lab/device-lab-shared-state.js";
+import { observeProcessStarts, processStartToken, sessionLockLiveness, sessionLockOwner } from "./session-lock-liveness.js";
 
-const locksDir = join(DATA_DIR, "locks");
+function containerLifecycleLock(containerPrefix: string): string {
+    return join(locksDir(), `${containerPrefix}.container-lifecycle.guard`);
+}
+
+function containerSetupLock(containerPrefix: string): string {
+    return join(locksDir(), `${containerPrefix}.container-setup.guard`);
+}
+
+function projectFamilyLifecycleLock(projectId: string): string {
+    return join(locksDir(), `${projectId}.project-family-lifecycle.guard`);
+}
+
+function ensureLocksDirectory(): void {
+    mkdirSync(locksDir(), { recursive: true, mode: 0o700 });
+    const observed = lstatSync(locksDir());
+    if (!observed.isDirectory() || observed.isSymbolicLink()) {
+        throw new Error("CCC session lock path must be a real directory");
+    }
+    if (process.platform !== "win32") chmodSync(locksDir(), 0o700);
+}
+
+export function withContainerLifecycleLock<T>(containerPrefix: string, operation: () => T): T {
+    ensureLocksDirectory();
+    return withSharedMutationLock(containerLifecycleLock(containerPrefix), operation, { waitMs: 180_000 });
+}
+
+export function withProjectFamilyLifecycleLock<T>(projectId: string, operation: () => T): T {
+    ensureLocksDirectory();
+    return withSharedMutationLock(projectFamilyLifecycleLock(projectId), operation, { waitMs: 180_000 });
+}
+
+export async function withProjectFamilyLifecycleLockAsync<T>(projectId: string, operation: () => Promise<T> | T): Promise<T> {
+    ensureLocksDirectory();
+    return withSharedMutationLockAsync(projectFamilyLifecycleLock(projectId), operation, { waitMs: 180_000 });
+}
+
+export async function withContainerLifecycleLockAsync<T>(containerPrefix: string, operation: () => Promise<T> | T): Promise<T> {
+    ensureLocksDirectory();
+    return withSharedMutationLockAsync(containerLifecycleLock(containerPrefix), operation, { waitMs: 180_000 });
+}
+
+export async function withContainerSetupLockAsync<T>(containerPrefix: string, operation: () => Promise<T> | T): Promise<T> {
+    ensureLocksDirectory();
+    return withSharedMutationLockAsync(containerSetupLock(containerPrefix), operation, { waitMs: 900_000 });
+}
 
 // Module state - managed via getter/setter for testability
 let currentSessionLockFile: string | null = null;
 let currentProjectPath: string | null = null;
 let currentProfile: string | undefined = undefined;
 let currentToolName: string | null = null;
+let currentContainerId: string | null = null;
 
 export function setSession(lockFile: string, projectPath: string, profile?: string, toolName?: string): void {
     currentSessionLockFile = lockFile;
     currentProjectPath = projectPath;
     currentProfile = profile;
     currentToolName = toolName ?? "claude";
+    currentContainerId = null;
+}
+
+export function setSessionContainerId(containerId: string | null): void {
+    currentContainerId = containerId;
 }
 
 export function getCurrentSession(): { lockFile: string | null; projectPath: string | null; profile?: string; toolName: string | null } {
@@ -32,15 +83,22 @@ export function clearSession(): void {
     currentProjectPath = null;
     currentProfile = undefined;
     currentToolName = null;
+    currentContainerId = null;
     cleanedUp = false;
 }
 
 export function createSessionLock(projectId: string, profile?: string): string {
-    mkdirSync(locksDir, { recursive: true });
+    ensureLocksDirectory();
     const sessionId = randomBytes(16).toString("hex");
     const prefix = profile ? `${projectId}--p--${profile}` : projectId;
-    const lockFile = join(locksDir, `${prefix}--${sessionId}.lock`);
-    writeFileSync(lockFile, String(process.pid), { mode: 0o600 });
+    const lockFile = join(locksDir(), `${prefix}--${sessionId}.lock`);
+    withContainerLifecycleLock(prefix, () => {
+        const startToken = processStartToken(process.pid);
+        const record = startToken
+            ? JSON.stringify({ version: 2, pid: process.pid, startToken })
+            : String(process.pid);
+        writeFileSync(lockFile, record, { mode: 0o600, flag: "wx" });
+    });
     return lockFile;
 }
 
@@ -54,15 +112,6 @@ export function removeSessionLock(lockFile: string): void {
     }
 }
 
-function isPidAlive(pid: number): boolean {
-    try {
-        process.kill(pid, 0);
-        return true;
-    } catch {
-        return false;
-    }
-}
-
 /**
  * Get active sessions for a container prefix.
  * containerPrefix is the full container name without trailing "--".
@@ -71,17 +120,38 @@ function isPidAlive(pid: number): boolean {
  * For profile containers (e.g. "projectId--p--work"), returns files that match
  * `${containerPrefix}--<sessionId>.lock`.
  */
-export function getActiveSessionsForContainer(containerPrefix: string): string[] {
-    if (!existsSync(locksDir)) {
-        return [];
+export function getActiveSessionsForContainer(
+    containerPrefix: string,
+    currentLockFile?: string,
+): string[] {
+    let entries: string[];
+    try {
+        ensureLocksDirectory();
+        entries = readdirSync(locksDir());
+    } catch (error) {
+        // The directory was just established above. Any observation failure,
+        // including a concurrent ENOENT, must not authorize container cleanup.
+        throw error;
     }
+    return filterLiveSessionLocks(
+        sessionLockClaimsForContainer(entries, containerPrefix),
+        currentLockFile,
+    );
+}
+
+function sessionLockClaimsForContainer(entries: string[], containerPrefix: string): string[] {
     const isProfilePrefix = containerPrefix.includes("--p--");
-    const locks = readdirSync(locksDir).filter((f) => {
+    return entries.filter((f) => {
         if (!f.endsWith(".lock")) return false;
 
         // New format: prefix--sessionId.lock
         if (f.startsWith(`${containerPrefix}--`)) {
-            if (!isProfilePrefix) {
+            if (isProfilePrefix) {
+                const sessionId = f.slice(containerPrefix.length + 2, -".lock".length);
+                // Profile names may contain "--". Only the single session-id
+                // segment belongs to this exact profile prefix.
+                return sessionId.length > 0 && !sessionId.includes("--");
+            } else {
                 const afterPrefix = f.slice(containerPrefix.length + 2);
                 if (afterPrefix.startsWith("p--")) return false;
             }
@@ -97,21 +167,99 @@ export function getActiveSessionsForContainer(containerPrefix: string): string[]
 
         return false;
     });
-    return locks.filter((f) => {
-        const lockPath = join(locksDir, f);
+}
+
+/**
+ * Return raw ownership claims without PID/start-token inference.
+ * Automatic container shutdown must not turn an imperfect Windows process
+ * observation into permission to terminate another session.
+ */
+export function getSessionLockClaimsForContainer(containerPrefix: string): string[] {
+    ensureLocksDirectory();
+    return sessionLockClaimsForContainer(readdirSync(locksDir()), containerPrefix);
+}
+
+export function getSessionLockClaimsForProjectFamily(projectId: string): string[] {
+    ensureLocksDirectory();
+    return readdirSync(locksDir()).filter((entry) =>
+        entry.endsWith(".lock") && entry.startsWith(`${projectId}--`),
+    );
+}
+
+function filterLiveSessionLocks(locks: string[], currentLockFile?: string): string[] {
+    const currentLockName = currentLockFile ? basename(currentLockFile) : null;
+    let currentOwnerPid: number | null = null;
+    if (currentLockName && locks.includes(currentLockName)) {
         try {
-            const content = readFileSync(lockPath, "utf-8").trim();
-            const pid = parseInt(content, 10);
-            if (isNaN(pid) || !isPidAlive(pid)) {
+            const currentOwner = sessionLockOwner(
+                readFileSync(join(locksDir(), currentLockName), "utf-8").trim(),
+            );
+            if (currentOwner?.pid === process.pid) currentOwnerPid = currentOwner.pid;
+        } catch {
+            // Without a valid current ownership record, preserve every claim.
+        }
+    }
+    // Each lock is read ONCE, here, and the walk below works from what was read. The first
+    // version of this batching read every file a second time to collect the owners, which
+    // broke two existing tests outright — their `readFileSync` is mocked per call, so the
+    // extra reads consumed the sequence the walk depended on. A double read is a bad way to
+    // save a process launch in any case.
+    const claims = locks.map((name) => {
+        try {
+            return { name, content: readFileSync(join(locksDir(), name), "utf-8").trim() };
+        } catch {
+            // Unreadable here is not a decision: the walk preserves such a lock, fail-closed.
+            return { name, content: null as string | null };
+        }
+    });
+    // One observation for every candidate owner, in one process. Each `sessionLockLiveness`
+    // call otherwise costs its own `powershell.exe` on Windows, so this filter's price grew
+    // with the number of leftover lock files — paid on every `ccc` invocation, before any work
+    // began. The map can only save a launch: a pid it cannot answer for falls through to the
+    // single-pid probe inside `sessionLockLiveness`.
+    const observedOwners = observeProcessStarts(
+        claims.flatMap(({ content }) => {
+            const owner = content === null ? null : sessionLockOwner(content);
+            return owner ? [owner.pid] : [];
+        }),
+    );
+    return claims.filter(({ name: f, content }) => {
+        const lockPath = join(locksDir(), f);
+        if (content === null) return true;
+        try {
+            const owner = sessionLockOwner(content);
+            if (f !== currentLockName
+                && currentOwnerPid === process.pid
+                && owner?.pid === currentOwnerPid
+                && !owner.startToken) {
+                // Host PIDs are unique. Once this invocation's current lock
+                // proves ownership of the PID, an older PID-only claim for the
+                // same PID is a superseded legacy lock, not another process.
                 try { unlinkSync(lockPath); } catch { /* ignore */ }
                 return false;
             }
+            const liveness = sessionLockLiveness(content, observedOwners);
+            if (liveness === "stale") {
+                try { unlinkSync(lockPath); } catch { /* ignore */ }
+                return false;
+            }
+            // Unknown observation is not proof that the owner exited.
             return true;
         } catch {
-            try { unlinkSync(lockPath); } catch { /* ignore */ }
-            return false;
+            // Failure to read a candidate lock is not proof that its owner is
+            // dead. Preserve it and fail closed so transient Windows sharing,
+            // antivirus, or permission errors cannot authorize stop/rm.
+            return true;
         }
-    });
+    }).map(({ name }) => name);
+}
+
+/**
+ * Return every live session for one project path, including all profile
+ * containers. This broader query is reserved for removing the project path.
+ */
+export function getActiveSessionsForProjectFamily(projectId: string): string[] {
+    return filterLiveSessionLocks(getSessionLockClaimsForProjectFamily(projectId));
 }
 
 /**
@@ -131,35 +279,69 @@ export function hasOtherActiveSessions(
     return sessions.some((s) => s !== currentLockName);
 }
 
+export function hasOtherSessionClaims(
+    containerPrefix: string,
+    currentLockFile: string,
+): boolean {
+    const claims = getSessionLockClaimsForContainer(containerPrefix);
+    const currentLockName = basename(currentLockFile);
+    return claims.some((claim) => claim !== currentLockName);
+}
+
+/**
+ * Atomically prove replacement is currently allowed, then require that no
+ * foreign ownership claim exists before destructive replacement. Session
+ * creation takes the same lock, so a new CCC process cannot appear between
+ * the final check and stop/rm.
+ */
+export function recreateContainerWithoutInterruptingSessions(
+    containerPrefix: string,
+    currentLockFile: string,
+    recreate: () => void,
+    replacementAllowed: () => boolean = () => true,
+): boolean {
+    return withContainerLifecycleLock(containerPrefix, () => {
+        if (!replacementAllowed()) return false;
+        // Replacement is already restricted to a caller-proven stopped
+        // container. Prune only locks whose PID/start-token observation proves
+        // that their owner exited; unreadable or unknown claims remain live and
+        // continue to block the destructive operation.
+        if (hasOtherActiveSessions(containerPrefix, currentLockFile)) return false;
+        recreate();
+        return true;
+    });
+}
+
 let cleanedUp = false;
+
+function cleanupDevicesBestEffort(projectPath: string, profile?: string): void {
+    try {
+        cleanupOwnerDevices(projectPath, 5000, profile);
+    } catch (err) {
+        console.error(`[ccc] device cleanup failed during session cleanup: ${err instanceof Error ? err.message : String(err)}`);
+    }
+}
 
 export function cleanupSession(): void {
     if (cleanedUp || !currentSessionLockFile || !currentProjectPath) {
         return;
     }
-    cleanedUp = true;
-
     const projectId = getProjectId(currentProjectPath);
     const containerPrefix = currentProfile ? `${projectId}--p--${currentProfile}` : projectId;
-    const hasOthers = hasOtherActiveSessions(containerPrefix, currentSessionLockFile);
-
-    // Stop clipboard server if this is the last CCC session (check BEFORE removing lock)
-    stopClipboardServerIfLast(currentSessionLockFile);
-
-    // Remove our lock file
-    removeSessionLock(currentSessionLockFile);
-
-    // Stop container if no other sessions are using this project
-    if (!hasOthers) {
-        const containerName = getContainerName(currentProjectPath, currentProfile);
-        if (isContainerRunning(containerName)) {
-            // Save claude binary to volume before stopping (handles `claude update`)
-            if (currentToolName === "claude") {
-                saveClaudeBinaryToVolume(containerName);
+    // Automatic shutdown requires the absence of every foreign ownership claim.
+    // Liveness inference is intentionally excluded from this destructive path.
+    withContainerLifecycleLock(containerPrefix, () => {
+        const hasOthers = hasOtherSessionClaims(containerPrefix, currentSessionLockFile!);
+        removeSessionLock(currentSessionLockFile!);
+        if (!hasOthers) {
+            cleanupDevicesBestEffort(currentProjectPath!, currentProfile);
+            if (currentContainerId) {
+                spawnSync(runtimeCli(), ["stop", currentContainerId], { stdio: "ignore" });
             }
-            spawnSync(runtimeCli(), ["stop", containerName], { stdio: "ignore" });
         }
-    }
+    });
+
+    cleanedUp = true;
 
     currentSessionLockFile = null;
     currentProjectPath = null;

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { spawnSync, execFileSync } from 'child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
@@ -8,6 +8,31 @@ import { join } from 'path'
 function isDockerAvailable(): boolean {
     const result = spawnSync('docker', ['info'], { encoding: 'utf-8', timeout: 5000 })
     return result.status === 0
+}
+
+// These drive the real `ccc` CLI against a real daemon, so they need to run where that daemon
+// resolves paths the same way this process does — i.e. on the Docker host.
+//
+// Run from inside a container and they fail rather than skip, which is how they read for a while as
+// "Docker is missing" when Docker is reachable and the daemon is fine. The actual refusal comes from
+// ccc's own safety check: it creates the container, verifies the bind mounts point where it asked,
+// and finds "bind source changed for /home/ccc/.claude" — because the paths it passed are paths in
+// THIS container and the daemon resolved them on the host. That check is doing its job; the tests
+// simply cannot be satisfied from here.
+//
+// Demonstrated rather than reasoned, because "cannot be fixed" is the kind of claim that quietly
+// turns a skip into a way of hiding a bug: write a marker into a fresh /tmp directory from inside
+// this container, then `docker run -v <same path>:/probe alpine ls /probe` — the directory comes up
+// EMPTY. The daemon mounted the host's path of that name, which is a different directory. There is
+// no host path to pass instead that this process could know, so the verification cannot be
+// satisfied, and disabling it to make the tests pass would delete the check that catches a real
+// mount mismatch.
+//
+// Detected the way systemd conventions and Docker itself mark a container, both of which ccc already
+// relies on elsewhere (`container=docker` is set into every ccc container; /.dockerenv is Docker's
+// own marker).
+function isInsideContainer(): boolean {
+    return process.env.container === 'docker' || existsSync('/.dockerenv')
 }
 
 // Run ccc command from the project root
@@ -30,6 +55,7 @@ function runCcc(args: string[], options: { cwd?: string, timeout?: number, env?:
     }
     childEnv.NODE_ENV = 'test'
     childEnv.CCC_RUNTIME = 'docker'
+    if (cccHomeDir) childEnv.HOME = cccHomeDir
     Object.assign(childEnv, options.env ?? {})
 
     const result = spawnSync(process.execPath, [CCC_PATH, ...args], {
@@ -45,16 +71,52 @@ function runCcc(args: string[], options: { cwd?: string, timeout?: number, env?:
     }
 }
 
+// Every assertion below reads stdout, while the reason a ccc invocation failed is on stderr — so a
+// failure printed the expected/received diff and nothing about the cause. Diagnosing one of these
+// required reproducing the command by hand outside the suite; this makes the next one self-serving.
+function cccDiagnostic(result: { stdout: string, stderr: string, status: number | null }): string {
+    const stderr = result.stderr.trim()
+    return [
+        `ccc exited ${result.status}`,
+        stderr ? `stderr:\n${stderr}` : 'stderr: (empty)',
+    ].join('\n')
+}
+
 // Get test project path with unique hash
 let testProjectDir: string
+let cccHomeDir: string
 let gitHomeDir: string
 
-describe.skipIf(!isDockerAvailable())('E2E: Docker Integration', () => {
+function stopIsolatedTestBroker(): void {
+    const runtimeFiles = [
+        join(cccHomeDir, '.ccc', 'devices', 'broker', 'runtime.json'),
+        join(gitHomeDir, '.ccc', 'devices', 'broker', 'runtime.json'),
+    ]
+    for (const runtimeFile of new Set(runtimeFiles)) {
+        if (!existsSync(runtimeFile)) continue
+        let runtime: { managedBy?: string, cwd?: string, pid?: number }
+        try {
+            runtime = JSON.parse(readFileSync(runtimeFile, 'utf8'))
+        } catch {
+            continue
+        }
+        if (runtime.managedBy !== 'ccc-host' || runtime.cwd !== testProjectDir || !Number.isInteger(runtime.pid) || Number(runtime.pid) <= 0) continue
+        if (process.platform === 'win32') {
+            spawnSync('taskkill', ['/PID', String(runtime.pid), '/T', '/F'], { windowsHide: true, timeout: 10000 })
+        } else {
+            try { process.kill(Number(runtime.pid), 'SIGTERM') } catch { /* already stopped */ }
+        }
+        rmSync(runtimeFile, { force: true })
+    }
+}
+
+describe.skipIf(!isDockerAvailable() || isInsideContainer())('E2E: Docker Integration', () => {
 
     beforeAll(() => {
         ensureBuilt()
         // Create a unique temp directory for test project
         testProjectDir = mkdtempSync(join(tmpdir(), 'ccc-test-'))
+        cccHomeDir = mkdtempSync(join(tmpdir(), 'ccc-home-'))
         gitHomeDir = mkdtempSync(join(tmpdir(), 'ccc-git-home-'))
         // Create a minimal project structure
         writeFileSync(join(testProjectDir, 'package.json'), JSON.stringify({ name: 'test-project' }))
@@ -72,8 +134,10 @@ describe.skipIf(!isDockerAvailable())('E2E: Docker Integration', () => {
         if (testProjectDir) {
             // Stop and remove any test containers
             const result = runCcc(['rm'], { cwd: testProjectDir, timeout: 30000 })
+            stopIsolatedTestBroker()
             // Remove temp directory
             rmSync(testProjectDir, { recursive: true, force: true })
+            rmSync(cccHomeDir, { recursive: true, force: true })
             rmSync(gitHomeDir, { recursive: true, force: true })
         }
     })
@@ -120,12 +184,12 @@ describe.skipIf(!isDockerAvailable())('E2E: Docker Integration', () => {
             const result = runCcc(['echo', 'hello'], { cwd: testProjectDir, timeout: 120000 })
             // Container should be created (check with docker ps)
             const ps = spawnSync('docker', ['ps', '-a', '--filter', 'name=^ccc-ccc-test-', '--format', '{{.Names}}'], { encoding: 'utf-8' })
-            expect(ps.stdout?.trim()).toMatch(/^ccc-ccc-test-/)
+            expect(ps.stdout?.trim(), cccDiagnostic(result)).toMatch(/^ccc-ccc-test-/)
         })
 
         it('executes command and returns output', { timeout: 60000 }, () => {
             const result = runCcc(['echo', 'test-output'], { cwd: testProjectDir, timeout: 60000 })
-            expect(result.stdout).toContain('test-output')
+            expect(result.stdout, cccDiagnostic(result)).toContain('test-output')
         })
 
         it('mounts host git identity into the container', { timeout: 120000 }, () => {
@@ -137,7 +201,7 @@ describe.skipIf(!isDockerAvailable())('E2E: Docker Integration', () => {
             )
 
             expect(result.status).toBe(0)
-            expect(result.stdout.trim()).toBe('ccc-e2e@example.com')
+            expect(result.stdout.trim().split(/\r?\n/).at(-1)).toBe('ccc-e2e@example.com')
         })
 
         it('ccc stop stops the container', { timeout: 30000 }, () => {

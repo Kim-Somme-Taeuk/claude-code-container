@@ -4,7 +4,7 @@
 #   Nested sections        → read by manifest_section_field("section", "key")
 #   browser/qa sections    → read by is_browser_first_project()
 
-version: 5
+version: 7
 initialized_at: 2026-04-01
 
 # --- Top-level identity (manifest_field) ---

@@ -14,6 +14,7 @@
 //
 // Runtime-specific behaviours centralised here:
 //   - bind-mount `:Z` suffix on Linux Podman with SELinux enforcing
+//   - rootless runtime detection for Docker/Podman
 //   - `--userns=keep-id:uid=1000,gid=1000` on rootless Podman
 //     (maps host user to container ccc UID, not the host UID)
 //   - `host.docker.internal` vs `host.containers.internal` alias
@@ -28,6 +29,7 @@ export type RuntimeName = "docker" | "podman";
 
 export type RuntimeFlavor =
     | "docker-native"        // docker on Linux (native daemon, rootful)
+    | "docker-rootless"      // docker on Linux running rootless
     | "docker-desktop"       // docker on macOS/Windows/WSL2 (VM-backed)
     | "podman-rootful"       // podman on Linux running as root
     | "podman-rootless"      // podman on Linux running as unprivileged user
@@ -39,8 +41,9 @@ export interface RuntimeInfo {
     flavor: RuntimeFlavor;
     version: string | null;    // "x.y.z" or null if detection failed
     socketPath: string | null; // host-side path to the container-manager socket
-    rootless: boolean;         // true iff rootless podman
+    rootless: boolean;         // true iff the selected runtime is rootless
     remote: boolean;           // true iff Docker Desktop or podman machine (VM-backed)
+    dockerDesktop: boolean;    // true only with Docker Desktop daemon or exact native Windows endpoint evidence
 }
 
 // === Module state (cache for process lifetime) ===
@@ -70,6 +73,7 @@ export function _setRuntimeInfoForTest(info: Partial<RuntimeInfo> & { runtime: R
         socketPath: info.runtime === "docker" ? "/var/run/docker.sock" : "/run/podman/podman.sock",
         rootless: false,
         remote: false,
+        dockerDesktop: false,
     };
     _cachedInfo = { ...defaults, ...info };
     _runtimeOverride = info.runtime;
@@ -156,19 +160,53 @@ function detectVersion(runtime: RuntimeName): string | null {
  * Detect whether the resolved runtime is VM-backed (Docker Desktop / podman
  * machine). Called once and cached.
  */
-function detectRemote(runtime: RuntimeName): boolean {
+function dockerEndpoint(): string | null {
+    const configured = process.env.DOCKER_HOST?.trim();
+    if (configured) return configured;
+    const result = spawnSync(
+        "docker",
+        ["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"],
+        { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    if (result.status !== 0) return null;
+    return (result.stdout ?? "").trim() || null;
+}
+
+function dockerEndpointIsLocal(endpoint: string | null): boolean {
+    return endpoint !== null && /^(?:unix|npipe):\/\//i.test(endpoint);
+}
+
+function isNativeWindowsDockerDesktopEndpoint(endpoint: string | null): boolean {
+    return process.platform === "win32"
+        && endpoint?.replace(/\\/g, "/").toLowerCase()
+            === "npipe:////./pipe/dockerdesktoplinuxengine";
+}
+
+function detectDockerDesktop(runtime: RuntimeName): boolean {
+    if (runtime !== "docker") return false;
+    const result = spawnSync(
+        "docker",
+        ["info", "--format", "{{.OperatingSystem}}"],
+        { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const operatingSystem = result.status === 0
+        ? (result.stdout ?? "").trim().toLowerCase()
+        : "";
+    const operatingSystemIsDesktop = operatingSystem.includes("docker desktop");
+    if (operatingSystem && !operatingSystemIsDesktop) return false;
+    if (!operatingSystemIsDesktop && process.platform !== "win32") return false;
+    const endpoint = dockerEndpoint();
+    if (!dockerEndpointIsLocal(endpoint)) return false;
+    return isNativeWindowsDockerDesktopEndpoint(endpoint)
+        || operatingSystemIsDesktop;
+}
+
+function detectRemote(runtime: RuntimeName, dockerDesktop: boolean): boolean {
     // Non-Linux always runs via a VM (Docker Desktop or podman machine).
     if (process.platform !== "linux") return true;
 
     if (runtime === "docker") {
-        const result = spawnSync(
-            "docker",
-            ["info", "--format", "{{.OperatingSystem}}"],
-            { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-        );
-        if ((result.stdout ?? "").toLowerCase().includes("docker desktop")) {
-            return true;
-        }
+        if (dockerDesktop) return true;
         if (process.env.WSL_DISTRO_NAME) {
             // WSL2 has two networking modes. Mirrored mode shares the Windows
             // host's loopback so --network host behaves equivalently to native
@@ -205,11 +243,28 @@ function isWSL2MirroredMode(): boolean {
 }
 
 /**
- * Rootless detection (podman only). Docker is rootful by convention.
+ * Rootless detection for local Docker/Podman runtimes.
  */
 function detectRootless(runtime: RuntimeName): boolean {
-    if (runtime !== "podman") return false;
     if (process.platform !== "linux") return false; // machine VM: not "rootless" in the host sense
+
+    if (runtime === "docker") {
+        const result = spawnSync(
+            "docker",
+            ["info", "--format", "{{json .SecurityOptions}}"],
+            { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+        );
+        if (result.status === 0) {
+            const raw = (result.stdout ?? "").trim();
+            try {
+                const options = JSON.parse(raw) as unknown;
+                if (Array.isArray(options) && options.some((option) => String(option).toLowerCase().includes("rootless"))) return true;
+            } catch {
+                if (raw.toLowerCase().includes("rootless")) return true;
+            }
+        }
+        return false;
+    }
 
     const result = spawnSync(
         "podman",
@@ -234,6 +289,7 @@ function detectRootless(runtime: RuntimeName): boolean {
 function deriveFlavor(runtime: RuntimeName, remote: boolean, rootless: boolean): RuntimeFlavor {
     if (runtime === "docker") {
         if (remote) return "docker-desktop";
+        if (rootless) return "docker-rootless";
         return "docker-native";
     }
     // runtime === "podman"
@@ -289,18 +345,20 @@ export function getRuntimeInfo(): RuntimeInfo {
             socketPath: "/var/run/docker.sock",
             rootless: false,
             remote: false,
+            dockerDesktop: false,
         };
         return _cachedInfo;
     }
 
     const runtime = resolveRuntime();
     const version = detectVersion(runtime);
-    const remote = detectRemote(runtime);
+    const dockerDesktop = detectDockerDesktop(runtime);
+    const remote = detectRemote(runtime, dockerDesktop);
     const rootless = detectRootless(runtime);
     const flavor = deriveFlavor(runtime, remote, rootless);
     const socketPath = detectSocketPath(runtime, rootless);
 
-    _cachedInfo = { runtime, flavor, version, socketPath, rootless, remote };
+    _cachedInfo = { runtime, flavor, version, socketPath, rootless, remote, dockerDesktop };
     return _cachedInfo;
 }
 

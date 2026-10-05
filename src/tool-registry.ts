@@ -37,6 +37,7 @@ const TOOLS: ToolDefinition[] = [
         binary: CLAUDE_BIN_PATH,
         defaultFlags: ["--dangerously-skip-permissions"],
         credentialMounts: [
+            // Legacy hostDir; the real source is per profile (resolveCredentialHostPath, home-layout.ts).
             { hostDir: ".ccc/claude", containerDir: "/home/ccc/.claude" },
             { hostDir: ".claude/ide", containerDir: "/home/ccc/.claude/ide" },
         ],
@@ -68,6 +69,7 @@ const TOOLS: ToolDefinition[] = [
             "login", "logout",
             "mcp", "plugin", "mcp-server", "app-server", "remote-control",
             "completion", "update",
+            "doctor", "migrate-rollouts",
             "sandbox", "debug",
             "apply", "a",
             "resume", "fork",
@@ -79,6 +81,7 @@ const TOOLS: ToolDefinition[] = [
         // Verified via `codex <sub> --help`. Other subcommands reject the flag.
         subcommandsAcceptingDefaultFlags: ["exec", "e", "resume", "fork"],
         credentialMounts: [
+            // Legacy hostDir; the real source is per profile (resolveCredentialHostPath, home-layout.ts).
             { hostDir: ".ccc/codex", containerDir: "/home/ccc/.codex" },
             { hostDir: ".omx", containerDir: "/home/ccc/.omx" },
             { hostDir: ".agents", containerDir: "/home/ccc/.agents" },

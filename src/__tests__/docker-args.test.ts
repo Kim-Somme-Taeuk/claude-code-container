@@ -15,6 +15,7 @@ function makeOpts(
         containerName: "ccc-myproject-abc123",
         fullPath: "/home/user/myproject",
         projectMountPath: "/project/myproject-abc123",
+        projectMountIdentity: "project-identity-digest",
         credentialMounts: [
             { hostPath: "/home/user/.ccc/claude", containerPath: "/home/ccc/.claude" },
             { hostPath: "/home/user/.claude/ide", containerPath: "/home/ccc/.claude/ide" },
@@ -208,19 +209,17 @@ describe("buildDockerRunArgs — GIT_SSH_COMMAND", () => {
 // 1b.1 Git identity mounts — host git config forwarding
 // ===========================================================================
 describe("buildDockerRunArgs — git identity mounts", () => {
-    it("mounts host ~/.gitconfig read-only at the staging path (not at HOME)", () => {
-        // The entrypoint copies /host-stage/gitconfig → /home/ccc/.gitconfig at
-        // container start. Mounting the file directly at /home/ccc/.gitconfig
-        // anchors the inode and breaks atomic rename for `git config --global`.
+    it("does not mount host ~/.gitconfig directly into the container", () => {
+        // The CLI copies ~/.gitconfig into the running container. A direct
+        // single-file bind mount is not portable and breaks git's atomic
+        // rewrite path when mounted at /home/ccc/.gitconfig.
         const args = buildDockerRunArgs(
             makeOpts({
-                gitIdentityMounts: [
-                    { hostPath: "/home/user/.gitconfig", containerPath: "/host-stage/gitconfig" },
-                ],
+                gitIdentityMounts: [],
             }),
         );
         const mounts = extractVolumeMounts(args);
-        expect(mounts).toContain("/home/user/.gitconfig:/host-stage/gitconfig:ro");
+        expect(mounts.find((m) => m.includes(".gitconfig"))).toBeUndefined();
         expect(mounts.find((m) => m.endsWith(":/home/ccc/.gitconfig:ro"))).toBeUndefined();
     });
 
@@ -390,6 +389,17 @@ describe("buildDockerRunArgs — structure", () => {
 // 3. Volume mounts — completeness
 // ===========================================================================
 describe("buildDockerRunArgs — volume mounts", () => {
+    it("persists the project mount identity contract as a runtime label", () => {
+        const labels = extractLabels(buildDockerRunArgs(makeOpts()));
+        expect(labels["ccc.project.mount-identity"]).toBe("project-identity-digest");
+    });
+
+    it("persists the device-lab mount identity contract as a runtime label", () => {
+        const args = buildDockerRunArgs(makeOpts({ deviceLabMountIdentity: "identity-digest" }));
+        const labels = extractLabels(args);
+        expect(labels["ccc.device-lab.mount-identity"]).toBe("identity-digest");
+    });
+
     it("mounts project directory", () => {
         const args = buildDockerRunArgs(makeOpts());
         const mounts = extractVolumeMounts(args);
@@ -430,6 +440,39 @@ describe("buildDockerRunArgs — volume mounts", () => {
         );
     });
 
+    it("runs the runtime init as PID 1, before the image name", () => {
+        const args = buildDockerRunArgs(makeOpts());
+        expect(args).toContain("--init");
+        expect(args.indexOf("--init")).toBeLessThan(args.lastIndexOf("ccc"));
+        expect(args.at(-1)).toBe("ccc");
+    });
+
+    it("mounts codex daemon packages as a named volume nested in the codex credential dir", () => {
+        const args = buildDockerRunArgs(makeOpts());
+        const mounts = extractVolumeMounts(args);
+        expect(mounts).toContain(
+            "ccc-codex-packages:/home/ccc/.codex/packages",
+        );
+    });
+
+    it("mounts device-lab state when provided", () => {
+        const args = buildDockerRunArgs(makeOpts({
+            deviceLabStateHostDir: "/home/user/.ccc/devices",
+            deviceLabOwnerId: "0123456789abcdef",
+            deviceLabOwnerAuthFile: "/home/user/.ccc/devices/broker/auth/0123456789abcdef.json",
+        }));
+        const mounts = extractVolumeMounts(args);
+        expect(mounts).toContain(
+            "/home/user/.ccc/devices:/home/ccc/.ccc/devices:ro",
+        );
+        expect(mounts).toContain("/home/user/.ccc/devices/owners/0123456789abcdef:/home/ccc/.ccc/devices/owners/0123456789abcdef");
+        expect(mounts).toContain("/home/user/.ccc/devices/broker/auth/0123456789abcdef.json:/run/ccc-device-broker-auth/owner.json:ro");
+        expect(args).toContain("/home/ccc/.ccc/devices/owners:rw,noexec,nosuid,nodev,mode=0711");
+        expect(args).toContain("/home/ccc/.ccc/devices/broker/auth:rw,noexec,nosuid,nodev,mode=0711");
+        expect(args.join(" ")).not.toMatch(/\/home\/ccc\/\.ccc\/devices\/(?:owners|broker\/auth):[^ ]*\b(?:uid|gid)=1000\b/);
+        expect(extractEnvVars(args).CCC_DEVICE_BROKER_AUTH_FILE).toBe("/run/ccc-device-broker-auth/owner.json");
+    });
+
     it("mounts docker socket", () => {
         const args = buildDockerRunArgs(makeOpts());
         const mounts = extractVolumeMounts(args);
@@ -438,34 +481,34 @@ describe("buildDockerRunArgs — volume mounts", () => {
         );
     });
 
-    it("has exactly 6 volume mounts without SSH", () => {
-        const args = buildDockerRunArgs(makeOpts({ hostSshDir: null, sshAgentSocket: null }));
-        const mounts = extractVolumeMounts(args);
-        expect(mounts).toHaveLength(6);
-    });
-
-    it("has exactly 7 volume mounts with SSH keys only", () => {
-        const args = buildDockerRunArgs(
-            makeOpts({ hostSshDir: "/home/user/.ssh", sshAgentSocket: null }),
-        );
-        const mounts = extractVolumeMounts(args);
-        expect(mounts).toHaveLength(7);
-    });
-
-    it("has exactly 7 volume mounts with agent socket only", () => {
-        const args = buildDockerRunArgs(
-            makeOpts({ hostSshDir: null, sshAgentSocket: "/tmp/agent.sock" }),
-        );
-        const mounts = extractVolumeMounts(args);
-        expect(mounts).toHaveLength(7);
-    });
-
-    it("has exactly 8 volume mounts with both SSH keys and agent socket", () => {
-        const args = buildDockerRunArgs(
-            makeOpts({ hostSshDir: "/home/user/.ssh", sshAgentSocket: "/tmp/agent.sock" }),
-        );
+    it("has exactly 8 volume mounts without SSH when device-lab state is mounted", () => {
+        const args = buildDockerRunArgs(makeOpts({ hostSshDir: null, sshAgentSocket: null, deviceLabStateHostDir: "/home/user/.ccc/devices" }));
         const mounts = extractVolumeMounts(args);
         expect(mounts).toHaveLength(8);
+    });
+
+    it("has exactly 9 volume mounts with SSH keys only when device-lab state is mounted", () => {
+        const args = buildDockerRunArgs(
+            makeOpts({ hostSshDir: "/home/user/.ssh", sshAgentSocket: null, deviceLabStateHostDir: "/home/user/.ccc/devices" }),
+        );
+        const mounts = extractVolumeMounts(args);
+        expect(mounts).toHaveLength(9);
+    });
+
+    it("has exactly 9 volume mounts with agent socket only when device-lab state is mounted", () => {
+        const args = buildDockerRunArgs(
+            makeOpts({ hostSshDir: null, sshAgentSocket: "/tmp/agent.sock", deviceLabStateHostDir: "/home/user/.ccc/devices" }),
+        );
+        const mounts = extractVolumeMounts(args);
+        expect(mounts).toHaveLength(9);
+    });
+
+    it("has exactly 10 volume mounts with both SSH keys and agent socket when device-lab state is mounted", () => {
+        const args = buildDockerRunArgs(
+            makeOpts({ hostSshDir: "/home/user/.ssh", sshAgentSocket: "/tmp/agent.sock", deviceLabStateHostDir: "/home/user/.ccc/devices" }),
+        );
+        const mounts = extractVolumeMounts(args);
+        expect(mounts).toHaveLength(10);
     });
 });
 
@@ -666,7 +709,13 @@ describe("buildDockerRunArgs — container labels", () => {
         const labels = extractLabels(args);
         expect(labels["ccc.managed"]).toBe("true");
         expect(labels["ccc.project.path"]).toBe("/home/user/myproject");
+        expect(labels["ccc.profile"]).toBe("");
         expect(labels["ccc.cli.version"]).toBeDefined();
+    });
+
+    it("records the explicit profile namespace", () => {
+        const labels = extractLabels(buildDockerRunArgs(makeOpts({ profile: "work" })));
+        expect(labels["ccc.profile"]).toBe("work");
     });
 
     it("sets com.docker.compose.service to the container name", () => {
@@ -689,8 +738,8 @@ describe("buildDockerRunArgs — container labels", () => {
 
 // ===========================================================================
 // CCC_PROXY_ENABLED — entrypoint gate for the in-container iptables/proxy
-// setup. Set only on remote (VM-backed) runtimes where --network host doesn't
-// actually expose the host loopback to the container.
+// setup. Set for runtimes where --network host doesn't actually expose the
+// host loopback to the container.
 // ===========================================================================
 describe("buildDockerRunArgs — CCC_PROXY_ENABLED", () => {
     it("omits CCC_PROXY_ENABLED when proxyEnabled is unset", () => {
@@ -705,9 +754,88 @@ describe("buildDockerRunArgs — CCC_PROXY_ENABLED", () => {
         expect(envs).not.toHaveProperty("CCC_PROXY_ENABLED");
     });
 
+    it("marks VM-backed containers with CCC_CONTAINER_HOST_REMOTE=1 independently of the proxy opt-out", () => {
+        const marked = buildDockerRunArgs(makeOpts({ proxyEnabled: false, containerHostRemote: true }));
+        expect(marked).toContain("CCC_CONTAINER_HOST_REMOTE=1");
+        expect(marked).not.toContain("CCC_PROXY_ENABLED=1");
+        expect(buildDockerRunArgs(makeOpts({ containerHostRemote: false }))).not.toContain("CCC_CONTAINER_HOST_REMOTE=1");
+    });
+
     it("sets CCC_PROXY_ENABLED=1 when proxyEnabled is true", () => {
         const args = buildDockerRunArgs(makeOpts({ proxyEnabled: true }));
         const envs = extractEnvVars(args);
         expect(envs["CCC_PROXY_ENABLED"]).toBe("1");
+    });
+});
+
+describe("buildDockerRunArgs — device-lab owner basis", () => {
+    it("does not pass device-lab owner basis through container env", () => {
+        const args = buildDockerRunArgs(makeOpts());
+        const envs = extractEnvVars(args);
+        expect(envs).not.toHaveProperty("CCC_DEVICE_LAB_OWNER_BASIS");
+    });
+});
+
+describe("buildDockerRunArgs — lab-runner profile", () => {
+    it("does not add lab-runner mounts, env, or devices by default", () => {
+        const args = buildDockerRunArgs(makeOpts());
+        const mounts = extractVolumeMounts(args);
+        const envs = extractEnvVars(args);
+
+        expect(mounts.some((mount) => mount.includes("lab-state"))).toBe(false);
+        expect(envs).not.toHaveProperty("CCC_LAB_RUNNER");
+        expect(args).not.toContain("--device");
+        expect(args).not.toContain("--privileged");
+    });
+
+    it("reports unsupported without a lab state volume or /dev/kvm", () => {
+        const args = buildDockerRunArgs(makeOpts({
+            labRunner: {
+                status: "unsupported",
+                stateVolumeName: "ccc-project-lab-state",
+                stateContainerDir: "/home/ccc/.ccc/labs",
+                networkMode: "user",
+                unsupportedReason: "/dev/kvm is not available",
+            },
+        }));
+        const mounts = extractVolumeMounts(args);
+        const envs = extractEnvVars(args);
+
+        expect(mounts.some((mount) => mount.endsWith(":/home/ccc/.ccc/labs"))).toBe(false);
+        expect(envs["CCC_LAB_RUNNER"]).toBe("1");
+        expect(envs["CCC_LAB_RUNNER_STATUS"]).toBe("unsupported");
+        expect(envs["CCC_LAB_STATE_DIR"]).toBe("/home/ccc/.ccc/labs");
+        expect(envs["CCC_LAB_NET_MODE"]).toBe("user");
+        expect(envs["CCC_LAB_RUNNER_UNSUPPORTED_REASON"]).toBe("/dev/kvm is not available");
+        expect(args).not.toContain("--device");
+        expect(args).not.toContain("/dev/kvm:/dev/kvm");
+        expect(args).not.toContain("/dev/net/tun:/dev/net/tun");
+        expect(args).not.toContain("--privileged");
+    });
+
+    it("adds bounded KVM device wiring when lab-runner is ready", () => {
+        const args = buildDockerRunArgs(makeOpts({
+            labRunner: {
+                status: "ready",
+                stateVolumeName: "ccc-project-lab-state",
+                stateContainerDir: "/home/ccc/.ccc/labs",
+                kvmDevicePath: "/dev/kvm",
+                kvmGroupId: 108,
+                networkMode: "user",
+            },
+        }));
+        const mounts = extractVolumeMounts(args);
+        const envs = extractEnvVars(args);
+
+        expect(mounts).toContain("ccc-project-lab-state:/home/ccc/.ccc/labs");
+        expect(envs["CCC_LAB_RUNNER_STATUS"]).toBe("ready");
+        expect(envs["CCC_LAB_NET_MODE"]).toBe("user");
+        expect(envs).not.toHaveProperty("CCC_LAB_TUN_PATH");
+        expect(args).toContain("--device");
+        expect(args).toContain("/dev/kvm:/dev/kvm");
+        expect(args).not.toContain("/dev/net/tun:/dev/net/tun");
+        expect(args).toContain("--group-add");
+        expect(args).toContain("108");
+        expect(args).not.toContain("--privileged");
     });
 });

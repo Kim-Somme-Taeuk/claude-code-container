@@ -1,25 +1,45 @@
 // src/worktree.ts - Git worktree workspace management for ccc
 
 import { spawnSync } from "child_process";
+import { randomBytes } from "crypto";
 import {
+    chmodSync,
+    closeSync,
     existsSync,
+    mkdtempSync,
     mkdirSync,
     readdirSync,
     readFileSync,
+    writeFileSync,
     copyFileSync,
-    statSync,
     rmSync,
+    rmdirSync,
     lstatSync,
+    linkSync,
+    openSync,
     renameSync,
     realpathSync,
+    unlinkSync,
 } from "fs";
-import { basename, dirname, join, resolve } from "path";
+import {
+    basename,
+    dirname,
+    isAbsolute,
+    join,
+    posix,
+    relative,
+    resolve,
+    sep,
+    win32,
+} from "path";
 
 /** Recursive directory copy (Node 14 compatible replacement for cpSync) */
 function copyDirRecursive(src: string, dest: string, depth: number = 0): void {
-    if (depth > 20) return;
+    if (depth > 20) throw new Error(`Source entry nesting is too deep to copy safely: ${src}`);
     const stat = lstatSync(src);
-    if (stat.isSymbolicLink()) return;
+    if (stat.isSymbolicLink()) {
+        throw new Error(`Source entry contains a symbolic link that cannot be copied safely: ${src}`);
+    }
     if (stat.isDirectory()) {
         mkdirSync(dest, { recursive: true });
         for (const entry of readdirSync(src)) {
@@ -30,6 +50,224 @@ function copyDirRecursive(src: string, dest: string, depth: number = 0): void {
     }
 }
 
+type CapturedIgnoredDependencyLink = {
+    readonly path: string;
+    readonly parentIdentity: DirectoryIdentity;
+    readonly dev: string;
+    readonly ino: string;
+};
+
+type CapturedIgnoredDependencyTree = {
+    readonly sourcePath: string;
+    readonly sourceIdentity: DirectoryIdentity;
+    readonly destinationPath: string;
+    readonly links: CapturedIgnoredDependencyLink[];
+};
+
+type PreservedContentMerge = {
+    readonly worktreeRoot: string;
+    readonly skippedIgnoredDependencyTrees: CapturedIgnoredDependencyTree[];
+    // Every path where the preserved content and the freshly checked-out branch disagree.
+    // Collected rather than thrown on, because a caller told about one conflict fixes it,
+    // re-runs, and is told about the next one: the whole set is what lets them decide once.
+    readonly conflicts: string[];
+};
+
+// A repair that could not merge the preserved content back over the new worktree. The
+// workspace is unchanged when this is raised -- the caller rolls the whole attempt back --
+// so it names what disagreed rather than what was lost.
+export class WorktreeContentConflictError extends Error {
+    readonly conflicts: readonly string[];
+    readonly worktreeRoot: string;
+
+    constructor(worktreeRoot: string, conflicts: readonly string[]) {
+        super(
+            `Preserved content conflicts with the branch's own version of ${conflicts.length === 1 ? "this file" : `these ${conflicts.length} files`}: `
+            + conflicts.join(", "),
+        );
+        this.name = "WorktreeContentConflictError";
+        this.worktreeRoot = worktreeRoot;
+        this.conflicts = conflicts;
+    }
+}
+
+function captureIgnoredDependencyTree(
+    sourcePath: string,
+    destinationPath: string,
+): CapturedIgnoredDependencyTree {
+    const sourceIdentity = captureDirectoryIdentity(sourcePath);
+    const links: CapturedIgnoredDependencyLink[] = [];
+    const pending = [{ path: sourcePath, identity: sourceIdentity }];
+    while (pending.length > 0) {
+        const current = pending.pop()!;
+        assertDirectoryIdentity(current.path, current.identity);
+        const entries = readdirSync(current.path);
+        assertDirectoryIdentity(current.path, current.identity);
+        for (const entry of entries) {
+            const entryPath = join(current.path, entry);
+            const observed = lstatSync(entryPath, { bigint: true });
+            if (observed.isSymbolicLink()) {
+                links.push({
+                    path: entryPath,
+                    parentIdentity: current.identity,
+                    dev: observed.dev.toString(),
+                    ino: observed.ino.toString(),
+                });
+            } else if (observed.isDirectory()) {
+                pending.push({
+                    path: entryPath,
+                    identity: captureDirectoryIdentity(entryPath),
+                });
+            }
+        }
+        assertDirectoryIdentity(current.path, current.identity);
+    }
+    return {
+        sourcePath,
+        sourceIdentity,
+        destinationPath,
+        links,
+    };
+}
+
+function unlinkCapturedIgnoredDependencyLinks(
+    trees: readonly CapturedIgnoredDependencyTree[],
+): void {
+    for (const tree of trees) {
+        assertDirectoryIdentity(tree.sourcePath, tree.sourceIdentity);
+        for (const link of tree.links) {
+            assertDirectoryIdentity(dirname(link.path), link.parentIdentity);
+            const observed = lstatSync(link.path, { bigint: true });
+            if (!observed.isSymbolicLink()
+                || observed.dev.toString() !== link.dev
+                || observed.ino.toString() !== link.ino) {
+                throw new Error(`Ignored dependency link identity changed before cleanup: ${link.path}`);
+            }
+            unlinkSync(link.path);
+            if (pathExistsStrict(link.path)) {
+                throw new Error(`Ignored dependency link was not removed: ${link.path}`);
+            }
+            assertDirectoryIdentity(dirname(link.path), link.parentIdentity);
+        }
+        assertDirectoryIdentity(tree.sourcePath, tree.sourceIdentity);
+    }
+}
+
+function ignoredGeneratedDependencyTree(
+    src: string,
+    dest: string,
+    merge: PreservedContentMerge,
+): boolean {
+    if (basename(src) !== "node_modules" || pathExistsStrict(dest)) return false;
+    const relativeDestination = relative(merge.worktreeRoot, dest);
+    if (!relativeDestination
+        || isAbsolute(relativeDestination)
+        || relativeDestination === ".."
+        || relativeDestination.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)) {
+        throw new Error(`Worktree merge path escaped its root: ${dest}`);
+    }
+    const ignored = spawnSync(
+        "git",
+        [
+            "check-ignore",
+            "--quiet",
+            "--",
+            `${process.platform === "win32"
+                ? relativeDestination.split(win32.sep).join(posix.sep)
+                : relativeDestination}/`,
+        ],
+        {
+            cwd: merge.worktreeRoot,
+            encoding: "utf-8",
+            env: sanitizedGitRepositoryEnvironment(),
+            stdio: ["pipe", "pipe", "pipe"],
+        },
+    );
+    if (ignored.error || ![0, 1].includes(ignored.status ?? -1)) {
+        const detail = (ignored.stderr ?? "").trim()
+            || ignored.error?.message
+            || `git exited with status ${String(ignored.status)}`;
+        throw new Error(`Unable to inspect ignored dependency path '${dest}': ${detail}`);
+    }
+    if (ignored.status !== 0) return false;
+    merge.skippedIgnoredDependencyTrees.push(captureIgnoredDependencyTree(src, dest));
+    return true;
+}
+
+function mergePreservingContent(src: string, dest: string, merge: PreservedContentMerge): void {
+    const source = lstatSync(src);
+    if (source.isSymbolicLink()) {
+        throw new Error(`Workspace content contains a symbolic link that cannot be merged safely: ${src}`);
+    }
+    if (source.isDirectory()) {
+        if (ignoredGeneratedDependencyTree(src, dest, merge)) return;
+        if (!pathExistsStrict(dest)) {
+            mkdirSync(dest);
+        } else {
+            const destination = lstatSync(dest);
+            if (destination.isSymbolicLink() || !destination.isDirectory()) {
+                // One side is a directory and the other is not. Nothing below it can be
+                // merged, so record this subtree and stop descending into it.
+                merge.conflicts.push(dest);
+                return;
+            }
+        }
+        for (const entry of readdirSync(src)) {
+            if (entry === ".git") continue;
+            mergePreservingContent(join(src, entry), join(dest, entry), merge);
+        }
+        return;
+    }
+    if (!pathExistsStrict(dest)) {
+        copyFileSync(src, dest);
+        return;
+    }
+    const destination = lstatSync(dest);
+    if (destination.isSymbolicLink()) {
+        throw new Error(`Worktree destination contains a symbolic link: ${dest}`);
+    }
+    if (source.isFile() && destination.isFile()
+        && readFileSync(src).equals(readFileSync(dest))) {
+        return;
+    }
+    merge.conflicts.push(dest);
+}
+
+/**
+ * Moves conflicting files out of a workspace checkout so a repair can be retried.
+ *
+ * The files are moved, never deleted: the local version is the only copy that is not already
+ * in Git, so it is the one that must survive. What is left behind is the branch's own version,
+ * which the retry can then merge cleanly.
+ *
+ * Returns the directory the files were moved into.
+ */
+export function setAsideConflictingContent(
+    worktreeRoot: string,
+    conflicts: readonly string[],
+    now: () => Date = () => new Date(),
+): string {
+    const stamp = now().toISOString().replace(/[:.]/g, "-");
+    const preserved = `${worktreeRoot}.ccc-conflict-${stamp}`;
+    if (pathExistsStrict(preserved)) {
+        throw new Error(`Conflict backup directory already exists: ${preserved}`);
+    }
+    mkdirSync(preserved, { recursive: true });
+    for (const conflict of conflicts) {
+        const relativePath = relative(worktreeRoot, conflict);
+        // A path outside the checkout is not this repair's to move. Nothing should produce
+        // one, which is exactly why it is worth refusing rather than trusting.
+        if (!relativePath || isAbsolute(relativePath) || relativePath.split(sep).includes("..")) {
+            throw new Error(`Refusing to set aside a path outside the worktree: ${conflict}`);
+        }
+        if (!pathExistsStrict(conflict)) continue;
+        const destination = join(preserved, relativePath);
+        mkdirSync(dirname(destination), { recursive: true });
+        renameSync(conflict, destination);
+    }
+    return preserved;
+}
+
 export const WORKTREE_SEPARATOR = "--";
 
 // === Types ===
@@ -38,6 +276,555 @@ export interface WorkspaceEntry {
     name: string;
     path: string;
     isGitRepo: boolean;
+}
+
+export type DirectoryIdentity = {
+    realpath: string;
+    dev: string;
+    ino: string;
+};
+
+type FileIdentity = {
+    dev: string;
+    ino: string;
+};
+
+function captureDirectoryIdentity(path: string): DirectoryIdentity {
+    const observed = lstatSync(path, { bigint: true });
+    if (!observed.isDirectory() || observed.isSymbolicLink()) {
+        throw new Error(`Workspace path '${path}' must be a real directory.`);
+    }
+    return {
+        realpath: realpathSync(path),
+        dev: observed.dev.toString(),
+        ino: observed.ino.toString(),
+    };
+}
+
+function assertDirectoryIdentity(path: string, expected: DirectoryIdentity): void {
+    const actual = captureDirectoryIdentity(path);
+    if ((actual.realpath !== expected.realpath
+            && !sameExistingObject(actual.realpath, expected.realpath))
+        || actual.dev !== expected.dev
+        || actual.ino !== expected.ino) {
+        throw new Error(`Workspace path identity changed before deletion: ${path}`);
+    }
+}
+
+function capturePathIdentity(path: string): DirectoryIdentity {
+    const observed = lstatSync(path, { bigint: true });
+    if (observed.isSymbolicLink()) {
+        throw new Error(`Workspace entry '${path}' must not be a symbolic link.`);
+    }
+    return {
+        realpath: realpathSync(path),
+        dev: observed.dev.toString(),
+        ino: observed.ino.toString(),
+    };
+}
+
+function assertPathIdentity(path: string, expected: DirectoryIdentity): void {
+    const actual = capturePathIdentity(path);
+    if ((actual.realpath !== expected.realpath
+            && !sameExistingObject(actual.realpath, expected.realpath))
+        || actual.dev !== expected.dev
+        || actual.ino !== expected.ino) {
+        throw new Error(`Workspace entry identity changed before deletion: ${path}`);
+    }
+}
+
+function captureFileIdentity(path: string): FileIdentity {
+    const observed = lstatSync(path, { bigint: true });
+    if (!observed.isFile() || observed.isSymbolicLink()) {
+        throw new Error(`Workspace entry '${path}' must be a real file.`);
+    }
+    return {
+        dev: observed.dev.toString(),
+        ino: observed.ino.toString(),
+    };
+}
+
+function assertFileIdentity(path: string, expected: FileIdentity): void {
+    const actual = captureFileIdentity(path);
+    if (actual.dev !== expected.dev || actual.ino !== expected.ino) {
+        throw new Error(`Workspace file identity changed: ${path}`);
+    }
+}
+
+export function portableWorktreeGitDirectory(
+    gitFileDirectory: string,
+    resolvedGitDirectory: string,
+    platform = process.platform,
+): string {
+    const paths = platform === "win32" ? win32 : posix;
+    const portableGitDirectory = paths.relative(
+        gitFileDirectory,
+        resolvedGitDirectory,
+    ).replace(/\\/g, "/");
+    const reconstructed = paths.resolve(
+        gitFileDirectory,
+        portableGitDirectory,
+    );
+    const expected = paths.resolve(resolvedGitDirectory);
+    const sameResolvedPath = platform === "win32"
+        ? reconstructed.toLowerCase() === expected.toLowerCase()
+        : reconstructed === expected;
+    if (!portableGitDirectory
+        || paths.isAbsolute(portableGitDirectory)
+        || /^[A-Za-z]:/.test(portableGitDirectory)
+        || !sameResolvedPath) {
+        throw new Error(
+            `Worktree metadata crosses incompatible filesystem roots: ${gitFileDirectory}`,
+        );
+    }
+    return portableGitDirectory;
+}
+
+export function portableWorktreeBackpointer(
+    gitFilePath: string,
+    platform = process.platform,
+): string {
+    const paths = platform === "win32" ? win32 : posix;
+    if (!paths.isAbsolute(gitFilePath)) {
+        throw new Error("Worktree backpointer must be an absolute path.");
+    }
+    // Git for Windows writes forward slashes in its administrative path files.
+    // Preserve that spelling when relocating the temporary registration.
+    return platform === "win32" ? gitFilePath.replace(/\\/g, "/") : gitFilePath;
+}
+
+function normalizeWorktreeGitLink(
+    gitFile: string,
+    resolvedGitDirectory: string,
+    gitFileIdentity: DirectoryIdentity,
+    validatedContent?: string,
+): string {
+    const portableGitDirectory = portableWorktreeGitDirectory(
+        dirname(gitFile),
+        resolvedGitDirectory,
+    );
+    const expectedContent = `gitdir: ${portableGitDirectory}\n`;
+    normalizeWorktreeMetadataFile(
+        gitFile,
+        expectedContent,
+        gitFileIdentity,
+        validatedContent,
+    );
+    return portableGitDirectory;
+}
+
+function normalizeWorktreeMetadataFile(
+    metadataFile: string,
+    expectedContent: string,
+    metadataIdentity: DirectoryIdentity,
+    validatedContent?: string,
+): void {
+    assertPathIdentity(metadataFile, metadataIdentity);
+    const existingContent = readFileSync(metadataFile, "utf-8");
+    assertPathIdentity(metadataFile, metadataIdentity);
+    if (existingContent === expectedContent) {
+        return;
+    }
+    const parentIdentity = captureDirectoryIdentity(dirname(metadataFile));
+    const temporary = join(
+        dirname(metadataFile),
+        `.${basename(metadataFile)}.ccc-${randomBytes(16).toString("hex")}.tmp`,
+    );
+    const backup = join(
+        dirname(metadataFile),
+        `.${basename(metadataFile)}.ccc-${randomBytes(16).toString("hex")}.backup`,
+    );
+    let temporaryIdentity: FileIdentity | null = null;
+    try {
+        writeFileSync(temporary, expectedContent, { flag: "wx", mode: 0o600 });
+        temporaryIdentity = captureFileIdentity(temporary);
+        assertDirectoryIdentity(dirname(metadataFile), parentIdentity);
+        assertPathIdentity(metadataFile, metadataIdentity);
+        renameSync(metadataFile, backup);
+        assertQuarantinedIdentity(backup, metadataIdentity, "entry");
+        if (validatedContent !== undefined
+            && readFileSync(backup, "utf-8") !== validatedContent) {
+            throw new Error("validated worktree metadata changed before quarantine");
+        }
+        assertDirectoryIdentity(dirname(metadataFile), parentIdentity);
+        linkSync(temporary, metadataFile);
+        assertFileIdentity(metadataFile, temporaryIdentity);
+        rmSync(temporary, { force: true });
+        assertDirectoryIdentity(dirname(metadataFile), parentIdentity);
+        assertFileIdentity(metadataFile, temporaryIdentity);
+        if (readFileSync(metadataFile, "utf-8") !== expectedContent) {
+            throw new Error("normalized worktree metadata changed after installation");
+        }
+        assertQuarantinedIdentity(backup, metadataIdentity, "entry");
+        if (validatedContent !== undefined
+            && readFileSync(backup, "utf-8") !== validatedContent) {
+            throw new Error("validated worktree metadata changed after quarantine");
+        }
+        rmSync(backup);
+    } catch (error) {
+        rmSync(temporary, { force: true });
+        let preservedBackup = false;
+        try {
+            if (pathExistsStrict(backup)) {
+                assertQuarantinedIdentity(backup, metadataIdentity, "entry");
+                if (!pathExistsStrict(metadataFile)) {
+                    linkSync(backup, metadataFile);
+                }
+                if (temporaryIdentity) {
+                    try {
+                        assertFileIdentity(metadataFile, temporaryIdentity);
+                        if (readFileSync(metadataFile, "utf-8") === expectedContent) {
+                            rmSync(backup);
+                            return;
+                        }
+                    } catch {
+                        // The installed path is not the file CCC staged.
+                    }
+                }
+                const restoredIdentity = capturePathIdentity(metadataFile);
+                if (restoredIdentity.dev === metadataIdentity.dev
+                    && restoredIdentity.ino === metadataIdentity.ino) {
+                    rmSync(backup);
+                } else {
+                    preservedBackup = true;
+                }
+            } else if (temporaryIdentity) {
+                assertFileIdentity(metadataFile, temporaryIdentity);
+                if (readFileSync(metadataFile, "utf-8") === expectedContent) {
+                    return;
+                }
+            }
+        } catch {
+            // Preserve the normalization race as the primary diagnostic.
+            preservedBackup = pathExistsStrict(backup);
+        }
+        const preservation = preservedBackup
+            ? `; original preserved at ${backup}`
+            : "";
+        throw new Error(`Worktree metadata changed during normalization: ${metadataFile}${preservation}`, {
+            cause: error,
+        });
+    }
+}
+
+function assertQuarantinedIdentity(
+    path: string,
+    expected: DirectoryIdentity,
+    kind: "directory" | "entry",
+): void {
+    const observed = lstatSync(path, { bigint: true });
+    if (observed.isSymbolicLink()
+        || (kind === "directory" && !observed.isDirectory())
+        || observed.dev.toString() !== expected.dev
+        || observed.ino.toString() !== expected.ino) {
+        throw new Error(`Workspace ${kind} identity changed after quarantine: ${path}`);
+    }
+}
+
+function pathExistsStrict(path: string): boolean {
+    try {
+        lstatSync(path);
+        return true;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw new Error(`Unable to inspect workspace path '${path}'.`, { cause: error });
+    }
+}
+
+type QuarantineLocation = {
+    directory: string;
+    directoryIdentity: DirectoryIdentity;
+    path: string;
+};
+
+function createPrivateQuarantine(
+    originalPath: string,
+    quarantineBase: string,
+): QuarantineLocation {
+    // The base is the workspace sibling directory, outside the project mount.
+    const baseIdentity = captureDirectoryIdentity(quarantineBase);
+    const directory = mkdtempSync(join(quarantineBase, ".ccc-worktree-quarantine-"));
+    try {
+        chmodSync(directory, 0o700);
+        assertDirectoryIdentity(quarantineBase, baseIdentity);
+        const directoryIdentity = captureDirectoryIdentity(directory);
+        return {
+            directory,
+            directoryIdentity,
+            path: join(directory, basename(originalPath)),
+        };
+    } catch (error) {
+        rmdirSync(directory);
+        throw error;
+    }
+}
+
+function removePrivateQuarantine(location: QuarantineLocation): void {
+    assertDirectoryIdentity(location.directory, location.directoryIdentity);
+    const remaining = readdirSync(location.directory);
+    if (remaining.length > 0) {
+        throw new Error(`Private worktree quarantine is not empty: ${location.directory}`);
+    }
+    rmdirSync(location.directory);
+    if (pathExistsStrict(location.directory)) {
+        throw new Error(`Private worktree quarantine was not removed: ${location.directory}`);
+    }
+}
+
+function rollbackQuarantinedPath(
+    originalPath: string,
+    location: QuarantineLocation,
+    expectedIdentity: DirectoryIdentity,
+    parentIdentity: DirectoryIdentity,
+    kind: "directory" | "entry",
+): boolean {
+    const quarantinedExists = pathExistsStrict(location.path);
+    const originalExists = pathExistsStrict(originalPath);
+    if (!quarantinedExists) {
+        removePrivateQuarantine(location);
+        return false;
+    }
+    if (originalExists) return false;
+    assertDirectoryIdentity(dirname(originalPath), parentIdentity);
+    assertDirectoryIdentity(location.directory, location.directoryIdentity);
+    assertQuarantinedIdentity(location.path, expectedIdentity, kind);
+    renameSync(location.path, originalPath);
+    if (kind === "directory") {
+        assertDirectoryIdentity(originalPath, expectedIdentity);
+    } else {
+        assertPathIdentity(originalPath, expectedIdentity);
+    }
+    removePrivateQuarantine(location);
+    return true;
+}
+
+function removeRegisteredWorktree(
+    sourceRepository: string,
+    worktreePath: string,
+    expectedIdentity: DirectoryIdentity,
+    force: boolean,
+    quarantineBase = dirname(worktreePath),
+    registrationFence?: WorktreeRegistrationFence,
+    sourceEnvironment?: NodeJS.ProcessEnv,
+    mutationGuard?: () => void,
+    quarantinedContentGuard?: (quarantinedPath: string) => void,
+): void {
+    mutationGuard?.();
+    const expectedBranch = registrationFence?.expectedRef.replace(/^refs\/heads\//, "");
+    if (registrationFence && (
+        !expectedBranch
+        || !worktreeRegistrationOwnershipMatches(
+            sourceRepository,
+            worktreePath,
+            registrationFence,
+        )
+    )) {
+        throw new Error(`Worktree registration ownership changed before deletion: ${worktreePath}`);
+    }
+    mutationGuard?.();
+    const parentIdentity = captureDirectoryIdentity(dirname(worktreePath));
+    mutationGuard?.();
+    assertDirectoryIdentity(worktreePath, expectedIdentity);
+    assertDirectoryIdentity(dirname(worktreePath), parentIdentity);
+    const quarantine = createPrivateQuarantine(worktreePath, quarantineBase);
+    try {
+        mutationGuard?.();
+        assertDirectoryIdentity(worktreePath, expectedIdentity);
+        assertDirectoryIdentity(dirname(worktreePath), parentIdentity);
+        renameSync(worktreePath, quarantine.path);
+        mutationGuard?.();
+        assertDirectoryIdentity(quarantine.directory, quarantine.directoryIdentity);
+        assertQuarantinedIdentity(quarantine.path, expectedIdentity, "directory");
+        if (registrationFence) {
+            assertWorktreeRegistrationFenceFileIdentities(
+                quarantine.path,
+                registrationFence,
+            );
+        }
+        const repaired = spawnSync(
+            "git",
+            ["worktree", "repair", quarantine.path],
+            {
+                cwd: sourceRepository,
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+                env: sourceEnvironment,
+            },
+        );
+        mutationGuard?.();
+        if (repaired.error || repaired.status !== 0
+            || !isValidWorktree(quarantine.path, sourceRepository)) {
+            throw new Error((repaired.stderr ?? "").trim() || "git worktree repair failed");
+        }
+        if (registrationFence) {
+            const quarantineIdentity = captureDirectoryIdentity(quarantine.path);
+            assertQuarantinedIdentity(
+                quarantine.path,
+                registrationFence.destinationIdentity,
+                "directory",
+            );
+            assertDirectoryIdentity(
+                registrationFence.managementIdentity.realpath,
+                registrationFence.managementIdentity,
+            );
+            if (!expectedBranch || !worktreeRegistrationOwnershipMatches(
+                sourceRepository,
+                quarantine.path,
+                {
+                    ...registrationFence,
+                    destinationIdentity: quarantineIdentity,
+                },
+            )) {
+                throw new Error(
+                    `Worktree registration ownership changed after quarantine: ${worktreePath}`,
+                );
+            }
+        }
+        quarantinedContentGuard?.(quarantine.path);
+        const args = ["worktree", "remove", quarantine.path];
+        if (force) args.push("--force");
+        const removed = spawnSync(
+            "git",
+            args,
+            {
+                cwd: sourceRepository,
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+                env: sourceEnvironment,
+            },
+        );
+        mutationGuard?.();
+        if (removed.error || removed.status !== 0) {
+            throw new Error((removed.stderr ?? "").trim() || "git worktree remove failed");
+        }
+        if (pathExistsStrict(quarantine.path)) {
+            throw new Error(`Git left quarantined worktree content behind: ${quarantine.path}`);
+        }
+        if (pathExistsStrict(worktreePath)) {
+            throw new Error(`Worktree path was recreated during deletion: ${worktreePath}`);
+        }
+        removePrivateQuarantine(quarantine);
+    } catch (error) {
+        try {
+            if (rollbackQuarantinedPath(
+                worktreePath,
+                quarantine,
+                expectedIdentity,
+                parentIdentity,
+                "directory",
+            )) {
+                if (registrationFence) {
+                    assertWorktreeRegistrationFenceFileIdentities(
+                        worktreePath,
+                        registrationFence,
+                    );
+                }
+                const repaired = spawnSync(
+                    "git",
+                    ["worktree", "repair", worktreePath],
+                    { cwd: sourceRepository, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+                );
+                if (repaired.error || repaired.status !== 0
+                    || !isValidWorktree(worktreePath, sourceRepository)) {
+                    throw new Error(
+                        (repaired.stderr ?? "").trim() || "git worktree rollback repair failed",
+                    );
+                }
+            }
+        } catch (rollbackError) {
+            throw new Error(
+                `${(error as Error).message}; quarantine rollback failed: ${(rollbackError as Error).message}`,
+                { cause: error },
+            );
+        }
+        throw error;
+    }
+}
+
+function removeDirectoryByQuarantine(
+    path: string,
+    expectedIdentity: DirectoryIdentity,
+    quarantineBase = dirname(path),
+    emptyOnly = false,
+): void {
+    const parentIdentity = captureDirectoryIdentity(dirname(path));
+    assertDirectoryIdentity(path, expectedIdentity);
+    assertDirectoryIdentity(dirname(path), parentIdentity);
+    const quarantine = createPrivateQuarantine(path, quarantineBase);
+    try {
+        assertDirectoryIdentity(path, expectedIdentity);
+        assertDirectoryIdentity(dirname(path), parentIdentity);
+        renameSync(path, quarantine.path);
+        assertDirectoryIdentity(quarantine.directory, quarantine.directoryIdentity);
+        assertQuarantinedIdentity(quarantine.path, expectedIdentity, "directory");
+        if (emptyOnly) {
+            rmdirSync(quarantine.path);
+        } else {
+            rmSync(quarantine.path, { recursive: true, force: true });
+        }
+        if (pathExistsStrict(quarantine.path)) {
+            throw new Error(`Quarantined workspace directory was not removed: ${quarantine.path}`);
+        }
+        if (pathExistsStrict(path)) {
+            throw new Error(`Workspace path was recreated during deletion: ${path}`);
+        }
+        removePrivateQuarantine(quarantine);
+    } catch (error) {
+        try {
+            rollbackQuarantinedPath(
+                path,
+                quarantine,
+                expectedIdentity,
+                parentIdentity,
+                "directory",
+            );
+        } catch (rollbackError) {
+            throw new Error(
+                `${(error as Error).message}; quarantine rollback failed: ${(rollbackError as Error).message}`,
+                { cause: error },
+            );
+        }
+        throw error;
+    }
+}
+
+function removePathByQuarantine(
+    path: string,
+    expectedIdentity: DirectoryIdentity,
+    quarantineBase = dirname(path),
+): void {
+    const parentIdentity = captureDirectoryIdentity(dirname(path));
+    assertPathIdentity(path, expectedIdentity);
+    assertDirectoryIdentity(dirname(path), parentIdentity);
+    const quarantine = createPrivateQuarantine(path, quarantineBase);
+    try {
+        assertPathIdentity(path, expectedIdentity);
+        assertDirectoryIdentity(dirname(path), parentIdentity);
+        renameSync(path, quarantine.path);
+        assertDirectoryIdentity(quarantine.directory, quarantine.directoryIdentity);
+        assertQuarantinedIdentity(quarantine.path, expectedIdentity, "entry");
+        rmSync(quarantine.path, { recursive: true, force: true });
+        if (pathExistsStrict(quarantine.path)) {
+            throw new Error(`Quarantined workspace entry was not removed: ${quarantine.path}`);
+        }
+        removePrivateQuarantine(quarantine);
+    } catch (error) {
+        try {
+            rollbackQuarantinedPath(
+                path,
+                quarantine,
+                expectedIdentity,
+                parentIdentity,
+                "entry",
+            );
+        } catch (rollbackError) {
+            throw new Error(
+                `${(error as Error).message}; quarantine rollback failed: ${(rollbackError as Error).message}`,
+                { cause: error },
+            );
+        }
+        throw error;
+    }
 }
 
 export interface WorkspaceInfo {
@@ -168,12 +955,1955 @@ export function parseWorktreeArg(
  * Created as a sibling directory: /projects → /projects--feature
  * Branch `/` chars are replaced with `-` in the directory name.
  */
+/**
+ * The nearest ancestor of `startPath` that is a Git working tree, or null.
+ *
+ * `.git` may be a directory or a file — a submodule or linked worktree checkout is still a
+ * working tree, and content dropped inside one is just as untracked as in any other.
+ */
+export function enclosingGitWorkingTree(startPath: string): string | null {
+    let current = resolve(startPath);
+    for (;;) {
+        if (pathExistsStrict(join(current, ".git"))) return current;
+        const parent = dirname(current);
+        if (parent === current) return null;
+        current = parent;
+    }
+}
+
+const warnedEnclosedWorkspaces = new Set<string>();
+
+/**
+ * Says so when a workspace is about to be created inside another repository's working tree.
+ *
+ * ccc puts a workspace beside its source, so running it from a repository that is itself
+ * nested — a submodule, or any checkout inside another checkout — lands the workspace inside
+ * the outer repository. That is legal and sometimes intended, so it is not refused. It is
+ * said out loud because the consequences surface much later and somewhere else: the outer
+ * repository reports the workspace as untracked content, and ccc's own nested-repository scan
+ * finds the checkouts inside it and has to work out that they belong to someone else.
+ */
+function warnWorkspaceInsideRepository(workspacePath: string, enclosing: string): void {
+    if (warnedEnclosedWorkspaces.has(workspacePath)) return;
+    warnedEnclosedWorkspaces.add(workspacePath);
+    process.stderr.write(
+        `[ccc] NOTE: Creating this workspace inside another Git repository.\n`
+        + `      Workspace: ${terminalSafe(workspacePath)}\n`
+        + `      Inside:    ${terminalSafe(enclosing)}\n`
+        + "      ccc places a workspace beside its source, and this source is itself nested,\n"
+        + "      so the workspace lands in the outer repository's working tree. It will show\n"
+        + "      there as untracked content, and ccc's own scans of that repository have to\n"
+        + "      recognise it as someone else's workspace rather than a repository of its own.\n"
+        + "      To keep them apart, run ccc from the outer repository instead.\n",
+    );
+}
+
 export function getWorkspacePath(sourcePath: string, branch: string): string {
     const resolved = resolve(sourcePath);
     const parent = dirname(resolved);
     const dirName = basename(resolved);
     const safeBranch = branch.replace(/\//g, "-");
     return join(parent, `${dirName}${WORKTREE_SEPARATOR}${safeBranch}`);
+}
+
+export function assertWorkspaceBranch(
+    workspacePath: string,
+    expectedBranch: string,
+    runner: typeof spawnSync = spawnSync,
+    sourcePath?: string,
+    options: { allowTrackedGitlinks?: boolean } = {},
+): void {
+    if (!existsSync(workspacePath)) {
+        throw new Error(`Workspace for branch '${expectedBranch}' no longer exists.`);
+    }
+    if (sourcePath) {
+        assertWorkspaceOwnership(workspacePath, sourcePath, options);
+    }
+    const repositories = withSanitizedGitRepositoryEnvironment(
+        () => branchRepositories(
+            workspacePath,
+            undefined,
+            options,
+        ),
+    );
+    if (repositories.length === 0) {
+        throw new Error(`Unable to verify workspace branch '${expectedBranch}': no worktree repositories found.`);
+    }
+    for (const repository of repositories) {
+        const identity = captureNestedRepositoryIdentity(repository.path);
+        const result = runner(
+            "git",
+            ["rev-parse", "--abbrev-ref", "HEAD"],
+            {
+                cwd: identity.directory.realpath,
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+                env: pinnedNestedRepositoryEnvironment(identity),
+            },
+        );
+        assertNestedRepositoryIdentity(repository.path, identity);
+        const actualBranch = (result.stdout ?? "").trim();
+        if (result.error || result.status !== 0 || !actualBranch) {
+            throw new Error(`Unable to verify workspace branch '${expectedBranch}' in '${repository.name}'.`);
+        }
+        if (actualBranch !== expectedBranch) {
+            throw new Error(
+                `Workspace repository '${repository.name}' belongs to branch '${actualBranch}', not '${expectedBranch}'.`,
+            );
+        }
+    }
+}
+
+type GitLinkKind = "directory" | "worktree" | "gitlink";
+
+/**
+ * A worktree's two-way link is broken: the checkout and its administrative directory no longer
+ * agree. Distinct from an ownership judgement, and the difference matters — this is repairable
+ * by `git worktree repair`, whereas an unowned nested repository is a refusal on purpose.
+ * Marked rather than message-matched so the classification survives rewording.
+ */
+const BROKEN_WORKTREE_LINK = Symbol.for("ccc.brokenWorktreeLink");
+
+function brokenWorktreeLink(message: string): Error {
+    return Object.assign(new Error(message), { [BROKEN_WORKTREE_LINK]: true });
+}
+
+function isBrokenWorktreeLink(error: unknown): boolean {
+    for (const link of errorChain(error)) {
+        if (link[BROKEN_WORKTREE_LINK as unknown as string] === true) return true;
+    }
+    return false;
+}
+
+function gitLinkKind(gitPath: string): GitLinkKind {
+    let observed;
+    try {
+        observed = lstatSync(gitPath);
+    } catch (error) {
+        throw new Error(`Unable to inspect worktree metadata '${gitPath}'.`, { cause: error });
+    }
+    if (observed.isDirectory()) return "directory";
+    if (!observed.isFile()) {
+        throw new Error(`Invalid worktree metadata '${gitPath}'.`);
+    }
+    const content = readFileSync(gitPath, "utf-8").trim();
+    const match = content.match(/^gitdir:\s*(.+)$/);
+    if (!match) throw new Error(`Invalid worktree metadata '${gitPath}'.`);
+    const gitDir = resolve(dirname(gitPath), match[1].trim());
+    let commonDir: string;
+    try {
+        commonDir = readFileSync(join(gitDir, "commondir"), "utf-8").trim();
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return "gitlink";
+        throw new Error(`Unable to inspect worktree common directory '${gitPath}'.`, { cause: error });
+    }
+    try {
+        if (!commonDir) throw new Error("empty commondir");
+        const gitDirObserved = lstatSync(gitDir);
+        if (!gitDirObserved.isDirectory() || gitDirObserved.isSymbolicLink()) {
+            throw brokenWorktreeLink("worktree management entry is not a real directory");
+        }
+        const registeredGitFile = readFileSync(join(gitDir, "gitdir"), "utf-8").trim();
+        if (!registeredGitFile) throw brokenWorktreeLink("empty gitdir registration");
+        const registeredPath = isAbsolute(registeredGitFile)
+            ? registeredGitFile
+            : resolve(gitDir, registeredGitFile);
+        try {
+            realpathSync(registeredPath);
+        } catch (error) {
+            // Carry the path Git actually recorded. An errno's own `path` is the FIRST MISSING
+            // COMPONENT of the walk, not the path asked for: on a machine where `/project` exists
+            // it reads like the recorded path, and on one where it does not it collapses to
+            // `/project` — dropping the workspace-and-hash that identifies which worktree to
+            // repair, and varying with the machine that happens to run the check.
+            throw Object.assign(
+                new Error("worktree registration names a path that cannot be resolved here", { cause: error }),
+                { recordedGitPath: registeredGitFile },
+            );
+        }
+        if (!sameDirectExistingObject(registeredPath, gitPath)) {
+            throw brokenWorktreeLink("worktree registration does not point back to workspace");
+        }
+        const commonGitDir = resolve(gitDir, commonDir);
+        if (!lstatSync(commonGitDir).isDirectory()) {
+            throw brokenWorktreeLink("worktree common directory is not a directory");
+        }
+        const managementRootPath = join(realpathSync(commonGitDir), "worktrees");
+        const managementRootObserved = lstatSync(managementRootPath);
+        if (!managementRootObserved.isDirectory() || managementRootObserved.isSymbolicLink()) {
+            throw brokenWorktreeLink("worktree management root is not a real directory");
+        }
+        if (!isSourceWorktreeManagementRoot(dirname(gitDir), realpathSync(commonGitDir))) {
+            throw brokenWorktreeLink("worktree management link crosses an untrusted root");
+        }
+        if (!sameExistingObject(dirname(realpathSync(gitDir)), managementRootPath)) {
+            throw new Error("worktree management entry is outside its source repository");
+        }
+        const listed = spawnSync(
+            "git",
+            ["--git-dir", realpathSync(commonGitDir), "worktree", "list", "--porcelain"],
+            { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+        );
+        if (listed.error || listed.status !== 0) {
+            throw new Error("unable to verify Git worktree registry");
+        }
+        const expectedPath = realpathSync(dirname(gitPath));
+        const registered = (listed.stdout ?? "")
+            .split(/\r?\n\r?\n/)
+            .some((record) => {
+                const lines = record.split(/\r?\n/);
+                const pathLine = lines.find((line) => line.startsWith("worktree "));
+                if (!pathLine || lines.some((line) => line.startsWith("prunable"))) return false;
+                const listedPath = pathLine.slice("worktree ".length).trim();
+                if (!listedPath) return false;
+                return sameDirectExistingObject(isAbsolute(listedPath)
+                    ? listedPath
+                    : resolve(gitDir, listedPath), expectedPath);
+            });
+        if (!registered) throw new Error("workspace is absent from Git worktree registry");
+        return "worktree";
+    } catch (error) {
+        throw new Error(`Unable to inspect worktree common directory '${gitPath}'.`, { cause: error });
+    }
+}
+
+function isTrackedGitlink(repositoryPath: string, entryName: string): boolean {
+    const result = spawnSync(
+        "git",
+        ["ls-files", "--stage", "--", `:(literal)${entryName}`],
+        { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    if (result.error || result.status !== 0) return false;
+    const matches = (result.stdout ?? "")
+        .split(/\r?\n/)
+        .filter((line) => {
+            const match = line.match(/^160000 [0-9a-f]+ 0\t(.+)$/i);
+            return match?.[1] === entryName;
+        });
+    return matches.length === 1;
+}
+
+function isUntrackedNestedRepository(repositoryPath: string, entryName: string): boolean {
+    const result = spawnSync(
+        "git",
+        ["ls-files", "-z", "--", `:(literal)${entryName}`],
+        { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    return !result.error && result.status === 0 && (result.stdout ?? "") === "";
+}
+
+function trackedGitlinkPaths(
+    repositoryPath: string,
+    strict: boolean,
+    identity: NestedRepositoryIdentity | null = null,
+): string[] {
+    const inspect = () => spawnSync(
+        "git",
+        ["ls-files", "--stage", "-z"],
+        {
+            cwd: identity ? dirname(identity.directory.realpath) : repositoryPath,
+            env: identity
+                ? pinnedNestedRepositoryEnvironment(identity)
+                : process.env,
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+        },
+    );
+    if (identity) assertNestedRepositoryIdentity(repositoryPath, identity);
+    const tracked = inspect();
+    if (identity) assertNestedRepositoryIdentity(repositoryPath, identity);
+    if (tracked.error || tracked.status !== 0) {
+        if (!strict) return [];
+        const detail = (tracked.stderr ?? "").trim()
+            || tracked.error?.message
+            || `git exited with status ${String(tracked.status)}`;
+        throw new Error(
+            `Unable to inspect tracked Git links in '${repositoryPath}': ${detail}`,
+        );
+    }
+
+    if (identity) {
+        const confirmed = inspect();
+        assertNestedRepositoryIdentity(repositoryPath, identity);
+        if (confirmed.error
+            || confirmed.status !== 0
+            || confirmed.stdout !== tracked.stdout) {
+            if (!strict) return [];
+            throw new Error(
+                `Tracked Git link inventory changed during inspection in '${repositoryPath}'.`,
+            );
+        }
+    }
+
+    const paths: string[] = [];
+    for (const record of (tracked.stdout ?? "").split("\0")) {
+        const match = record.match(/^160000 [0-9a-f]+ 0\t(.+)$/i);
+        if (!match) continue;
+        const path = normalizeNestedRepositoryName(match[1]);
+        if (!path) {
+            if (strict) {
+                throw new Error(
+                    `Invalid tracked Git link path in '${repositoryPath}'.`,
+                );
+            }
+            continue;
+        }
+        paths.push(path);
+    }
+    return paths;
+}
+
+type SubmoduleDeclaration = {
+    name: string;
+    path: string;
+};
+
+function submoduleDeclarations(
+    repositoryPath: string,
+    strict: boolean,
+): SubmoduleDeclaration[] {
+    const tracked = spawnSync(
+        "git",
+        ["ls-files", "--error-unmatch", "--", ".gitmodules"],
+        {
+            cwd: repositoryPath,
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+        },
+    );
+    if (tracked.status === 1) return [];
+    if (tracked.error || tracked.status !== 0) {
+        if (!strict) return [];
+        const detail = (tracked.stderr ?? "").trim()
+            || tracked.error?.message
+            || `git exited with status ${String(tracked.status)}`;
+        throw new Error(
+            `Unable to inspect tracked submodule configuration in '${repositoryPath}': ${detail}`,
+        );
+    }
+    const configured = spawnSync(
+        "git",
+        [
+            "config",
+            "--null",
+            "--blob",
+            ":.gitmodules",
+            "--get-regexp",
+            "^submodule\\..*\\.path$",
+        ],
+        {
+            cwd: repositoryPath,
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+        },
+    );
+    if (configured.error || (configured.status !== 0 && configured.status !== 1)) {
+        if (!strict) return [];
+        const detail = (configured.stderr ?? "").trim()
+            || configured.error?.message
+            || `git exited with status ${String(configured.status)}`;
+        throw new Error(
+            `Unable to inspect submodule configuration in '${repositoryPath}': ${detail}`,
+        );
+    }
+    if (configured.status === 1) return [];
+
+    const declarations: SubmoduleDeclaration[] = [];
+    for (const record of (configured.stdout ?? "").split("\0")) {
+        const separator = record.indexOf("\n");
+        if (separator < 0) continue;
+        const key = record.slice(0, separator);
+        const match = key.match(/^submodule\.(.*)\.path$/);
+        const name = match
+            ? normalizeNestedRepositoryName(match[1])
+            : null;
+        const path = normalizeNestedRepositoryName(record.slice(separator + 1));
+        if (!name || !path) {
+            if (strict) {
+                throw new Error(
+                    `Invalid submodule configuration in '${repositoryPath}'.`,
+                );
+            }
+            continue;
+        }
+        declarations.push({ name, path });
+    }
+    return declarations;
+}
+
+function trackedSubmoduleGitDirectoryIsOwned(
+    parentRepository: string,
+    candidateName: string,
+    candidatePath: string,
+): boolean {
+    if (!isTrackedGitlink(parentRepository, candidateName)) return false;
+    const declaration = submoduleDeclarations(parentRepository, true)
+        .find(({ path }) => path === candidateName);
+    const storageName = declaration?.name ?? candidateName;
+
+    const gitDirectory = spawnSync(
+        "git",
+        ["rev-parse", "--git-dir"],
+        {
+            cwd: parentRepository,
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+        },
+    );
+    const gitDirectoryOutput = (gitDirectory.stdout ?? "").trim();
+    if (
+        gitDirectory.error
+        || gitDirectory.status !== 0
+        || !gitDirectoryOutput
+    ) return false;
+
+    const expectedGitDirectory = resolve(
+        parentRepository,
+        gitDirectoryOutput,
+        "modules",
+        ...storageName.split("/"),
+    );
+    const gitFile = join(candidatePath, ".git");
+    const content = readFileSync(gitFile, "utf-8").trim();
+    const match = content.match(/^gitdir:\s*(.+)$/);
+    if (!match) return false;
+    const actualGitDirectory = resolve(dirname(gitFile), match[1].trim());
+    try {
+        const ownerGitDirectory = resolve(parentRepository, gitDirectoryOutput);
+        const ownerGitRealpath = realpathSync(ownerGitDirectory);
+        let observedPath = ownerGitDirectory;
+        for (const segment of ["modules", ...storageName.split("/")]) {
+            observedPath = join(observedPath, segment);
+            const observed = lstatSync(observedPath);
+            if (observed.isSymbolicLink()) return false;
+        }
+        const expected = lstatSync(expectedGitDirectory);
+        if (!expected.isDirectory()) return false;
+        const relativeExpected = relative(
+            ownerGitRealpath,
+            realpathSync(expectedGitDirectory),
+        );
+        if (relativePathEscapesRoot(relativeExpected)) return false;
+        return sameObservedPath(actualGitDirectory, expectedGitDirectory);
+    } catch {
+        return false;
+    }
+}
+
+function sameObservedPath(left: string, right: string): boolean {
+    try {
+        return realpathSync(left) === realpathSync(right);
+    } catch {
+        const resolvedLeft = resolve(left);
+        const resolvedRight = resolve(right);
+        return process.platform === "win32"
+            ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
+            : resolvedLeft === resolvedRight;
+    }
+}
+
+// Git for Windows and Node can spell the same existing path with different case.
+// A case-folded string alone is not ownership evidence (Windows directories may
+// be case-sensitive), so accept an alias only when both observations name the
+// same filesystem object.
+function sameExistingObject(left: string, right: string): boolean {
+    try {
+        if (realpathSync(left) === realpathSync(right)) return true;
+        if (process.platform !== "win32") return false;
+        const observedLeft = lstatSync(left, { bigint: true });
+        const observedRight = lstatSync(right, { bigint: true });
+        return observedLeft.ino !== 0n
+            && observedLeft.dev === observedRight.dev
+            && observedLeft.ino === observedRight.ino
+            && observedLeft.isDirectory() === observedRight.isDirectory()
+            && observedLeft.isFile() === observedRight.isFile();
+    } catch {
+        return false;
+    }
+}
+
+// A Git backpointer or registry path must name the requested path directly.
+// Case and slash spelling can differ on Windows, but a symlink alias must not
+// become ownership evidence merely because it resolves to the same file.
+function sameDirectExistingObject(left: string, right: string): boolean {
+    const resolvedLeft = resolve(left);
+    const resolvedRight = resolve(right);
+    const sameSpelling = process.platform === "win32"
+        ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
+        : resolvedLeft === resolvedRight;
+    return sameSpelling && sameExistingObject(left, right);
+}
+
+function isSourceWorktreeManagementRoot(
+    candidate: string,
+    commonGitDirectory: string,
+): boolean {
+    const expected = join(commonGitDirectory, "worktrees");
+    const resolvedCandidate = resolve(candidate);
+    const resolvedExpected = resolve(expected);
+    const hasExpectedSpelling = process.platform === "win32"
+        ? resolvedCandidate.toLowerCase() === resolvedExpected.toLowerCase()
+        : resolvedCandidate === resolvedExpected;
+    if (!hasExpectedSpelling) return false;
+    if (pathExistsStrict(candidate)) {
+        const candidateObserved = lstatSync(candidate);
+        if (!candidateObserved.isDirectory() || candidateObserved.isSymbolicLink()) return false;
+    }
+    if (pathExistsStrict(expected)) {
+        const expectedObserved = lstatSync(expected);
+        if (!expectedObserved.isDirectory() || expectedObserved.isSymbolicLink()) return false;
+        return sameExistingObject(candidate, expected);
+    }
+    return basename(candidate) === "worktrees"
+        && sameExistingObject(dirname(candidate), commonGitDirectory);
+}
+
+function registryContainsWorktree(repositoryPath: string, expectedPath: string): boolean {
+    const listed = spawnSync(
+        "git",
+        ["worktree", "list", "--porcelain"],
+        { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    if (listed.error || listed.status !== 0) {
+        throw new Error(`Unable to inspect Git worktree registry '${repositoryPath}'.`);
+    }
+    return (listed.stdout ?? "")
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("worktree "))
+        .some((line) => sameObservedPath(
+            line.slice("worktree ".length).trim(),
+            expectedPath,
+        ));
+}
+
+function siblingRegisteredWorkspacePaths(workspacePath: string): string[] {
+    const registered: string[] = [];
+    const workspaceName = basename(workspacePath);
+    let separatorIndex = workspaceName.indexOf(WORKTREE_SEPARATOR);
+    while (separatorIndex > 0) {
+        const sourcePath = join(
+            dirname(workspacePath),
+            workspaceName.slice(0, separatorIndex),
+        );
+        if (pathExistsStrict(sourcePath)) {
+            if (hasGitMetadata(sourcePath)
+                && registryContainsWorktree(sourcePath, workspacePath)) {
+                registered.push(workspacePath);
+            }
+            for (const entry of scanUnifiedNestedRepositories(
+                sourcePath,
+                { strict: true, allowRegisteredWorktrees: true },
+            )) {
+                if (entry.isGitRepo
+                    && registryContainsWorktree(
+                        entry.path,
+                        join(workspacePath, entry.name),
+                    )) {
+                    registered.push(join(workspacePath, entry.name));
+                }
+            }
+        }
+        separatorIndex = workspaceName.indexOf(
+            WORKTREE_SEPARATOR,
+            separatorIndex + WORKTREE_SEPARATOR.length,
+        );
+    }
+    return registered.filter((path, index) => (
+        registered.findIndex((candidate) => sameObservedPath(candidate, path)) === index
+    ));
+}
+
+function siblingSourceRegistersWorkspace(workspacePath: string): boolean {
+    return siblingRegisteredWorkspacePaths(workspacePath).length > 0;
+}
+
+function primarySourceRepositoryForWorktree(
+    worktreePath: string,
+): string | null {
+    const gitFile = join(worktreePath, ".git");
+    if (!pathExistsStrict(gitFile) || gitLinkKind(gitFile) !== "worktree") {
+        return null;
+    }
+    const content = readFileSync(gitFile, "utf-8").trim();
+    const match = content.match(/^gitdir:\s*(.+)$/);
+    if (!match) return null;
+    const worktreeGitDirectory = resolve(
+        dirname(gitFile),
+        match[1].trim(),
+    );
+    const commonGitDirectory = resolve(worktreeGitDirectory, "..", "..");
+    const listed = spawnSync(
+        "git",
+        [
+            "--git-dir",
+            commonGitDirectory,
+            "worktree",
+            "list",
+            "--porcelain",
+        ],
+        { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    if (listed.error || listed.status !== 0) return null;
+    for (const line of (listed.stdout ?? "").split(/\r?\n/)) {
+        if (!line.startsWith("worktree ")) continue;
+        const candidate = line.slice("worktree ".length).trim();
+        if (!candidate || sameObservedPath(candidate, worktreePath)) continue;
+        const candidateGit = join(candidate, ".git");
+        if (!pathExistsStrict(candidateGit)) continue;
+        const observed = lstatSync(candidateGit);
+        if (observed.isFile() && gitLinkKind(candidateGit) === "worktree") {
+            continue;
+        }
+        if (isValidWorktree(worktreePath, candidate)) return candidate;
+    }
+    return null;
+}
+
+function branchRepositories(
+    workspacePath: string,
+    expectedTopology?: "root" | "children",
+    options: { allowTrackedGitlinks?: boolean } = {},
+): Array<{ name: string; path: string }> {
+    const rootGit = join(workspacePath, ".git");
+    const hasRootGit = pathExistsStrict(rootGit);
+    if (expectedTopology === "root" && !hasRootGit) {
+        throw new Error(`Workspace root metadata changed during inspection: ${rootGit}`);
+    }
+    if (expectedTopology === "children" && hasRootGit) {
+        throw new Error(`Workspace topology changed during inspection: ${rootGit}`);
+    }
+    if (hasRootGit) {
+        const repositories = [{ name: basename(workspacePath), path: workspacePath }];
+        const rootKind = gitLinkKind(rootGit);
+        const sourceRoot = rootKind === "worktree"
+            ? primarySourceRepositoryForWorktree(workspacePath)
+            : null;
+        if (rootKind === "worktree" && !sourceRoot) {
+            throw new Error(
+                `Workspace root source ownership could not be established: ${workspacePath}`,
+            );
+        }
+        const sourceRepositories = sourceRoot
+            ? new Map(
+                scanUnifiedNestedRepositories(sourceRoot, { strict: true })
+                    .filter((entry) => entry.isGitRepo)
+                    .map((entry) => [entry.name, entry.path]),
+            )
+            : null;
+        // The workspace scan, and only it. The `sourceRoot` scan above keeps aborting: a
+        // submodule missing on the SOURCE side is what makes a newly created workspace a half
+        // checkout, which is the case the refusal exists for.
+        const nestedRepositories = scanUnifiedNestedRepositories(
+            workspacePath,
+            {
+                strict: true,
+                allowRegisteredWorktrees: true,
+                openingExistingWorkspace: true,
+            },
+        );
+        for (const entry of nestedRepositories) {
+            if (!entry.isGitRepo) continue;
+            const kind = gitLinkKind(join(entry.path, ".git"));
+            if (kind === "worktree") {
+                const sourceRepository = sourceRepositories?.get(entry.name);
+                if (
+                    sourceRepositories
+                    && (
+                        !sourceRepository
+                        || !isValidWorktree(entry.path, sourceRepository)
+                    )
+                ) {
+                    throw new Error(
+                        `Workspace repository '${entry.name}' is not owned by its source repository.`,
+                    );
+                }
+                repositories.push({ name: entry.name, path: entry.path });
+                continue;
+            }
+            if (kind === "gitlink"
+                && isNestedTrackedGitlink(
+                    workspacePath,
+                    nestedRepositories,
+                    entry,
+                )) {
+                if (options.allowTrackedGitlinks) continue;
+                throw new Error(
+                    `Workspace tracked submodule '${entry.name}' is not a linked worktree.`,
+                );
+            }
+            if (kind === "directory"
+                && !sourceRepositories?.has(entry.name)
+                && isUntrackedNestedRepository(workspacePath, entry.name)) continue;
+            throw new Error(`Workspace contains unmanaged Git repository '${entry.name}'.`);
+        }
+        return repositories;
+    }
+    return scanDirectory(workspacePath, { strict: true })
+        .filter((entry) => entry.isGitRepo)
+        .map(({ name, path }) => ({ name, path }));
+}
+
+export function hasGitMetadata(repositoryPath: string): boolean {
+    const gitPath = join(resolve(repositoryPath), ".git");
+    try {
+        lstatSync(gitPath);
+        return true;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw new Error(`Unable to inspect Git metadata '${gitPath}'.`, { cause: error });
+    }
+}
+
+function assertWorkspaceOwnership(
+    workspacePath: string,
+    sourcePath: string,
+    options: { allowTrackedGitlinks?: boolean } = {},
+): void {
+    const resolvedSource = resolve(sourcePath);
+    if (hasGitMetadata(resolvedSource)) {
+        assertWorkspaceRootOwnership(workspacePath, resolvedSource);
+        const sourceGit = join(resolvedSource, ".git");
+        const sourceIsWorktree = lstatSync(sourceGit).isFile()
+            && gitLinkKind(sourceGit) === "worktree";
+        const sourceRepositories = new Map(
+            scanUnifiedNestedRepositories(
+                resolvedSource,
+                {
+                    strict: true,
+                    allowRegisteredWorktrees: sourceIsWorktree,
+                },
+            )
+                .filter((entry) => entry.isGitRepo)
+                .map((entry) => [entry.name, entry]),
+        );
+        const sourceRepositoryEntries = [...sourceRepositories.values()];
+        for (const source of sourceRepositoryEntries) {
+            const destinationGit = join(workspacePath, source.name, ".git");
+            if (!pathExistsStrict(destinationGit)
+                && !(options.allowTrackedGitlinks && isNestedTrackedGitlink(
+                    resolvedSource,
+                    sourceRepositoryEntries,
+                    source,
+                ))) {
+                throw new Error(
+                    `Workspace repository '${source.name}' is not owned by its source repository.`,
+                );
+            }
+        }
+        // Also the workspace, also already existing. The source scan in this same function keeps
+        // aborting; it is the one that decides whether a workspace can be created at all.
+        const destinationRepositories = scanUnifiedNestedRepositories(
+            workspacePath,
+            {
+                strict: true,
+                allowRegisteredWorktrees: true,
+                openingExistingWorkspace: true,
+            },
+        );
+        for (const destination of destinationRepositories) {
+            const source = sourceRepositories.get(destination.name);
+            if (!source) {
+                if (gitLinkKind(join(destination.path, ".git")) === "directory"
+                    && isUntrackedNestedRepository(workspacePath, destination.name)) continue;
+                throw new Error(`Workspace contains unowned Git repository '${destination.name}'.`);
+            }
+            const kind = gitLinkKind(join(destination.path, ".git"));
+            if (kind === "gitlink"
+                && isNestedTrackedGitlink(
+                    workspacePath,
+                    destinationRepositories,
+                    destination,
+                )) {
+                if (options.allowTrackedGitlinks) continue;
+                throw new Error(
+                    `Workspace tracked submodule '${destination.name}' is not a linked worktree.`,
+                );
+            }
+            if (kind !== "worktree" || !isValidWorktree(destination.path, source.path)) {
+                throw new Error(`Workspace repository '${destination.name}' is not owned by its source repository.`);
+            }
+        }
+        return;
+    }
+
+    const sourceRepositories = scanDirectory(resolvedSource, { strict: true }).filter((entry) => entry.isGitRepo);
+    if (sourceRepositories.length === 0) {
+        throw new Error(`Unable to verify workspace ownership: no source repositories found.`);
+    }
+    for (const source of sourceRepositories) {
+        const destination = join(workspacePath, source.name);
+        if (!isValidWorktree(destination, source.path)) {
+            throw new Error(`Workspace repository '${source.name}' is not owned by its source repository.`);
+        }
+    }
+    const sourceNames = new Set(sourceRepositories.map(({ name }) => name));
+    for (const destination of scanDirectory(workspacePath, { strict: true }).filter((entry) => entry.isGitRepo)) {
+        if (!sourceNames.has(destination.name)) {
+            throw new Error(`Workspace contains unowned Git repository '${destination.name}'.`);
+        }
+    }
+}
+
+export function assertWorkspaceRootOwnership(
+    workspacePath: string,
+    sourcePath: string,
+): void {
+    const resolvedSource = resolve(sourcePath);
+    if (!isValidWorktree(workspacePath, resolvedSource)) {
+        let missingManagementEntry: string | null = null;
+        try {
+            const gitFile = join(workspacePath, ".git");
+            if (lstatSync(gitFile).isFile()) {
+                const match = readFileSync(gitFile, "utf-8").trim().match(/^gitdir:\s*(.+)$/);
+                if (match) {
+                    const managementEntry = resolve(dirname(gitFile), match[1].trim());
+                    const sourceIdentity = captureNestedRepositoryIdentity(resolvedSource);
+                    if (isSourceWorktreeManagementRoot(
+                        dirname(managementEntry),
+                        sourceIdentity.commonDirectory.realpath,
+                    )
+                        && !pathExistsStrict(managementEntry)) {
+                        missingManagementEntry = managementEntry;
+                    }
+                }
+            }
+        } catch {
+            // A failed diagnostic must not weaken the ownership refusal.
+        }
+        const message = (
+            `Workspace ${terminalSafe(workspacePath)} is not owned by source repository ${terminalSafe(resolvedSource)}.`
+            + `\nInspect Git's registration: git -C ${pasteableArgument(resolvedSource)} worktree list --porcelain`
+            + `\nInspect the workspace Git link: ${terminalSafe(join(workspacePath, ".git"))}`
+            + (missingManagementEntry
+                ? `\nGit worktree management entry is missing: ${terminalSafe(missingManagementEntry)}`
+                    + "\nccc will verify whether this Git registration can be recreated in place."
+                    + "\nWorkspace files, including uncommitted files, will be left in place."
+                : `\nIf this worktree was moved and the source owns it, run: git -C ${pasteableArgument(resolvedSource)} worktree repair ${pasteableArgument(workspacePath)}`)
+        );
+        if (missingManagementEntry) {
+            throw new MissingWorkspaceRootRegistrationError(
+                message,
+                workspacePath,
+                resolvedSource,
+                missingManagementEntry,
+            );
+        }
+        throw new Error(message);
+    }
+    assertWorkspaceBranchIsExclusive(workspacePath, resolvedSource);
+}
+
+export class MissingWorkspaceRootRegistrationError extends Error {
+    constructor(
+        message: string,
+        readonly workspacePath: string,
+        readonly sourcePath: string,
+        readonly managementEntry: string,
+    ) {
+        super(message);
+        this.name = "MissingWorkspaceRootRegistrationError";
+    }
+}
+
+type WorkspaceOwnershipEvidence = {
+    sourcePath: string;
+    sourceIdentity: NestedRepositoryIdentity;
+    destinationPath: string;
+    destinationIdentity: NestedRepositoryIdentity;
+    expectedBranch: string;
+};
+
+function captureNestedWorkspaceOwnershipEvidence(
+    workspacePath: string,
+    sourcePath: string,
+    expectedBranch: string,
+): WorkspaceOwnershipEvidence | null {
+    const sourceOwner = primarySourceRepositoryForWorktree(sourcePath);
+    const sourceRootIdentity = captureNestedRepositoryIdentity(sourcePath);
+    const sourceRepositories = withSanitizedGitRepositoryEnvironment(
+        () => scanUnifiedNestedRepositories(
+            sourcePath,
+            {
+                strict: true,
+                allowRegisteredWorktrees: Boolean(sourceOwner),
+            },
+        ),
+    ).filter((entry) => entry.isGitRepo);
+    assertNestedRepositoryIdentity(sourcePath, sourceRootIdentity);
+    for (const source of sourceRepositories) {
+        const destination = join(workspacePath, source.name);
+        const sourceIdentity = captureNestedRepositoryIdentity(source.path);
+        if (!pathExistsStrict(join(destination, ".git"))
+            || !withPinnedNestedRepository(
+                sourceIdentity,
+                () => isValidWorktree(destination, source.path),
+            )) continue;
+        const destinationIdentity = captureNestedRepositoryIdentity(destination);
+        const branch = spawnSync(
+            "git",
+            ["rev-parse", "--abbrev-ref", "HEAD"],
+            {
+                cwd: destinationIdentity.directory.realpath,
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+                env: pinnedNestedRepositoryEnvironment(destinationIdentity),
+            },
+        );
+        assertNestedRepositoryIdentity(source.path, sourceIdentity);
+        assertNestedRepositoryIdentity(destination, destinationIdentity);
+        if (!branch.error && branch.status === 0
+            && (branch.stdout ?? "").trim() === expectedBranch) {
+            return {
+                sourcePath: source.path,
+                sourceIdentity,
+                destinationPath: destination,
+                destinationIdentity,
+                expectedBranch,
+            };
+        }
+    }
+    return null;
+}
+
+function assertWorkspaceOwnershipEvidence(
+    evidence: WorkspaceOwnershipEvidence,
+): void {
+    assertNestedRepositoryIdentity(evidence.sourcePath, evidence.sourceIdentity);
+    assertNestedRepositoryIdentity(
+        evidence.destinationPath,
+        evidence.destinationIdentity,
+    );
+    const branch = spawnSync(
+        "git",
+        ["rev-parse", "--abbrev-ref", "HEAD"],
+        {
+            cwd: evidence.destinationIdentity.directory.realpath,
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+            env: pinnedNestedRepositoryEnvironment(evidence.destinationIdentity),
+        },
+    );
+    assertNestedRepositoryIdentity(
+        evidence.destinationPath,
+        evidence.destinationIdentity,
+    );
+    if (branch.error || branch.status !== 0
+        || (branch.stdout ?? "").trim() !== evidence.expectedBranch) {
+        throw new Error("Nested workspace ownership branch changed during recovery.");
+    }
+}
+
+class WorkspaceRootRecoveryRollbackError extends Error {}
+
+class WorkspaceBranchConflictError extends Error {}
+
+function liveWorktreeBranchConflicts(
+    sourcePath: string,
+    sourceIdentity: NestedRepositoryIdentity,
+    workspacePath: string,
+    expectedRef: string,
+): string[] {
+    const listed = spawnSync(
+        "git",
+        ["worktree", "list", "--porcelain", "-z"],
+        {
+            cwd: sourceIdentity.directory.realpath,
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+            env: isolatedPinnedRepositoryEnvironment(sourceIdentity),
+        },
+    );
+    assertNestedRepositoryIdentity(sourcePath, sourceIdentity);
+    if (listed.error || listed.status !== 0) {
+        throw new Error(`Unable to inspect Git worktree registry '${sourcePath}'.`);
+    }
+    return (listed.stdout ?? "")
+        .split("\0\0")
+        .map((record) => record.split("\0"))
+        .filter((lines) => lines.includes(`branch ${expectedRef}`))
+        .map((lines) => lines.find((line) => line.startsWith("worktree ")))
+        .filter((line): line is string => Boolean(line))
+        .map((line) => line.slice("worktree ".length))
+        .filter((candidate) => candidate
+            && !sameExistingObject(candidate, workspacePath)
+            && pathExistsStrict(candidate));
+}
+
+function throwOnLiveWorkspaceBranchConflict(
+    sourcePath: string,
+    sourceIdentity: NestedRepositoryIdentity,
+    workspacePath: string,
+    expectedRef: string,
+): void {
+    const conflicts = liveWorktreeBranchConflicts(
+        sourcePath,
+        sourceIdentity,
+        workspacePath,
+        expectedRef,
+    );
+    if (conflicts.length > 0) {
+        throw new WorkspaceBranchConflictError(
+            `Workspace branch '${expectedRef.slice("refs/heads/".length)}' is also checked out at '${conflicts[0]}'; refusing unsafe shared-branch worktree.`,
+        );
+    }
+}
+
+function readWorkspaceSymbolicRef(
+    identity: NestedRepositoryIdentity,
+): string | null {
+    const symbolicRef = spawnSync(
+        "git",
+        ["symbolic-ref", "--quiet", "HEAD"],
+        {
+            cwd: identity.directory.realpath,
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+            env: isolatedPinnedRepositoryEnvironment(identity),
+        },
+    );
+    if (!symbolicRef.error && symbolicRef.status === 1) return null;
+    const branchRef = (symbolicRef.stdout ?? "").trim();
+    if (symbolicRef.error || symbolicRef.status !== 0 || !branchRef) {
+        throw new Error(`Unable to inspect workspace branch '${identity.directory.realpath}'.`);
+    }
+    return branchRef;
+}
+
+function assertWorkspaceBranchIsExclusive(
+    workspacePath: string,
+    sourcePath: string,
+    expectedBranch?: string,
+): void {
+    const sourceIdentity = captureNestedRepositoryIdentity(sourcePath);
+    const workspaceIdentity = captureNestedRepositoryIdentity(workspacePath);
+    if (!sameExistingObject(
+        sourceIdentity.commonDirectory.realpath,
+        workspaceIdentity.commonDirectory.realpath,
+    )) {
+        throw new Error(`Workspace is not owned by source repository '${resolve(sourcePath)}'.`);
+    }
+
+    const branchRef = readWorkspaceSymbolicRef(workspaceIdentity);
+    assertNestedRepositoryIdentity(sourcePath, sourceIdentity);
+    assertNestedRepositoryIdentity(workspacePath, workspaceIdentity);
+    if (branchRef === null) {
+        if (readWorkspaceSymbolicRef(workspaceIdentity) !== null) {
+            throw new Error("Workspace branch changed during ownership validation.");
+        }
+        assertNestedRepositoryIdentity(sourcePath, sourceIdentity);
+        assertNestedRepositoryIdentity(workspacePath, workspaceIdentity);
+        return;
+    }
+    const expectedRef = expectedBranch ? `refs/heads/${expectedBranch}` : branchRef;
+    if (branchRef !== expectedRef) {
+        throw new Error(
+            `Workspace branch changed during ownership validation: expected '${expectedRef}', found '${branchRef}'.`,
+        );
+    }
+
+    throwOnLiveWorkspaceBranchConflict(
+        sourcePath,
+        sourceIdentity,
+        workspacePath,
+        expectedRef,
+    );
+    assertNestedRepositoryIdentity(sourcePath, sourceIdentity);
+    assertNestedRepositoryIdentity(workspacePath, workspaceIdentity);
+    if (readWorkspaceSymbolicRef(workspaceIdentity) !== branchRef) {
+        throw new Error("Workspace branch changed during ownership validation.");
+    }
+    assertNestedRepositoryIdentity(sourcePath, sourceIdentity);
+    assertNestedRepositoryIdentity(workspacePath, workspaceIdentity);
+}
+
+function recreateMissingWorkspaceRootRegistration(
+    workspacePath: string,
+    sourcePath: string,
+    expectedBranch: string,
+    commonGitDirectory: string,
+    sourceIdentity: NestedRepositoryIdentity,
+    staleGitDirectory: string,
+    workspaceIdentity: DirectoryIdentity,
+    gitFileIdentity: DirectoryIdentity,
+    gitFileContent: string,
+    mode: "inspect" | "confirmed",
+    reportFailure?: (reason: string) => void,
+    preflightFence?: () => void,
+): boolean {
+    const refuse = (stage: string, gitStderr?: string): false => {
+        const reason = gitStderr ? gitFailureReason(gitStderr) : undefined;
+        reportFailure?.(reason ? `${stage}: ${reason}` : stage);
+        return false;
+    };
+    const managementRoot = resolve(commonGitDirectory, "worktrees");
+    const managementName = basename(staleGitDirectory);
+    const workspaceManagementName = basename(workspacePath);
+    const ownershipEvidence = captureNestedWorkspaceOwnershipEvidence(
+        workspacePath,
+        sourcePath,
+        expectedBranch,
+    );
+    const managementSuffix = managementName.slice(workspaceManagementName.length);
+    if (!isSourceWorktreeManagementRoot(dirname(staleGitDirectory), commonGitDirectory)
+        || !managementName.startsWith(workspaceManagementName)
+        || (managementSuffix !== "" && !/^\d+$/.test(managementSuffix))
+        || pathExistsStrict(staleGitDirectory)) {
+        return refuse("workspace Git link no longer names a missing direct child of the source management root");
+    }
+
+    const assertRecoveryAuthority = (expectOriginalGitFile = true): void => {
+        if (expectOriginalGitFile) preflightFence?.();
+        assertNestedRepositoryIdentity(sourcePath, sourceIdentity);
+        assertDirectoryIdentity(workspacePath, workspaceIdentity);
+        if (expectOriginalGitFile) {
+            assertPathIdentity(join(workspacePath, ".git"), gitFileIdentity);
+            if (readFileSync(join(workspacePath, ".git"), "utf-8") !== gitFileContent) {
+                throw new Error("Workspace Git metadata changed during root registration recovery.");
+            }
+        }
+        if (ownershipEvidence) assertWorkspaceOwnershipEvidence(ownershipEvidence);
+    };
+
+    const expectedRef = `refs/heads/${expectedBranch}`;
+    const sourceEnvironment = pinnedNestedRepositoryEnvironment(sourceIdentity);
+    const branchHead = spawnSync(
+        "git",
+        ["rev-parse", "--verify", "--quiet", `${expectedRef}^{commit}`],
+        {
+            cwd: sourceIdentity.directory.realpath,
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+            env: sourceEnvironment,
+        },
+    );
+    const expectedOid = (branchHead.stdout ?? "").trim();
+    if (branchHead.error || branchHead.status !== 0 || !expectedOid) {
+        return refuse("expected branch is unavailable", branchHead.stderr ?? undefined);
+    }
+    throwOnLiveWorkspaceBranchConflict(
+        sourcePath,
+        sourceIdentity,
+        workspacePath,
+        expectedRef,
+    );
+    assertRecoveryAuthority();
+    if (mode === "inspect") return true;
+
+    const temporaryPath = join(
+        dirname(workspacePath),
+        `.${basename(workspacePath)}.ccc-register-${randomBytes(16).toString("hex")}`,
+    );
+    mkdirSync(temporaryPath);
+    const temporaryIdentity = captureDirectoryIdentity(temporaryPath);
+    let temporaryRegistered = false;
+    let workspaceRewritten = false;
+    let registrationRewritten = false;
+    let managementGitdir = "";
+    let managementGitdirOriginal = "";
+    let workspaceInstalledIdentity: DirectoryIdentity | null = null;
+    let registrationInstalledIdentity: DirectoryIdentity | null = null;
+    let workspaceInstalledContent = "";
+    let registrationInstalledContent = "";
+    let createdManagementIdentity: DirectoryIdentity | null = null;
+    let createdManagementHeadIdentity: FileIdentity | null = null;
+    let createdManagementTree: CapturedDirectoryTree | null = null;
+    let managementRootIdentity: DirectoryIdentity | null = null;
+    let temporaryGitFileIdentity: DirectoryIdentity | null = null;
+    let temporaryGitFileContent = "";
+    let failedRegistrationCommand = false;
+    try {
+        assertRecoveryAuthority();
+        const registered = spawnSync(
+            "git",
+            ["worktree", "add", "--no-checkout", temporaryPath, expectedBranch],
+            {
+                cwd: sourceIdentity.directory.realpath,
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+                env: sourceEnvironment,
+            },
+        );
+        failedRegistrationCommand = Boolean(registered.error) || registered.status !== 0;
+        if (failedRegistrationCommand) {
+            return refuse("git worktree add failed", registered.stderr ?? registered.error?.message);
+        }
+        temporaryRegistered = true;
+
+        const temporaryGitFile = join(temporaryPath, ".git");
+        const temporaryContent = readFileSync(temporaryGitFile, "utf-8");
+        temporaryGitFileIdentity = capturePathIdentity(temporaryGitFile);
+        temporaryGitFileContent = temporaryContent;
+        assertPathIdentity(temporaryGitFile, temporaryGitFileIdentity);
+        const temporaryMatch = temporaryContent.trim().match(/^gitdir:\s*(.+)$/);
+        if (!temporaryMatch) return refuse("temporary Git link is invalid");
+        const managementDirectory = resolve(
+            dirname(temporaryGitFile),
+            temporaryMatch[1].trim(),
+        );
+        const managementIdentity = captureDirectoryIdentity(managementDirectory);
+        createdManagementIdentity = managementIdentity;
+        managementRootIdentity = captureDirectoryIdentity(managementRoot);
+        if (!sameExistingObject(dirname(managementIdentity.realpath), managementRootIdentity.realpath)
+            || pathExistsStrict(staleGitDirectory)) {
+            return refuse("temporary registration is outside the source management root or the old entry reappeared");
+        }
+        const managementHead = join(managementDirectory, "HEAD");
+        managementGitdir = join(managementDirectory, "gitdir");
+        managementGitdirOriginal = readFileSync(managementGitdir, "utf-8");
+        const managementHeadIdentity = captureFileIdentity(managementHead);
+        createdManagementHeadIdentity = managementHeadIdentity;
+        const managementHeadContent = readFileSync(managementHead, "utf-8");
+        createdManagementTree = captureDirectoryTree(managementDirectory);
+        if (!sameExistingObject(dirname(managementIdentity.realpath), managementRoot)
+            || managementHeadContent.trim() !== `ref: ${expectedRef}`) {
+            return refuse("temporary registration path or branch does not match");
+        }
+        const temporaryRepositoryIdentity = captureNestedRepositoryIdentity(
+            temporaryPath,
+        );
+        const temporaryEnvironment = pinnedNestedRepositoryEnvironment(
+            temporaryRepositoryIdentity,
+        );
+        const registeredHead = spawnSync(
+            "git",
+            ["rev-parse", "HEAD"],
+            {
+                cwd: temporaryRepositoryIdentity.directory.realpath,
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+                env: temporaryEnvironment,
+            },
+        );
+        const currentBranchHead = spawnSync(
+            "git",
+            ["rev-parse", "--verify", "--quiet", `${expectedRef}^{commit}`],
+            {
+                cwd: sourceIdentity.directory.realpath,
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+                env: sourceEnvironment,
+            },
+        );
+        if (registeredHead.error || registeredHead.status !== 0
+            || currentBranchHead.error || currentBranchHead.status !== 0
+            || (registeredHead.stdout ?? "").trim() !== expectedOid
+            || (currentBranchHead.stdout ?? "").trim() !== expectedOid) {
+            return refuse("temporary registration HEAD changed");
+        }
+        const initializedIndex = spawnSync(
+            "git",
+            ["read-tree", expectedOid],
+            {
+                cwd: temporaryRepositoryIdentity.directory.realpath,
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+                env: temporaryEnvironment,
+            },
+        );
+        createdManagementTree = captureDirectoryTree(managementDirectory);
+        if (initializedIndex.error || initializedIndex.status !== 0) {
+            return refuse("git read-tree failed", initializedIndex.stderr ?? initializedIndex.error?.message);
+        }
+        const stagedDiff = spawnSync(
+            "git",
+            ["diff", "--cached", "--quiet", expectedOid],
+            {
+                cwd: temporaryRepositoryIdentity.directory.realpath,
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+                env: temporaryEnvironment,
+            },
+        );
+        if (stagedDiff.error || stagedDiff.status !== 0) {
+            return refuse("temporary index does not match the expected branch", stagedDiff.stderr ?? stagedDiff.error?.message);
+        }
+        const managementIndex = join(managementDirectory, "index");
+        const managementIndexIdentity = captureFileIdentity(managementIndex);
+        const managementIndexContent = readFileSync(managementIndex);
+        assertFileIdentity(managementHead, managementHeadIdentity);
+        if (readFileSync(managementHead, "utf-8") !== managementHeadContent) {
+            return refuse("temporary registration branch changed");
+        }
+
+        const portableGitDirectory = portableWorktreeGitDirectory(
+            dirname(join(workspacePath, ".git")),
+            managementDirectory,
+        );
+        assertRecoveryAuthority();
+        if (!managementRootIdentity) return refuse("temporary management root identity is unavailable");
+        assertDirectoryIdentity(managementRoot, managementRootIdentity);
+        if (pathExistsStrict(staleGitDirectory)) return refuse("old management entry reappeared");
+        assertDirectoryIdentity(workspacePath, workspaceIdentity);
+        workspaceInstalledContent = `gitdir: ${portableGitDirectory}\n`;
+        normalizeWorktreeMetadataFile(
+            join(workspacePath, ".git"),
+            workspaceInstalledContent,
+            gitFileIdentity,
+            gitFileContent,
+        );
+        workspaceRewritten = true;
+        workspaceInstalledIdentity = capturePathIdentity(join(workspacePath, ".git"));
+        registrationInstalledContent = `${portableWorktreeBackpointer(join(workspacePath, ".git"))}\n`;
+        normalizeWorktreeMetadataFile(
+            managementGitdir,
+            registrationInstalledContent,
+            capturePathIdentity(managementGitdir),
+            managementGitdirOriginal,
+        );
+        registrationRewritten = true;
+        registrationInstalledIdentity = capturePathIdentity(managementGitdir);
+
+        if (!withPinnedNestedRepository(
+            sourceIdentity,
+            () => isValidWorktree(workspacePath, sourcePath,
+                (reason) => reportFailure?.(`relinked workspace validation failed: ${reason}`)),
+        )) return false;
+        const finalBranchHead = spawnSync(
+            "git",
+            ["rev-parse", "--verify", "--quiet", `${expectedRef}^{commit}`],
+            {
+                cwd: sourceIdentity.directory.realpath,
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+                env: sourceEnvironment,
+            },
+        );
+        if (finalBranchHead.error || finalBranchHead.status !== 0
+            || (finalBranchHead.stdout ?? "").trim() !== expectedOid) {
+            return refuse("expected branch changed after registration", finalBranchHead.stderr ?? undefined);
+        }
+        assertRecoveryAuthority(false);
+        assertDirectoryIdentity(managementRoot, managementRootIdentity);
+        if (pathExistsStrict(staleGitDirectory)) return refuse("old management entry reappeared after registration");
+        assertDirectoryIdentity(managementDirectory, managementIdentity);
+        assertFileIdentity(managementHead, managementHeadIdentity);
+        assertFileIdentity(managementIndex, managementIndexIdentity);
+        if (readFileSync(managementHead, "utf-8") !== managementHeadContent
+            || !readFileSync(managementIndex).equals(managementIndexContent)) {
+            return refuse("temporary registration HEAD or index changed");
+        }
+        if (!workspaceInstalledIdentity || !registrationInstalledIdentity) {
+            return refuse("installed Git metadata identity is unavailable");
+        }
+        assertPathIdentity(join(workspacePath, ".git"), workspaceInstalledIdentity);
+        assertPathIdentity(managementGitdir, registrationInstalledIdentity);
+        if (readFileSync(join(workspacePath, ".git"), "utf-8")
+                !== workspaceInstalledContent
+            || readFileSync(managementGitdir, "utf-8")
+                !== registrationInstalledContent) return refuse("installed Git metadata changed");
+        assertDirectoryIdentity(temporaryPath, temporaryIdentity);
+        if (readdirSync(temporaryPath).some((entry) => entry !== ".git")) {
+            return refuse("temporary workspace contains unexpected content");
+        }
+        if (!temporaryGitFileIdentity) return refuse("temporary Git link identity is unavailable");
+        assertPathIdentity(temporaryGitFile, temporaryGitFileIdentity);
+        if (readFileSync(temporaryGitFile, "utf-8") !== temporaryGitFileContent) {
+            return refuse("temporary Git link changed");
+        }
+        unlinkSync(temporaryGitFile);
+        rmdirSync(temporaryPath);
+        temporaryRegistered = false;
+        return true;
+    } finally {
+        if (failedRegistrationCommand && !temporaryRegistered) {
+            try {
+                assertNestedRepositoryIdentity(sourcePath, sourceIdentity);
+                assertDirectoryIdentity(temporaryPath, temporaryIdentity);
+                const temporaryEntries = readdirSync(temporaryPath);
+                if (temporaryEntries.length > 1
+                    || (temporaryEntries.length === 1
+                        && temporaryEntries[0] !== ".git")) {
+                    throw new Error(
+                        "failed registration left unexpected temporary workspace content",
+                    );
+                }
+                if (temporaryEntries.length === 1
+                    && !lstatSync(join(temporaryPath, ".git")).isFile()) {
+                    throw new Error(
+                        "failed registration left unexpected temporary Git metadata",
+                    );
+                }
+                if (registeredWorktreePath(sourcePath, temporaryPath)) {
+                    const removed = spawnSync(
+                        "git",
+                        ["worktree", "remove", "--force", temporaryPath],
+                        {
+                            cwd: sourceIdentity.directory.realpath,
+                            encoding: "utf-8",
+                            stdio: ["pipe", "pipe", "pipe"],
+                            env: sourceEnvironment,
+                        },
+                    );
+                    if (removed.error || removed.status !== 0
+                        || pathExistsStrict(temporaryPath)
+                        || registeredWorktreePath(sourcePath, temporaryPath)) {
+                        throw new Error("failed registration could not be rolled back");
+                    }
+                } else if (temporaryEntries.length === 1) {
+                    const failedGitFile = join(temporaryPath, ".git");
+                    const failedGitFileIdentity = capturePathIdentity(failedGitFile);
+                    assertPathIdentity(failedGitFile, failedGitFileIdentity);
+                    unlinkSync(failedGitFile);
+                    assertDirectoryIdentity(temporaryPath, temporaryIdentity);
+                    rmdirSync(temporaryPath);
+                }
+            } catch (error) {
+                throw new WorkspaceRootRecoveryRollbackError(
+                    "Workspace root registration recovery rollback failed; workspace content was preserved.",
+                    { cause: error },
+                );
+            }
+        }
+        if (temporaryRegistered) {
+            try {
+                if (registrationRewritten && managementGitdir) {
+                    if (!registrationInstalledIdentity) {
+                        throw new Error("missing installed registration identity");
+                    }
+                    normalizeWorktreeMetadataFile(
+                        managementGitdir,
+                        managementGitdirOriginal,
+                        registrationInstalledIdentity,
+                        registrationInstalledContent,
+                    );
+                }
+                if (workspaceRewritten) {
+                    if (!workspaceInstalledIdentity) {
+                        throw new Error("missing installed workspace identity");
+                    }
+                    normalizeWorktreeMetadataFile(
+                        join(workspacePath, ".git"),
+                        gitFileContent,
+                        workspaceInstalledIdentity,
+                        workspaceInstalledContent,
+                    );
+                }
+                assertDirectoryIdentity(temporaryPath, temporaryIdentity);
+                if (readdirSync(temporaryPath).some((entry) => entry !== ".git")) {
+                    throw new Error("temporary registration directory contains unexpected content");
+                }
+                if (!temporaryGitFileIdentity) {
+                    throw new Error("missing temporary Git file identity during rollback");
+                }
+                assertPathIdentity(join(temporaryPath, ".git"), temporaryGitFileIdentity);
+                if (readFileSync(join(temporaryPath, ".git"), "utf-8")
+                    !== temporaryGitFileContent) {
+                    throw new Error("temporary Git file changed during rollback");
+                }
+                unlinkSync(join(temporaryPath, ".git"));
+                rmdirSync(temporaryPath);
+                if (!createdManagementIdentity || !createdManagementHeadIdentity) {
+                    throw new Error("missing created registration identity during rollback");
+                }
+                if (!createdManagementTree) {
+                    throw new Error("missing created registration tree during rollback");
+                }
+                const managementIdentity = createdManagementIdentity;
+                const managementTree = createdManagementTree;
+                assertDirectoryIdentity(
+                    managementIdentity.realpath,
+                    managementIdentity,
+                );
+                assertFileIdentity(
+                    join(managementIdentity.realpath, "HEAD"),
+                    createdManagementHeadIdentity,
+                );
+                const staleRegistration: MissingWorktreeRegistrationFence = {
+                    managementIdentity,
+                    managementGitdirIdentity: captureFileIdentity(managementGitdir),
+                    managementHeadIdentity: createdManagementHeadIdentity,
+                    expectedOid,
+                    expectedRef,
+                };
+                withPinnedNestedRepository(sourceIdentity, () => {
+                    if (!missingWorktreeManagementMatches(
+                        sourcePath,
+                        temporaryPath,
+                        staleRegistration,
+                    )) throw new Error("created registration changed during rollback");
+                    assertCapturedDirectoryTree(
+                        managementIdentity.realpath,
+                        managementTree,
+                        new Set(["gitdir"]),
+                    );
+                    commitQuarantinedMissingWorktreeRegistration(
+                        quarantineMissingWorktreeRegistration(
+                            sourcePath,
+                            temporaryPath,
+                            staleRegistration,
+                        ),
+                    );
+                    if (pathExistsStrict(staleRegistration.managementIdentity.realpath)
+                        || registeredWorktreePath(sourcePath, temporaryPath)) {
+                        throw new Error("temporary registration reappeared during rollback");
+                    }
+                });
+            } catch (error) {
+                throw new WorkspaceRootRecoveryRollbackError(
+                    "Workspace root registration recovery rollback failed; workspace content was preserved.",
+                    { cause: error },
+                );
+            }
+        }
+        if (pathExistsStrict(temporaryPath)) {
+            try {
+                assertDirectoryIdentity(temporaryPath, temporaryIdentity);
+                if (readdirSync(temporaryPath).length === 0) {
+                    rmdirSync(temporaryPath);
+                }
+            } catch {
+                // Preserve unexpected temporary content for explicit recovery.
+            }
+        }
+    }
+}
+
+/**
+ * Repair a stale Git worktree backpointer without weakening ownership checks.
+ *
+ * Git records both a forward pointer in <worktree>/.git and a backpointer in
+ * <common-git-dir>/worktrees/<entry>/gitdir. Moving a workspace can leave only
+ * the backpointer stale. Before asking Git to repair it, prove that the
+ * management entry belongs to the source repository and expected branch.
+ */
+function handleWorkspaceRootOwnership(
+    workspacePath: string,
+    sourcePath: string,
+    expectedBranch: string,
+    missingRegistrationMode: "none" | "inspect" | "confirmed",
+    reportFailure?: (reason: string) => void,
+    onPreflightReady?: (assertUnchanged: () => void) => void,
+    preflightFence?: () => void,
+): boolean {
+    const refuse = (reason: string): false => {
+        if (missingRegistrationMode === "confirmed") reportFailure?.(reason);
+        return false;
+    };
+    if (missingRegistrationMode === "confirmed" && preflightFence) {
+        try {
+            preflightFence();
+        } catch {
+            return refuse("workspace or Git metadata changed while awaiting confirmation");
+        }
+    }
+    if (isValidWorktree(workspacePath, sourcePath)) {
+        return refuse("workspace registration is already valid");
+    }
+
+    const resolvedWorkspace = resolve(workspacePath);
+    const resolvedSource = resolve(sourcePath);
+    if (!sameObservedPath(
+        resolvedWorkspace,
+        getWorkspacePath(resolvedSource, expectedBranch),
+    )) return refuse("workspace path no longer matches the requested branch");
+
+    try {
+        const workspaceIdentity = captureDirectoryIdentity(resolvedWorkspace);
+        const gitFile = join(resolvedWorkspace, ".git");
+        const gitFileIdentity = capturePathIdentity(gitFile);
+        const gitFileContent = readFileSync(gitFile, "utf-8");
+        assertPathIdentity(gitFile, gitFileIdentity);
+        const gitFileMatch = gitFileContent.trim().match(/^gitdir:\s*(.+)$/);
+        if (!gitFileMatch) return refuse("workspace Git link is invalid");
+        const resolvedGitDirectory = resolve(
+            dirname(gitFile),
+            gitFileMatch[1].trim(),
+        );
+
+        const sourceIdentity = captureNestedRepositoryIdentity(resolvedSource);
+        const commonGitDirectory = sourceIdentity.commonDirectory.realpath;
+        assertNestedRepositoryIdentity(resolvedSource, sourceIdentity);
+
+        if (!pathExistsStrict(resolvedGitDirectory)) {
+            if (missingRegistrationMode === "none") return false;
+            const ready = recreateMissingWorkspaceRootRegistration(
+                resolvedWorkspace,
+                resolvedSource,
+                expectedBranch,
+                commonGitDirectory,
+                sourceIdentity,
+                resolvedGitDirectory,
+                workspaceIdentity,
+                gitFileIdentity,
+                gitFileContent,
+                missingRegistrationMode,
+                reportFailure,
+                preflightFence,
+            );
+            if (ready && missingRegistrationMode === "inspect") {
+                onPreflightReady?.(() => {
+                    assertNestedRepositoryIdentity(resolvedSource, sourceIdentity);
+                    assertDirectoryIdentity(resolvedWorkspace, workspaceIdentity);
+                    assertPathIdentity(gitFile, gitFileIdentity);
+                    if (readFileSync(gitFile, "utf-8") !== gitFileContent) {
+                        throw new Error("Workspace Git metadata changed while awaiting confirmation.");
+                    }
+                });
+            }
+            return ready;
+        }
+
+        if (missingRegistrationMode === "inspect") return false;
+        if (missingRegistrationMode === "confirmed") {
+            return refuse("missing management entry reappeared before recovery");
+        }
+        if (!isSourceWorktreeManagementRoot(dirname(resolvedGitDirectory), commonGitDirectory)) {
+            return false;
+        }
+
+        const managementEntry = captureDirectoryIdentity(
+            resolvedGitDirectory,
+        );
+        const managementRoot = captureDirectoryIdentity(join(
+            commonGitDirectory,
+            "worktrees",
+        ));
+        if (!sameExistingObject(dirname(managementEntry.realpath), managementRoot.realpath)) {
+            return false;
+        }
+        const commonDirFile = join(managementEntry.realpath, "commondir");
+        const headFile = join(managementEntry.realpath, "HEAD");
+        const managementGitdir = join(managementEntry.realpath, "gitdir");
+        const commonDirIdentity = captureFileIdentity(commonDirFile);
+        const headIdentity = captureFileIdentity(headFile);
+        const managementGitdirIdentity = capturePathIdentity(managementGitdir);
+        const commonDirContent = readFileSync(commonDirFile, "utf-8");
+        const headContent = readFileSync(headFile, "utf-8");
+        const managementGitdirContent = readFileSync(managementGitdir, "utf-8");
+        const previousBackpointer = managementGitdirContent.trim();
+        if (!previousBackpointer) return false;
+        const previousGitFile = isAbsolute(previousBackpointer)
+            ? previousBackpointer
+            : resolve(dirname(managementGitdir), previousBackpointer);
+        if (pathExistsStrict(previousGitFile)) return false;
+        const commonDirectory = captureDirectoryIdentity(resolve(
+            managementEntry.realpath,
+            commonDirContent.trim(),
+        ));
+        if (!sameExistingObject(commonDirectory.realpath, commonGitDirectory)) return false;
+
+        const expectedRef = `refs/heads/${expectedBranch}`;
+        if (headContent.trim() !== `ref: ${expectedRef}`) return false;
+        const branchHead = spawnSync(
+            "git",
+            ["rev-parse", "--verify", "--quiet", `${expectedRef}^{commit}`],
+            {
+                cwd: sourceIdentity.directory.realpath,
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+                env: pinnedNestedRepositoryEnvironment(sourceIdentity),
+            },
+        );
+        const expectedOid = (branchHead.stdout ?? "").trim();
+        if (branchHead.error || branchHead.status !== 0 || !expectedOid) {
+            return false;
+        }
+
+        assertDirectoryIdentity(resolvedWorkspace, workspaceIdentity);
+        assertNestedRepositoryIdentity(resolvedSource, sourceIdentity);
+        assertPathIdentity(gitFile, gitFileIdentity);
+        if (readFileSync(gitFile, "utf-8") !== gitFileContent) return false;
+        assertDirectoryIdentity(managementEntry.realpath, managementEntry);
+        assertDirectoryIdentity(managementRoot.realpath, managementRoot);
+        assertFileIdentity(commonDirFile, commonDirIdentity);
+        assertFileIdentity(headFile, headIdentity);
+        assertFileIdentity(managementGitdir, managementGitdirIdentity);
+        if (readFileSync(commonDirFile, "utf-8") !== commonDirContent
+            || readFileSync(headFile, "utf-8") !== headContent
+            || readFileSync(managementGitdir, "utf-8") !== managementGitdirContent) {
+            return false;
+        }
+
+        const installedContent = `${portableWorktreeBackpointer(gitFile)}\n`;
+        let installedIdentity: DirectoryIdentity | null = null;
+        let repaired = false;
+        try {
+            normalizeWorktreeMetadataFile(
+                managementGitdir,
+                installedContent,
+                managementGitdirIdentity,
+                managementGitdirContent,
+            );
+            installedIdentity = capturePathIdentity(managementGitdir);
+            assertDirectoryIdentity(resolvedWorkspace, workspaceIdentity);
+            assertNestedRepositoryIdentity(resolvedSource, sourceIdentity);
+            assertPathIdentity(gitFile, gitFileIdentity);
+            if (readFileSync(gitFile, "utf-8") !== gitFileContent
+                || !isValidWorktree(resolvedWorkspace, resolvedSource)) return false;
+            const currentBranchHead = spawnSync(
+                "git",
+                ["rev-parse", "--verify", "--quiet", `${expectedRef}^{commit}`],
+                {
+                    cwd: sourceIdentity.directory.realpath,
+                    encoding: "utf-8",
+                    stdio: ["pipe", "pipe", "pipe"],
+                    env: pinnedNestedRepositoryEnvironment(sourceIdentity),
+                },
+            );
+            assertDirectoryIdentity(resolvedWorkspace, workspaceIdentity);
+            assertNestedRepositoryIdentity(resolvedSource, sourceIdentity);
+            assertPathIdentity(gitFile, gitFileIdentity);
+            assertFileIdentity(managementGitdir, installedIdentity);
+            if (currentBranchHead.error || currentBranchHead.status !== 0
+                || (currentBranchHead.stdout ?? "").trim() !== expectedOid
+                || readFileSync(gitFile, "utf-8") !== gitFileContent
+                || readFileSync(managementGitdir, "utf-8") !== installedContent) {
+                return false;
+            }
+            repaired = true;
+            return true;
+        } finally {
+            if (!repaired && installedIdentity) {
+                try {
+                    normalizeWorktreeMetadataFile(
+                        managementGitdir,
+                        managementGitdirContent,
+                        installedIdentity,
+                        installedContent,
+                    );
+                } catch (error) {
+                    throw new WorkspaceRootRecoveryRollbackError(
+                        "Workspace root backpointer recovery rollback failed; workspace content was preserved.",
+                        { cause: error },
+                    );
+                }
+            }
+        }
+    } catch (error) {
+        if (error instanceof WorkspaceRootRecoveryRollbackError
+            || error instanceof WorkspaceBranchConflictError) throw error;
+        if (missingRegistrationMode === "confirmed") {
+            reportFailure?.(error instanceof Error ? error.message : String(error));
+        }
+        return false;
+    }
+}
+
+export function canRecreateMissingWorkspaceRootRegistration(
+    workspacePath: string,
+    sourcePath: string,
+    expectedBranch: string,
+    onPreflightReady?: (assertUnchanged: () => void) => void,
+): boolean {
+    return handleWorkspaceRootOwnership(
+        workspacePath,
+        sourcePath,
+        expectedBranch,
+        "inspect",
+        undefined,
+        onPreflightReady,
+    );
+}
+
+export function repairWorkspaceRootOwnership(
+    workspacePath: string,
+    sourcePath: string,
+    expectedBranch: string,
+    options: {
+        confirmedMissingRegistration?: boolean;
+        reportFailure?: (reason: string) => void;
+        preflightFence?: () => void;
+    } = {},
+): boolean {
+    return handleWorkspaceRootOwnership(
+        workspacePath,
+        sourcePath,
+        expectedBranch,
+        options.confirmedMissingRegistration === true ? "confirmed" : "none",
+        options.reportFailure,
+        undefined,
+        options.preflightFence,
+    );
+}
+
+/**
+ * "Workspace Git metadata is missing or damaged." on its own is a dead end: it says something
+ * is broken, names nothing, and offers no way out — which is the same defect as refusing an
+ * orphaned checkout with an ownership message.
+ *
+ * The remedy is measured, not assumed. With the registration intact and the checkout's `.git`
+ * file naming a directory that is gone, `git worktree prune` removes nothing — it only drops
+ * registrations whose directory is missing, and this one is present. `git worktree repair`
+ * reports `.git file broken` and rewrites the file to the real administrative directory.
+ */
+export type WorkspaceWorktreeRepair = {
+    /** The checkout inside the workspace whose `.git` file no longer resolves. */
+    readonly checkoutPath: string;
+    /** The repository that still registers it, and the only place `repair` can run. */
+    readonly sourcePath: string;
+};
+
+/**
+ * Carries what a caller needs to offer the repair rather than dictate it. Printing a command
+ * and making the operator retype it is not a remedy; ccc knows the repository, the checkout
+ * and the command, so it can ask for consent and run it.
+ */
+export class DamagedWorkspaceMetadataError extends Error {
+    readonly repairs: readonly WorkspaceWorktreeRepair[];
+    constructor(message: string, repairs: readonly WorkspaceWorktreeRepair[]) {
+        super(message);
+        this.name = "DamagedWorkspaceMetadataError";
+        this.repairs = repairs;
+    }
+}
+
+/** Map each unusable checkout back to the sibling source repository that still registers it. */
+function workspaceWorktreeRepairPlan(
+    workspacePath: string,
+    unusablePaths: readonly string[],
+): WorkspaceWorktreeRepair[] {
+    const repairs: WorkspaceWorktreeRepair[] = [];
+    const remaining = new Set(unusablePaths);
+    const workspaceName = basename(workspacePath);
+    let separatorIndex = workspaceName.indexOf(WORKTREE_SEPARATOR);
+    while (separatorIndex > 0) {
+        const sourcePath = join(dirname(workspacePath), workspaceName.slice(0, separatorIndex));
+        if (pathExistsStrict(sourcePath)) {
+            const consider = (owner: string, checkoutPath: string) => {
+                if (!remaining.has(checkoutPath)) return;
+                if (!hasGitMetadata(owner)) return;
+                if (!registryContainsWorktree(owner, checkoutPath)) return;
+                remaining.delete(checkoutPath);
+                repairs.push({ checkoutPath, sourcePath: owner });
+            };
+            consider(sourcePath, workspacePath);
+            try {
+                for (const entry of scanUnifiedNestedRepositories(
+                    sourcePath,
+                    { strict: true, allowRegisteredWorktrees: true },
+                )) {
+                    if (entry.isGitRepo) consider(entry.path, join(workspacePath, entry.name));
+                }
+            } catch {
+                // A source that cannot be scanned simply offers no repair for these paths.
+            }
+        }
+        separatorIndex = workspaceName.indexOf(
+            WORKTREE_SEPARATOR,
+            separatorIndex + WORKTREE_SEPARATOR.length,
+        );
+    }
+    return repairs;
+}
+
+/**
+ * Run `git worktree repair` for one damaged checkout, from the repository that owns it.
+ * Measured: with the registration intact and the checkout's `.git` file naming a directory
+ * that is gone, `prune` removes nothing and `repair` relinks it.
+ */
+export function repairWorkspaceWorktree(
+    repair: WorkspaceWorktreeRepair,
+    runner: typeof spawnSync = spawnSync,
+): { ok: boolean; detail: string } {
+    const result = runner("git", ["worktree", "repair", repair.checkoutPath], {
+        cwd: repair.sourcePath,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+    });
+    if (result.error) return { ok: false, detail: result.error.message };
+    const detail = [(result.stdout ?? "").trim(), (result.stderr ?? "").trim()]
+        .filter(Boolean)
+        .join(" ");
+    return { ok: result.status === 0, detail };
+}
+
+function damagedWorkspaceMetadataError(
+    workspacePath: string,
+    registeredPaths: readonly string[],
+): Error {
+    const paths = registeredPaths.length > 0 ? registeredPaths : [workspacePath];
+    const listed = paths.map((path) => `\n  ${terminalSafe(path)}`).join("");
+    const repairs = workspaceWorktreeRepairPlan(workspacePath, paths);
+    return new DamagedWorkspaceMetadataError(
+        "Workspace Git metadata is missing or damaged."
+        + `\n\nA source repository still registers a linked worktree at:${listed}`
+        + "\n\nbut the checkout there cannot be used — usually its `.git` file names a Git"
+        + "\ndirectory that no longer exists. Your working files are untouched; only the"
+        + "\nlink to the repository is broken."
+        + (repairs.length > 0
+            ? "\n\n`git worktree repair` relinks it. ccc can run that for you."
+            : "\n\nNo source repository offers a repair for it — the registration itself is"
+                + "\ngone. Recreate the workspace with `ccc @<branch>` from the source"
+                + "\nrepository, then copy back anything that was never committed."),
+        repairs,
+    );
+}
+
+export function detectWorktreeWorkspaceBranch(
+    workspacePath: string,
+    runner: typeof spawnSync = spawnSync,
+): string | null {
+    if (!pathExistsStrict(workspacePath)) return null;
+    const rootGit = join(workspacePath, ".git");
+    let repositories: Array<{ name: string; path: string }>;
+    if (pathExistsStrict(rootGit)) {
+        if (gitLinkKind(rootGit) !== "worktree") {
+            const nestedKinds = scanDirectory(workspacePath, { strict: true })
+                .filter((entry) => entry.isGitRepo)
+                .map((entry) => gitLinkKind(join(entry.path, ".git")));
+            if (nestedKinds.some((kind) => kind === "worktree")
+                || siblingSourceRegistersWorkspace(workspacePath)) {
+                throw new Error("Workspace contains a mixture of a root repository and child worktrees.");
+            }
+            return null;
+        }
+        repositories = branchRepositories(workspacePath, "root");
+    } else {
+        const candidates = scanDirectory(workspacePath, { strict: true }).filter((entry) => entry.isGitRepo);
+        const kinds = candidates.map((entry) => ({
+            entry,
+            kind: gitLinkKind(join(entry.path, ".git")),
+        }));
+        const worktrees = kinds.filter(({ kind }) => kind === "worktree");
+        if (worktrees.length === 0) {
+            if (siblingSourceRegistersWorkspace(workspacePath)) {
+                throw damagedWorkspaceMetadataError(
+                    workspacePath,
+                    siblingRegisteredWorkspacePaths(workspacePath),
+                );
+            }
+            return null;
+        }
+        if (worktrees.length !== kinds.length) {
+            throw new Error("Workspace contains a mixture of worktrees and regular repositories.");
+        }
+        repositories = worktrees.map(({ entry: { name, path } }) => ({ name, path }));
+    }
+    const registeredPaths = siblingRegisteredWorkspacePaths(workspacePath);
+    // Named, not counted: the operator has to know WHICH checkout to repair, and a workspace
+    // with a dozen nested repositories gives no clue otherwise.
+    const unusableRegisteredPaths = registeredPaths.filter((registeredPath) => (
+        !repositories.some(({ path }) => sameObservedPath(path, registeredPath))
+    ));
+    if (unusableRegisteredPaths.length > 0) {
+        throw damagedWorkspaceMetadataError(workspacePath, unusableRegisteredPaths);
+    }
+    if (repositories.length === 0) return null;
+
+    const branches = new Set<string>();
+    for (const repository of repositories) {
+        const identity = captureNestedRepositoryIdentity(repository.path);
+        const result = runner(
+            "git",
+            ["rev-parse", "--abbrev-ref", "HEAD"],
+            {
+                cwd: identity.directory.realpath,
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+                env: pinnedNestedRepositoryEnvironment(identity),
+            },
+        );
+        assertNestedRepositoryIdentity(repository.path, identity);
+        const branch = (result.stdout ?? "").trim();
+        if (result.error || result.status !== 0 || !branch) {
+            throw new Error(`Unable to determine worktree branch in '${repository.name}'.`);
+        }
+        branches.add(branch);
+    }
+    if (branches.size !== 1) {
+        throw new Error("Workspace repositories do not share one checked-out branch.");
+    }
+    return [...branches][0];
 }
 
 // === Read-only Functions ===
@@ -184,9 +2914,18 @@ export function getWorkspacePath(sourcePath: string, branch: string): string {
  * Skips hidden files/directories (starting with .)
  * Uses lstatSync to avoid following symlinks (prevents symlink loops).
  */
-export function scanDirectory(dirPath: string): WorkspaceEntry[] {
-    if (!existsSync(dirPath)) {
-        return [];
+export function scanDirectory(
+    dirPath: string,
+    options: { strict?: boolean } = {},
+): WorkspaceEntry[] {
+    if (!options.strict && !existsSync(dirPath)) return [];
+    if (options.strict) {
+        try {
+            if (!lstatSync(dirPath).isDirectory()) return [];
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+            throw new Error(`Unable to inspect workspace directory '${dirPath}'.`, { cause: error });
+        }
     }
 
     const entries: WorkspaceEntry[] = [];
@@ -201,7 +2940,10 @@ export function scanDirectory(dirPath: string): WorkspaceEntry[] {
         let lstat;
         try {
             lstat = lstatSync(fullPath);
-        } catch {
+        } catch (error) {
+            if (options.strict) {
+                throw new Error(`Unable to inspect workspace entry '${fullPath}'.`, { cause: error });
+            }
             continue;
         }
 
@@ -217,11 +2959,1115 @@ export function scanDirectory(dirPath: string): WorkspaceEntry[] {
         }
 
         // Check for .git (directory or file — file means gitlink/worktree/submodule)
-        const isGitRepo = existsSync(join(fullPath, ".git"));
+        const gitPath = join(fullPath, ".git");
+        let isGitRepo: boolean;
+        if (options.strict) {
+            try {
+                lstatSync(gitPath);
+                isGitRepo = true;
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                    throw new Error(`Unable to inspect Git metadata '${gitPath}'.`, { cause: error });
+                }
+                isGitRepo = false;
+            }
+        } else {
+            isGitRepo = existsSync(gitPath);
+        }
         entries.push({ name, path: fullPath, isGitRepo });
     }
 
     return entries;
+}
+
+function normalizeNestedRepositoryName(rawName: string): string | null {
+    const normalized = rawName.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!normalized) return null;
+    const segments = normalized.split("/");
+    if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
+        return null;
+    }
+    if (segments.some((segment) => segment.includes(":"))) return null;
+    return segments.join("/");
+}
+
+function relativePathEscapesRoot(relativePath: string): boolean {
+    return isAbsolute(relativePath)
+        || relativePath === ".."
+        || relativePath.split(/[\\/]/)[0] === "..";
+}
+
+/**
+ * The recorded path, when this error says a worktree registration named a path
+ * this machine cannot resolve — and `null` for every other failure.
+ *
+ * The nested-repository scan already decided that a candidate it cannot stat is
+ * one to skip rather than to abort on. That decision was unreachable, because
+ * the only route to it wraps: `gitLinkKind` ends its worktree-inspection block
+ * by rethrowing everything as `Unable to inspect worktree common directory`
+ * with the original as `cause`, and a wrapper built that way has no `code` of
+ * its own. So a raw `realpathSync` ENOENT arrived as an error with
+ * `code === undefined`, missed the escape, and took workspace detection down.
+ *
+ * Reached in practice by a Git worktree registered from inside the container:
+ * its management `gitdir` file records `/project/<workspace>-<hash>`, which the
+ * Windows host reads as `C:\project\<workspace>-<hash>` and cannot stat. Neither
+ * side is wrong about its own path; the file is simply not portable across the
+ * mount boundary.
+ *
+ * TWO conditions, because either alone is too wide. The marker is attached at
+ * exactly one site — resolving the registration back-pointer — so it says the
+ * failure is about a recorded path rather than about anything else `gitLinkKind`
+ * touches. Keying on the errno alone was much wider than the portability case it
+ * was written for: `gitLinkKind` raises unwrapped errnos from seven places
+ * inside its ownership block, some of them BEFORE the judgement they precede can
+ * run. A `commondir` naming a repository with no `worktrees` directory made
+ * `lstat` throw where `worktree management entry is outside its source
+ * repository` was about to be decided, and that ownership refusal became a
+ * silent skip — measured against both sides of the change. And the errno is
+ * still required alongside the marker, so a registration that fails to resolve
+ * for a reason other than absence (a symlink loop, say) keeps aborting.
+ */
+// Is this metadata invalid ONLY because the path it records cannot be reached here?
+//
+// Asked through gitLinkKind so there is exactly one reader of the metadata. Re-deriving the
+// answer from a second, similar-looking read is the mistake `pathContent` was written to
+// undo: two readers of one path drift, and the one that drifts is the one the operator's
+// message comes from.
+function recordedGitPathUnreachableHere(gitPath: string): string | null {
+    try {
+        gitLinkKind(gitPath);
+        return null;
+    } catch (error) {
+        return unreachableRecordedGitPath(error);
+    }
+}
+
+export function unreachableRecordedGitPath(error: unknown): string | null {
+    let recorded: string | null = null;
+    let absent = false;
+    for (const link of errorChain(error)) {
+        if (recorded === null && typeof link.recordedGitPath === "string" && link.recordedGitPath) {
+            recorded = link.recordedGitPath;
+        }
+        if (typeof link.code === "string" && UNREACHABLE_PATH_CODES.includes(link.code)) absent = true;
+    }
+    return recorded !== null && absent ? recorded : null;
+}
+
+const UNREACHABLE_PATH_CODES: readonly string[] = ["ENOENT", "ENOTDIR"];
+
+/**
+ * The Git directory a `.git` FILE points at, or null when the file is unreadable or is not
+ * a gitfile at all. Resolution matches Git's own: the recorded path is taken relative to the
+ * directory holding the gitfile.
+ */
+function gitFileRecordedDirectory(gitPath: string): string | null {
+    let content: string;
+    try {
+        content = readFileSync(gitPath, "utf-8").trim();
+    } catch {
+        return null;
+    }
+    const match = content.match(/^gitdir:\s*(.+)$/);
+    if (!match) return null;
+    const recorded = match[1].trim();
+    if (!recorded) return null;
+    return resolve(dirname(gitPath), recorded);
+}
+
+function nestedRepositoryCandidateIsSafe(
+    parentRepository: string,
+    candidateName: string,
+    candidatePath: string,
+    strict: boolean,
+    allowRegisteredWorktrees: boolean,
+    unreachable?: string[],
+): boolean {
+    try {
+        const candidate = lstatSync(candidatePath);
+        if (!candidate.isDirectory() || candidate.isSymbolicLink()) return false;
+        const relativeCandidate = relative(
+            realpathSync(parentRepository),
+            realpathSync(candidatePath),
+        );
+        if (relativePathEscapesRoot(relativeCandidate)) {
+            throw new Error(
+                `Nested Git repository escapes its parent repository: ${candidatePath}`,
+            );
+        }
+        const gitMetadata = lstatSync(join(candidatePath, ".git"));
+        if (gitMetadata.isSymbolicLink()) {
+            throw new Error(
+                `Nested Git repository metadata is a symbolic link: ${candidatePath}`,
+            );
+        }
+        if (gitMetadata.isDirectory()) return true;
+        if (!gitMetadata.isFile()) return false;
+        // A nested checkout whose Git directory was deleted out from under it — `git worktree
+        // remove` run elsewhere, a pruned source, a cleanup that swept `.git/worktrees/`, a
+        // deleted `.git/modules/<name>` — leaves a gitfile naming a path that is simply gone.
+        // This is asked BEFORE `gitLinkKind`, which cannot answer it: a missing worktree
+        // administrative directory it reports as a gitlink (a submodule's gitdir is the other
+        // thing with no `commondir`), and a gitdir under a `.git` FILE fails ENOTDIR rather
+        // than ENOENT and it throws. Two different fatal endings for one condition, which is
+        // why the reachability of the recorded path is tested first and directly.
+        // This matters because the refusal is fatal to the WHOLE workspace: one orphaned
+        // checkout among healthy siblings aborted every `ccc @<branch>` with a message that
+        // named the wrong cause and offered no remedy. The recorded-path skip below already
+        // handles "metadata names somewhere that is not here", warns with the path, and
+        // points at `ccc @<branch>` — which is in fact what re-creates the worktree. Route
+        // orphans into it rather than inventing a second diagnosis.
+        const recordedGitDirectory = gitFileRecordedDirectory(join(candidatePath, ".git"));
+        if (recordedGitDirectory !== null && !existsSync(recordedGitDirectory)) {
+            // `code` is deliberately left off this error and carried only by the cause: the
+            // catch below returns silently for a top-level errno, and silence is what this
+            // fix exists to remove.
+            throw Object.assign(
+                // The message deliberately does not begin with "Nested Git repository ":
+                // the catch rethrows that prefix verbatim under `strict`, which is the
+                // fatal path this is routing around.
+                new Error(
+                    `Orphaned Git worktree metadata names a Git directory that does not exist: ${candidatePath}`,
+                    { cause: Object.assign(new Error("recorded Git directory is absent"), { code: "ENOENT" }) },
+                ),
+                { recordedGitPath: recordedGitDirectory },
+            );
+        }
+        const kind = gitLinkKind(join(candidatePath, ".git"));
+        if (kind === "worktree" && allowRegisteredWorktrees) return true;
+        if (kind === "gitlink"
+            && trackedSubmoduleGitDirectoryIsOwned(
+                parentRepository,
+                candidateName,
+                candidatePath,
+            )) return true;
+        throw new Error(
+            `Nested Git repository metadata is not owned by its parent or a registered worktree: ${candidatePath}`,
+        );
+    } catch (error) {
+        // The deliberate refusals are answered first. None of them can carry an errno today,
+        // so the order is not load-bearing — but nothing tested that, and having the judgement
+        // win by construction rather than by accident costs nothing.
+        if (strict && (error as Error).message?.startsWith?.("Nested Git repository ")) {
+            throw error;
+        }
+        // A candidate that vanished between the readdir and the lstat, unwrapped and raw. This
+        // is the pre-existing behaviour, restored: narrowing the skip to the recorded-path case
+        // removed it by accident, which would abort a whole scan because an install happened to
+        // delete a directory while it ran. Silent, and not added to `unreachable`, because the
+        // path is gone — there is nothing to tell the operator and nothing to protect from a
+        // later delete. Only the top-level error, never a cause: an errno reached through a
+        // wrapper came from inside an ownership judgement, and that is the case this must not
+        // swallow.
+        // A worktree whose two-way link is broken: the administrative directory is there, but
+        // it and the checkout no longer agree about each other. That is not an ownership
+        // problem and must not be reported as one, and it is not fatal to the workspace —
+        // `git worktree repair` relinks it, and every sibling repository is still usable. One
+        // checkout with a stale registration used to abort every `ccc @<branch>` for the whole
+        // workspace, with a message whose innermost cause named the real fault and whose
+        // outermost said only "Unable to inspect".
+        if (isBrokenWorktreeLink(error)) {
+            warnBrokenWorktreeLink(candidatePath);
+            unreachable?.push(candidatePath);
+            return false;
+        }
+        const rawCode = (error as NodeJS.ErrnoException)?.code;
+        if (typeof rawCode === "string" && UNREACHABLE_PATH_CODES.includes(rawCode)) return false;
+        const recorded = unreachableRecordedGitPath(error);
+        if (recorded !== null) {
+            // Skipped, not silent. `ccc` now manages less than the workspace
+            // contains, and the run that used to fail loudly would otherwise
+            // succeed while saying nothing about what it dropped.
+            // Unified by construction, not by measurement: this is the unified scan, and it
+            // only ever recurses into confirmed git repositories, so `parentRepository` is
+            // one. Asking `hasGitMetadata` here would have been a discrimination that never
+            // discriminates — instrumented across the suite, this site answered true 17 times
+            // out of 17 — and worse, it rethrows any non-ENOENT errno, which would turn this
+            // catch block's whole purpose (skip gracefully, tell the operator) into the abort
+            // it exists to prevent. The one live discriminator is the filter at the bottom of
+            // workspaceWorktreeGitFiles, which is reached for both layouts.
+            warnUnreachableNestedRepository(candidatePath, recorded, true);
+            unreachable?.push(candidatePath);
+            return false;
+        }
+        if (!strict) return false;
+        throw new Error(
+            `Unable to inspect nested Git repository '${candidatePath}'.`,
+            { cause: error },
+        );
+    }
+}
+
+const warnedUnreachableNestedRepositories = new Set<string>();
+
+function warnBrokenWorktreeLink(candidatePath: string): void {
+    // The scan runs more than once per invocation; one line per directory, not per scan.
+    if (warnedUnreachableNestedRepositories.has(`broken-link:${candidatePath}`)) return;
+    warnedUnreachableNestedRepositories.add(`broken-link:${candidatePath}`);
+    process.stderr.write(
+        `[ccc] NOTE: Skipping nested Git repository ${terminalSafe(candidatePath)}: it is a linked\n`
+        + "      worktree whose registration no longer points back to it. Your files are\n"
+        + "      untouched; only the link is broken, and `git worktree repair` relinks it.\n"
+        + "      Run `ccc @<branch>` from the source repository and ccc will offer to do it.\n",
+    );
+}
+
+
+type PathContent = "absent" | "empty" | "unreadable" | "content" | "repository" | "broken-worktree";
+
+// One rule for reading the path, used by both the decision to refuse and the sentence
+// explaining it. It replaced two functions that classified the same errors differently.
+//
+// Be precise about what that did and did not fix: the duplicated LOGIC is gone, the duplicated
+// READ is not. This is called once during the scan to decide registration and again when the
+// refusal is worded, so a path that changes between them still yields a sentence describing a
+// state it no longer has. That is cosmetic — the second call cannot un-register anything — but
+// the comment here previously claimed a single observation, which was not true then either.
+//
+// `unreadable` is deliberately NOT folded into `absent`. The first version of this check caught
+// every error and answered "nothing here", which is the errno-swallows-a-judgement mistake for
+// the third time in this file, in the one place whose entire job is deciding whether there is
+// something worth protecting: a directory readable only by another user — mode 0111 passes the
+// existence check and fails the read — reported empty. Not knowing is the strongest reason to
+// refuse, not a reason to proceed.
+/**
+ * Whether this directory is a linked worktree's checkout rather than a repository of its own.
+ *
+ * Decided from what the `.git` file records, not from whether that target resolves: a checkout
+ * whose administrative directory is missing is still a linked worktree, and it is precisely
+ * the case where saying otherwise would mislead.
+ */
+function isLinkedWorktreeCheckout(path: string): boolean {
+    const gitPath = join(path, ".git");
+    try {
+        // Not load-bearing -- reading a directory fails below and reaches the same answer --
+        // but it states the shape being looked for instead of leaning on that.
+        if (!lstatSync(gitPath).isFile()) return false;
+    } catch {
+        return false;
+    }
+    const recorded = gitFileRecordedDirectory(gitPath);
+    return recorded !== null && basename(dirname(recorded)) === "worktrees";
+}
+
+// Exported alongside the refusal it feeds: the classification is what decides which sentence
+// an operator gets, and telling a broken worktree link apart from a repository of its own is
+// the distinction that decides whether they are told to repair or to delete.
+export function pathContent(path: string): PathContent {
+    try {
+        const entries = readdirSync(path);
+        if (entries.length === 0) return "empty";
+        // The listing already answers this, so distinguishing costs one comparison. It matters
+        // because the refusal below called every non-empty path "a nested Git repository" —
+        // false for the shape that actually blocked `ccc rm -f`, which is a tracked
+        // submodule's path holding ordinary files and no `.git` at all.
+        if (!entries.includes(".git")) return "content";
+        // A linked worktree records its administrative directory in a `.git` FILE. The scan
+        // has already told the operator when such a checkout's registration no longer points
+        // back to it, and calling the same directory unmanaged two lines later contradicts
+        // that: it is ccc's own worktree with a broken link, not a stranger's repository.
+        return isLinkedWorktreeCheckout(path) ? "broken-worktree" : "repository";
+    } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unreadable";
+    }
+}
+
+// The whole sentence per state, because the fixed prefix was false on two of them: on an empty
+// directory there is no repository and ccc DID inspect it — a successful read returning nothing
+// is how that state is recognised — and on an unreadable one "could not inspect" is the one
+// accurate description and was the only state not being told so. That is this file's own first
+// rule, print a diagnosis only where its evidence exists, broken by a branch added to serve it.
+// Only reached without `--force`. Every branch therefore ends by naming `-f`, which is the way
+// through: a workspace removal takes what is inside it, and this message is the one chance the
+// operator gets to know that before it happens.
+// Exported for the branch-coverage test: the two assertions that pinned "-f" both landed on
+// the `default` arm, so stripping it from `empty` and `content` left the suite green. A message
+// that stops naming the way through is the whole safety story failing silently.
+export function unmanagedPathRefusal(path: string, content: PathContent): string {
+    const where = terminalSafe(path);
+    const anyway = " — re-run with -f to delete it along with the workspace";
+    switch (content) {
+        case "empty":
+            return `workspace holds an empty directory where a tracked submodule belongs: ${where}`
+                + " — remove the directory yourself" + anyway;
+        case "unreadable":
+            // Its own tail, not the shared `anyway`. Everywhere else the two clauses are
+            // ALTERNATIVES — keep it by moving it out, or delete it with -f. Here they are
+            // sequential: -f refuses an unreadable directory, because `rm -rf` cannot
+            // enumerate one, so appending "or re-run with -f" sends the operator to a command
+            // that turns them straight back. That is the defect this whole family of fixes
+            // opened on, one message further along.
+            return `workspace holds a nested Git repository ccc could not read: ${where}`
+                + " — make it readable to see what is in it,"
+                + " then re-run with -f to delete it along with the workspace";
+        case "content":
+            return `workspace holds files where a tracked submodule belongs: ${where}`
+                + " — move them out of the workspace to keep them" + anyway;
+        case "broken-worktree":
+            // Says what is knowable here and no more. This function is given a path, not the
+            // repository the worktree belongs to, so it cannot tell one ccc made from a
+            // stranger's -- but either way it is a linked worktree whose link is broken, not
+            // an unmanaged repository. The old wording contradicted the NOTE printed moments
+            // earlier and left -f as the only apparent way out, which deletes a checkout that
+            // repairing would have kept.
+            return `workspace holds a linked Git worktree whose registration is broken: ${where}`
+                + " — your files are there and only the link is broken;"
+                + " `git worktree repair` relinks it, and ccc offers to do that when the"
+                + " worktree is its own — move it out of the workspace to keep it" + anyway;
+        case "absent":
+            // Not reachable from either veto — both guard with `existsSync` first — but this
+            // function is exported and enumerable, and without this arm `absent` fell through
+            // to `repository` and produced a byte-identical message claiming a repository is
+            // at a path with nothing at it.
+            return `nothing is at a tracked submodule's path: ${where}`
+                + " — there is nothing here for ccc to keep or delete";
+        default:
+            return `workspace holds a nested Git repository ccc does not manage: ${where}`
+                + " — move it out of the workspace to keep it" + anyway;
+    }
+}
+
+function warnUnmanagedNestedRepository(candidatePath: string, protectedFromDeletion: boolean): void {
+    // Keyed by kind as well as path. Sharing the key with the unreachable-metadata NOTE meant
+    // whichever fired first silenced the other for that path forever, and the one that gets
+    // dropped is the more useful of the two: the container-boundary explanation.
+    if (warnedUnreachableNestedRepositories.has(`unmanaged:${candidatePath}`)) return;
+    warnedUnreachableNestedRepositories.add(`unmanaged:${candidatePath}`);
+    // Same stream, same escaping and same dedup as the unreachable-metadata NOTE: the path
+    // comes from the index and is chosen by whoever authored the repository.
+    // The remedy is `ccc` itself, and specifically NOT `git submodule update --init`. That was
+    // this NOTE's first advice and it was measured to make things worse: in a ccc workspace it
+    // clones a plain submodule where a linked worktree belongs, after which ccc cannot open the
+    // workspace at all ("Workspace tracked submodule is not a linked worktree") and there is no
+    // way back. Running ccc against the workspace repairs it, which is what it was already
+    // trying to do.
+    process.stderr.write(
+        `[ccc] NOTE: Tracked submodule ${terminalSafe(candidatePath)} is not initialized.\n`
+        + (protectedFromDeletion
+            // "will not delete it" was true when unmanaged meant undeletable. It stopped
+            // being true when the owner decided a command that deletes a workspace deletes
+            // the git inside it: under -f this exact path is deleted, and this NOTE is
+            // printed by a scan that runs before removal and does not know the flag. Rather
+            // than thread `force` through four scan call sites to fix a sentence, say the
+            // thing that is true either way and names the flag that decides it.
+            ? "      Continuing without it; ccc is not managing it, and `ccc rm` will not\n"
+                + "      delete it unless you pass -f.\n"
+            : "      Continuing without it; there is nothing at that path for ccc to manage.\n")
+        + "      To have ccc set it up as a linked worktree, run `ccc @<branch>` from the source\n"
+        + "      repository — that is the only invocation that repairs; plain `ccc` inside the\n"
+        + "      workspace will keep printing this. If the directory already holds files, ccc\n"
+        + "      asks before touching them.\n",
+    );
+}
+
+// A repair that fails returns null, and the CLI's line for that is "failed to fix (content
+// unchanged)" — true, and useless: it names no cause, so the operator cannot act and cannot
+// even tell whether the cause is something they control. git already wrote the reason; this
+// carries it instead of discarding it. Same channel as the NOTE above, for the same reason:
+// console binds its stream once, so a test proving this reaches stderr would see nothing.
+// A displaced registration is moved aside, never deleted — see settleStaleRegistration. The
+// operator has to be told, because the only other party who could is the machine that cannot
+// be reached: if that path comes back, its worktree will have lost its registration, and this
+// line is the one record of where the contents went.
+// Removal runs git against the QUARANTINED copy, so git's refusal names a path inside
+// `.ccc-worktree-quarantine-*` — and the quarantine is rolled back before the operator reads
+// the line. The one concrete noun in the sentence is therefore a path that does not exist by
+// the time it is printed:
+//
+//     services/web: fatal: '…/.ccc-worktree-quarantine-6JLX1n/web' contains modified or
+//                   untracked files, use --force to delete it
+//
+// while the operator's dirty files are at `<workspace>/services/web`. ccc knows that path —
+// it is already prefixing the line with it. Only the quarantine token is substituted; git's
+// sentence is otherwise passed through, because its wording is the accurate part.
+const QUARANTINED_PATH_IN_MESSAGE =
+    /'[^']*\.ccc-worktree-quarantine-[^']*'|"[^"]*\.ccc-worktree-quarantine-[^"]*"|\S*\.ccc-worktree-quarantine-\S*/g;
+
+export function relayNestedRemovalError(
+    name: string,
+    operatorPath: string,
+    error: unknown,
+): string {
+    const message = (error as Error)?.message ?? String(error);
+    return `${name}: ${message.replace(QUARANTINED_PATH_IN_MESSAGE, (match) => {
+        const quote = match.startsWith("'") || match.startsWith('"') ? match[0] : "";
+        return `${quote}${operatorPath}${quote}`;
+    })}`;
+}
+
+function warnDisplacedWorktreeRegistration(recordedPath: string, quarantine: string): void {
+    process.stderr.write(
+        `[ccc] NOTE: A worktree registration recorded at ${terminalSafe(recordedPath)}\n`
+        + "      held this branch, and that path cannot be reached from here. It was moved\n"
+        + `      aside to ${terminalSafe(quarantine)} rather than deleted,\n`
+        + "      because ccc cannot see whether a working tree is still using it.\n"
+        // Said because this is the only place it can be said. The name is now free, so the
+        // new worktree takes it, and the working tree at the recorded path — whose own `.git`
+        // file still names that entry — resolves to the NEW worktree's index and HEAD. A
+        // commit made there moves the branch and writes through this workspace's index. "It
+        // was moved aside rather than deleted" reads as "deregistered, contents kept", which
+        // is only half of what happened.
+        // `git worktree repair` was this line's first advice and it is WRONG here, measured:
+        // the premise of this whole path is that the source repository is the SAME directory
+        // on both sides of the mount, so repair rewrites the one registration back to the
+        // other side's path — un-repairing this workspace, aborting `ccc` again, and leaving
+        // both working trees on one gitdir. The operator was stuck until they undid it by
+        // hand. Do not name a command whose effect depends on a premise this message cannot
+        // check; name the state and the artefact instead.
+        + "      If that path comes back, its working tree resolves to THIS workspace's index\n"
+        + "      and HEAD — a commit made there would write through them. Do not use it until\n"
+        + "      one of the two working trees has been re-created. The directory above is the\n"
+        + "      only copy of the other side's HEAD, index and reflog, and ccc will not\n"
+        + "      reclaim it.\n",
+    );
+}
+
+// Which line of git's stderr is the reason. Exported because the choice is the thing that
+// was wrong twice, and a NOTE-level test cannot enumerate git's error shapes.
+//
+// `fatal:` first. Git's "missing but already registered worktree" error is two lines and
+// the path is on the FIRST, so taking the last one printed the remedy list and dropped the
+// only noun in the message.
+//
+// Then `error:`, because the last line can be a SUCCESS sentence. This is also fed
+// `git checkout --force`'s stderr, and a partial checkout exits 1 like this:
+//
+//     error: unable to read sha1 file of a.txt (78981922…)
+//     error: invalid object 100644 78981922… for 'a.txt'
+//     Already on 'feature-x'
+//
+// so the last line told the operator the repair failed and that git's reason was
+// "Already on 'feature-x'", discarding both lines naming the cause. That is the defect
+// this NOTE exists to fix, one error shape over.
+//
+// The trailing semicolon goes because git's two-line message continues below it, and
+// keeping it made the quoted sentence read as truncated output.
+export function gitFailureReason(gitStderr: string): string | undefined {
+    const lines = gitStderr
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+    return (
+        lines.find((line) => line.startsWith("fatal:"))
+        ?? lines.find((line) => line.startsWith("error:"))
+        ?? lines.pop()
+    )?.replace(/;$/, "");
+}
+
+function warnWorktreeRepairFailure(destinationPath: string, gitStderr: string): void {
+    const reason = gitFailureReason(gitStderr);
+    process.stderr.write(
+        `[ccc] NOTE: Could not recreate the worktree at ${terminalSafe(destinationPath)}.\n`
+        + `      git said: ${reason ? terminalSafe(reason) : "nothing"}\n`
+        + "      The directory was left exactly as it was.\n",
+    );
+}
+
+function warnUnreachableNestedRepository(
+    candidatePath: string,
+    recorded: string,
+    // Whether `ccc @<branch>` repairs this, and whether `ccc rm -f` deletes it. Both are true
+    // in the unified layout and neither is in the multi-repo one, where `ccc @<branch>` dies
+    // with a raw `Workspace repository '<name>' is not owned by its source repository` and
+    // `ccc rm -f` refuses with the same. An earlier version of this NOTE asserted both
+    // unconditionally, which is the fourth time in this task a claim was measured in one
+    // layout and shipped for both — and the third of those is what put "run it in both
+    // layouts before it ships" in the guide.
+    managedLayout: boolean,
+): void {
+    // The scan runs more than once per invocation, and repeating the same line
+    // teaches an operator to skim past it.
+    if (warnedUnreachableNestedRepositories.has(`unreachable:${candidatePath}`)) return;
+    warnedUnreachableNestedRepositories.add(`unreachable:${candidatePath}`);
+    // The container-boundary sentence is a diagnosis, and it is now the only case that
+    // reaches here: the caller skips only when it has a recorded path that is not there.
+    // There used to be a second branch for skips with no recorded path, which was how a
+    // malformed-metadata failure got this diagnosis attached to it; narrowing the skip
+    // removed those failures from this function rather than rewording them.
+    // Written straight to the stream rather than through console.warn: console binds its
+    // stream once, so a test that intercepts process.stderr.write to prove this line goes
+    // to stderr would see nothing, and the channel would stop being pinned.
+    process.stderr.write(
+        `[ccc] NOTE: Skipping nested Git repository ${terminalSafe(candidatePath)}: its Git metadata\n`
+        // "It is left as ordinary files" was true about the SCAN's decision and false about
+        // the run: `ccc rm -f` prints this line and then deletes those files with the
+        // workspace. That is the same defect as the sibling NOTE's "will not delete it",
+        // fixed once already; this one was missed in that sweep and only became reachable
+        // when the -f path stopped crashing and started deleting. Say what holds on both
+        // sides of the flag.
+        + `      names ${terminalSafe(recorded)}, which does not exist here. It is left as ordinary\n`
+        + (managedLayout
+            ? "      files — which `ccc rm -f` deletes along with the workspace, unless you repair\n"
+                + "      it first by running `ccc @<branch>` from the source repository — the same\n"
+                + "      invocation the sibling NOTE names, and the only one that repairs.\n"
+            // Multi-repo: measured, `ccc @<branch>` raises `Workspace repository '<name>' is
+            // not owned by its source repository` and `ccc rm -f` refuses with the same, so
+            // neither claim above is true here. Say what the operator can actually do, which
+            // is the remedy the ownership refusal already gives and which was verified to
+            // terminate in this layout.
+            // "in the source repository if it is one" is not filler. The arm is chosen by the
+            // WORKSPACE's layout, and the ownership check that makes the two claims above true
+            // or false branches on the SOURCE's — they agree in the ordinary layouts and come
+            // apart in real ones, e.g. a workspace whose root `.git` was removed by a partial
+            // removal while the source is unified and still holds the branch at its root.
+            // Pruning only the nested repositories there leaves that registration, and the
+            // next `ccc @<branch>` dies on it. This is the sentence ccc already ships in the
+            // ownership refusal, and it terminates in both.
+            : "      files. ccc cannot repair or delete this layout's nested repository while it\n"
+                + "      cannot prove it owns it: move what you want to keep out of the workspace,\n"
+                + "      delete the workspace directory yourself, then run `git worktree prune` in\n"
+                + "      the source repository if it is one, and in each nested repository.\n")
+        // The container boundary is the common cause, not the only one: a workspace that was
+        // moved or renamed leaves the same unresolvable back-pointer with no container
+        // anywhere near it, and an operator told "registered inside the container" about a
+        // directory they dragged across their disk will go looking for a container.
+        + "      Usually this is the container boundary — a worktree registered inside the\n"
+        + "      container records a container path the host cannot resolve, and the reverse.\n"
+        + "      A workspace that was moved or renamed leaves the same trace.\n",
+    );
+}
+
+// Everything interpolated into the NOTE is repository-controlled: submodule names arrive
+// from `git ls-files -z`, which is unquoted by design, and the recorded path is the content
+// of a file. Printed raw, an ESC sequence in a submodule name rewrites the operator's
+// screen and U+202E reverses the path they are reading — the decision this NOTE exists to
+// inform. Git quotes such paths itself (core.quotePath); this line has to as well.
+// Quoted by JSON.stringify first, then the characters it leaves raw are escaped. Escaping
+// alone was not enough on either count: it did not escape the quote, so a submodule named
+// `api": names "C:/innocent` closed the field and forged a second one; and it did not escape
+// the backslash, so a directory literally named `svc\u001b[31m` rendered identically to a
+// real ESC that had been escaped. JSON.stringify escapes quote, backslash, C0 and lone
+// surrogates, and leaves everything below.
+//
+// The class is written as the four categories rather than as the characters I could name.
+// Twice now — here and in the Hyper-V log redaction — enumerating remembered characters
+// missed U+2028 and U+2029, which are Zl and Zp: not control characters, not format
+// characters, and line terminators to a terminal all the same. Cc and Cf carry the ESC and
+// BEL and the bidi overrides; Zl and Zp carry the two that keep being forgotten.
+const TERMINAL_UNSAFE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+// A separate, non-global copy. `RegExp.test` on a `g` regex carries `lastIndex` between calls,
+// and here that happens to cancel out — a true leads straight into `terminalSafe`, whose
+// `replace` resets `lastIndex` to 0, and a false resets it itself. Measured: reusing the `g`
+// regex passes every test. It is still not what this should read, because the property that
+// saves it belongs to a different function and nothing states it there.
+const TERMINAL_UNSAFE_PROBE = new RegExp(TERMINAL_UNSAFE.source, "u");
+
+/**
+ * The form to print inside a command the operator is meant to paste: unchanged when there is
+ * nothing to escape, which is every ordinary path including a Windows one — JSON-quoting
+ * `C:\Users\x` doubles its separators and what they paste is no longer the path. When the
+ * value does carry something a terminal would act on, the quoted and escaped form is printed
+ * instead: a command that cannot be pasted safely is better shown as data than emitted raw.
+ */
+export function terminalSafeLiteral(value: string): string {
+    return TERMINAL_UNSAFE_PROBE.test(value) ? terminalSafe(value) : value;
+}
+
+// The bare-word set. `\` is NOT in it, which is a reversal: it was put there so an ordinary
+// Windows path would stay unquoted, and that was measured backwards. Bare, a shell eats the
+// separators — `C:\dev\proj` reaches git as `C:devproj`, and `C:\dev\proj\ worktree` escapes
+// the SPACE, so git gets `-C "C:devproj worktree"` and runs `git prune`, the object-database
+// GC, instead of `git worktree prune`. The only reason the suite ever passed is that every
+// Windows path in its table happened to contain a space, so it took the quoted branch and the
+// bare exception it was written for was never exercised. `%` IS in the set, after being taken
+// out and put back: it went out for cmd's `%VAR%`, but that expands inside double quotes in
+// cmd exactly as it does bare, so the removal changed which quotes are emitted and nothing
+// else — measured in sh and bash, bare and quoted, all four readings identical. cmd is beyond
+// the reach of every quoting form here, which is a fact about cmd rather than something this
+// function can do anything about.
+const SHELL_SAFE_BARE = /^[A-Za-z0-9_@%+=:,./-]+$/u;
+// Double quotes are the form all three shells read alike, and they tame a space, `;`, `|`, `&`
+// and `#` — measured. They do not tame everything, and this is the exact boundary, measured in
+// bash: inside double quotes a backslash is still special before `$`, a backtick, `"` and
+// another backslash, and at the end of the value it escapes the closing quote itself.
+//   "C:\dev\proj"          -> C:\dev\proj          (fine — the ordinary Windows path)
+//   "\\server\share\repo"  -> \server\share\repo   (one separator eaten — a UNC path)
+//   "C:\dev\proj\"         -> unexpected EOF       (the whole pasted line fails to parse)
+// So: an expander, a doubled backslash, or a trailing backslash means single quotes, where
+// nothing is special at all. That costs cmd, which has no single-quote form, and the trade is
+// deliberate: a path that does not run in cmd beats a path that runs something else in bash,
+// or that silently becomes a different git subcommand.
+const SHELL_NEEDS_SINGLE_QUOTES = /["$`]|\\{2}|\\$/u;
+
+/**
+ * One argument of a command the operator is meant to paste.
+ *
+ * A path with a space in it — `C:\Users\Kyeong Jae\catchy`, which is most Windows hosts —
+ * printed bare produces `fatal: cannot change to '...Kyeong': No such file or directory`,
+ * measured. That is the same defect as naming a command that does nothing: a remedy the
+ * operator cannot run.
+ *
+ * Three forms, because no single one is right for all of it:
+ *  - bare, for an ordinary path, which is nearly all of them;
+ *  - double quotes for the rest, the one form bash, cmd and PowerShell read the same way;
+ *  - single quotes when the value carries `$`, a backtick or a `"`, or ends in a backslash, because those are inert
+ *    inside single quotes in bash, zsh and PowerShell. It costs cmd, which has no single-quote
+ *    form — a trade taken deliberately: a path that does not run in cmd beats a path that runs
+ *    something else in bash. These values reach us from a registry `gitdir` file, which is to
+ *    say from the other side of the container boundary.
+ *
+ * What it does NOT do, stated because the previous comment here claimed otherwise: it cannot
+ * make a value carrying a control character into a runnable command. Those get the escaped
+ * display form, and that form is data — the caller must not present it as something to paste.
+ */
+export function pasteableArgument(value: string): string {
+    if (TERMINAL_UNSAFE_PROBE.test(value)) return terminalSafe(value);
+    if (SHELL_SAFE_BARE.test(value)) return value;
+    // `'\''`: close the quote, an escaped literal quote, reopen. POSIX only — PowerShell wants
+    // `''` for an embedded quote and reads this one as three fragments and a stray backslash.
+    // The single-quote FORM is inert in PowerShell; this ESCAPE inside it is not, and saying
+    // otherwise was a comment asserting a property the code does not have. Reachable only for a
+    // value carrying a single quote AND an expander or a doubled backslash, so it is stated
+    // rather than fixed: one emitted line cannot be correct in both shells at once, and POSIX
+    // is where a pasted `git -C` line most often lands.
+    if (SHELL_NEEDS_SINGLE_QUOTES.test(value)) {
+        return `'${value.replace(/'/g, "'\\''")}'`;
+    }
+    return `"${value}"`;
+}
+
+function terminalSafe(value: string): string {
+    return JSON.stringify(value).replace(TERMINAL_UNSAFE, (character) => {
+        const code = character.codePointAt(0)!;
+        // Astral code points need six digits and `\u{...}`; `\u` plus five digits is not an
+        // escape any reader, human or machine, can parse back.
+        return code > 0xffff
+            ? `\\u{${code.toString(16)}}`
+            : `\\u${code.toString(16).padStart(4, "0")}`;
+    });
+}
+
+// One traversal, two questions. Nothing else in the repository walks `cause`, so there is
+// no existing helper to reuse; the `seen` guard is cheap insurance rather than a response
+// to a chain that can actually cycle today.
+function* errorChain(error: unknown): Generator<Record<string, unknown>> {
+    const seen = new Set<unknown>();
+    let current: unknown = error;
+    while (current && typeof current === "object" && !seen.has(current)) {
+        seen.add(current);
+        yield current as Record<string, unknown>;
+        current = (current as { cause?: unknown }).cause;
+    }
+}
+
+/**
+ * Find managed repositories nested below a unified Git root. Tracked Gitlinks
+ * are read directly from the index; .gitmodules only supplies optional
+ * absorbed-storage names. Direct child repositories are detected by the
+ * bounded directory scan. CCC deliberately does not recursively enumerate
+ * untracked paths: large dependency and build trees must not delay startup.
+ * Ignored paths are outside CCC worktree management.
+ */
+function scanUnifiedNestedRepositories(
+    repositoryPath: string,
+    options: {
+        strict?: boolean;
+        allowRegisteredWorktrees?: boolean;
+        // Candidates dropped because their Git metadata could not be inspected. A caller that
+        // is about to DELETE what the scan returns needs these: they are repositories, they
+        // are simply not ones ccc can manage, and without this they look like ordinary files.
+        unreachable?: string[];
+        // The workspace exists already and is being opened, rather than being created. Only
+        // then may a tracked submodule with no `.git` be skipped instead of aborting — see the
+        // branch that reads this.
+        openingExistingWorkspace?: boolean;
+    } = {},
+): WorkspaceEntry[] {
+    const root = resolve(repositoryPath);
+    const repositories = new Map<string, WorkspaceEntry>();
+
+    const collect = (
+        currentRepository: string,
+        relativePrefix: string,
+    ): void => {
+        const candidates = new Map<string, WorkspaceEntry>();
+        const trackedPaths = trackedGitlinkPaths(
+            currentRepository,
+            options.strict === true,
+        );
+        const trackedPathSet = new Set(trackedPaths);
+        for (const entry of scanDirectory(currentRepository, options)) {
+            if (!entry.isGitRepo) continue;
+            if (!trackedPathSet.has(entry.name)) {
+                const ignored = spawnSync(
+                    "git",
+                    [
+                        "check-ignore",
+                        "--quiet",
+                        "--no-index",
+                        "--",
+                        entry.name,
+                    ],
+                    {
+                        cwd: currentRepository,
+                        encoding: "utf-8",
+                        stdio: ["pipe", "pipe", "pipe"],
+                    },
+                );
+                if (ignored.error || ![0, 1].includes(ignored.status ?? -1)) {
+                    if (options.strict) {
+                        const detail = (ignored.stderr ?? "").trim()
+                            || ignored.error?.message
+                            || `git exited with status ${String(ignored.status)}`;
+                        throw new Error(
+                            `Unable to inspect ignored repository path '${entry.path}': ${detail}`,
+                        );
+                    }
+                    continue;
+                }
+                if (ignored.status === 0) continue;
+            }
+            candidates.set(entry.name, entry);
+        }
+
+        for (const name of trackedPaths) {
+            if (candidates.has(name)) continue;
+            const candidatePath = join(currentRepository, ...name.split("/"));
+            if (!pathExistsStrict(join(candidatePath, ".git"))) {
+                if (options.strict && !options.openingExistingWorkspace) {
+                    throw new Error(
+                        `Tracked submodule repository is not initialized: ${candidatePath}`,
+                    );
+                }
+                if (options.openingExistingWorkspace) {
+                    // Refusing to CREATE a half checkout is right. Refusing to OPEN a workspace
+                    // that already exists is not: it removes the only tool that could repair it.
+                    // An operator hit this three times in one session and each recovery was a
+                    // manual move dictated over chat, because `ccc` would not start at all. The
+                    // state is also ordinary — clone without --recursive, or interrupt a
+                    // submodule update — and being an accurate diagnosis does not make it a good
+                    // place to abort.
+                    // Decide first, then say what was decided. The NOTE used to promise "ccc
+                    // will not delete it" unconditionally while registration was already
+                    // conditional, so for an absent path — or a dangling symlink, which reads
+                    // as absent — it promised protection the next line declined to provide.
+                    const content = pathContent(candidatePath);
+                    warnUnmanagedNestedRepository(candidatePath, content !== "absent");
+                    // Unmanaged must not mean deletable — but an absent path has nothing to
+                    // protect, and registering it made `ccc rm` refuse with a remedy that is a
+                    // no-op: "delete it yourself" when it is already gone, and the index entry
+                    // brings the refusal straight back. An EMPTY directory is different: it is
+                    // there, `rmdir` clears it, and removal then succeeds — so it is registered,
+                    // and the message below tells the operator which of the two they have.
+                    if (content !== "absent") options.unreachable?.push(candidatePath);
+                }
+                continue;
+            }
+            candidates.set(name, {
+                name,
+                path: candidatePath,
+                isGitRepo: true,
+            });
+        }
+
+        for (const candidate of [...candidates.values()]
+            .sort((left, right) => left.name.localeCompare(right.name))) {
+            if (!nestedRepositoryCandidateIsSafe(
+                currentRepository,
+                candidate.name,
+                candidate.path,
+                options.strict === true,
+                options.allowRegisteredWorktrees === true,
+                options.unreachable,
+            )) continue;
+            const name = relativePrefix
+                ? `${relativePrefix}/${candidate.name}`
+                : candidate.name;
+            const key = process.platform === "win32" ? name.toLowerCase() : name;
+            if (repositories.has(key)) continue;
+            const nested = { ...candidate, name };
+            repositories.set(key, nested);
+            collect(candidate.path, name);
+        }
+    };
+
+    collect(root, "");
+    return [...repositories.values()].sort((left, right) => (
+        left.name.split("/").length - right.name.split("/").length
+        || left.name.localeCompare(right.name)
+    ));
+}
+
+type NestedRepositoryIdentity = {
+    directory: DirectoryIdentity;
+    gitMetadata: DirectoryIdentity;
+    gitFileContent: string | null;
+    gitDirectory: DirectoryIdentity;
+    commonDirectory: DirectoryIdentity;
+    commonDirectoryFile: {
+        identity: FileIdentity;
+        content: string;
+    } | null;
+};
+
+function captureNestedRepositoryIdentity(
+    repositoryPath: string,
+): NestedRepositoryIdentity {
+    const gitMetadataPath = join(repositoryPath, ".git");
+    const gitMetadata = capturePathIdentity(gitMetadataPath);
+    const metadataObserved = lstatSync(gitMetadataPath);
+    let gitFileContent: string | null = null;
+    let gitDirectoryPath = gitMetadataPath;
+    if (metadataObserved.isFile()) {
+        gitFileContent = readFileSync(gitMetadataPath, "utf-8");
+        const match = gitFileContent.trim().match(/^gitdir:\s*(.+)$/);
+        if (!match) {
+            throw new Error(`Nested Git repository metadata is invalid: ${repositoryPath}`);
+        }
+        gitDirectoryPath = resolve(repositoryPath, match[1].trim());
+    }
+    const gitDirectory = captureDirectoryIdentity(gitDirectoryPath);
+    const commonDirectoryPath = join(gitDirectoryPath, "commondir");
+    let commonDirectoryFile: NestedRepositoryIdentity["commonDirectoryFile"] = null;
+    let resolvedCommonDirectory = gitDirectoryPath;
+    if (pathExistsStrict(commonDirectoryPath)) {
+        commonDirectoryFile = {
+            identity: captureFileIdentity(commonDirectoryPath),
+            content: readFileSync(commonDirectoryPath, "utf-8"),
+        };
+        const commonDirectoryValue = commonDirectoryFile.content.trim();
+        if (!commonDirectoryValue) {
+            throw new Error(`Nested Git repository common directory is invalid: ${repositoryPath}`);
+        }
+        resolvedCommonDirectory = resolve(gitDirectoryPath, commonDirectoryValue);
+    }
+    return {
+        directory: captureDirectoryIdentity(repositoryPath),
+        gitMetadata,
+        gitFileContent,
+        gitDirectory,
+        commonDirectory: captureDirectoryIdentity(resolvedCommonDirectory),
+        commonDirectoryFile,
+    };
+}
+
+function assertNestedRepositoryIdentity(
+    repositoryPath: string,
+    identity: NestedRepositoryIdentity,
+): void {
+    assertDirectoryIdentity(repositoryPath, identity.directory);
+    const gitMetadataPath = join(repositoryPath, ".git");
+    assertPathIdentity(gitMetadataPath, identity.gitMetadata);
+    let gitDirectoryPath = gitMetadataPath;
+    if (identity.gitFileContent !== null) {
+        const currentContent = readFileSync(gitMetadataPath, "utf-8");
+        if (currentContent !== identity.gitFileContent) {
+            throw new Error(`Nested Git repository metadata changed: ${repositoryPath}`);
+        }
+        const match = currentContent.trim().match(/^gitdir:\s*(.+)$/);
+        if (!match) {
+            throw new Error(`Nested Git repository metadata changed: ${repositoryPath}`);
+        }
+        gitDirectoryPath = resolve(repositoryPath, match[1].trim());
+    }
+    assertDirectoryIdentity(gitDirectoryPath, identity.gitDirectory);
+    let resolvedCommonDirectory = gitDirectoryPath;
+    if (identity.commonDirectoryFile) {
+        const commonDirectoryPath = join(gitDirectoryPath, "commondir");
+        assertFileIdentity(
+            commonDirectoryPath,
+            identity.commonDirectoryFile.identity,
+        );
+        const currentContent = readFileSync(commonDirectoryPath, "utf-8");
+        if (currentContent !== identity.commonDirectoryFile.content) {
+            throw new Error(`Nested Git repository common directory changed: ${repositoryPath}`);
+        }
+        resolvedCommonDirectory = resolve(gitDirectoryPath, currentContent.trim());
+    } else if (pathExistsStrict(join(gitDirectoryPath, "commondir"))) {
+        throw new Error(`Nested Git repository common directory changed: ${repositoryPath}`);
+    }
+    assertDirectoryIdentity(resolvedCommonDirectory, identity.commonDirectory);
+}
+
+const GIT_REPOSITORY_SELECTOR_ENVIRONMENT = [
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_WORK_TREE",
+] as const;
+
+function withSanitizedGitRepositoryEnvironment<T>(operation: () => T): T {
+    const previous = new Map<string, string | undefined>();
+    for (const key of GIT_REPOSITORY_SELECTOR_ENVIRONMENT) {
+        previous.set(key, process.env[key]);
+        delete process.env[key];
+    }
+    try {
+        return operation();
+    } finally {
+        for (const key of GIT_REPOSITORY_SELECTOR_ENVIRONMENT) {
+            const value = previous.get(key);
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+        }
+    }
+}
+
+function pinnedRepositoryEnvironment(
+    identity: NestedRepositoryIdentity,
+): NodeJS.ProcessEnv {
+    const environment = sanitizedGitRepositoryEnvironment();
+    environment.GIT_DIR = identity.gitDirectory.realpath;
+    environment.GIT_WORK_TREE = identity.directory.realpath;
+    environment.GIT_INDEX_FILE = join(identity.gitDirectory.realpath, "index");
+    return environment;
+}
+
+function sanitizedGitRepositoryEnvironment(): NodeJS.ProcessEnv {
+    const environment = { ...process.env };
+    for (const key of GIT_REPOSITORY_SELECTOR_ENVIRONMENT) {
+        delete environment[key];
+    }
+    return environment;
+}
+
+function withPinnedNestedRepository<T>(
+    identity: NestedRepositoryIdentity,
+    operation: () => T,
+): T {
+    const previous = new Map<string, string | undefined>();
+    for (const key of GIT_REPOSITORY_SELECTOR_ENVIRONMENT) {
+        previous.set(key, process.env[key]);
+        delete process.env[key];
+    }
+    Object.assign(process.env, pinnedRepositoryEnvironment(identity));
+    try {
+        return operation();
+    } finally {
+        for (const key of GIT_REPOSITORY_SELECTOR_ENVIRONMENT) {
+            const value = previous.get(key);
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+        }
+    }
+}
+
+function pinnedNestedRepositoryEnvironment(
+    identity: NestedRepositoryIdentity,
+): NodeJS.ProcessEnv {
+    return pinnedRepositoryEnvironment(identity);
+}
+
+function isolatedPinnedRepositoryEnvironment(
+    identity: NestedRepositoryIdentity,
+): NodeJS.ProcessEnv {
+    const pinned = pinnedRepositoryEnvironment(identity);
+    const environment = { ...pinned };
+    for (const key of Object.keys(environment)) {
+        if (key.toUpperCase().startsWith("GIT_")) delete environment[key];
+    }
+    environment.GIT_DIR = pinned.GIT_DIR;
+    environment.GIT_WORK_TREE = pinned.GIT_WORK_TREE;
+    environment.GIT_INDEX_FILE = pinned.GIT_INDEX_FILE;
+    return environment;
+}
+
+function isNestedTrackedGitlink(
+    repositoryRoot: string,
+    repositories: WorkspaceEntry[],
+    entry: WorkspaceEntry,
+): boolean {
+    const parent = repositories
+        .filter((candidate) => (
+            candidate.name !== entry.name
+            && entry.name.startsWith(`${candidate.name}/`)
+        ))
+        .sort((left, right) => right.name.length - left.name.length)[0];
+    const ownerPath = parent?.path ?? repositoryRoot;
+    const relativeName = parent
+        ? entry.name.slice(parent.name.length + 1)
+        : entry.name;
+    return isTrackedGitlink(ownerPath, relativeName);
+}
+
+function ensureNestedWorktreeParent(
+    workspacePath: string,
+    destinationPath: string,
+    createdParents: Map<string, DirectoryIdentity>,
+    createMissing = true,
+): {
+    workspace: DirectoryIdentity;
+    parents: Array<{ path: string; identity: DirectoryIdentity }>;
+} {
+    const workspace = captureDirectoryIdentity(workspacePath);
+    const workspaceRoot = workspace.realpath;
+    const parents: Array<{ path: string; identity: DirectoryIdentity }> = [];
+    const relativeDestination = relative(workspacePath, destinationPath);
+    const segments = relativeDestination.split(/[\\/]/);
+    if (!relativeDestination || relativePathEscapesRoot(relativeDestination)
+        || segments.some((segment) => !segment || segment === "." || segment === "..")) {
+        throw new Error(`Nested worktree destination escapes its workspace: ${destinationPath}`);
+    }
+
+    let current = workspacePath;
+    for (const segment of segments.slice(0, -1)) {
+        current = join(current, segment);
+        assertDirectoryIdentity(workspacePath, workspace);
+        for (const parent of parents) {
+            assertDirectoryIdentity(parent.path, parent.identity);
+        }
+        if (!pathExistsStrict(current)) {
+            if (!createMissing) {
+                throw new Error(`Nested worktree parent is missing: ${current}`);
+            }
+            mkdirSync(current);
+            assertDirectoryIdentity(workspacePath, workspace);
+            for (const parent of parents) {
+                assertDirectoryIdentity(parent.path, parent.identity);
+            }
+            createdParents.set(current, captureDirectoryIdentity(current));
+        }
+        const observed = lstatSync(current);
+        if (!observed.isDirectory() || observed.isSymbolicLink()) {
+            throw new Error(`Nested worktree parent is not a safe directory: ${current}`);
+        }
+        const relativeObserved = relative(workspaceRoot, realpathSync(current));
+        if (relativePathEscapesRoot(relativeObserved)) {
+            throw new Error(`Nested worktree parent escapes its workspace: ${current}`);
+        }
+        parents.push({
+            path: current,
+            identity: captureDirectoryIdentity(current),
+        });
+        assertDirectoryIdentity(workspacePath, workspace);
+        for (const parent of parents) {
+            assertDirectoryIdentity(parent.path, parent.identity);
+        }
+    }
+    return { workspace, parents };
+}
+
+function assertNestedWorktreeDestinationFence(
+    workspacePath: string,
+    destinationPath: string,
+    fence: {
+        workspace: DirectoryIdentity;
+        parents: Array<{ path: string; identity: DirectoryIdentity }>;
+    },
+): void {
+    assertDirectoryIdentity(workspacePath, fence.workspace);
+    for (const parent of fence.parents) {
+        assertDirectoryIdentity(parent.path, parent.identity);
+        if (relativePathEscapesRoot(
+            relative(fence.workspace.realpath, realpathSync(parent.path)),
+        )) {
+            throw new Error(`Nested worktree parent escaped its workspace: ${parent.path}`);
+        }
+    }
+    if (!pathExistsStrict(destinationPath)) return;
+    const destination = lstatSync(destinationPath);
+    if (!destination.isDirectory() || destination.isSymbolicLink()
+        || relativePathEscapesRoot(relative(
+            fence.workspace.realpath,
+            realpathSync(destinationPath),
+        ))) {
+        throw new Error(`Nested worktree destination escaped its workspace: ${destinationPath}`);
+    }
 }
 
 /**
@@ -232,28 +4078,1617 @@ export function scanDirectory(dirPath: string): WorkspaceEntry[] {
 export function branchExistsInRepo(
     repoPath: string,
     branch: string,
+    runner: typeof spawnSync = spawnSync,
 ): "local" | "remote" | "none" {
-    // Check local branch (refs/heads/ restricts to branch refs only)
-    const localResult = spawnSync(
-        "git",
-        ["rev-parse", "--verify", `refs/heads/${branch}`],
-        { cwd: repoPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-    );
-    if (localResult.status === 0) {
+    const exactRefExists = (ref: string, description: string): boolean => {
+        const result = runner(
+            "git",
+            ["show-ref", "--quiet", "--verify", "--", ref],
+            { cwd: repoPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+        );
+        if (!result.error && result.status === 0) return true;
+        if (!result.error && result.status === 1) return false;
+        const failure = result.error
+            ? `spawn-${(result.error as NodeJS.ErrnoException).code || "error"}`
+            : `exit-${String(result.status)}`;
+        throw new Error(`Unable to inspect ${description} branch '${branch}' (${failure}).`);
+    };
+
+    // show-ref --verify uses a full ref and reports an absent ref as status 1
+    // on every supported Git version, including Git for Windows.
+    if (exactRefExists(`refs/heads/${branch}`, "local")) {
         return "local";
     }
 
-    // Check remote branch
-    const remoteResult = spawnSync(
-        "git",
-        ["rev-parse", "--verify", `refs/remotes/origin/${branch}`],
-        { cwd: repoPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-    );
-    if (remoteResult.status === 0) {
+    if (exactRefExists(`refs/remotes/origin/${branch}`, "remote")) {
         return "remote";
     }
 
     return "none";
+}
+function expectedFailedCreationBranchOid(
+    repositoryPath: string,
+    branch: string,
+    action: WorktreeRepoResult["action"],
+): string {
+    const sourceRef = action === "worktree-existing"
+        ? `refs/heads/${branch}^{commit}`
+        : action === "worktree-remote"
+            ? `refs/remotes/origin/${branch}^{commit}`
+            : "HEAD^{commit}";
+    const resolved = spawnSync(
+        "git",
+        ["rev-parse", "--verify", sourceRef],
+        { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const oid = (resolved.stdout ?? "").trim();
+    if (resolved.error || resolved.status !== 0 || !/^[a-f0-9]{40,64}$/i.test(oid)) {
+        throw new Error(`Unable to snapshot branch creation source for '${branch}'.`);
+    }
+    return oid;
+}
+
+type BranchTrackingConfig = {
+    remote: string[];
+    merge: string[];
+    rebase: string[];
+};
+
+type BranchCreationFence = {
+    expectedOid: string;
+    configBefore: BranchTrackingConfig;
+    configAfter: BranchTrackingConfig;
+};
+
+function readBranchTrackingConfig(
+    repositoryPath: string,
+    branch: string,
+    configFile?: string,
+): BranchTrackingConfig {
+    const readValues = (suffix: keyof BranchTrackingConfig): string[] => {
+        const result = spawnSync(
+            "git",
+            [
+                "config",
+                ...(configFile ? ["--file", configFile] : ["--local"]),
+                "--get-all",
+                `branch.${branch}.${suffix}`,
+            ],
+            { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+        );
+        if (result.error || (result.status !== 0 && result.status !== 1)) {
+            throw new Error(`Unable to inspect branch tracking configuration for '${branch}'.`);
+        }
+        if (result.status === 1) return [];
+        return (result.stdout ?? "").replace(/\r?\n$/, "").split(/\r?\n/);
+    };
+    return {
+        remote: readValues("remote"),
+        merge: readValues("merge"),
+        rebase: readValues("rebase"),
+    };
+}
+
+function sameBranchTrackingConfig(
+    left: BranchTrackingConfig,
+    right: BranchTrackingConfig,
+): boolean {
+    return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function replaceBranchTrackingConfig(
+    repositoryPath: string,
+    branch: string,
+    expected: BranchTrackingConfig,
+    replacement: BranchTrackingConfig,
+    beforeCommit: () => void = () => {},
+): void {
+    const commonDirResult = spawnSync(
+        "git",
+        ["rev-parse", "--git-common-dir"],
+        { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    if (commonDirResult.error || commonDirResult.status !== 0) {
+        throw new Error(`Unable to locate Git configuration for '${branch}'.`);
+    }
+    const commonDir = resolve(repositoryPath, (commonDirResult.stdout ?? "").trim());
+    const commonDirIdentity = captureDirectoryIdentity(commonDir);
+    const configPath = join(commonDir, "config");
+    const configIdentity = capturePathIdentity(configPath);
+    const lockPath = `${configPath}.lock`;
+    let lockCreated = false;
+    try {
+        assertDirectoryIdentity(commonDir, commonDirIdentity);
+        const lockFd = openSync(lockPath, "wx", 0o600);
+        lockCreated = true;
+        closeSync(lockFd);
+        if (!sameBranchTrackingConfig(
+            readBranchTrackingConfig(repositoryPath, branch, configPath),
+            expected,
+        )) {
+            throw new Error(
+                `Branch '${branch}' tracking configuration changed; preserving it.`,
+            );
+        }
+        copyFileSync(configPath, lockPath);
+        for (const suffix of ["remote", "merge", "rebase"] as const) {
+            const key = `branch.${branch}.${suffix}`;
+            const unset = spawnSync(
+                "git",
+                ["config", "--file", lockPath, "--unset-all", key],
+                { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+            );
+            if (unset.error || (unset.status !== 0 && unset.status !== 5)) {
+                throw new Error(`Failed to clear branch tracking configuration for '${branch}'.`);
+            }
+            for (const value of replacement[suffix]) {
+                const restored = spawnSync(
+                    "git",
+                    ["config", "--file", lockPath, "--add", key, value],
+                    { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+                );
+                if (restored.error || restored.status !== 0) {
+                    throw new Error(
+                        `Failed to restore branch tracking configuration for '${branch}'.`,
+                    );
+                }
+            }
+        }
+        assertDirectoryIdentity(commonDir, commonDirIdentity);
+        if (!sameBranchTrackingConfig(
+            readBranchTrackingConfig(repositoryPath, branch, configPath),
+            expected,
+        )) {
+            throw new Error(
+                `Branch '${branch}' tracking configuration changed; preserving it.`,
+            );
+        }
+        beforeCommit();
+        assertPathIdentity(configPath, configIdentity);
+        renameSync(lockPath, configPath);
+        lockCreated = false;
+    } finally {
+        if (lockCreated) unlinkSync(lockPath);
+    }
+}
+
+function rollbackFailedCreatedBranch(
+    repositoryPath: string,
+    branch: string,
+    action: WorktreeRepoResult["action"],
+    fence: BranchCreationFence | null,
+): void {
+    if (action === "worktree-existing") return;
+    if (!fence) {
+        throw new Error(`Missing branch ownership snapshot for '${branch}'.`);
+    }
+    const { expectedOid } = fence;
+    const ref = `refs/heads/${branch}`;
+    const current = spawnSync(
+        "git",
+        ["rev-parse", "--verify", "--quiet", ref],
+        { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    if (current.error || current.status === null) {
+        throw new Error(`Unable to inspect branch '${branch}' during rollback.`);
+    }
+    if (current.status === 1) {
+        replaceBranchTrackingConfig(
+            repositoryPath,
+            branch,
+            fence.configAfter,
+            fence.configBefore,
+        );
+        return;
+    }
+    if (current.status !== 0) {
+        throw new Error(`Unable to inspect branch '${branch}' during rollback.`);
+    }
+    const currentOid = (current.stdout ?? "").trim();
+    if (currentOid !== expectedOid) {
+        throw new Error(
+            `Branch '${branch}' changed during failed creation; preserving ref ${currentOid || "<unknown>"}.`,
+        );
+    }
+    replaceBranchTrackingConfig(
+        repositoryPath,
+        branch,
+        fence.configAfter,
+        fence.configBefore,
+        () => {
+            const removed = spawnSync(
+                "git",
+                ["update-ref", "-d", ref, expectedOid],
+                { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+            );
+            const remaining = spawnSync(
+                "git",
+                ["rev-parse", "--verify", "--quiet", ref],
+                { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+            );
+            if (removed.error || removed.status !== 0
+                || remaining.error || remaining.status !== 1) {
+                throw new Error(`Failed to roll back branch '${branch}' by exact ref identity.`);
+            }
+        },
+    );
+}
+
+function registeredWorktreePath(
+    repositoryPath: string,
+    worktreePath: string,
+): boolean {
+    const listed = spawnSync(
+        "git",
+        ["worktree", "list", "--porcelain"],
+        { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    if (listed.error || listed.status !== 0) {
+        throw new Error(`Unable to inspect worktree registry for rollback: ${repositoryPath}`);
+    }
+    return (listed.stdout ?? "")
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("worktree "))
+        .some((line) => sameObservedPath(
+            line.slice("worktree ".length).trim(),
+            worktreePath,
+        ));
+}
+
+type WorktreeRegistrationFence = {
+    destinationIdentity: DirectoryIdentity;
+    managementIdentity: DirectoryIdentity;
+    worktreeGitFileIdentity: FileIdentity;
+    managementGitdirIdentity: FileIdentity;
+    managementHeadIdentity: FileIdentity;
+    expectedOid: string;
+    expectedRef: string;
+};
+
+type MissingWorktreeRegistrationFence = {
+    managementIdentity: DirectoryIdentity;
+    managementGitdirIdentity: FileIdentity;
+    managementHeadIdentity: FileIdentity;
+    expectedOid: string;
+    expectedRef: string;
+};
+
+type QuarantinedMissingWorktreeRegistration = {
+    fence: MissingWorktreeRegistrationFence;
+    location: QuarantineLocation;
+    parentIdentity: DirectoryIdentity;
+    tree: CapturedDirectoryTree;
+};
+
+function requireWorktreeRegistrationFence(
+    fence: WorktreeRegistrationFence | null,
+    worktreePath: string,
+): WorktreeRegistrationFence {
+    if (!fence) {
+        throw new Error(`Missing worktree registration ownership fence: ${worktreePath}`);
+    }
+    return fence;
+}
+
+function captureWorktreeManagementIdentity(
+    worktreePath: string,
+): DirectoryIdentity {
+    const content = readFileSync(join(worktreePath, ".git"), "utf-8").trim();
+    const match = content.match(/^gitdir:\s*(.+)$/);
+    if (!match) {
+        throw new Error(`Worktree registration metadata is invalid: ${worktreePath}`);
+    }
+    return captureDirectoryIdentity(resolve(worktreePath, match[1].trim()));
+}
+
+function managementGitdirBackpointer(managementGitdir: string): string {
+    const recorded = readFileSync(managementGitdir, "utf-8").trim();
+    return isAbsolute(recorded) ? recorded : resolve(dirname(managementGitdir), recorded);
+}
+
+function worktreeManagementBackpointersMatch(
+    worktreePath: string,
+    fence: WorktreeRegistrationFence,
+): boolean {
+    try {
+        assertDirectoryIdentity(fence.managementIdentity.realpath, fence.managementIdentity);
+        const gitFile = join(worktreePath, ".git");
+        assertFileIdentity(gitFile, fence.worktreeGitFileIdentity);
+        const content = readFileSync(gitFile, "utf-8").trim();
+        const match = content.match(/^gitdir:\s*(.+)$/);
+        if (!match) return false;
+        const resolvedManagement = resolve(worktreePath, match[1].trim());
+        assertDirectoryIdentity(resolvedManagement, fence.managementIdentity);
+        const managementGitdir = join(fence.managementIdentity.realpath, "gitdir");
+        const managementHead = join(fence.managementIdentity.realpath, "HEAD");
+        assertFileIdentity(managementGitdir, fence.managementGitdirIdentity);
+        assertFileIdentity(managementHead, fence.managementHeadIdentity);
+        const registeredGitFile = managementGitdirBackpointer(managementGitdir);
+        const managedHead = readFileSync(
+            managementHead,
+            "utf-8",
+        ).trim();
+        if (!sameObservedPath(registeredGitFile, gitFile)
+            || managedHead !== `ref: ${fence.expectedRef}`) {
+            return false;
+        }
+        assertFileIdentity(gitFile, fence.worktreeGitFileIdentity);
+        assertFileIdentity(managementGitdir, fence.managementGitdirIdentity);
+        assertFileIdentity(managementHead, fence.managementHeadIdentity);
+        assertDirectoryIdentity(fence.managementIdentity.realpath, fence.managementIdentity);
+        assertDirectoryIdentity(resolvedManagement, fence.managementIdentity);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function assertWorktreeRegistrationFenceFileIdentities(
+    worktreePath: string,
+    fence: WorktreeRegistrationFence,
+): void {
+    assertFileIdentity(join(worktreePath, ".git"), fence.worktreeGitFileIdentity);
+    assertFileIdentity(
+        join(fence.managementIdentity.realpath, "gitdir"),
+        fence.managementGitdirIdentity,
+    );
+    assertFileIdentity(
+        join(fence.managementIdentity.realpath, "HEAD"),
+        fence.managementHeadIdentity,
+    );
+    assertDirectoryIdentity(fence.managementIdentity.realpath, fence.managementIdentity);
+}
+
+function refreshWorktreeRegistrationFenceFileIdentities(
+    worktreePath: string,
+    fence: WorktreeRegistrationFence,
+): WorktreeRegistrationFence {
+    assertDirectoryIdentity(worktreePath, fence.destinationIdentity);
+    assertDirectoryIdentity(fence.managementIdentity.realpath, fence.managementIdentity);
+    const gitFile = join(worktreePath, ".git");
+    const content = readFileSync(gitFile, "utf-8").trim();
+    const match = content.match(/^gitdir:\s*(.+)$/);
+    if (!match) {
+        throw new Error(`Worktree registration metadata is invalid: ${worktreePath}`);
+    }
+    assertDirectoryIdentity(
+        resolve(worktreePath, match[1].trim()),
+        fence.managementIdentity,
+    );
+    const managementGitdir = join(fence.managementIdentity.realpath, "gitdir");
+    const managementHead = join(fence.managementIdentity.realpath, "HEAD");
+    if (!sameObservedPath(
+        managementGitdirBackpointer(managementGitdir),
+        gitFile,
+    ) || readFileSync(managementHead, "utf-8").trim() !== `ref: ${fence.expectedRef}`) {
+        throw new Error(`Worktree registration backpointer changed: ${worktreePath}`);
+    }
+    const refreshed = {
+        ...fence,
+        worktreeGitFileIdentity: captureFileIdentity(gitFile),
+        managementGitdirIdentity: captureFileIdentity(managementGitdir),
+        managementHeadIdentity: captureFileIdentity(managementHead),
+    };
+    if (!worktreeManagementBackpointersMatch(worktreePath, refreshed)) {
+        throw new Error(`Worktree registration changed while refreshing metadata: ${worktreePath}`);
+    }
+    return refreshed;
+}
+
+function refreshMissingWorktreeRegistrationFenceFileIdentities(
+    repositoryPath: string,
+    worktreePath: string,
+    fence: WorktreeRegistrationFence,
+): WorktreeRegistrationFence {
+    const managementGitdir = join(fence.managementIdentity.realpath, "gitdir");
+    const managementHead = join(fence.managementIdentity.realpath, "HEAD");
+    assertDirectoryIdentity(fence.managementIdentity.realpath, fence.managementIdentity);
+    if (!sameObservedPath(
+        managementGitdirBackpointer(managementGitdir),
+        join(worktreePath, ".git"),
+    ) || readFileSync(managementHead, "utf-8").trim() !== `ref: ${fence.expectedRef}`) {
+        throw new Error(`Missing worktree registration backpointer changed: ${worktreePath}`);
+    }
+    const refreshed = {
+        ...fence,
+        managementGitdirIdentity: captureFileIdentity(managementGitdir),
+        managementHeadIdentity: captureFileIdentity(managementHead),
+    };
+    if (!missingWorktreeManagementMatches(repositoryPath, worktreePath, refreshed)) {
+        throw new Error(`Missing worktree registration changed: ${worktreePath}`);
+    }
+    return refreshed;
+}
+
+function missingWorktreeManagementMatches(
+    repositoryPath: string,
+    worktreePath: string,
+    fence: MissingWorktreeRegistrationFence,
+): boolean {
+    try {
+        assertDirectoryIdentity(fence.managementIdentity.realpath, fence.managementIdentity);
+        const managementGitdir = join(fence.managementIdentity.realpath, "gitdir");
+        const managementHead = join(fence.managementIdentity.realpath, "HEAD");
+        assertFileIdentity(managementGitdir, fence.managementGitdirIdentity);
+        assertFileIdentity(managementHead, fence.managementHeadIdentity);
+        const registeredGitFile = managementGitdirBackpointer(managementGitdir);
+        const managedHead = readFileSync(
+            managementHead,
+            "utf-8",
+        ).trim();
+        if (!sameObservedPath(registeredGitFile, join(worktreePath, ".git"))
+            || managedHead !== `ref: ${fence.expectedRef}`) {
+            return false;
+        }
+        const branchHead = spawnSync(
+            "git",
+            ["rev-parse", "--verify", "--quiet", `${fence.expectedRef}^{commit}`],
+            { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+        );
+        if (branchHead.error || branchHead.status !== 0
+            || (branchHead.stdout ?? "").trim() !== fence.expectedOid) {
+            return false;
+        }
+        const common = spawnSync(
+            "git",
+            ["rev-parse", "--git-common-dir"],
+            { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+        );
+        if (common.error || common.status !== 0) return false;
+        const managementRoot = join(
+            resolve(repositoryPath, (common.stdout ?? "").trim()),
+            "worktrees",
+        );
+        const matches = readdirSync(managementRoot, { withFileTypes: true })
+            .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+            .map((entry) => join(managementRoot, entry.name))
+            .filter((candidate) => {
+                try {
+                    return sameObservedPath(
+                        managementGitdirBackpointer(join(candidate, "gitdir")),
+                        join(worktreePath, ".git"),
+                    );
+                } catch {
+                    return false;
+                }
+            });
+        if (matches.length !== 1) return false;
+        assertDirectoryIdentity(matches[0], fence.managementIdentity);
+        const registryMatches = worktreeRegistryEntryMatches(
+            repositoryPath,
+            worktreePath,
+            fence.expectedRef,
+            fence.expectedOid,
+        );
+        assertFileIdentity(managementGitdir, fence.managementGitdirIdentity);
+        assertFileIdentity(managementHead, fence.managementHeadIdentity);
+        assertDirectoryIdentity(fence.managementIdentity.realpath, fence.managementIdentity);
+        return registryMatches;
+    } catch {
+        return false;
+    }
+}
+
+function captureExistingWorktreeRegistrationFence(
+    repositoryPath: string,
+    worktreePath: string,
+    branch: string,
+    expectedDestinationIdentity?: DirectoryIdentity,
+): WorktreeRegistrationFence {
+    const destinationIdentity = captureDirectoryIdentity(worktreePath);
+    if (expectedDestinationIdentity) {
+        assertDirectoryIdentity(worktreePath, expectedDestinationIdentity);
+    }
+    const head = spawnSync(
+        "git",
+        ["rev-parse", "--verify", "HEAD^{commit}"],
+        { cwd: worktreePath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    if (head.error || head.status !== 0) {
+        throw new Error(`Unable to capture worktree HEAD ownership: ${worktreePath}`);
+    }
+    const managementIdentity = captureWorktreeManagementIdentity(worktreePath);
+    const fence: WorktreeRegistrationFence = {
+        destinationIdentity,
+        managementIdentity,
+        worktreeGitFileIdentity: captureFileIdentity(join(worktreePath, ".git")),
+        managementGitdirIdentity: captureFileIdentity(join(managementIdentity.realpath, "gitdir")),
+        managementHeadIdentity: captureFileIdentity(join(managementIdentity.realpath, "HEAD")),
+        expectedOid: (head.stdout ?? "").trim(),
+        expectedRef: `refs/heads/${branch}`,
+    };
+    if (!worktreeRegistrationMatches(
+        repositoryPath,
+        worktreePath,
+        branch,
+        fence.expectedOid,
+        fence,
+    )) {
+        throw new Error(`Worktree registration ownership changed before deletion: ${worktreePath}`);
+    }
+    return fence;
+}
+
+// Which registration is standing in the way of recreating this worktree.
+//
+// Usually it is the one recorded against the destination itself, and the caller falls back
+// to that. It is not when the workspace was created on the other side of the container
+// boundary: the source repository then holds a registration for THIS branch recorded against
+// a path that exists only in the container, and `git worktree add` refuses with
+//
+//     fatal: '<branch>' is already used by worktree at '/project/<workspace>/<repo>'
+//
+// Git itself calls that entry prunable ("gitdir file points to non-existent location").
+// Without this, repair returned null on every attempt and the CLI said only "failed to fix
+// (content unchanged)", so the operator had no way to learn that a registration was the
+// obstacle, let alone which one.
+/**
+ * Repositories that still hold `branch` through a registration recorded at a path nothing
+ * here can reach — after the workspace that path belonged to has been removed.
+ *
+ * `ccc rm -f` said "Workspace removed." and left exactly this, silently: the next
+ * `ccc @<branch>` then died with `fatal: '<branch>' is already used by worktree at
+ * '/project/…'`, whose only noun is a path on the other side of the container boundary and
+ * which names no remedy. Three commands from ccc's own output, and `git worktree prune` in
+ * the named repository is the whole fix.
+ *
+ * Best effort by construction: this runs after a successful removal and must never turn one
+ * into a failure, so every step that can throw is contained.
+ */
+// `lockedPaths` because `git worktree unlock` takes the worktree PATH — measured, without
+// one it exits 129 with a usage line. Naming only the repository sent the most-stuck
+// operator to a usage error, which is the same shape as sending them to a command that does
+// nothing; that was the defect the locked branch was added to avoid.
+export type StrandedBranchRegistration = {
+    repository: string;
+    lockedPaths: string[];
+};
+
+export function strandedBranchRegistrations(
+    sourcePath: string,
+    branch: string,
+): StrandedBranchRegistration[] {
+    const resolved = resolve(sourcePath);
+    const repositories = [resolved];
+    try {
+        const entries = hasGitMetadata(resolved)
+            ? scanUnifiedNestedRepositories(resolved, {
+                strict: false,
+                allowRegisteredWorktrees: true,
+                openingExistingWorkspace: true,
+            })
+            : scanDirectory(resolved, { strict: false });
+        for (const entry of entries) if (entry.isGitRepo) repositories.push(entry.path);
+    } catch {
+        // The root alone is still worth checking.
+    }
+    const stranded: StrandedBranchRegistration[] = [];
+    // Keyed by REGISTRY, not by directory. The scan runs with allowRegisteredWorktrees, so a
+    // worktree of the source that lives inside the source is listed as its own repository
+    // while sharing the source's registry — one registration, reported twice, and the second
+    // command in the emitted block then fails with `is not a working tree` because the first
+    // already cleared it. Under `sh -e` that aborts the rest of the block, so the duplicate
+    // does not merely look untidy: it stops the remedy halfway.
+    const registries = new Set<string>();
+    for (const repository of repositories) {
+        try {
+            if (!pathExistsStrict(join(repository, ".git"))) continue;
+            // `--git-common-dir` is the registry a worktree shares with its source; `--git-dir`
+            // is per-worktree and would not collapse them. Plain, not `--path-format=absolute`:
+            // that flag landed in git 2.31 and Debian 11 ships 2.30.2, where the probe would
+            // exit non-zero, the key would be empty, and the dedupe would silently turn itself
+            // off — on the HOST, which is where this runs, not in the container. git answers
+            // `.git` relative from a repository root and an absolute path from a linked
+            // worktree; resolving against the repository normalises both, on every version.
+            const registry = spawnSync(
+                "git",
+                ["rev-parse", "--git-common-dir"],
+                { cwd: repository, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+            );
+            const answer = registry.status === 0 ? (registry.stdout ?? "").trim() : "";
+            const key = answer === "" ? "" : resolve(repository, answer);
+            // No key means git could not answer, and a repository we cannot identify is one we
+            // must not silently drop — report it and let the operator see the duplicate rather
+            // than lose a registration to a failed probe.
+            if (key !== "") {
+                if (registries.has(key)) continue;
+                registries.add(key);
+            }
+            // Every holder, with no policy applied. This advises; it displaces nothing. Both of
+            // displacement's rules were wrong here and both went the same way — a locked
+            // entry is where the operator is MOST stuck, since `prune` will not clear it, and
+            // two holders means there is MORE to clean up, not less. Inheriting either made
+            // `ccc rm -f` print "Workspace removed." and nothing else.
+            const held = registrationsHoldingBranch(repository, branch);
+            if (held.length === 0) continue;
+            // One line per REPOSITORY, because that is what the operator runs the command in.
+            // Locked if ANY of its holders is: prune clears the rest and stops at that one, so
+            // the remedy has to be the stronger of the two.
+            stranded.push({
+                repository,
+                lockedPaths: held.filter((entry) => entry.locked).map((entry) => entry.path),
+            });
+        } catch {
+            // A repository we cannot inspect is one we cannot advise about.
+        }
+    }
+    return stranded;
+}
+
+type UnreachableRegistration = { path: string; locked: boolean };
+
+/**
+ * Every registration in `repositoryPath` that holds `branch` through a path nothing here can
+ * reach. No policy: this reports what git's registry says, and each caller applies its own.
+ *
+ * Split out because two callers wanted opposite things from the same function and the
+ * shared version carried DISPLACEMENT's rules — skip locked entries, refuse when there is
+ * more than one. Both are right for choosing an entry to move aside and both are wrong for a
+ * read-only advisory, which went silent in exactly the states with the most to clean up. The
+ * first divergence was patched with a boolean parameter; the second arrived the same way,
+ * which is what a parameter on a policy question buys you.
+ */
+function registrationsHoldingBranch(
+    repositoryPath: string,
+    branch: string,
+): UnreachableRegistration[] {
+    const listed = spawnSync(
+        "git",
+        ["worktree", "list", "--porcelain"],
+        { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    if (listed.error || listed.status !== 0) {
+        throw new Error(`Unable to inspect worktree registrations: ${repositoryPath}`);
+    }
+    // Anything other than a clean absence counts as reachable. Displacement decides whether to
+    // move someone's registry entry on this, so every ambiguity falls on the side of leaving
+    // it alone — an EACCES on the recorded path means we cannot see it, not that it is gone.
+    const observable = (path: string): boolean => {
+        try {
+            lstatSync(path);
+            return true;
+        } catch (error) {
+            return !["ENOENT", "ENOTDIR"].includes(
+                (error as NodeJS.ErrnoException).code ?? "",
+            );
+        }
+    };
+    const wanted = `branch refs/heads/${branch}`;
+    const holders: UnreachableRegistration[] = [];
+    for (const block of (listed.stdout ?? "").split(/\r?\n\r?\n/)) {
+        const lines = block.split(/\r?\n/);
+        const worktreeLine = lines.find((line) => line.startsWith("worktree "));
+        if (!worktreeLine || !lines.includes(wanted)) continue;
+        const registered = worktreeLine.slice("worktree ".length).trim();
+        if (observable(registered)) continue;
+        holders.push({
+            path: registered,
+            locked: lines.some((line) => line === "locked" || line.startsWith("locked ")),
+        });
+    }
+    return holders;
+}
+
+/**
+ * The one registration `fixBrokenWorktree` may move aside, or null if there is none it may.
+ *
+ * Three rules, all of them displacement's alone:
+ *
+ * - The destination's own entry is that caller's other case, handled by the fence with the
+ *   checks it already carries.
+ * - A `locked` entry is never displaced. Git's manual names this exact case — a worktree "on
+ *   a portable device or network share which is not always mounted" — and an unmounted volume
+ *   answers ENOENT identically to a container path. Honouring the lock is the contract this
+ *   can defend: it does what `git worktree prune` would do, and stops where prune stops.
+ * - More than one candidate is a refusal. `git worktree add --force` DOES put a second
+ *   worktree on a branch — measured against git 2.43.0, and an earlier comment here claimed
+ *   otherwise and used the claim as a safety argument — so a second holder is not proof of
+ *   corruption, it is proof that this cannot tell which to displace.
+ *
+ *   The OUTCOME is identical either way — null, every registration rolled back — so what
+ *   this rule changes is the git error the operator is shown: refusing displaces nothing and
+ *   git names a rival that is holding the branch, while displacing one anyway leaves git
+ *   complaining that the destination is registered, which says nothing about the rivals.
+ *   That is the difference between "here is what is holding your branch" and "this path is
+ *   registered". Pinned by a fixture with THREE unreachable holders, because the
+ *   destination's own registration is filtered out before the count and two leave only one
+ *   candidate — with two, the rule is never reached and any assertion against it passes.
+ *
+ *   The destination filter is pinned by the same fixture one rival fewer, with the two
+ *   needles read in the other direction: two holders leave one candidate, ccc displaces the
+ *   rival, and git then refuses on the destination's own entry. Without the filter there are
+ *   two candidates, ambiguity fires, ccc displaces the destination's entry, and git names the
+ *   rival instead. One fixture family, one pair of needles, both rules.
+ */
+function registrationToDisplace(
+    repositoryPath: string,
+    destinationPath: string,
+    branch: string,
+): UnreachableRegistration | null {
+    const candidates = registrationsHoldingBranch(repositoryPath, branch)
+        .filter((holder) => !sameObservedPath(holder.path, destinationPath))
+        .filter((holder) => !holder.locked);
+    return candidates.length === 1 ? candidates[0] : null;
+}
+
+function captureMissingWorktreeRegistrationFence(
+    repositoryPath: string,
+    worktreePath: string,
+    branch: string,
+): MissingWorktreeRegistrationFence | null {
+    const expectedRef = `refs/heads/${branch}`;
+    const listed = spawnSync(
+        "git",
+        ["worktree", "list", "--porcelain"],
+        { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    if (listed.error || listed.status !== 0) {
+        throw new Error(`Unable to inspect stale worktree registration: ${worktreePath}`);
+    }
+    const records = (listed.stdout ?? "")
+        .split(/\r?\n\r?\n/)
+        .filter((block) => {
+            const worktreeLine = block
+                .split(/\r?\n/)
+                .find((line) => line.startsWith("worktree "));
+            return worktreeLine !== undefined
+                && sameObservedPath(
+                    worktreeLine.slice("worktree ".length).trim(),
+                    worktreePath,
+                );
+        });
+    if (records.length === 0) return null;
+    if (records.length !== 1) {
+        throw new Error(`Ambiguous stale worktree registration: ${worktreePath}`);
+    }
+    const lines = records[0].split(/\r?\n/);
+    if (lines.some((line) => line === "locked" || line.startsWith("locked "))) {
+        throw new Error(`Stale worktree registration is locked: ${worktreePath}`);
+    }
+    const branchLine = lines.find((line) => line.startsWith("branch "));
+    const headLine = lines.find((line) => line.startsWith("HEAD "));
+    if (branchLine !== `branch ${expectedRef}` || !headLine) {
+        throw new Error(`Stale worktree registration belongs to another branch: ${worktreePath}`);
+    }
+    const expectedOid = headLine.slice("HEAD ".length).trim();
+    const branchHead = spawnSync(
+        "git",
+        ["rev-parse", "--verify", "--quiet", `${expectedRef}^{commit}`],
+        { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    if (branchHead.error || branchHead.status !== 0
+        || (branchHead.stdout ?? "").trim() !== expectedOid) {
+        throw new Error(`Stale worktree branch ownership changed: ${worktreePath}`);
+    }
+    const common = spawnSync(
+        "git",
+        ["rev-parse", "--git-common-dir"],
+        { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    if (common.error || common.status !== 0) {
+        throw new Error(`Unable to inspect worktree management root: ${repositoryPath}`);
+    }
+    const commonDirectory = resolve(repositoryPath, (common.stdout ?? "").trim());
+    const commonIdentity = captureDirectoryIdentity(commonDirectory);
+    const managementRoot = join(commonDirectory, "worktrees");
+    const managementRootIdentity = captureDirectoryIdentity(managementRoot);
+    const matches: DirectoryIdentity[] = [];
+    for (const entry of readdirSync(managementRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+        const candidate = join(managementRoot, entry.name);
+        const gitdirPath = join(candidate, "gitdir");
+        try {
+            const registeredGitFile = managementGitdirBackpointer(gitdirPath);
+            if (sameObservedPath(registeredGitFile, join(worktreePath, ".git"))) {
+                matches.push(captureDirectoryIdentity(candidate));
+            }
+        } catch {
+            // A malformed unrelated registration cannot own this exact path.
+        }
+    }
+    assertDirectoryIdentity(commonDirectory, commonIdentity);
+    assertDirectoryIdentity(managementRoot, managementRootIdentity);
+    if (matches.length !== 1) {
+        throw new Error(`Unable to prove stale worktree management ownership: ${worktreePath}`);
+    }
+    const fence = {
+        managementIdentity: matches[0],
+        managementGitdirIdentity: captureFileIdentity(join(matches[0].realpath, "gitdir")),
+        managementHeadIdentity: captureFileIdentity(join(matches[0].realpath, "HEAD")),
+        expectedOid,
+        expectedRef,
+    };
+    if (!missingWorktreeManagementMatches(repositoryPath, worktreePath, fence)) {
+        throw new Error(`Stale worktree registration changed during inspection: ${worktreePath}`);
+    }
+    return fence;
+}
+
+function quarantineMissingWorktreeRegistration(
+    repositoryPath: string,
+    worktreePath: string,
+    fence: MissingWorktreeRegistrationFence,
+    requireMissingDestination = false,
+): QuarantinedMissingWorktreeRegistration {
+    const recordedPath = dirname(managementGitdirBackpointer(
+        join(fence.managementIdentity.realpath, "gitdir"),
+    ));
+    const assertSafeToMove = (managementPath: string): void => {
+        if (pathExistsStrict(join(managementPath, "locked"))) {
+            throw new Error(`Stale worktree registration is locked: ${worktreePath}`);
+        }
+        if (requireMissingDestination
+            && (pathExistsStrict(worktreePath) || pathExistsStrict(recordedPath))) {
+            throw new Error(`Stale worktree destination reappeared: ${worktreePath}`);
+        }
+    };
+    assertSafeToMove(fence.managementIdentity.realpath);
+    if (!missingWorktreeManagementMatches(repositoryPath, worktreePath, fence)) {
+        throw new Error(`Stale worktree registration changed before deletion: ${worktreePath}`);
+    }
+    const parentIdentity = captureDirectoryIdentity(
+        dirname(fence.managementIdentity.realpath),
+    );
+    const tree = captureDirectoryTree(fence.managementIdentity.realpath);
+    // NOT `dirname(management)`. That is `.git/worktrees`, the directory git enumerates as
+    // its worktree registry, and a quarantine there is deleted by `git worktree prune` —
+    // unconditionally, because the expiry window only protects entries that HAVE a gitdir
+    // file pointing somewhere missing, and a quarantine directory has none at its top level.
+    // `git gc --auto` runs that prune on its own after ordinary commits. So the promise the
+    // displaced-registration NOTE makes — moved aside, not deleted — expired on a schedule
+    // the operator does not control and cannot see. One level up is the common git directory,
+    // which git does not walk.
+    const location = createPrivateQuarantine(
+        fence.managementIdentity.realpath,
+        dirname(dirname(fence.managementIdentity.realpath)),
+    );
+    let renamed = false;
+    try {
+        if (!missingWorktreeManagementMatches(repositoryPath, worktreePath, fence)) {
+            throw new Error(`Stale worktree registration changed before quarantine: ${worktreePath}`);
+        }
+        assertDirectoryIdentity(fence.managementIdentity.realpath, fence.managementIdentity);
+        assertFileIdentity(
+            join(fence.managementIdentity.realpath, "gitdir"),
+            fence.managementGitdirIdentity,
+        );
+        assertFileIdentity(
+            join(fence.managementIdentity.realpath, "HEAD"),
+            fence.managementHeadIdentity,
+        );
+        assertDirectoryIdentity(dirname(fence.managementIdentity.realpath), parentIdentity);
+        assertSafeToMove(fence.managementIdentity.realpath);
+        renameSync(fence.managementIdentity.realpath, location.path);
+        renamed = true;
+        assertQuarantinedIdentity(location.path, fence.managementIdentity, "directory");
+        assertSafeToMove(location.path);
+        if (registeredWorktreePath(repositoryPath, worktreePath)) {
+            throw new Error(`Failed to remove stale worktree registration: ${worktreePath}`);
+        }
+        return {
+            fence,
+            location,
+            parentIdentity,
+            tree,
+        };
+    } catch (error) {
+        if (renamed) {
+            try {
+                const restored = rollbackQuarantinedPath(
+                    fence.managementIdentity.realpath,
+                    location,
+                    fence.managementIdentity,
+                    parentIdentity,
+                    "directory",
+                );
+                if (!restored) {
+                    throw new Error(`Stale registration remains in quarantine: ${location.path}`);
+                }
+            } catch (rollbackError) {
+                throw new Error(
+                    `${(error as Error).message}; stale registration rollback failed at ${location.path}: ${(rollbackError as Error).message}`,
+                    { cause: error },
+                );
+            }
+        } else {
+            removePrivateQuarantine(location);
+        }
+        throw error;
+    }
+}
+
+function restoreQuarantinedMissingWorktreeRegistration(
+    registration: QuarantinedMissingWorktreeRegistration,
+): void {
+    // Git removes `.git/worktrees` once its last entry goes, and quarantining the only
+    // registration is exactly that — the caller runs `git worktree list` immediately after
+    // the rename, which is enough to trigger it. While the quarantine lived INSIDE that
+    // directory the question never arose, because it kept the directory non-empty; moving the
+    // quarantine out from under `git worktree prune` moved it into this one instead.
+    //
+    // Recreating is not a swap this fence needs to detect: it happens only when lstat says
+    // there is nothing at the path at all, so there is nothing that could have been swapped.
+    // A symlink planted there counts as existing, so this does not run and the identity
+    // assertion below still refuses it.
+    const managementParent = dirname(registration.fence.managementIdentity.realpath);
+    let parentIdentity = registration.parentIdentity;
+    if (!pathExistsStrict(managementParent)) {
+        mkdirSync(managementParent, { recursive: true });
+        parentIdentity = captureDirectoryIdentity(managementParent);
+    }
+    const restored = rollbackQuarantinedPath(
+        registration.fence.managementIdentity.realpath,
+        registration.location,
+        registration.fence.managementIdentity,
+        parentIdentity,
+        "directory",
+    );
+    if (!restored) {
+        throw new Error("Failed to restore stale worktree registration.");
+    }
+}
+
+type CapturedDirectoryTree = {
+    identity: DirectoryIdentity;
+    files: Array<{ name: string; identity: FileIdentity; content: Buffer }>;
+    directories: Array<{ name: string; tree: CapturedDirectoryTree }>;
+};
+
+function captureDirectoryTree(path: string, depth = 0): CapturedDirectoryTree {
+    if (depth > 8) {
+        throw new Error(`Worktree registration metadata is too deeply nested: ${path}`);
+    }
+    const identity = captureDirectoryIdentity(path);
+    const files: CapturedDirectoryTree["files"] = [];
+    const directories: CapturedDirectoryTree["directories"] = [];
+    const entries = readdirSync(path, { withFileTypes: true });
+    for (const entry of entries) {
+        const entryPath = join(path, entry.name);
+        if (entry.isSymbolicLink()) {
+            throw new Error(`Worktree registration metadata contains a symbolic link: ${entryPath}`);
+        }
+        if (entry.isFile()) {
+            const fileIdentity = captureFileIdentity(entryPath);
+            const content = readFileSync(entryPath);
+            assertFileIdentity(entryPath, fileIdentity);
+            files.push({
+                name: entry.name,
+                identity: fileIdentity,
+                content,
+            });
+            continue;
+        }
+        if (entry.isDirectory()) {
+            directories.push({
+                name: entry.name,
+                tree: captureDirectoryTree(entryPath, depth + 1),
+            });
+            continue;
+        }
+        throw new Error(`Worktree registration metadata contains an invalid entry: ${entryPath}`);
+    }
+    assertDirectoryIdentity(path, identity);
+    const expectedNames = entries.map(({ name }) => name).sort();
+    const finalNames = readdirSync(path).sort();
+    if (finalNames.length !== expectedNames.length
+        || finalNames.some((name, index) => name !== expectedNames[index])) {
+        throw new Error(`Worktree registration metadata changed during capture: ${path}`);
+    }
+    return { identity, files, directories };
+}
+
+function assertRelocatedDirectoryIdentity(
+    path: string,
+    expected: DirectoryIdentity,
+): void {
+    const observed = lstatSync(path, { bigint: true });
+    if (!observed.isDirectory() || observed.isSymbolicLink()
+        || observed.dev.toString() !== expected.dev
+        || observed.ino.toString() !== expected.ino) {
+        throw new Error(`Worktree registration directory identity changed: ${path}`);
+    }
+}
+
+function assertCapturedDirectoryTree(
+    path: string,
+    tree: CapturedDirectoryTree,
+    ignoredRootFiles: ReadonlySet<string> = new Set(),
+    depth = 0,
+): void {
+    assertRelocatedDirectoryIdentity(path, tree.identity);
+    const expectedNames = [
+        ...tree.files.map(({ name }) => name),
+        ...tree.directories.map(({ name }) => name),
+    ].sort();
+    const observedNames = readdirSync(path).sort();
+    if (observedNames.length !== expectedNames.length
+        || observedNames.some((name, index) => name !== expectedNames[index])) {
+        throw new Error(`Worktree registration metadata changed before deletion: ${path}`);
+    }
+    for (const file of tree.files) {
+        if (depth === 0 && ignoredRootFiles.has(file.name)) continue;
+        const filePath = join(path, file.name);
+        assertFileIdentity(filePath, file.identity);
+        if (!readFileSync(filePath).equals(file.content)) {
+            throw new Error(`Worktree registration metadata content changed: ${filePath}`);
+        }
+    }
+    for (const child of tree.directories) {
+        assertCapturedDirectoryTree(
+            join(path, child.name),
+            child.tree,
+            ignoredRootFiles,
+            depth + 1,
+        );
+    }
+}
+
+function removeCapturedDirectoryTree(
+    path: string,
+    tree: CapturedDirectoryTree,
+): void {
+    const remove = (directory: string, captured: CapturedDirectoryTree): void => {
+        assertRelocatedDirectoryIdentity(directory, captured.identity);
+        for (const file of captured.files) {
+            const filePath = join(directory, file.name);
+            assertFileIdentity(filePath, file.identity);
+            if (!readFileSync(filePath).equals(file.content)) {
+                throw new Error(`Worktree registration metadata content changed: ${filePath}`);
+            }
+            const tombstone = join(
+                directory,
+                `.ccc-delete-${randomBytes(16).toString("hex")}`,
+            );
+            renameSync(filePath, tombstone);
+            assertFileIdentity(tombstone, file.identity);
+            if (!readFileSync(tombstone).equals(file.content)) {
+                throw new Error(`Worktree registration metadata content changed: ${tombstone}`);
+            }
+            unlinkSync(tombstone);
+        }
+        for (const child of captured.directories) {
+            remove(join(directory, child.name), child.tree);
+        }
+        assertRelocatedDirectoryIdentity(directory, captured.identity);
+        if (readdirSync(directory).length !== 0) {
+            throw new Error(`Worktree registration directory changed before deletion: ${directory}`);
+        }
+        const parent = dirname(directory);
+        const parentIdentity = captureDirectoryIdentity(parent);
+        const tombstone = join(
+            parent,
+            `.ccc-delete-${randomBytes(16).toString("hex")}`,
+        );
+        renameSync(directory, tombstone);
+        assertDirectoryIdentity(parent, parentIdentity);
+        assertRelocatedDirectoryIdentity(tombstone, captured.identity);
+        if (readdirSync(tombstone).length !== 0) {
+            throw new Error(`Worktree registration directory changed after quarantine: ${tombstone}`);
+        }
+        rmdirSync(tombstone);
+    };
+    assertCapturedDirectoryTree(path, tree);
+    remove(path, tree);
+}
+
+function commitQuarantinedMissingWorktreeRegistration(
+    registration: QuarantinedMissingWorktreeRegistration,
+): void {
+    assertDirectoryIdentity(
+        registration.location.directory,
+        registration.location.directoryIdentity,
+    );
+    assertQuarantinedIdentity(
+        registration.location.path,
+        registration.fence.managementIdentity,
+        "directory",
+    );
+    removeCapturedDirectoryTree(registration.location.path, registration.tree);
+    if (pathExistsStrict(registration.location.path)) {
+        throw new Error("Failed to remove quarantined stale worktree registration.");
+    }
+    removePrivateQuarantine(registration.location);
+}
+
+function worktreeRegistryEntryMatches(
+    repositoryPath: string,
+    worktreePath: string,
+    expectedRef: string,
+    expectedOid: string,
+    allowMissingRefOid = false,
+): boolean {
+    const listed = spawnSync(
+        "git",
+        ["worktree", "list", "--porcelain"],
+        { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    if (listed.status !== 0) return false;
+    const matches = (listed.stdout ?? "")
+        .split(/\r?\n\r?\n/)
+        .filter((block) => {
+                const lines = block.split(/\r?\n/);
+                const worktreeLine = lines.find((line) => line.startsWith("worktree "));
+                const branchLine = lines.find((line) => line.startsWith("branch "));
+                const headLine = lines.find((line) => line.startsWith("HEAD "));
+                return worktreeLine !== undefined
+                    && branchLine === `branch ${expectedRef}`
+                    && (
+                        headLine === `HEAD ${expectedOid}`
+                        || (
+                            allowMissingRefOid
+                            && headLine === `HEAD ${"0".repeat(expectedOid.length)}`
+                        )
+                    )
+                    && sameObservedPath(
+                        worktreeLine.slice("worktree ".length).trim(),
+                        worktreePath,
+                    );
+        });
+    return matches.length === 1;
+}
+
+function worktreeRegistrationOwnershipMatches(
+    repositoryPath: string,
+    worktreePath: string,
+    fence: WorktreeRegistrationFence,
+): boolean {
+    try {
+        assertDirectoryIdentity(worktreePath, fence.destinationIdentity);
+        assertDirectoryIdentity(
+            fence.managementIdentity.realpath,
+            fence.managementIdentity,
+        );
+        if (!worktreeManagementBackpointersMatch(
+            worktreePath,
+            fence,
+        )) {
+            return false;
+        }
+        const symbolicHead = spawnSync(
+            "git",
+            ["symbolic-ref", "-q", "HEAD"],
+            { cwd: worktreePath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+        );
+        const matches = symbolicHead.status === 0
+            && (symbolicHead.stdout ?? "").trim() === fence.expectedRef
+            && worktreeRegistryEntryMatches(
+                repositoryPath,
+                worktreePath,
+                fence.expectedRef,
+                fence.expectedOid,
+                true,
+            );
+        if (!matches) return false;
+        assertDirectoryIdentity(worktreePath, fence.destinationIdentity);
+        assertDirectoryIdentity(
+            fence.managementIdentity.realpath,
+            fence.managementIdentity,
+        );
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function worktreeRegistrationMatches(
+    repositoryPath: string,
+    worktreePath: string,
+    branch: string,
+    expectedOid: string,
+    fence?: WorktreeRegistrationFence,
+    requireBranchRef = true,
+): boolean {
+    try {
+        if (fence) {
+            assertDirectoryIdentity(worktreePath, fence.destinationIdentity);
+            if (!worktreeManagementBackpointersMatch(
+                worktreePath,
+                fence,
+            )) {
+                return false;
+            }
+        }
+        const branchResult = spawnSync(
+            "git",
+            ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`],
+            { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+        );
+        const worktreeResult = spawnSync(
+            "git",
+            ["rev-parse", "--verify", "HEAD^{commit}"],
+            { cwd: worktreePath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+        );
+        const symbolicHead = spawnSync(
+            "git",
+            ["symbolic-ref", "-q", "HEAD"],
+            { cwd: worktreePath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+        );
+        const expectedRef = fence?.expectedRef ?? `refs/heads/${branch}`;
+        const matches = (!requireBranchRef || (
+            branchResult.status === 0
+            && (branchResult.stdout ?? "").trim() === expectedOid
+        ))
+            && worktreeResult.status === 0
+            && symbolicHead.status === 0
+            && (symbolicHead.stdout ?? "").trim() === expectedRef
+            && worktreeRegistryEntryMatches(
+                repositoryPath,
+                worktreePath,
+                expectedRef,
+                expectedOid,
+            )
+            && (worktreeResult.stdout ?? "").trim() === expectedOid;
+        if (!matches) return false;
+        if (fence) {
+            assertDirectoryIdentity(worktreePath, fence.destinationIdentity);
+            if (!worktreeManagementBackpointersMatch(
+                worktreePath,
+                fence,
+            )) {
+                return false;
+            }
+        }
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function rollbackFailedWorktreeAdd(
+    repositoryPath: string,
+    worktreePath: string,
+    branch: string,
+    action: WorktreeRepoResult["action"],
+    expectedBranchOid: BranchCreationFence | null,
+    destinationIdentity: DirectoryIdentity,
+    registrationFence: WorktreeRegistrationFence | null,
+    quarantineBase = dirname(worktreePath),
+    sourceIdentity?: NestedRepositoryIdentity,
+    mutationGuard?: () => void,
+): void {
+    if (pathExistsStrict(worktreePath)) {
+        assertDirectoryIdentity(worktreePath, destinationIdentity);
+        if (isValidWorktree(worktreePath, repositoryPath)) {
+            if (!registrationFence
+                || !worktreeRegistrationOwnershipMatches(
+                    repositoryPath,
+                    worktreePath,
+                    registrationFence,
+                )) {
+                throw new Error(
+                    `Failed worktree creation found a foreign registration at '${worktreePath}'; preserving it.`,
+                );
+            }
+            removeRegisteredWorktree(
+                repositoryPath,
+                worktreePath,
+                destinationIdentity,
+                true,
+                quarantineBase,
+                registrationFence,
+                sourceIdentity
+                    ? pinnedNestedRepositoryEnvironment(sourceIdentity)
+                    : undefined,
+                mutationGuard,
+            );
+        } else {
+            removeDirectoryByQuarantine(
+                worktreePath,
+                destinationIdentity,
+                quarantineBase,
+                true,
+            );
+        }
+    } else if (registeredWorktreePath(repositoryPath, worktreePath)) {
+        if (!registrationFence) {
+            throw new Error(
+                `Failed worktree creation left an unowned registry entry at '${worktreePath}'.`,
+            );
+        }
+        try {
+            assertDirectoryIdentity(
+                registrationFence.managementIdentity.realpath,
+                registrationFence.managementIdentity,
+            );
+        } catch {
+            throw new Error(
+                `Failed worktree creation registry ownership changed at '${worktreePath}'; preserving it.`,
+            );
+        }
+        if (!worktreeRegistryEntryMatches(
+            repositoryPath,
+            worktreePath,
+            registrationFence.expectedRef,
+            registrationFence.expectedOid,
+        )) {
+            throw new Error(
+                `Failed worktree creation registry entry changed at '${worktreePath}'; preserving it.`,
+            );
+        }
+        const quarantinedRegistration = quarantineMissingWorktreeRegistration(
+            repositoryPath,
+            worktreePath,
+            registrationFence,
+        );
+        commitQuarantinedMissingWorktreeRegistration(quarantinedRegistration);
+    }
+    const rollbackBranch = () => rollbackFailedCreatedBranch(
+        repositoryPath,
+        branch,
+        action,
+        expectedBranchOid,
+    );
+    if (sourceIdentity) {
+        withPinnedNestedRepository(sourceIdentity, rollbackBranch);
+    } else {
+        rollbackBranch();
+    }
+}
+
+type PreparedWorktreeAddResult = {
+    result: {
+        error?: Error;
+        status: number | null;
+        stdout?: string;
+        stderr?: string;
+    };
+    registrationFence: WorktreeRegistrationFence | null;
+};
+
+function runPreparedWorktreeAdd(
+    repositoryPath: string,
+    worktreePath: string,
+    branch: string,
+    expectedBranchOid: string,
+    destinationIdentity: DirectoryIdentity,
+    destinationGuard?: () => void,
+    sourceIdentity?: NestedRepositoryIdentity,
+): PreparedWorktreeAddResult {
+    try {
+        destinationGuard?.();
+        assertDirectoryIdentity(worktreePath, destinationIdentity);
+    } catch (error) {
+        return {
+            result: { status: 1, error: error as Error },
+            registrationFence: null,
+        };
+    }
+    const register = () => spawnSync(
+        "git",
+        ["worktree", "add", "--no-checkout", worktreePath, branch],
+        { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const registered = sourceIdentity
+        ? spawnSync(
+            "git",
+            ["worktree", "add", "--no-checkout", worktreePath, branch],
+            {
+                cwd: repositoryPath,
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+                env: pinnedNestedRepositoryEnvironment(sourceIdentity),
+            },
+        )
+        : register();
+    if (registered.error || registered.status !== 0) {
+        return { result: registered, registrationFence: null };
+    }
+    let registrationFence: WorktreeRegistrationFence;
+    try {
+        destinationGuard?.();
+        assertDirectoryIdentity(worktreePath, destinationIdentity);
+        registrationFence = captureExistingWorktreeRegistrationFence(
+            repositoryPath,
+            worktreePath,
+            branch,
+            destinationIdentity,
+        );
+    } catch (error) {
+        return {
+            result: { status: 1, error: error as Error },
+            registrationFence: null,
+        };
+    }
+    if (!worktreeRegistrationMatches(
+        repositoryPath,
+        worktreePath,
+        branch,
+        expectedBranchOid,
+        registrationFence,
+    )) {
+        return {
+            result: {
+                status: 1,
+                stderr: "worktree branch identity changed after registration",
+            },
+            registrationFence,
+        };
+    }
+    try {
+        destinationGuard?.();
+    } catch (error) {
+        return {
+            result: { status: 1, error: error as Error },
+            registrationFence,
+        };
+    }
+    const checkout = spawnSync(
+        "git",
+        ["checkout", "--force", branch],
+        { cwd: worktreePath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    try {
+        destinationGuard?.();
+        registrationFence = refreshWorktreeRegistrationFenceFileIdentities(
+            worktreePath,
+            registrationFence,
+        );
+    } catch (error) {
+        if (!pathExistsStrict(worktreePath)) {
+            try {
+                registrationFence = refreshMissingWorktreeRegistrationFenceFileIdentities(
+                    repositoryPath,
+                    worktreePath,
+                    registrationFence,
+                );
+                return { result: checkout, registrationFence };
+            } catch {
+                // Preserve the original registration fence for conservative rollback.
+            }
+        }
+        return {
+            result: {
+                status: 1,
+                error: error as Error,
+                stderr: "worktree branch identity changed during checkout",
+            },
+            registrationFence,
+        };
+    }
+    if (checkout.error || checkout.status !== 0) {
+        return { result: checkout, registrationFence };
+    }
+    return worktreeRegistrationMatches(
+        repositoryPath,
+        worktreePath,
+        branch,
+        expectedBranchOid,
+        registrationFence,
+    )
+        ? { result: checkout, registrationFence }
+        : {
+            result: {
+                status: 1,
+                stderr: "worktree branch identity changed during checkout",
+            },
+            registrationFence,
+        };
+}
+
+function reserveWorktreeDestination(
+    worktreePath: string,
+    destinationGuard?: () => void,
+): DirectoryIdentity {
+    destinationGuard?.();
+    mkdirSync(worktreePath);
+    const identity = captureDirectoryIdentity(worktreePath);
+    destinationGuard?.();
+    return identity;
+}
+
+function prepareWorktreeCreation(
+    repositoryPath: string,
+    worktreePath: string,
+    branch: string,
+    action: WorktreeRepoResult["action"],
+    destinationGuard?: () => void,
+    quarantineBase = dirname(worktreePath),
+): {
+    destinationIdentity: DirectoryIdentity;
+    expectedBranchOid: BranchCreationFence;
+} {
+    const sourceOid = expectedFailedCreationBranchOid(
+        repositoryPath,
+        branch,
+        action,
+    );
+    const configBefore = readBranchTrackingConfig(repositoryPath, branch);
+    const destinationIdentity = reserveWorktreeDestination(
+        worktreePath,
+        destinationGuard,
+    );
+    if (action === "worktree-existing") {
+        return {
+            destinationIdentity,
+            expectedBranchOid: {
+                expectedOid: sourceOid,
+                configBefore,
+                configAfter: configBefore,
+            },
+        };
+    }
+    destinationGuard?.();
+    const branchArgs = ["branch", "--no-track", branch, sourceOid];
+    const created = spawnSync(
+        "git",
+        branchArgs,
+        { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const current = spawnSync(
+        "git",
+        ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`],
+        { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    if (created.error || created.status !== 0
+        || current.error || current.status !== 0
+        || (current.stdout ?? "").trim() !== sourceOid) {
+        destinationGuard?.();
+        assertDirectoryIdentity(worktreePath, destinationIdentity);
+        removeDirectoryByQuarantine(
+            worktreePath,
+            destinationIdentity,
+            quarantineBase,
+            true,
+        );
+        throw new Error(
+            `Branch '${branch}' changed while reserving worktree creation; preserving any existing ref.`,
+        );
+    }
+    let configAfter = configBefore;
+    if (action === "worktree-remote") {
+        const autoRebase = spawnSync(
+            "git",
+            ["config", "--get", "branch.autoSetupRebase"],
+            { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+        );
+        const autoRebaseValue = autoRebase.status === 0
+            ? (autoRebase.stdout ?? "").trim().toLowerCase()
+            : "";
+        configAfter = {
+            remote: ["origin"],
+            merge: [`refs/heads/${branch}`],
+            rebase: autoRebaseValue === "always" || autoRebaseValue === "remote"
+                ? ["true"]
+                : [],
+        };
+        try {
+            replaceBranchTrackingConfig(
+                repositoryPath,
+                branch,
+                configBefore,
+                configAfter,
+            );
+        } catch (error) {
+            destinationGuard?.();
+            assertDirectoryIdentity(worktreePath, destinationIdentity);
+            removeDirectoryByQuarantine(
+                worktreePath,
+                destinationIdentity,
+                quarantineBase,
+                true,
+            );
+            const removed = spawnSync(
+                "git",
+                ["update-ref", "-d", `refs/heads/${branch}`, sourceOid],
+                { cwd: repositoryPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+            );
+            if (removed.error || removed.status !== 0) {
+                throw new Error(
+                    `${(error as Error).message}; failed to roll back newly created branch '${branch}'.`,
+                    { cause: error },
+                );
+            }
+            throw error;
+        }
+    }
+    return {
+        destinationIdentity,
+        expectedBranchOid: {
+            expectedOid: sourceOid,
+            configBefore,
+            configAfter,
+        },
+    };
 }
 
 /**
@@ -329,11 +5764,11 @@ export function needsSubmoduleSetup(dirPath: string): string[] | null {
     const resolved = resolve(dirPath);
 
     // Already a git repo → no setup needed
-    if (existsSync(join(resolved, ".git"))) {
+    if (hasGitMetadata(resolved)) {
         return null;
     }
 
-    const entries = scanDirectory(resolved);
+    const entries = scanDirectory(resolved, { strict: true });
     const gitRepos = entries.filter((e) => e.isGitRepo);
 
     if (gitRepos.length === 0) {
@@ -400,7 +5835,7 @@ function getRemoteUrl(repoPath: string): string {
  *
  * - git init the directory
  * - For each child git repo: add as submodule using its remote URL
- * - Submodules track their current branch (not pinned to specific commits)
+ * - Submodules remain registered without automatic checkout updates
  * - Sets ignore = all so parent doesn't report submodule changes as dirty
  * - Commits the initial state
  *
@@ -427,6 +5862,20 @@ export function initWithSubmodules(dirPath: string): void {
         stdio: "pipe",
     });
     spawnSync("git", ["config", "user.name", "ccc"], {
+        cwd: resolved,
+        stdio: "pipe",
+    });
+    spawnSync("git", ["config", "commit.gpgsign", "false"], {
+        cwd: resolved,
+        stdio: "pipe",
+    });
+    // This repository is generated from already-present child repositories.
+    // Keep their local-path submodule URLs usable in the resulting worktrees.
+    spawnSync("git", ["config", "protocol.file.allow", "always"], {
+        cwd: resolved,
+        stdio: "pipe",
+    });
+    spawnSync("git", ["config", "ccc.localSubmodules", "true"], {
         cwd: resolved,
         stdio: "pipe",
     });
@@ -459,9 +5908,9 @@ export function initWithSubmodules(dirPath: string): void {
         }
     }
 
-    // Configure submodules: ignore = all + update = rebase
+    // Configure submodules: ignore = all + update = none
     // ignore = all: parent won't report submodule content changes as dirty
-    // update = rebase: submodules follow branch, not pinned to commits
+    // update = none: generic recursive updates cannot reset active development
     for (const repo of gitRepos) {
         spawnSync(
             "git",
@@ -470,7 +5919,7 @@ export function initWithSubmodules(dirPath: string): void {
         );
         spawnSync(
             "git",
-            ["config", "-f", ".gitmodules", `submodule.${repo.name}.update`, "rebase"],
+            ["config", "-f", ".gitmodules", `submodule.${repo.name}.update`, "none"],
             { cwd: resolved, stdio: "pipe" },
         );
     }
@@ -491,8 +5940,7 @@ export function initWithSubmodules(dirPath: string): void {
  * Two modes:
  *
  * 1. **Unified mode** (sourcePath is a git repo):
- *    - Creates a single worktree of the top-level repo
- *    - Initializes submodules with --remote (tracks branches, not pinned commits)
+ *    - Creates linked worktrees for the top-level repo and initialized submodules
  *    - All files (.claude, .env, etc.) are part of the repo, fully isolated
  *
  * 2. **Multi-repo mode** (sourcePath is NOT a git repo):
@@ -513,8 +5961,13 @@ export function createWorkspace(
     const resolved = resolve(sourcePath);
     const wsPath = getWorkspacePath(resolved, branch);
 
+    // Checked from the workspace's parent, which is the source's parent, so a hit is always
+    // some other repository: the source itself is never its own ancestor here.
+    const enclosing = enclosingGitWorkingTree(dirname(wsPath));
+    if (enclosing) warnWorkspaceInsideRepository(wsPath, enclosing);
+
     // Unified mode: top-level is a git repo
-    if (existsSync(join(resolved, ".git"))) {
+    if (hasGitMetadata(resolved)) {
         return createUnifiedWorkspace(resolved, wsPath, branch);
     }
 
@@ -529,51 +5982,96 @@ function createUnifiedWorkspace(
 ): WorktreeResult {
     const existence = branchExistsInRepo(resolved, branch);
 
-    let args: string[];
     let action: WorktreeRepoResult["action"];
 
     switch (existence) {
         case "local":
-            args = ["worktree", "add", wsPath, branch];
             action = "worktree-existing";
             break;
         case "remote":
-            args = ["worktree", "add", "-b", branch, wsPath, `origin/${branch}`];
             action = "worktree-remote";
             break;
         case "none":
-            args = ["worktree", "add", "-b", branch, wsPath];
             action = "worktree-new";
             break;
     }
-
-    const result = spawnSync("git", args, {
-        cwd: resolved,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-    });
+    const {
+        expectedBranchOid,
+        destinationIdentity,
+    } = prepareWorktreeCreation(
+        resolved,
+        wsPath,
+        branch,
+        action,
+    );
+    const { result, registrationFence } = runPreparedWorktreeAdd(
+        resolved,
+        wsPath,
+        branch,
+        expectedBranchOid.expectedOid,
+        destinationIdentity,
+    );
 
     if (result.status !== 0) {
         const stderr = (result.stderr ?? "").trim();
+        try {
+            rollbackFailedWorktreeAdd(
+                resolved,
+                wsPath,
+                branch,
+                action,
+                expectedBranchOid,
+                destinationIdentity,
+                registrationFence,
+            );
+        } catch (rollbackError) {
+            throw new Error(
+                `Failed to create worktree: ${stderr}; rollback failed: ${(rollbackError as Error).message}`,
+                { cause: rollbackError },
+            );
+        }
         throw new Error(`Failed to create worktree: ${stderr}`);
     }
-
-    // Init submodules if any (without --remote to avoid fetch failures on local repos)
-    const submoduleCheck = spawnSync(
-        "git",
-        ["submodule", "status"],
-        { cwd: wsPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    const rootRegistrationFence = requireWorktreeRegistrationFence(
+        registrationFence,
+        wsPath,
     );
-    if (submoduleCheck.status === 0 && (submoduleCheck.stdout ?? "").trim()) {
-        spawnSync(
-            "git",
-            ["submodule", "update", "--init", "--recursive"],
-            { cwd: wsPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-        );
-    }
 
     const dirName = basename(resolved);
-    const nestedCreated = repairWorkspace(resolved, wsPath, branch);
+    let nestedCreated: WorktreeRepoResult[];
+    try {
+        nestedCreated = repairWorkspace(resolved, wsPath, branch);
+    } catch (error) {
+        const rollbackErrors: string[] = [];
+        try {
+            if (!isValidWorktree(wsPath, resolved)) {
+                throw new Error("root worktree ownership changed during rollback");
+            }
+            removeRegisteredWorktree(
+                resolved,
+                wsPath,
+                rootRegistrationFence.destinationIdentity,
+                true,
+                dirname(wsPath),
+                rootRegistrationFence,
+            );
+            rollbackFailedCreatedBranch(
+                resolved,
+                branch,
+                action,
+                expectedBranchOid,
+            );
+        } catch (rollbackError) {
+            rollbackErrors.push((rollbackError as Error).message);
+        }
+        if (rollbackErrors.length > 0) {
+            throw new Error(
+                `${(error as Error).message}; workspace rollback failed: ${rollbackErrors.join("; ")}`,
+                { cause: error },
+            );
+        }
+        throw error;
+    }
 
     return {
         workspacePath: wsPath,
@@ -587,7 +6085,7 @@ function createMultiRepoWorkspace(
     wsPath: string,
     branch: string,
 ): WorktreeResult {
-    const entries = scanDirectory(resolved);
+    const entries = scanDirectory(resolved, { strict: true });
     const gitRepos = entries.filter((e) => e.isGitRepo);
 
     if (gitRepos.length === 0) {
@@ -609,9 +6107,13 @@ function createMultiRepoWorkspace(
         }
         throw e;
     }
+    const workspaceIdentity = captureDirectoryIdentity(wsPath);
 
     const created: WorktreeRepoResult[] = [];
+    const rollbackOids = new Map<string, BranchCreationFence | null>();
+    const registrationFences = new Map<string, WorktreeRegistrationFence>();
     const copied: string[] = [];
+    const copiedIdentities = new Map<string, DirectoryIdentity>();
 
     // Process git repos → worktree (with rollback on failure)
     try {
@@ -619,60 +6121,116 @@ function createMultiRepoWorkspace(
             const destPath = join(wsPath, repo.name);
             const existence = branchExistsInRepo(repo.path, branch);
 
-            let args: string[];
             let action: WorktreeRepoResult["action"];
 
             switch (existence) {
                 case "local":
-                    args = ["worktree", "add", destPath, branch];
                     action = "worktree-existing";
                     break;
                 case "remote":
-                    args = [
-                        "worktree",
-                        "add",
-                        "-b",
-                        branch,
-                        destPath,
-                        `origin/${branch}`,
-                    ];
                     action = "worktree-remote";
                     break;
                 case "none":
-                    args = ["worktree", "add", "-b", branch, destPath];
                     action = "worktree-new";
                     break;
             }
-
-            const result = spawnSync("git", args, {
-                cwd: repo.path,
-                encoding: "utf-8",
-                stdio: ["pipe", "pipe", "pipe"],
-            });
+            const {
+                expectedBranchOid,
+                destinationIdentity,
+            } = prepareWorktreeCreation(
+                repo.path,
+                destPath,
+                branch,
+                action,
+            );
+            const { result, registrationFence } = runPreparedWorktreeAdd(
+                repo.path,
+                destPath,
+                branch,
+                expectedBranchOid.expectedOid,
+                destinationIdentity,
+            );
 
             if (result.status !== 0) {
                 const stderr = (result.stderr ?? "").trim();
+                try {
+                    rollbackFailedWorktreeAdd(
+                        repo.path,
+                        destPath,
+                        branch,
+                        action,
+                        expectedBranchOid,
+                        destinationIdentity,
+                        registrationFence,
+                    );
+                } catch (rollbackError) {
+                    throw new Error(
+                        `Failed to create worktree for ${repo.name}: ${stderr}; rollback failed: ${(rollbackError as Error).message}`,
+                        { cause: rollbackError },
+                    );
+                }
                 throw new Error(
                     `Failed to create worktree for ${repo.name}: ${stderr}`,
                 );
             }
 
             created.push({ name: repo.name, branch, action });
+            rollbackOids.set(repo.name, expectedBranchOid);
+            registrationFences.set(
+                repo.name,
+                requireWorktreeRegistrationFence(registrationFence, destPath),
+            );
         }
     } catch (e) {
-        // Rollback: remove already-created worktrees
+        const rollbackErrors: string[] = [];
         for (const c of created) {
             const destPath = join(wsPath, c.name);
             const sourceRepo = gitRepos.find((r) => r.name === c.name);
-            if (sourceRepo) {
-                spawnSync(
-                    "git",
-                    ["worktree", "remove", "--force", destPath],
-                    { cwd: sourceRepo.path, stdio: "pipe" },
+            if (!sourceRepo || !pathExistsStrict(destPath)) continue;
+            if (!isValidWorktree(destPath, sourceRepo.path)) {
+                rollbackErrors.push(`${c.name}: worktree ownership changed during rollback`);
+                continue;
+            }
+            try {
+                const registrationFence = registrationFences.get(c.name);
+                if (!registrationFence) {
+                    throw new Error("missing worktree registration fence");
+                }
+                removeRegisteredWorktree(
+                    sourceRepo.path,
+                    destPath,
+                    registrationFence.destinationIdentity,
+                    true,
+                    dirname(wsPath),
+                    registrationFence,
                 );
+                rollbackFailedCreatedBranch(
+                    sourceRepo.path,
+                    branch,
+                    c.action,
+                    rollbackOids.get(c.name) ?? null,
+                );
+            } catch (rollbackError) {
+                rollbackErrors.push(`${c.name}: ${(rollbackError as Error).message}`);
             }
         }
-        rmSync(wsPath, { recursive: true, force: true });
+        if (rollbackErrors.length === 0) {
+            try {
+                assertDirectoryIdentity(wsPath, workspaceIdentity);
+                if (readdirSync(wsPath).length !== 0) {
+                    throw new Error("workspace is not empty after worktree rollback");
+                }
+                removeDirectoryByQuarantine(wsPath, workspaceIdentity);
+            } catch (rollbackError) {
+                rollbackErrors.push((rollbackError as Error).message);
+            }
+        }
+        if (rollbackErrors.length > 0) {
+            throw new Error(
+                `${(e as Error).message}; workspace rollback failed: ${rollbackErrors.join("; ")}`,
+                { cause: e },
+            );
+        }
         throw e;
     }
 
@@ -682,11 +6240,77 @@ function createMultiRepoWorkspace(
         const destPath = join(wsPath, entry.name);
         try {
             copyDirRecursive(entry.path, destPath);
-            copied.push(entry.name);
-        } catch (e) {
-            if ((e as NodeJS.ErrnoException).code === "EEXIST") {
-                continue;
+            if (!pathExistsStrict(destPath)) {
+                throw new Error(`Source entry could not be copied safely: ${entry.path}`);
             }
+            copied.push(entry.name);
+            copiedIdentities.set(entry.name, capturePathIdentity(destPath));
+        } catch (e) {
+            const rollbackErrors: string[] = [];
+            for (const createdEntry of [...created].reverse()) {
+                const sourceRepo = gitRepos.find((repo) => (
+                    repo.name === createdEntry.name
+                ));
+                if (!sourceRepo) continue;
+                try {
+                    const registrationFence = registrationFences.get(createdEntry.name);
+                    if (!registrationFence) {
+                        throw new Error("missing worktree registration fence");
+                    }
+                    removeRegisteredWorktree(
+                        sourceRepo.path,
+                        join(wsPath, createdEntry.name),
+                        registrationFence.destinationIdentity,
+                        true,
+                        dirname(wsPath),
+                        registrationFence,
+                    );
+                    rollbackFailedCreatedBranch(
+                        sourceRepo.path,
+                        branch,
+                        createdEntry.action,
+                        rollbackOids.get(createdEntry.name) ?? null,
+                    );
+                } catch (rollbackError) {
+                    rollbackErrors.push(
+                        `${createdEntry.name}: ${(rollbackError as Error).message}`,
+                    );
+                }
+            }
+            for (const copiedName of [...copied].reverse()) {
+                const identity = copiedIdentities.get(copiedName);
+                if (!identity) continue;
+                try {
+                    removePathByQuarantine(
+                        join(wsPath, copiedName),
+                        identity,
+                        dirname(wsPath),
+                    );
+                } catch (rollbackError) {
+                    rollbackErrors.push(
+                        `${copiedName}: ${(rollbackError as Error).message}`,
+                    );
+                }
+            }
+            if (pathExistsStrict(destPath)) {
+                rollbackErrors.push(`${entry.name}: partial copied content was preserved`);
+            } else if (rollbackErrors.length === 0) {
+                try {
+                    assertDirectoryIdentity(wsPath, workspaceIdentity);
+                    if (readdirSync(wsPath).length === 0) {
+                        removeDirectoryByQuarantine(wsPath, workspaceIdentity);
+                    }
+                } catch (rollbackError) {
+                    rollbackErrors.push((rollbackError as Error).message);
+                }
+            }
+            if (rollbackErrors.length > 0) {
+                throw new Error(
+                    `${(e as Error).message}; workspace rollback failed: ${rollbackErrors.join("; ")}`,
+                    { cause: e },
+                );
+            }
+            throw e;
         }
     }
 
@@ -696,8 +6320,6 @@ function createMultiRepoWorkspace(
 /**
  * Repair an existing workspace by creating worktrees for nested git repos
  * that are missing or empty in the workspace directory.
- *
- * Also initializes submodules if they haven't been initialized yet.
  *
  * This is useful when:
  * - A workspace was created before this feature existed
@@ -714,89 +6336,419 @@ export function repairWorkspace(
     const resolved = resolve(sourcePath);
 
     // Only works in unified mode (source is a git repo)
-    if (!existsSync(join(resolved, ".git"))) {
+    if (!hasGitMetadata(resolved)) {
         return [];
     }
-
-    // Try to init submodules that may not be initialized yet
-    const submoduleCheck = spawnSync(
-        "git",
-        ["submodule", "status"],
-        { cwd: wsPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-    );
-    if (submoduleCheck.status === 0 && (submoduleCheck.stdout ?? "").trim()) {
-        spawnSync(
-            "git",
-            ["submodule", "update", "--init", "--recursive"],
-            { cwd: wsPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-        );
+    const primarySource = primarySourceRepositoryForWorktree(resolved);
+    if (gitLinkKind(join(resolved, ".git")) === "worktree") {
+        if (!primarySource) {
+            throw new Error(
+                `Source worktree ownership could not be established: ${resolved}`,
+            );
+        }
+        assertWorkspaceOwnership(resolved, primarySource);
     }
+    assertWorkspaceRootOwnership(wsPath, resolved);
 
-    // Create worktrees for nested git repos not managed as submodules.
-    // In unified mode, git worktree only checks out the top-level repo.
-    // Nested git repos (gitignored or gitlink entries without submodule config)
-    // end up as empty or missing directories in the worktree.
+    // In unified mode, the root worktree does not populate nested repositories.
+    // Initialized tracked submodules receive linked worktrees so the source
+    // checkout is never reset by a submodule update. Ignored repositories are
+    // intentionally outside the managed inventory.
     const created: WorktreeRepoResult[] = [];
-    const sourceEntries = scanDirectory(resolved);
+    const rollbackOids = new Map<string, BranchCreationFence | null>();
+    const registrationFences = new Map<string, WorktreeRegistrationFence>();
+    const preservedStaleRegistrations: Array<{
+        name: string;
+        source: string;
+        destination: string;
+        registration: QuarantinedMissingWorktreeRegistration;
+    }> = [];
+    const removedEmptyDestinations: string[] = [];
+    const createdParentDirectories = new Map<string, DirectoryIdentity>();
+    const destinationFences = new Map<string, {
+        workspace: DirectoryIdentity;
+        parents: Array<{ path: string; identity: DirectoryIdentity }>;
+    }>();
+    const blockedRepositoryPrefixes: string[] = [];
+    const sourceEntries = scanUnifiedNestedRepositories(
+        resolved,
+        {
+            strict: true,
+            allowRegisteredWorktrees: Boolean(primarySource),
+        },
+    );
+    const sourceRepositoryIdentities = new Map(
+        sourceEntries
+            .filter((entry) => entry.isGitRepo)
+            .map((entry) => [
+                entry.name,
+                captureNestedRepositoryIdentity(entry.path),
+            ]),
+    );
 
-    for (const entry of sourceEntries) {
-        if (!entry.isGitRepo) continue;
-
-        const destPath = join(wsPath, entry.name);
-
-        // Check existing directory
-        if (existsSync(destPath)) {
-            try {
-                const contents = readdirSync(destPath);
-                if (contents.length > 0) {
-                    // Has content — skip if already a valid worktree
-                    if (isValidWorktree(destPath, entry.path)) {
-                        continue;
-                    }
-                    // Not a valid worktree (submodule checkout, copy, etc.) — auto-fix
-                    const fixed = fixBrokenWorktree(resolved, wsPath, entry.name, branch);
-                    if (fixed) {
-                        created.push(fixed);
-                    }
-                    continue;
-                }
-                // Empty directory — remove so git worktree add can create it
-                rmSync(destPath, { recursive: true });
-            } catch {
+    let rollbackStarted = false;
+    function rollbackNestedCreation(error: unknown): never {
+        rollbackStarted = true;
+        const rollbackErrors: string[] = [];
+        for (const createdEntry of [...created].reverse()) {
+            const sourceEntry = sourceEntries.find((entry) => (
+                entry.isGitRepo && entry.name === createdEntry.name
+            ));
+            const destination = join(wsPath, createdEntry.name);
+            if (!sourceEntry || !pathExistsStrict(destination)) continue;
+            const sourceIdentity = sourceRepositoryIdentities.get(createdEntry.name);
+            if (!sourceIdentity) {
+                rollbackErrors.push(`${createdEntry.name}: missing source repository fence`);
                 continue;
             }
+            const destinationFence = destinationFences.get(createdEntry.name);
+            if (!destinationFence) {
+                rollbackErrors.push(`${createdEntry.name}: missing destination parent fence`);
+                continue;
+            }
+            try {
+                assertNestedWorktreeDestinationFence(
+                    wsPath,
+                    destination,
+                    destinationFence,
+                );
+            } catch (rollbackError) {
+                rollbackErrors.push(
+                    `${createdEntry.name}: ${(rollbackError as Error).message}`,
+                );
+                continue;
+            }
+            if (!isValidWorktree(destination, sourceEntry.path)) {
+                rollbackErrors.push(
+                    `${createdEntry.name}: worktree ownership changed during rollback`,
+                );
+                continue;
+            }
+            try {
+                assertNestedRepositoryIdentity(sourceEntry.path, sourceIdentity);
+                const registrationFence = registrationFences.get(createdEntry.name);
+                if (!registrationFence) {
+                    throw new Error("missing worktree registration fence");
+                }
+                removeRegisteredWorktree(
+                    sourceEntry.path,
+                    destination,
+                    registrationFence.destinationIdentity,
+                    true,
+                    dirname(wsPath),
+                    registrationFence,
+                    pinnedNestedRepositoryEnvironment(sourceIdentity),
+                    () => {
+                        assertNestedRepositoryIdentity(
+                            sourceEntry.path,
+                            sourceIdentity,
+                        );
+                        assertNestedWorktreeDestinationFence(
+                            wsPath,
+                            destination,
+                            destinationFence,
+                        );
+                    },
+                );
+                withPinnedNestedRepository(sourceIdentity, () => {
+                    rollbackFailedCreatedBranch(
+                        sourceEntry.path,
+                        branch,
+                        createdEntry.action,
+                        rollbackOids.get(createdEntry.name) ?? null,
+                    );
+                });
+            } catch (rollbackError) {
+                rollbackErrors.push(
+                    `${createdEntry.name}: ${(rollbackError as Error).message}`,
+                );
+            }
+        }
+        for (const preserved of [...preservedStaleRegistrations].reverse()) {
+            try {
+                const sourceIdentity = sourceRepositoryIdentities.get(preserved.name);
+                if (!sourceIdentity) {
+                    throw new Error("missing source repository fence");
+                }
+                assertNestedRepositoryIdentity(preserved.source, sourceIdentity);
+                if (registeredWorktreePath(preserved.source, preserved.destination)) {
+                    throw new Error("replacement worktree registration remains in use");
+                }
+                restoreQuarantinedMissingWorktreeRegistration(preserved.registration);
+            } catch (rollbackError) {
+                rollbackErrors.push(
+                    `${preserved.name}: failed to restore stale registration from ${preserved.registration.location.path}: ${(rollbackError as Error).message}`,
+                );
+            }
+        }
+        for (const destination of removedEmptyDestinations) {
+            if (pathExistsStrict(destination)) continue;
+            try {
+                const sourceEntry = sourceEntries.find((entry) => (
+                    join(wsPath, entry.name) === destination
+                ));
+                const destinationFence = sourceEntry
+                    ? destinationFences.get(sourceEntry.name)
+                    : null;
+                if (!destinationFence) {
+                    throw new Error("missing destination parent fence");
+                }
+                assertNestedWorktreeDestinationFence(
+                    wsPath,
+                    destination,
+                    destinationFence,
+                );
+                mkdirSync(destination);
+                assertNestedWorktreeDestinationFence(
+                    wsPath,
+                    destination,
+                    destinationFence,
+                );
+            } catch (rollbackError) {
+                rollbackErrors.push(
+                    `${basename(destination)}: failed to restore empty directory: ${(rollbackError as Error).message}`,
+                );
+            }
+        }
+        for (const [parent, identity] of [...createdParentDirectories.entries()].reverse()) {
+            if (!pathExistsStrict(parent)) continue;
+            try {
+                assertDirectoryIdentity(parent, identity);
+                if (readdirSync(parent).length === 0) {
+                    removeDirectoryByQuarantine(parent, identity, dirname(parent), true);
+                }
+            } catch (rollbackError) {
+                rollbackErrors.push(
+                    `${parent}: failed to remove created parent: ${(rollbackError as Error).message}`,
+                );
+            }
+        }
+        if (rollbackErrors.length > 0) {
+            throw new Error(
+                `${(error as Error).message}; nested worktree rollback failed: ${rollbackErrors.join("; ")}`,
+                { cause: error },
+            );
+        }
+        throw error;
+    }
+
+    try {
+    for (const entry of sourceEntries) {
+        if (!entry.isGitRepo) continue;
+        if (blockedRepositoryPrefixes.some((prefix) => (
+            entry.name.startsWith(`${prefix}/`)
+        ))) {
+            continue;
         }
 
+        const destPath = join(wsPath, entry.name);
+        const sourceIdentity = sourceRepositoryIdentities.get(entry.name);
+        if (!sourceIdentity) {
+            rollbackNestedCreation(
+                new Error(`Missing source repository fence for ${entry.name}`),
+            );
+        }
+        const sourceGuard = (): void => {
+            assertNestedRepositoryIdentity(entry.path, sourceIdentity);
+        };
+        let destinationFence: {
+            workspace: DirectoryIdentity;
+            parents: Array<{ path: string; identity: DirectoryIdentity }>;
+        };
+        try {
+            destinationFence = ensureNestedWorktreeParent(
+                wsPath,
+                destPath,
+                createdParentDirectories,
+            );
+            destinationFences.set(entry.name, destinationFence);
+        } catch (error) {
+            rollbackNestedCreation(error);
+        }
+        const operationGuard = (): void => {
+            sourceGuard();
+            assertNestedWorktreeDestinationFence(
+                wsPath,
+                destPath,
+                destinationFence,
+            );
+        };
+
+        // Check existing directory
+        if (pathExistsStrict(destPath)) {
+            operationGuard();
+            const destIdentity = captureDirectoryIdentity(destPath);
+            const contents = readdirSync(destPath);
+            if (contents.length > 0) {
+                if (!isValidWorktree(destPath, entry.path)) {
+                    blockedRepositoryPrefixes.push(entry.name);
+                }
+                operationGuard();
+                // Non-empty invalid entries and their descendants require the
+                // explicit repair prompt.
+                continue;
+            }
+            operationGuard();
+            removeDirectoryByQuarantine(destPath, destIdentity, dirname(wsPath), true);
+            operationGuard();
+            removedEmptyDestinations.push(destPath);
+        }
+
+        // Git refuses to add a worktree when this exact absent destination is
+        // still registered. Keep its management files outside Git's worktree
+        // registry so they can be restored on any later creation failure.
+        try {
+            operationGuard();
+            const staleFence = withPinnedNestedRepository(sourceIdentity, () => (
+                captureMissingWorktreeRegistrationFence(entry.path, destPath, branch)
+            ));
+            if (staleFence) {
+                const recordedGitFile = managementGitdirBackpointer(
+                    join(staleFence.managementIdentity.realpath, "gitdir"),
+                );
+                const expectedGitFile = join(destPath, ".git");
+                const sameName = process.platform === "win32"
+                    ? basename(recordedGitFile).toLowerCase() === basename(expectedGitFile).toLowerCase()
+                        && basename(dirname(recordedGitFile)).toLowerCase() === basename(destPath).toLowerCase()
+                    : basename(recordedGitFile) === basename(expectedGitFile)
+                        && basename(dirname(recordedGitFile)) === basename(destPath);
+                if (!sameName || !sameDirectExistingObject(
+                    dirname(dirname(recordedGitFile)),
+                    dirname(destPath),
+                )) {
+                    throw new Error(`Stale worktree registration path is not the requested destination: ${destPath}`);
+                }
+                if (pathExistsStrict(dirname(recordedGitFile)) || pathExistsStrict(destPath)) {
+                    throw new Error(`Stale worktree destination reappeared: ${destPath}`);
+                }
+                operationGuard();
+                const registration = withPinnedNestedRepository(sourceIdentity, () => (
+                    quarantineMissingWorktreeRegistration(entry.path, destPath, staleFence, true)
+                ));
+                preservedStaleRegistrations.push({
+                    name: entry.name,
+                    source: entry.path,
+                    destination: destPath,
+                    registration,
+                });
+                operationGuard();
+            }
+        } catch (error) {
+            rollbackNestedCreation(error);
+        }
+
+        sourceGuard();
         const nestedExistence = branchExistsInRepo(entry.path, branch);
-        let nestedArgs: string[];
+        sourceGuard();
         let nestedAction: WorktreeRepoResult["action"];
 
         switch (nestedExistence) {
             case "local":
-                nestedArgs = ["worktree", "add", destPath, branch];
                 nestedAction = "worktree-existing";
                 break;
             case "remote":
-                nestedArgs = ["worktree", "add", "-b", branch, destPath, `origin/${branch}`];
                 nestedAction = "worktree-remote";
                 break;
             case "none":
-                nestedArgs = ["worktree", "add", "-b", branch, destPath];
                 nestedAction = "worktree-new";
                 break;
         }
+        let prepared: ReturnType<typeof prepareWorktreeCreation>;
+        try {
+            prepared = withPinnedNestedRepository(
+                sourceIdentity,
+                () => prepareWorktreeCreation(
+                    entry.path,
+                    destPath,
+                    branch,
+                    nestedAction,
+                    operationGuard,
+                    dirname(wsPath),
+                ),
+            );
+        } catch (error) {
+            rollbackNestedCreation(error);
+        }
+        const { expectedBranchOid, destinationIdentity } = prepared;
+        let addResult: ReturnType<typeof runPreparedWorktreeAdd>;
+        try {
+            addResult = runPreparedWorktreeAdd(
+                entry.path,
+                destPath,
+                branch,
+                expectedBranchOid.expectedOid,
+                destinationIdentity,
+                operationGuard,
+                sourceIdentity,
+            );
+        } catch (error) {
+            rollbackNestedCreation(error);
+        }
+        const { result: nestedResult, registrationFence } = addResult;
 
-        const nestedResult = spawnSync("git", nestedArgs, {
-            cwd: entry.path,
-            encoding: "utf-8",
-            stdio: ["pipe", "pipe", "pipe"],
-        });
-
-        if (nestedResult.status === 0) {
-            created.push({ name: entry.name, branch, action: nestedAction });
+        if (nestedResult.error || nestedResult.status !== 0) {
+            const detail = (nestedResult.stderr ?? "").trim()
+                || nestedResult.error?.message
+                || `git exited with status ${String(nestedResult.status)}`;
+            try {
+                operationGuard();
+                rollbackFailedWorktreeAdd(
+                    entry.path,
+                    destPath,
+                    branch,
+                    nestedAction,
+                    expectedBranchOid,
+                    destinationIdentity,
+                    registrationFence,
+                    dirname(wsPath),
+                    sourceIdentity,
+                    operationGuard,
+                );
+                operationGuard();
+            } catch (rollbackError) {
+                rollbackNestedCreation(new Error(
+                    `Failed to create nested worktree for ${entry.name}: ${detail}; rollback failed: ${(rollbackError as Error).message}`,
+                    { cause: rollbackError },
+                ));
+            }
+            rollbackNestedCreation(
+                new Error(`Failed to create nested worktree for ${entry.name}: ${detail}`),
+            );
+        }
+        created.push({ name: entry.name, branch, action: nestedAction });
+        rollbackOids.set(entry.name, expectedBranchOid);
+        try {
+            registrationFences.set(
+                entry.name,
+                requireWorktreeRegistrationFence(registrationFence, destPath),
+            );
+        } catch (error) {
+            rollbackNestedCreation(error);
         }
     }
+    } catch (error) {
+        if (rollbackStarted) throw error;
+        rollbackNestedCreation(error);
+    }
 
+    try {
+        normalizeOwnerVerifiedWorktreeGitLink(wsPath, resolved);
+        for (const entry of sourceEntries) {
+            if (!entry.isGitRepo) continue;
+            const destination = join(wsPath, entry.name);
+            // Broken or foreign nested entries are preserved for the explicit
+            // repair prompt and must never be mutated during normalization.
+            if (!isValidWorktree(destination, entry.path)) continue;
+            normalizeOwnerVerifiedWorktreeGitLink(destination, entry.path);
+        }
+    } catch (error) {
+        rollbackNestedCreation(error);
+    }
+    for (const preserved of preservedStaleRegistrations) {
+        process.stderr.write(
+            `[ccc] NOTE: Preserved the previous Git worktree registration for ${terminalSafe(preserved.destination)} at ${terminalSafe(preserved.registration.location.path)}. If the old workspace reappears, do not use it until its Git link is repaired.\n`,
+        );
+    }
     return created;
 }
 
@@ -805,6 +6757,514 @@ export function repairWorkspace(
 export interface WorktreeGitMount {
     hostPath: string;
     containerPath: string;
+    identity: DirectoryIdentity;
+    presence: "core" | "additive";
+}
+
+function trackedWorktreeGitFiles(
+    repositoryPath: string,
+    strict: boolean,
+): string[] {
+    const gitFiles: string[] = [];
+    const visited = new Set<string>();
+
+    const collect = (currentRepository: string): void => {
+        let currentRealpath: string;
+        try {
+            currentRealpath = realpathSync(currentRepository);
+        } catch (error) {
+            if (!strict) return;
+            throw new Error(
+                `Unable to inspect tracked Git link root '${currentRepository}'.`,
+                { cause: error },
+            );
+        }
+        const visitKey = process.platform === "win32"
+            ? currentRealpath.toLowerCase()
+            : currentRealpath;
+        if (visited.has(visitKey)) return;
+        visited.add(visitKey);
+
+        for (const name of trackedGitlinkPaths(currentRepository, strict)) {
+            const candidatePath = join(currentRepository, ...name.split("/"));
+            const gitMetadata = join(candidatePath, ".git");
+            try {
+                const candidate = lstatSync(candidatePath);
+                if (!candidate.isDirectory() || candidate.isSymbolicLink()) {
+                    throw new Error("tracked Git link is not a real directory");
+                }
+                const candidateRealpath = realpathSync(candidatePath);
+                const relativeCandidate = relative(currentRealpath, candidateRealpath);
+                if (relativePathEscapesRoot(relativeCandidate)) {
+                    throw new Error("tracked Git link escapes its repository");
+                }
+                const metadata = lstatSync(gitMetadata);
+                if (metadata.isSymbolicLink()
+                    || (!metadata.isFile() && !metadata.isDirectory())) {
+                    throw new Error("tracked Git link metadata is invalid");
+                }
+                if (metadata.isFile()) gitFiles.push(gitMetadata);
+                collect(candidatePath);
+            } catch (error) {
+                // An absent gitlink is an uninitialized submodule, and this function only ever
+                // runs against a workspace that already exists — it computes that workspace's
+                // mounts. Relaxing the scan without relaxing this left the operator worse off
+                // than before: detection now succeeded and printed a NOTE saying the workspace
+                // was being opened without the repository, and then this threw `Unable to
+                // inspect tracked Git link worktree`, which names neither the submodule nor a
+                // remedy. The judgements above ("escapes its repository", "metadata is
+                // invalid") carry no errno and keep throwing.
+                if (["ENOENT", "ENOTDIR"].includes(
+                    (error as NodeJS.ErrnoException).code ?? "",
+                )) {
+                    // In multi-repo mode this is the ONLY place the skip happens: that branch
+                    // goes through scanDirectory and never reaches the scan that carries the
+                    // NOTE. Without this the relaxation was silent there — and multi-repo has
+                    // no removal guard either, so silence is the worst of the two modes to
+                    // have it in. Deduplicated per path, so the unified mode still prints once.
+                    if (strict) warnUnmanagedNestedRepository(candidatePath, pathContent(candidatePath) !== "absent");
+                    continue;
+                }
+                if (!strict) continue;
+                throw new Error(
+                    `Unable to inspect tracked Git link worktree '${candidatePath}'.`,
+                    { cause: error },
+                );
+            }
+        }
+    };
+
+    collect(resolve(repositoryPath));
+    return gitFiles;
+}
+
+type TrackedNestedRepository = {
+    name: string;
+    path: string;
+    identity: NestedRepositoryIdentity;
+};
+
+function trackedNestedRepositories(
+    repositoryPath: string,
+    strict: boolean,
+): TrackedNestedRepository[] {
+    const root = resolve(repositoryPath);
+    const rootIdentity = captureDirectoryIdentity(root);
+    const repositories: TrackedNestedRepository[] = [];
+    const visited = new Set<string>();
+
+    const collect = (
+        currentRepository: string,
+        relativePrefix: string,
+    ): void => {
+        const currentIdentity = captureNestedRepositoryIdentity(currentRepository);
+        const visitKey = process.platform === "win32"
+            ? currentIdentity.directory.realpath.toLowerCase()
+            : currentIdentity.directory.realpath;
+        if (visited.has(visitKey)) return;
+        visited.add(visitKey);
+
+        for (const name of trackedGitlinkPaths(
+            currentRepository,
+            strict,
+            currentIdentity,
+        )) {
+            const candidatePath = join(currentRepository, ...name.split("/"));
+            try {
+                const candidateIdentity = captureNestedRepositoryIdentity(candidatePath);
+                const relativeCandidate = relative(
+                    rootIdentity.realpath,
+                    candidateIdentity.directory.realpath,
+                );
+                if (relativePathEscapesRoot(relativeCandidate)) {
+                    throw new Error("tracked Git link escapes its repository");
+                }
+                const repositoryName = relativePrefix
+                    ? `${relativePrefix}/${name}`
+                    : name;
+                repositories.push({
+                    name: repositoryName,
+                    path: candidatePath,
+                    identity: candidateIdentity,
+                });
+                collect(candidatePath, repositoryName);
+                assertNestedRepositoryIdentity(candidatePath, candidateIdentity);
+            } catch (error) {
+                if (!strict) continue;
+                throw new Error(
+                    `Unable to inspect tracked nested repository '${candidatePath}'.`,
+                    { cause: error },
+                );
+            }
+        }
+        assertNestedRepositoryIdentity(currentRepository, currentIdentity);
+    };
+
+    collect(root, "");
+    assertDirectoryIdentity(root, rootIdentity);
+    return repositories.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function workspaceWorktreeGitFiles(
+    worktreePath: string,
+    required: boolean,
+    trackedSourceRepositories: TrackedNestedRepository[] = [],
+): string[] {
+    const resolved = resolve(worktreePath);
+    const gitFiles: string[] = [];
+    const rootGit = join(resolved, ".git");
+    if (pathExistsStrict(rootGit)) {
+        if (lstatSync(rootGit).isFile()) {
+            gitFiles.push(rootGit);
+        } else if (required) {
+            throw new Error(`Required worktree metadata is invalid: ${rootGit}`);
+        }
+    }
+
+    const unifiedWorkspace = hasGitMetadata(resolved);
+    if (unifiedWorkspace) {
+        for (const trackedGit of trackedWorktreeGitFiles(resolved, required)) {
+            if (!gitFiles.includes(trackedGit)) gitFiles.push(trackedGit);
+        }
+    }
+
+    const nestedRepositories = unifiedWorkspace
+        ? scanUnifiedNestedRepositories(
+            resolved,
+            {
+                strict: required,
+                allowRegisteredWorktrees: true,
+                // Mounts are computed for a workspace that already exists, so this is the open
+                // side of the create/open split like the two scans in branchRepositories and
+                // assertWorkspaceOwnership.
+                openingExistingWorkspace: true,
+            },
+        )
+        : scanDirectory(resolved, { strict: required });
+    for (const entry of nestedRepositories) {
+        if (!entry.isGitRepo) continue;
+        const nestedGit = join(entry.path, ".git");
+        if (lstatSync(nestedGit).isFile() && !gitFiles.includes(nestedGit)) {
+            gitFiles.push(nestedGit);
+        }
+        if (!unifiedWorkspace) {
+            for (const trackedGit of trackedWorktreeGitFiles(entry.path, required)) {
+                if (!gitFiles.includes(trackedGit)) gitFiles.push(trackedGit);
+            }
+        }
+    }
+
+    // A long-lived workspace can retain an older index and .gitignore after
+    // the source checkout starts tracking a nested repository as a Gitlink.
+    // Repair creates the nested worktree from the current source inventory,
+    // so include that owner-verified worktree even when workspace-local Git
+    // discovery still classifies its path as ignored.
+    if (unifiedWorkspace) {
+        for (const entry of trackedSourceRepositories) {
+            const workspaceRepository = join(resolved, entry.name);
+            const nestedGit = join(workspaceRepository, ".git");
+            let metadata: ReturnType<typeof lstatSync>;
+            try {
+                metadata = lstatSync(nestedGit);
+            } catch (error) {
+                // Same relaxation as the tracked-gitlink walk above, and for the same reason:
+                // the metadata is missing because the submodule is not initialized, which is an
+                // ordinary state and one this workspace can be opened without. This is the third
+                // place the abort lived; chasing them one at a time is why the first attempt at
+                // this change reached the operator as a different, worse error.
+                if (["ENOENT", "ENOTDIR"].includes(
+                    (error as NodeJS.ErrnoException).code ?? "",
+                )) continue;
+                throw new Error(
+                    `Required managed nested worktree metadata is missing: ${nestedGit}`,
+                    { cause: error },
+                );
+            }
+            if (metadata.isSymbolicLink()
+                || !metadata.isFile()
+                || !isValidWorktree(workspaceRepository, entry.path)) {
+                // `isValidWorktree` answers one bit for a dozen different shapes. Exactly one
+                // of them is not a fault of this workspace: a registration recorded on the
+                // other side of the container boundary, which the scan a few lines above has
+                // already decided to skip and has already told the operator about — "It is
+                // left as ordinary files". Throwing here made that sentence a lie and took
+                // the whole workspace down with it, which is what the operator saw: a NOTE
+                // promising the run would continue, immediately followed by the run not
+                // continuing. Every other invalid shape still aborts; a symlink or a
+                // directory here is not this case and is not asked.
+                const recorded = !metadata.isSymbolicLink() && metadata.isFile()
+                    ? recordedGitPathUnreachableHere(nestedGit)
+                    : null;
+                if (recorded !== null) {
+                    // Deduplicated per path inside, so this is the one NOTE for the run
+                    // whether the scan reached the path first or this loop did — and the
+                    // loop exists precisely for paths the scan does not reach.
+                    // `true`, spelled out: this loop is inside `if (unifiedWorkspace)`, so the
+                    // variable would be a constant here and reading it suggests a choice the
+                    // site cannot make.
+                    warnUnreachableNestedRepository(workspaceRepository, recorded, true);
+                    continue;
+                }
+                if (!required) continue;
+                throw new Error(
+                    `Managed nested worktree ownership could not be verified: ${nestedGit}`,
+                );
+            }
+            assertNestedRepositoryIdentity(entry.path, entry.identity);
+            if (!gitFiles.includes(nestedGit)) gitFiles.push(nestedGit);
+        }
+    }
+    // One choke point for the container boundary rather than a check at each producer above,
+    // and at each consumer below. Four earlier fixes each patched the site that happened to
+    // throw next and the operator saw a different error on every attempt; the sixth was the
+    // mount loop in getWorktreeGitMounts, reporting `Required worktree metadata is invalid`
+    // for a path this function had already been taught to skip in one of its four branches.
+    // Everything downstream may now assume a returned gitfile records a path that resolves
+    // here. The workspace's own root .git is deliberately exempt: if THAT is unreachable
+    // there is no workspace to open, and aborting is the right answer.
+    const reachable = gitFiles.filter((gitFile) => {
+        if (gitFile === rootGit) return true;
+        const recorded = recordedGitPathUnreachableHere(gitFile);
+        if (recorded === null) return true;
+        warnUnreachableNestedRepository(dirname(gitFile), recorded, unifiedWorkspace);
+        return false;
+    });
+    // Counted before the filter, deliberately. "Missing" is a claim about what was found, and
+    // filtering everything that WAS found does not make it true — for a multi-repo workspace
+    // whose single nested repository is unreachable, counting after turned AC-003's "the
+    // workspace still opens" into an abort that named the wrong cause.
+    if (required && gitFiles.length === 0) {
+        throw new Error(`Required worktree metadata is missing: ${resolved}`);
+    }
+    return reachable;
+}
+
+type StableGitLinkSnapshot = {
+    identity: DirectoryIdentity;
+    content: string;
+    kind: GitLinkKind;
+    resolvedGitDirectory: string;
+};
+
+function stableGitLinkSnapshot(gitFile: string): StableGitLinkSnapshot {
+    const identity = capturePathIdentity(gitFile);
+    const content = readFileSync(gitFile, "utf-8");
+    assertPathIdentity(gitFile, identity);
+    const kind = gitLinkKind(gitFile);
+    assertPathIdentity(gitFile, identity);
+    if (readFileSync(gitFile, "utf-8") !== content) {
+        throw new Error(`Worktree metadata changed during ownership validation: ${gitFile}`);
+    }
+    assertPathIdentity(gitFile, identity);
+    const match = content.trim().match(/^gitdir:\s*(.+)$/);
+    if (!match) {
+        throw new Error(`Required worktree metadata is invalid: ${gitFile}`);
+    }
+    return {
+        identity,
+        content,
+        kind,
+        resolvedGitDirectory: resolve(dirname(gitFile), match[1].trim()),
+    };
+}
+
+function assertStableGitLinkSnapshot(
+    gitFile: string,
+    snapshot: StableGitLinkSnapshot,
+): void {
+    assertPathIdentity(gitFile, snapshot.identity);
+    if (readFileSync(gitFile, "utf-8") !== snapshot.content) {
+        throw new Error(`Worktree metadata changed after ownership validation: ${gitFile}`);
+    }
+    assertPathIdentity(gitFile, snapshot.identity);
+}
+
+function normalizeOwnerVerifiedWorktreeGitLink(
+    worktreePath: string,
+    sourceRepositoryPath: string,
+): void {
+    const gitFile = join(worktreePath, ".git");
+    const snapshot = stableGitLinkSnapshot(gitFile);
+    if (snapshot.kind !== "worktree"
+        || !isValidWorktree(worktreePath, sourceRepositoryPath)) {
+        throw new Error(
+            `Worktree normalization ownership could not be verified: ${gitFile}`,
+        );
+    }
+    assertStableGitLinkSnapshot(gitFile, snapshot);
+    normalizeWorktreeGitLink(
+        gitFile,
+        snapshot.resolvedGitDirectory,
+        snapshot.identity,
+        snapshot.content,
+    );
+}
+
+function sameDirectoryIdentity(
+    left: DirectoryIdentity,
+    right: DirectoryIdentity,
+): boolean {
+    return sameExistingObject(left.realpath, right.realpath)
+        && left.dev === right.dev
+        && left.ino === right.ino;
+}
+
+function isValidWorktreeForNestedIdentity(
+    worktreePath: string,
+    sourceIdentity: NestedRepositoryIdentity,
+): boolean {
+    try {
+        assertNestedRepositoryIdentity(
+            sourceIdentity.directory.realpath,
+            sourceIdentity,
+        );
+        const worktreeIdentity = captureDirectoryIdentity(worktreePath);
+        const gitFile = join(worktreePath, ".git");
+        const snapshot = stableGitLinkSnapshot(gitFile);
+        if (snapshot.kind !== "worktree") return false;
+        const commonDirectory = captureDirectoryIdentity(resolve(
+            snapshot.resolvedGitDirectory,
+            "..",
+            "..",
+        ));
+        if (!sameDirectoryIdentity(
+            commonDirectory,
+            sourceIdentity.commonDirectory,
+        )) return false;
+
+        const managementRoot = captureDirectoryIdentity(join(
+            sourceIdentity.commonDirectory.realpath,
+            "worktrees",
+        ));
+        const managementEntry = captureDirectoryIdentity(
+            snapshot.resolvedGitDirectory,
+        );
+        if (!isSourceWorktreeManagementRoot(
+            dirname(snapshot.resolvedGitDirectory),
+            sourceIdentity.commonDirectory.realpath,
+        ) || !sameExistingObject(dirname(managementEntry.realpath), managementRoot.realpath)) {
+            return false;
+        }
+        const registrationFile = join(
+            snapshot.resolvedGitDirectory,
+            "gitdir",
+        );
+        const registrationIdentity = captureFileIdentity(registrationFile);
+        const registrationContent = readFileSync(registrationFile, "utf-8");
+        assertFileIdentity(registrationFile, registrationIdentity);
+        const registeredGitFile = managementGitdirBackpointer(registrationFile);
+        if (!registeredGitFile
+            || !sameDirectExistingObject(registeredGitFile, gitFile)) {
+            return false;
+        }
+
+        const listed = spawnSync(
+            "git",
+            ["worktree", "list", "--porcelain"],
+            {
+                cwd: dirname(worktreeIdentity.realpath),
+                env: pinnedNestedRepositoryEnvironment(sourceIdentity),
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+            },
+        );
+        if (listed.error || listed.status !== 0) return false;
+        const registered = (listed.stdout ?? "")
+            .split(/\r?\n/)
+            .filter((line) => line.startsWith("worktree "))
+            .some((line) => {
+                try {
+                    return sameDirectExistingObject(
+                        line.slice("worktree ".length).trim(),
+                        worktreeIdentity.realpath,
+                    );
+                } catch {
+                    return false;
+                }
+            });
+        if (!registered) return false;
+
+        assertNestedRepositoryIdentity(
+            sourceIdentity.directory.realpath,
+            sourceIdentity,
+        );
+        assertDirectoryIdentity(worktreePath, worktreeIdentity);
+        assertStableGitLinkSnapshot(gitFile, snapshot);
+        assertFileIdentity(registrationFile, registrationIdentity);
+        return readFileSync(registrationFile, "utf-8") === registrationContent;
+    } catch {
+        return false;
+    }
+}
+
+export function containerGitSourceMountPath(
+    containerGitFileDirectory: string,
+    rawGitDirectory: string,
+    platform = process.platform,
+): string {
+    const normalizedGitDirectory = platform === "win32"
+        ? rawGitDirectory.replace(/\\/g, "/")
+        : rawGitDirectory;
+    return posix.resolve(
+        containerGitFileDirectory,
+        normalizedGitDirectory,
+        "..",
+        "..",
+    );
+}
+
+function ensureContainerWorktreeBackpointer(
+    managementDirectory: string,
+    containerGitFile: string,
+): { path: string; identity: DirectoryIdentity } {
+    const parentIdentity = captureDirectoryIdentity(managementDirectory);
+    const compatibilityFile = join(
+        managementDirectory,
+        ".ccc-container-gitdir",
+    );
+    const expectedContent = `${containerGitFile}\n`;
+    if (pathExistsStrict(compatibilityFile)) {
+        const observed = lstatSync(compatibilityFile);
+        if (!observed.isFile() || observed.isSymbolicLink()) {
+            throw new Error(
+                `Container worktree backpointer is not a regular file: ${compatibilityFile}`,
+            );
+        }
+        const identity = capturePathIdentity(compatibilityFile);
+        normalizeWorktreeMetadataFile(
+            compatibilityFile,
+            expectedContent,
+            identity,
+        );
+        assertDirectoryIdentity(managementDirectory, parentIdentity);
+        return {
+            path: compatibilityFile,
+            identity: capturePathIdentity(compatibilityFile),
+        };
+    }
+    try {
+        writeFileSync(
+            compatibilityFile,
+            expectedContent,
+            { flag: "wx", mode: 0o600 },
+        );
+        assertDirectoryIdentity(managementDirectory, parentIdentity);
+        const identity = capturePathIdentity(compatibilityFile);
+        if (readFileSync(compatibilityFile, "utf-8") !== expectedContent) {
+            throw new Error(
+                `Container worktree backpointer changed after creation: ${compatibilityFile}`,
+            );
+        }
+        return { path: compatibilityFile, identity };
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+            return ensureContainerWorktreeBackpointer(
+                managementDirectory,
+                containerGitFile,
+            );
+        }
+        throw error;
+    }
 }
 
 /**
@@ -820,70 +7280,198 @@ export interface WorktreeGitMount {
  * - Source repo's .git at /project/<basename>/.git (for relative refs from submodules)
  * - Each nested git repo's .git directories similarly
  */
-export function getWorktreeGitMounts(worktreePath: string): WorktreeGitMount[] {
+export function getWorktreeGitMounts(
+    worktreePath: string,
+    required = false,
+    containerWorkspacePath?: string,
+): WorktreeGitMount[] {
     const resolved = resolve(worktreePath);
-    const gitFile = join(resolved, ".git");
-
-    // Not a worktree if .git doesn't exist or is a directory (regular repo)
-    if (!existsSync(gitFile)) return [];
-    try {
-        if (!lstatSync(gitFile).isFile()) return [];
-    } catch {
-        return [];
-    }
-
-    const content = readFileSync(gitFile, "utf-8").trim();
-    const match = content.match(/^gitdir:\s*(.+)$/);
-    if (!match) return [];
-
-    const gitdirPath = match[1].trim();
-    const resolvedGitdir = resolve(resolved, gitdirPath);
-
-    // Navigate from .git/worktrees/<name> up to .git/
-    const sourceGitDir = resolve(resolvedGitdir, "..", "..");
-    if (!existsSync(sourceGitDir)) return [];
-
-    const sourceRepoDir = dirname(sourceGitDir);
-    const sourceBasename = basename(sourceRepoDir);
-
     const mounts: WorktreeGitMount[] = [];
     const seen = new Set<string>();
+    const destinationSources = new Map<string, string>();
 
-    function addMount(hostPath: string, containerPath: string): void {
+    function addMount(
+        hostPath: string,
+        containerPath: string,
+        identity = captureDirectoryIdentity(hostPath),
+        presence: WorktreeGitMount["presence"] = "core",
+    ): void {
+        const existingSource = destinationSources.get(containerPath);
+        if (existingSource && !sameObservedPath(existingSource, hostPath)) {
+            throw new Error(
+                `Conflicting Git mount sources target '${containerPath}': `
+                + `'${existingSource}' and '${hostPath}'.`,
+            );
+        }
+        destinationSources.set(containerPath, hostPath);
         const key = `${hostPath}:${containerPath}`;
         if (!seen.has(key)) {
             seen.add(key);
-            mounts.push({ hostPath, containerPath });
+            mounts.push({ hostPath, containerPath, identity, presence });
         }
     }
 
-    // Mount source .git at absolute host path (for absolute gitdir references)
-    addMount(sourceGitDir, sourceGitDir);
-
-    // Mount source .git at /project/<basename>/.git (for relative refs from submodules)
-    // Submodule .git files use paths like ../../<source_basename>/.git/worktrees/...
-    const relMountPath = `/project/${sourceBasename}/.git`;
-    if (relMountPath !== sourceGitDir) {
-        addMount(sourceGitDir, relMountPath);
-    }
-
-    // Scan source for nested git repos and mount their .git directories too
-    try {
-        const entries = scanDirectory(sourceRepoDir);
-        for (const entry of entries) {
-            if (!entry.isGitRepo) continue;
-            const nestedGitPath = join(entry.path, ".git");
-            try {
-                if (lstatSync(nestedGitPath).isDirectory()) {
-                    addMount(nestedGitPath, nestedGitPath);
-                    const nestedRelPath = `/project/${sourceBasename}/${entry.name}/.git`;
-                    if (nestedRelPath !== nestedGitPath) {
-                        addMount(nestedGitPath, nestedRelPath);
-                    }
-                }
-            } catch { /* skip inaccessible entries */ }
+    const rootGit = join(resolved, ".git");
+    let unifiedSourceRoot: string | null = null;
+    let trackedSourceRepositories: TrackedNestedRepository[] = [];
+    if (pathExistsStrict(rootGit) && lstatSync(rootGit).isFile()) {
+        try {
+            unifiedSourceRoot = primarySourceRepositoryForWorktree(resolved);
+            if (required && !unifiedSourceRoot) {
+                throw new Error("worktree source ownership could not be established");
+            }
+            if (unifiedSourceRoot) {
+                trackedSourceRepositories = trackedNestedRepositories(
+                    unifiedSourceRoot,
+                    required,
+                );
+            }
+        } catch (error) {
+            if (required) {
+                throw new Error(`Required worktree metadata is invalid: ${rootGit}`, {
+                    cause: error,
+                });
+            }
         }
-    } catch { /* skip if source scan fails */ }
+    }
+    const gitFiles = workspaceWorktreeGitFiles(
+        resolved,
+        required,
+        trackedSourceRepositories,
+    );
+    const trackedSourceRepositoryByName = new Map(
+        trackedSourceRepositories.map((entry) => [entry.name, entry]),
+    );
+    for (const gitFile of gitFiles) {
+        let snapshot: StableGitLinkSnapshot;
+        try {
+            snapshot = stableGitLinkSnapshot(gitFile);
+        } catch (error) {
+            if (required) {
+                throw new Error(`Required worktree metadata is invalid: ${gitFile}`, {
+                    cause: error,
+                });
+            }
+            continue;
+        }
+        if (snapshot.kind !== "worktree") {
+            if (required) throw new Error(`Required worktree metadata is invalid: ${gitFile}`);
+            continue;
+        }
+        const resolvedGitdir = snapshot.resolvedGitDirectory;
+        const sourceGitDir = resolve(resolvedGitdir, "..", "..");
+        const sourceIdentity = captureDirectoryIdentity(sourceGitDir);
+        const repositoryRelativePath = relative(resolved, dirname(gitFile))
+            .replace(/\\/g, "/");
+        const sourceRepoDir = unifiedSourceRoot
+            ? join(
+                unifiedSourceRoot,
+                ...repositoryRelativePath.split("/").filter(Boolean),
+            )
+            : dirname(sourceGitDir);
+        const trackedSource = trackedSourceRepositoryByName.get(
+            repositoryRelativePath,
+        );
+        if (trackedSource) {
+            assertNestedRepositoryIdentity(trackedSource.path, trackedSource.identity);
+            if (!sameDirectoryIdentity(
+                sourceIdentity,
+                trackedSource.identity.commonDirectory,
+            )) {
+                throw new Error(
+                    `Tracked worktree common directory changed before mount: ${gitFile}`,
+                );
+            }
+        }
+        const validWorktree = trackedSource
+            ? isValidWorktreeForNestedIdentity(
+                dirname(gitFile),
+                trackedSource.identity,
+            )
+            : isValidWorktree(dirname(gitFile), sourceRepoDir);
+        if (!validWorktree) {
+            throw new Error(`Worktree mount ownership could not be verified: ${gitFile}`);
+        }
+        assertStableGitLinkSnapshot(gitFile, snapshot);
+        const portableGitDirectory = normalizeWorktreeGitLink(
+            gitFile,
+            resolvedGitdir,
+            snapshot.identity,
+            snapshot.content,
+        );
+        const registrationFile = join(resolvedGitdir, "gitdir");
+        const registrationIdentity = captureFileIdentity(registrationFile);
+        const registrationContent = readFileSync(registrationFile, "utf-8");
+        assertFileIdentity(registrationFile, registrationIdentity);
+        const rawBackpointer = managementGitdirBackpointer(registrationFile);
+        if (!rawBackpointer || !sameObservedPath(rawBackpointer, gitFile)) {
+            throw new Error(
+                `Worktree registration ownership could not be verified: ${registrationFile}`,
+            );
+        }
+        const sourceBasename = basename(sourceRepoDir);
+        const containerGitFileDirectory = containerWorkspacePath
+            ? posix.join(
+                containerWorkspacePath,
+                relative(resolved, dirname(gitFile)).replace(/\\/g, "/"),
+            )
+            : dirname(gitFile);
+        const sourceContainerPath = containerWorkspacePath
+            ? containerGitSourceMountPath(
+                containerGitFileDirectory,
+                portableGitDirectory,
+            )
+            : sourceGitDir;
+        addMount(sourceGitDir, sourceContainerPath, sourceIdentity);
+        const relMountPath = `/project/${
+            repositoryRelativePath || sourceBasename
+        }/.git`;
+        if (relMountPath !== sourceContainerPath) {
+            addMount(sourceGitDir, relMountPath, sourceIdentity);
+        }
+        if (containerWorkspacePath) {
+            assertFileIdentity(registrationFile, registrationIdentity);
+            if (readFileSync(registrationFile, "utf-8") !== registrationContent) {
+                throw new Error(
+                    `Worktree registration changed during mount preparation: ${registrationFile}`,
+                );
+            }
+            assertFileIdentity(registrationFile, registrationIdentity);
+            const containerManagementDirectory = posix.resolve(
+                containerGitFileDirectory,
+                portableGitDirectory.replace(/\\/g, "/"),
+            );
+            const actualContainerGitFile = posix.join(
+                containerGitFileDirectory,
+                ".git",
+            );
+            const managementRelative = posix.relative(
+                sourceContainerPath,
+                containerManagementDirectory,
+            );
+            if (!managementRelative
+                || managementRelative === ".."
+                || managementRelative.startsWith("../")
+                || posix.isAbsolute(managementRelative)) {
+                throw new Error(
+                    `Container worktree management path escapes its Git source mount: ${gitFile}`,
+                );
+            }
+            const compatibility = ensureContainerWorktreeBackpointer(
+                resolvedGitdir,
+                actualContainerGitFile,
+            );
+            addMount(
+                compatibility.path,
+                posix.join(containerManagementDirectory, "gitdir"),
+                compatibility.identity,
+                "additive",
+            );
+        }
+        if (trackedSource) {
+            assertNestedRepositoryIdentity(trackedSource.path, trackedSource.identity);
+        }
+    }
 
     return mounts;
 }
@@ -908,60 +7496,126 @@ export interface BrokenWorktreeEntry {
 export function isValidWorktree(
     dirPath: string,
     sourceRepoPath: string,
+    reportFailure?: (reason: string) => void,
 ): boolean {
-    if (!existsSync(dirPath)) return false;
+    const refuse = (reason: string): false => {
+        reportFailure?.(reason);
+        return false;
+    };
+    if (!existsSync(dirPath)) return refuse("workspace directory is missing");
+    try {
+        captureDirectoryIdentity(dirPath);
+    } catch {
+        return refuse("workspace path is not a real directory");
+    }
 
     const gitPath = join(dirPath, ".git");
-    if (!existsSync(gitPath)) return false;
+    if (!existsSync(gitPath)) return refuse("workspace .git file is missing");
 
     // Must be a file (gitlink), not a directory — directories are regular repos
     try {
-        if (!lstatSync(gitPath).isFile()) return false;
+        if (!lstatSync(gitPath).isFile()) return refuse("workspace .git is not a file");
     } catch {
-        return false;
+        return refuse("workspace .git file cannot be inspected");
     }
 
     // Read and parse the .git file to get the gitdir reference
     try {
+        const sourceIdentity = captureNestedRepositoryIdentity(sourceRepoPath);
         const content = readFileSync(gitPath, "utf-8").trim();
         const match = content.match(/^gitdir:\s*(.+)$/);
-        if (!match) return false;
+        if (!match) return refuse("workspace .git link is invalid");
 
         const gitdirPath = match[1].trim();
         const resolvedGitdir = resolve(dirPath, gitdirPath);
+        const gitdirObserved = lstatSync(resolvedGitdir);
+        if (!gitdirObserved.isDirectory() || gitdirObserved.isSymbolicLink()) {
+            return refuse("management entry is not a real directory");
+        }
+        const registeredGitFile = readFileSync(
+            join(resolvedGitdir, "gitdir"),
+            "utf-8",
+        ).trim();
+        if (!registeredGitFile) return refuse("management backpointer is empty");
+        try {
+            const registeredPath = isAbsolute(registeredGitFile)
+                ? registeredGitFile
+                : resolve(resolvedGitdir, registeredGitFile);
+            if (!sameDirectExistingObject(registeredPath, gitPath)) {
+                return refuse("management backpointer does not name the workspace .git file");
+            }
+        } catch {
+            return refuse("management backpointer cannot be resolved");
+        }
 
         // gitdir format: <source>/.git/worktrees/<name>
         // Navigate up to find the common .git dir
         const commonGitDir = resolve(resolvedGitdir, "..", "..");
 
-        // Resolve the source repo's actual git directory.
-        // If the source is a submodule, its .git is a gitlink file pointing
-        // to the parent's .git/modules/<name> — we must follow that reference.
-        const sourceGitPath = join(sourceRepoPath, ".git");
-        let actualSourceGitDir: string;
+        // Compare with realpathSync to handle symlinks (common on macOS).
+        // Observation failure cannot establish destructive ownership.
         try {
-            if (lstatSync(sourceGitPath).isFile()) {
-                // Source is a submodule — parse gitlink to find actual git dir
-                const srcContent = readFileSync(sourceGitPath, "utf-8").trim();
-                const srcMatch = srcContent.match(/^gitdir:\s*(.+)$/);
-                if (!srcMatch) return false;
-                actualSourceGitDir = resolve(sourceRepoPath, srcMatch[1].trim());
-            } else {
-                actualSourceGitDir = sourceGitPath;
+            const sourceGitRealpath = sourceIdentity.commonDirectory.realpath;
+            if (!sameExistingObject(commonGitDir, sourceGitRealpath)) {
+                return refuse("management entry belongs to a different common Git directory");
             }
+            const managementRootPath = join(sourceGitRealpath, "worktrees");
+            const managementRootObserved = lstatSync(managementRootPath);
+            if (!managementRootObserved.isDirectory() || managementRootObserved.isSymbolicLink()) {
+                return refuse("source worktree management root is not a real directory");
+            }
+            if (!isSourceWorktreeManagementRoot(dirname(resolvedGitdir), sourceGitRealpath)) {
+                return refuse("workspace Git link crosses an untrusted management root");
+            }
+            const managementRoot = realpathSync(managementRootPath);
+            const managementEntry = realpathSync(resolvedGitdir);
+            if (!sameExistingObject(dirname(managementEntry), managementRoot)) {
+                return refuse("management entry is outside the source worktrees directory");
+            }
+            const listed = spawnSync(
+                "git",
+                ["worktree", "list", "--porcelain"],
+                {
+                    cwd: sourceIdentity.directory.realpath,
+                    encoding: "utf-8",
+                    stdio: ["pipe", "pipe", "pipe"],
+                    env: pinnedNestedRepositoryEnvironment(sourceIdentity),
+                },
+            );
+            if (listed.error || listed.status !== 0) {
+                const detail = gitFailureReason(listed.stderr ?? listed.error?.message ?? "");
+                return refuse(`git worktree list failed${detail ? `: ${detail}` : ""}`);
+            }
+            assertNestedRepositoryIdentity(sourceRepoPath, sourceIdentity);
+            const expectedPath = realpathSync(dirPath);
+            const records = (listed.stdout ?? "")
+                .split(/\r?\n\r?\n/)
+                .map((record) => {
+                    const lines = record.split(/\r?\n/);
+                    const pathLine = lines.find((line) => line.startsWith("worktree "));
+                    if (!pathLine) return null;
+                    const registeredPath = pathLine.slice("worktree ".length).trim();
+                    if (!registeredPath) return null;
+                    const registeredAbsolutePath = isAbsolute(registeredPath)
+                        ? registeredPath
+                        : resolve(resolvedGitdir, registeredPath);
+                    return {
+                        samePath: sameDirectExistingObject(registeredAbsolutePath, expectedPath),
+                        prunable: lines.find((line) => line.startsWith("prunable")),
+                    };
+                })
+                .filter((record) => record !== null);
+            if (records.some((record) => record.samePath && !record.prunable)) return true;
+            const matching = records.find((record) => record.samePath);
+            if (matching?.prunable) {
+                return refuse(`Git marks the workspace registration prunable: ${matching.prunable}`);
+            }
+            return refuse("Git registry has no record for the relinked workspace path");
         } catch {
-            return false;
-        }
-
-        // Compare with realpathSync to handle symlinks (common on macOS)
-        try {
-            return realpathSync(commonGitDir) === realpathSync(actualSourceGitDir);
-        } catch {
-            // Fallback: compare without symlink resolution
-            return resolve(commonGitDir) === resolve(actualSourceGitDir);
+            return refuse("source Git registry or path identity could not be inspected");
         }
     } catch {
-        return false;
+        return refuse("workspace Git metadata could not be inspected");
     }
 }
 
@@ -978,12 +7632,20 @@ export function detectBrokenWorktrees(
 ): BrokenWorktreeEntry[] {
     const resolved = resolve(sourcePath);
 
-    if (!existsSync(join(resolved, ".git"))) {
+    if (!hasGitMetadata(resolved)) {
         return [];
     }
 
     const broken: BrokenWorktreeEntry[] = [];
-    const sourceEntries = scanDirectory(resolved);
+    const sourceEntries = scanUnifiedNestedRepositories(
+        resolved,
+        {
+            strict: true,
+            allowRegisteredWorktrees: Boolean(
+                primarySourceRepositoryForWorktree(resolved),
+            ),
+        },
+    );
 
     for (const entry of sourceEntries) {
         if (!entry.isGitRepo) continue;
@@ -1027,81 +7689,371 @@ export function fixBrokenWorktree(
     wsPath: string,
     repoName: string,
     branch: string,
+    confirmed = false,
+    cleanupOperations: {
+        removeMergedBackup?: (path: string) => void;
+    } = {},
 ): WorktreeRepoResult | null {
+    return withSanitizedGitRepositoryEnvironment(() => fixBrokenWorktreeSanitized(
+        sourcePath,
+        wsPath,
+        repoName,
+        branch,
+        confirmed,
+        cleanupOperations,
+    ));
+}
+
+function fixBrokenWorktreeSanitized(
+    sourcePath: string,
+    wsPath: string,
+    repoName: string,
+    branch: string,
+    confirmed: boolean,
+    cleanupOperations: {
+        removeMergedBackup?: (path: string) => void;
+    },
+): WorktreeRepoResult | null {
+    if (!confirmed) {
+        throw new Error("Explicit confirmation is required to replace broken worktree content.");
+    }
     const resolved = resolve(sourcePath);
-    const destPath = join(wsPath, repoName);
-    const backupPath = destPath + ".ccc-backup";
+    assertWorkspaceRootOwnership(wsPath, resolved);
 
     // Find the source repo
-    const sourceEntries = scanDirectory(resolved);
+    const sourceEntries = scanUnifiedNestedRepositories(
+        resolved,
+        {
+            strict: true,
+            allowRegisteredWorktrees: Boolean(
+                primarySourceRepositoryForWorktree(resolved),
+            ),
+        },
+    );
     const sourceRepo = sourceEntries.find((e) => e.name === repoName && e.isGitRepo);
     if (!sourceRepo) return null;
-
-    // Backup existing content
-    if (existsSync(destPath)) {
-        if (existsSync(backupPath)) {
-            rmSync(backupPath, { recursive: true, force: true });
+    const destPath = join(wsPath, ...sourceRepo.name.split("/"));
+    for (const ancestor of sourceEntries.filter((entry) => (
+        entry.isGitRepo
+        && sourceRepo.name.startsWith(`${entry.name}/`)
+    ))) {
+        const ancestorDestination = join(wsPath, ...ancestor.name.split("/"));
+        if (!isValidWorktree(ancestorDestination, ancestor.path)) {
+            throw new Error(
+                `Cannot repair '${repoName}' beneath unmanaged ancestor '${ancestor.name}'.`,
+            );
         }
-        renameSync(destPath, backupPath);
+    }
+    const sourceIdentity = captureNestedRepositoryIdentity(sourceRepo.path);
+    const createdParentDirectories = new Map<string, DirectoryIdentity>();
+    const destinationFence = ensureNestedWorktreeParent(
+        wsPath,
+        destPath,
+        createdParentDirectories,
+    );
+    const operationGuard = (): void => {
+        assertNestedRepositoryIdentity(sourceRepo.path, sourceIdentity);
+        assertNestedWorktreeDestinationFence(wsPath, destPath, destinationFence);
+    };
+    operationGuard();
+    // Not always destPath: see unreachableRegistrationPathHoldingBranch. Everything below
+    // takes this path as "the path the registration records", which is what the quarantine
+    // and its rollback have always keyed on — so displacing a container-side entry needs no
+    // new machinery, only the right path.
+    const staleRegistrationPath = registrationToDisplace(
+        sourceRepo.path,
+        destPath,
+        branch,
+    )?.path ?? destPath;
+    const staleRegistrationFence = captureMissingWorktreeRegistrationFence(
+        sourceRepo.path,
+        staleRegistrationPath,
+        branch,
+    );
+    operationGuard();
+
+    let backup: QuarantineLocation | null = null;
+    let backupIdentity: DirectoryIdentity | null = null;
+    let quarantinedStaleRegistration: QuarantinedMissingWorktreeRegistration | null = null;
+    // The directory rollback renames the quarantined content back INTO, which is the
+    // destination's own parent — not the workspace root. Those are the same path only for a
+    // top-level repository name; for a nested one such as `services/catchy-api` they never are,
+    // so every rollback below threw `identity changed before deletion: <ws>/services` BEFORE
+    // restoring anything, and the content stayed in the quarantine directory. The operator saw
+    // it as `ccc` losing a submodule on every attempt: answering the repair prompt moved the
+    // directory away and the failed rollback left it there.
+    const destinationParentIdentity = captureDirectoryIdentity(dirname(destPath));
+    const restoreStaleRegistration = (): void => {
+        if (!quarantinedStaleRegistration) return;
+        restoreQuarantinedMissingWorktreeRegistration(quarantinedStaleRegistration);
+        quarantinedStaleRegistration = null;
+    };
+    // Committing a quarantined registration DELETES it. That is right for the destination's
+    // own stale entry — it describes this very path and this repair is what replaces it. It
+    // is not right for one displaced from somewhere else: what we cannot reach, we cannot
+    // prove is dead. Everything a worktree keeps outside its working directory lives in that
+    // directory — HEAD, the index, per-worktree refs, the reflog, an in-progress rebase — so
+    // deleting it on a wrong guess loses work that is not even on this machine to look at.
+    // Kept in the quarantine instead, and the operator is told where.
+    const displacedRegistration = staleRegistrationPath !== destPath;
+    const settleStaleRegistration = (): void => {
+        if (!quarantinedStaleRegistration) return;
+        if (displacedRegistration) {
+            warnDisplacedWorktreeRegistration(
+                staleRegistrationPath,
+                quarantinedStaleRegistration.location.path,
+            );
+        } else {
+            commitQuarantinedMissingWorktreeRegistration(quarantinedStaleRegistration);
+        }
+        quarantinedStaleRegistration = null;
+    };
+    if (pathExistsStrict(destPath)) {
+        operationGuard();
+        backupIdentity = captureDirectoryIdentity(destPath);
+        backup = createPrivateQuarantine(destPath, dirname(wsPath));
+        try {
+            operationGuard();
+            assertDirectoryIdentity(destPath, backupIdentity);
+            renameSync(destPath, backup.path);
+            operationGuard();
+            assertQuarantinedIdentity(backup.path, backupIdentity, "directory");
+        } catch (error) {
+            if (!pathExistsStrict(backup.path)) removePrivateQuarantine(backup);
+            throw error;
+        }
     }
 
-    // Prune stale worktree references (previous fix attempts may leave orphaned entries)
-    spawnSync("git", ["worktree", "prune"], {
-        cwd: sourceRepo.path,
-        stdio: "pipe",
-    });
+    if (staleRegistrationFence) {
+        try {
+            operationGuard();
+            quarantinedStaleRegistration = withPinnedNestedRepository(
+                sourceIdentity,
+                () => quarantineMissingWorktreeRegistration(
+                    sourceRepo.path,
+                    staleRegistrationPath,
+                    staleRegistrationFence,
+                ),
+            );
+            operationGuard();
+        } catch (error) {
+            if (backup && backupIdentity) {
+                operationGuard();
+                rollbackQuarantinedPath(
+                    destPath,
+                    backup,
+                    backupIdentity,
+                    destinationParentIdentity,
+                    "directory",
+                );
+                operationGuard();
+            }
+            throw error;
+        }
+    }
 
     // Create worktree
+    operationGuard();
     const existence = branchExistsInRepo(sourceRepo.path, branch);
-    let args: string[];
+    operationGuard();
     let action: WorktreeRepoResult["action"];
 
     switch (existence) {
         case "local":
-            args = ["worktree", "add", destPath, branch];
             action = "worktree-existing";
             break;
         case "remote":
-            args = ["worktree", "add", "-b", branch, destPath, `origin/${branch}`];
             action = "worktree-remote";
             break;
         case "none":
-            args = ["worktree", "add", "-b", branch, destPath];
             action = "worktree-new";
             break;
     }
-
-    const result = spawnSync("git", args, {
-        cwd: sourceRepo.path,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-    });
+    let expectedBranchOid: BranchCreationFence;
+    let destinationIdentity: DirectoryIdentity;
+    try {
+        ({
+            expectedBranchOid,
+            destinationIdentity,
+        } = withPinnedNestedRepository(
+            sourceIdentity,
+            () => prepareWorktreeCreation(
+                sourceRepo.path,
+                destPath,
+                branch,
+                action,
+                operationGuard,
+                dirname(wsPath),
+            ),
+        ));
+    } catch (error) {
+        if (backup && backupIdentity) {
+            operationGuard();
+            rollbackQuarantinedPath(
+                destPath,
+                backup,
+                backupIdentity,
+                destinationParentIdentity,
+                "directory",
+            );
+            operationGuard();
+        }
+        restoreStaleRegistration();
+        throw error;
+    }
+    const { result, registrationFence } = runPreparedWorktreeAdd(
+        sourceRepo.path,
+        destPath,
+        branch,
+        expectedBranchOid.expectedOid,
+        destinationIdentity,
+        operationGuard,
+        sourceIdentity,
+    );
 
     if (result.status !== 0) {
-        // Restore backup — don't lose user's content
-        if (existsSync(backupPath)) {
-            if (existsSync(destPath)) {
-                rmSync(destPath, { recursive: true, force: true });
-            }
-            renameSync(backupPath, destPath);
+        try {
+            operationGuard();
+            rollbackFailedWorktreeAdd(
+                sourceRepo.path,
+                destPath,
+                branch,
+                action,
+                expectedBranchOid,
+                destinationIdentity,
+                registrationFence,
+                dirname(wsPath),
+                sourceIdentity,
+                operationGuard,
+            );
+            operationGuard();
+        } catch (rollbackError) {
+            const preservation = backup
+                ? `; original content remains in '${backup.directory}'`
+                : "";
+            throw new Error(
+                `Failed worktree repair rollback: ${(rollbackError as Error).message}${preservation}.`,
+                { cause: rollbackError },
+            );
         }
+        if (backup && backupIdentity) {
+            operationGuard();
+            const restored = rollbackQuarantinedPath(
+                destPath,
+                backup,
+                backupIdentity,
+                destinationParentIdentity,
+                "directory",
+            );
+            operationGuard();
+            if (!restored) {
+                throw new Error(
+                    `Failed worktree creation could not restore original content from '${backup.directory}'.`,
+                );
+            }
+        }
+        restoreStaleRegistration();
+        warnWorktreeRepairFailure(destPath, result.stderr ?? "");
         return null;
     }
+    const createdRegistrationFence = requireWorktreeRegistrationFence(
+        registrationFence,
+        destPath,
+    );
 
-    // Restore non-.git content from backup into the new worktree
-    if (existsSync(backupPath)) {
-        for (const name of readdirSync(backupPath)) {
-            if (name === ".git") continue;
-            const srcItem = join(backupPath, name);
-            const dstItem = join(destPath, name);
-            // Only restore files that don't already exist in the worktree
-            if (!existsSync(dstItem)) {
-                copyDirRecursive(srcItem, dstItem);
+    if (backup && backupIdentity) {
+        const preservedContentMerge: PreservedContentMerge = {
+            worktreeRoot: destPath,
+            skippedIgnoredDependencyTrees: [],
+            conflicts: [],
+        };
+        try {
+            operationGuard();
+            if (!isValidWorktree(destPath, sourceRepo.path)) {
+                throw new Error("Created worktree ownership could not be verified.");
             }
+            operationGuard();
+            assertQuarantinedIdentity(backup.path, backupIdentity, "directory");
+            for (const name of readdirSync(backup.path)) {
+                if (name === ".git") continue;
+                mergePreservingContent(
+                    join(backup.path, name),
+                    join(destPath, name),
+                    preservedContentMerge,
+                );
+            }
+            if (preservedContentMerge.conflicts.length > 0) {
+                throw new WorktreeContentConflictError(destPath, preservedContentMerge.conflicts);
+            }
+        } catch (error) {
+            if (pathExistsStrict(destPath)) {
+                operationGuard();
+                if (!isValidWorktree(destPath, sourceRepo.path)) {
+                    throw new Error(
+                        `${(error as Error).message}; created worktree ownership changed during rollback`,
+                        { cause: error },
+                    );
+                }
+                removeRegisteredWorktree(
+                    sourceRepo.path,
+                    destPath,
+                    createdRegistrationFence.destinationIdentity,
+                    true,
+                    dirname(wsPath),
+                    createdRegistrationFence,
+                    pinnedNestedRepositoryEnvironment(sourceIdentity),
+                    operationGuard,
+                );
+                operationGuard();
+                withPinnedNestedRepository(sourceIdentity, () => (
+                    rollbackFailedCreatedBranch(
+                        sourceRepo.path,
+                        branch,
+                        action,
+                        expectedBranchOid,
+                    )
+                ));
+            }
+            operationGuard();
+            rollbackQuarantinedPath(
+                destPath,
+                backup,
+                backupIdentity,
+                destinationParentIdentity,
+                "directory",
+            );
+            operationGuard();
+            restoreStaleRegistration();
+            throw error;
         }
-        rmSync(backupPath, { recursive: true, force: true });
+
+        // The replacement is now the authoritative worktree. Cleanup failures
+        // must not roll it back after either quarantine has been settled.
+        settleStaleRegistration();
+        if (preservedContentMerge.skippedIgnoredDependencyTrees.length > 0) {
+            process.stderr.write(
+                `[ccc] NOTE: Recreated ${terminalSafe(destPath)} without ignored generated dependency trees that may contain platform-specific links.\n`
+                + `      Skipped: ${preservedContentMerge.skippedIgnoredDependencyTrees.map((tree) => terminalSafe(tree.destinationPath)).join(", ")}\n`
+                + "      Run the repository's package-manager install command in the repaired worktree.\n",
+            );
+        }
+        const removeMergedBackup = cleanupOperations.removeMergedBackup
+            ?? ((path: string) => rmSync(path, { recursive: true, force: true }));
+        operationGuard();
+        assertQuarantinedIdentity(backup.path, backupIdentity, "directory");
+        unlinkCapturedIgnoredDependencyLinks(
+            preservedContentMerge.skippedIgnoredDependencyTrees,
+        );
+        assertQuarantinedIdentity(backup.path, backupIdentity, "directory");
+        removeMergedBackup(backup.path);
+        operationGuard();
+        if (pathExistsStrict(backup.path)) {
+            throw new Error(`Broken-worktree backup was not removed: ${backup.path}`);
+        }
+        removePrivateQuarantine(backup);
     }
 
+    settleStaleRegistration();
     return { name: repoName, branch, action };
 }
 
@@ -1130,71 +8082,410 @@ export function removeWorkspace(
         throw new Error(`Workspace not found: ${wsPath}`);
     }
 
+    assertWorkspaceBranch(
+        wsPath,
+        branch,
+        spawnSync,
+        resolved,
+        { allowTrackedGitlinks: true },
+    );
+    // A nested repository ccc declines to manage is not deleted SILENTLY. It is still deleted
+    // when the operator says so: a command that removes a workspace removes what is inside it,
+    // and `--force` is where they say they know. An earlier version of this guard held under
+    // `--force` too, arguing that `--force` means "delete my modified and untracked files" and
+    // not "delete a repository you could not even inspect" — that was this file's reasoning,
+    // not the repository owner's, and it left `ccc rm -f` with no way through on a workspace
+    // the owner wanted gone. The warning still happens; only the veto is lifted.
+    if (opts?.force !== true) {
+        const unreachable: string[] = [];
+        scanUnifiedNestedRepositories(wsPath, {
+            allowRegisteredWorktrees: true,
+            openingExistingWorkspace: true,
+            unreachable,
+        });
+        if (unreachable.length > 0) {
+            return {
+                removed: [],
+                // NOT forceWouldNotHelp: -f is now exactly what helps, and the CLI's standing
+                // advice to use it is correct here.
+                // Both the refusal and its remedy from one observation of the path: telling
+                // someone to move files out of an empty directory sends them looking for files
+                // that are not there, and telling them to move files out of a directory they
+                // cannot read is worse still — the reason ccc refuses is that it could not
+                // look, and that is what to say.
+                errors: unreachable.map((path) => unmanagedPathRefusal(path, pathContent(path))),
+            };
+        }
+    }
+
+    const workspaceIdentity = captureDirectoryIdentity(wsPath);
+
     // Unified mode: top-level is a git repo → remove single worktree
-    if (existsSync(join(resolved, ".git"))) {
-        return removeUnifiedWorkspace(resolved, wsPath, opts);
+    if (hasGitMetadata(resolved)) {
+        return removeUnifiedWorkspace(resolved, wsPath, branch, workspaceIdentity, opts);
     }
 
     // Multi-repo mode
-    return removeMultiRepoWorkspace(resolved, wsPath, opts);
+    return removeMultiRepoWorkspace(resolved, wsPath, branch, workspaceIdentity, opts);
 }
 
 function removeUnifiedWorkspace(
     resolved: string,
     wsPath: string,
+    branch: string,
+    workspaceIdentity: DirectoryIdentity,
     opts?: { force?: boolean },
 ): RemoveResult {
     const removed: string[] = [];
     const errors: string[] = [];
 
-    // Remove nested worktrees before removing the parent.
-    // These are worktrees created for nested git repos (non-submodule).
-    const sourceEntries = scanDirectory(resolved);
-    for (const entry of sourceEntries) {
+    const sourceEntries = scanUnifiedNestedRepositories(
+        resolved,
+        {
+            strict: true,
+            allowRegisteredWorktrees: Boolean(
+                primarySourceRepositoryForWorktree(resolved),
+            ),
+        },
+    );
+    const inspectRootStatus = (path = wsPath) => spawnSync(
+        "git",
+        [
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+            "--",
+            ".",
+            ...sourceEntries.map(({ name }) => `:(exclude,literal)${name}`),
+        ],
+        { cwd: path, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const inspectIgnoredRootStatus = (path = wsPath) => spawnSync(
+        "git",
+        [
+            "status",
+            "--porcelain=v1",
+            "--ignored",
+            "--untracked-files=all",
+            "--",
+            ".",
+            ...sourceEntries.map(({ name }) => `:(exclude,literal)${name}`),
+        ],
+        { cwd: path, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const rootStatus = inspectRootStatus();
+    if (rootStatus.error || rootStatus.status !== 0) {
+        return {
+            removed,
+            errors: [
+                (rootStatus.stderr ?? "").trim()
+                || rootStatus.error?.message
+                || "unable to inspect root worktree status",
+            ],
+        };
+    }
+    if (opts?.force !== true && (rootStatus.stdout ?? "").trim()) {
+        return {
+            removed,
+            errors: [
+                "root worktree contains modified or untracked files, use --force to delete it",
+            ],
+        };
+    }
+    const ignoredRootStatus = inspectIgnoredRootStatus();
+    if (ignoredRootStatus.error || ignoredRootStatus.status !== 0) {
+        return {
+            removed,
+            errors: [
+                (ignoredRootStatus.stderr ?? "").trim()
+                || ignoredRootStatus.error?.message
+                || "unable to inspect ignored root worktree content",
+            ],
+        };
+    }
+    if (opts?.force !== true && (ignoredRootStatus.stdout ?? "").trim()) {
+        return {
+            removed,
+            errors: [
+                "root worktree contains ignored files, use --force to delete it",
+            ],
+        };
+    }
+
+    // Remove every linked nested worktree before removing the parent.
+    const workspaceRepositoryEntries = sourceEntries.map((sourceEntry) => ({
+        ...sourceEntry,
+        path: join(wsPath, sourceEntry.name),
+    }));
+    const sourceRepositoryIdentities = new Map(
+        sourceEntries
+            .filter((entry) => entry.isGitRepo)
+            .map((entry) => [
+                entry.name,
+                captureNestedRepositoryIdentity(entry.path),
+            ]),
+    );
+    for (const entry of [...sourceEntries].reverse()) {
         if (!entry.isGitRepo) continue;
 
         const nestedPath = join(wsPath, entry.name);
         if (!existsSync(nestedPath)) continue;
-
-        // Check if it's a worktree (has .git file, not directory)
-        const gitPath = join(nestedPath, ".git");
-        if (!existsSync(gitPath)) continue;
-        try {
-            const stat = lstatSync(gitPath);
-            if (!stat.isFile()) continue;
-        } catch {
+        const sourceIdentity = sourceRepositoryIdentities.get(entry.name);
+        if (!sourceIdentity) {
+            errors.push(`${entry.name}: missing source repository fence`);
             continue;
         }
-
-        const nestedArgs = ["worktree", "remove", nestedPath];
-        if (opts?.force) nestedArgs.push("--force");
-
-        const nestedResult = spawnSync("git", nestedArgs, {
-            cwd: entry.path,
-            encoding: "utf-8",
-            stdio: ["pipe", "pipe", "pipe"],
-        });
-        if (nestedResult.status === 0) {
+        let destinationFence: ReturnType<typeof ensureNestedWorktreeParent>;
+        try {
+            destinationFence = ensureNestedWorktreeParent(
+                wsPath,
+                nestedPath,
+                new Map<string, DirectoryIdentity>(),
+                false,
+            );
+        } catch (error) {
+            errors.push(`${entry.name}: ${(error as Error).message}`);
+            continue;
+        }
+        const operationGuard = (): void => {
+            assertDirectoryIdentity(wsPath, workspaceIdentity);
+            assertNestedRepositoryIdentity(entry.path, sourceIdentity);
+            assertNestedWorktreeDestinationFence(
+                wsPath,
+                nestedPath,
+                destinationFence,
+            );
+        };
+        operationGuard();
+        const nestedGitPath = join(nestedPath, ".git");
+        // `gitLinkKind` THROWS on metadata that names a path it cannot resolve here — which
+        // is the container boundary, the state this whole task exists to handle. Calling it
+        // raw made `ccc rm -f` die with `Unable to inspect worktree common directory '<path>'`
+        // and exit 1, on the exact workspace whose no-force refusal had just told the operator
+        // to re-run with -f. A message that sends someone to a command that crashes is the
+        // defect this file keeps relearning, so the classification is answered rather than
+        // raised: unreadable-from-here is not a tracked gitlink, and the checks below decide
+        // what happens to it.
+        let nestedKind: GitLinkKind | null = null;
+        if (existsSync(nestedGitPath)) {
+            try {
+                nestedKind = gitLinkKind(nestedGitPath);
+            } catch (error) {
+                if (unreachableRecordedGitPath(error) === null) throw error;
+            }
+        }
+        if (nestedKind === "gitlink"
+            && isNestedTrackedGitlink(
+                wsPath,
+                workspaceRepositoryEntries,
+                {
+                    ...entry,
+                    path: nestedPath,
+                },
+            )) {
+            const nestedStatus = spawnSync(
+                "git",
+                ["status", "--porcelain=v1", "--untracked-files=all"],
+                {
+                    cwd: nestedPath,
+                    encoding: "utf-8",
+                    stdio: ["pipe", "pipe", "pipe"],
+                },
+            );
+            if (nestedStatus.error || nestedStatus.status !== 0) {
+                errors.push(
+                    `${entry.name}: ${
+                        (nestedStatus.stderr ?? "").trim()
+                        || nestedStatus.error?.message
+                        || "unable to inspect tracked submodule status"
+                    }`,
+                );
+            } else if (
+                opts?.force !== true
+                && (nestedStatus.stdout ?? "").trim()
+            ) {
+                errors.push(
+                    `${entry.name}: tracked submodule contains modified or untracked files, use --force to delete it`,
+                );
+            }
+            continue;
+        }
+        if (!isValidWorktree(nestedPath, entry.path)) {
+            // The SECOND veto. Lifting the first one and stopping there left `ccc rm -f`
+            // refusing exactly the shape the change was written for: a tracked submodule's
+            // path holding a directory with files and no `.git`. Measured before and after
+            // that change, the result was identical — blocked, and now blocked with a
+            // sentence that named no path, no cause and no remedy.
+            //
+            // There is no registration to deregister here, only files. Under -f the
+            // workspace deletion below takes them with everything else, which is what -f
+            // means. Without it, refuse in the same words as the other guard: naming the
+            // path and naming -f is the whole safety story.
+            const content = pathContent(nestedPath);
+            // One state survives -f, and not as policy. A directory with no read bit cannot
+            // be enumerated, so `rm -rf` cannot empty it — measured. Letting -f through
+            // anyway does not delete the workspace; it deletes as far as this directory and
+            // stops, and what it gets through first is the workspace root: `.git`, the
+            // tracked files, and any uncommitted work the operator had there. Measured on
+            // this exact fixture, the operator was left with a gutted directory that ccc then
+            // refused to touch at all, from a command that had printed an error and looked
+            // like it had done nothing.
+            //
+            // So the refusal here is arithmetic, not a veto: the sequence cannot succeed, and
+            // starting it costs work. The owner's decision is untouched — unmanaged is still
+            // deletable under -f everywhere deletion can actually happen.
+            if (opts?.force !== true || content === "unreadable") {
+                errors.push(
+                    content === "unreadable"
+                        ? `ccc cannot delete a directory it cannot read: ${terminalSafe(nestedPath)}`
+                            + " — make it readable, then re-run with -f"
+                        : unmanagedPathRefusal(nestedPath, content),
+                );
+            }
+            continue;
+        }
+        const nestedIdentity = captureDirectoryIdentity(nestedPath);
+        try {
+            operationGuard();
+            const registrationFence = captureExistingWorktreeRegistrationFence(
+                entry.path,
+                nestedPath,
+                branch,
+                nestedIdentity,
+            );
+            removeRegisteredWorktree(
+                entry.path,
+                nestedPath,
+                nestedIdentity,
+                opts?.force === true,
+                dirname(wsPath),
+                registrationFence,
+                pinnedNestedRepositoryEnvironment(sourceIdentity),
+                operationGuard,
+            );
+            operationGuard();
             removed.push(entry.name);
+        } catch (error) {
+            errors.push(relayNestedRemovalError(entry.name, nestedPath, error));
         }
     }
 
-    const args = ["worktree", "remove", wsPath];
-    if (opts?.force) {
-        args.push("--force");
+    if (errors.length > 0) return { removed, errors };
+    assertDirectoryIdentity(wsPath, workspaceIdentity);
+    assertWorkspaceRootOwnership(wsPath, resolved);
+    const branchResult = spawnSync(
+        "git",
+        ["rev-parse", "--abbrev-ref", "HEAD"],
+        { cwd: wsPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const observedBranch = (branchResult.stdout ?? "").trim();
+    if (branchResult.error || branchResult.status !== 0 || observedBranch !== branch) {
+        throw new Error(
+            observedBranch
+                ? `Workspace belongs to branch '${observedBranch}', not '${branch}'.`
+                : `Unable to determine worktree branch in '${basename(wsPath)}'.`,
+        );
     }
-
-    const result = spawnSync("git", args, {
-        cwd: resolved,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    if (result.status !== 0) {
-        const stderr = (result.stderr ?? "").trim();
-        errors.push(stderr);
-    } else {
+    const finalRootStatus = inspectRootStatus();
+    if (finalRootStatus.error || finalRootStatus.status !== 0) {
+        return {
+            removed,
+            errors: [
+                (finalRootStatus.stderr ?? "").trim()
+                || finalRootStatus.error?.message
+                || "unable to re-inspect root worktree status",
+            ],
+        };
+    }
+    if (opts?.force !== true && (finalRootStatus.stdout ?? "").trim()) {
+        return {
+            removed,
+            errors: [
+                "root worktree changed during removal, use --force to delete it",
+            ],
+        };
+    }
+    const finalIgnoredRootStatus = inspectIgnoredRootStatus();
+    if (finalIgnoredRootStatus.error || finalIgnoredRootStatus.status !== 0) {
+        return {
+            removed,
+            errors: [
+                (finalIgnoredRootStatus.stderr ?? "").trim()
+                || finalIgnoredRootStatus.error?.message
+                || "unable to re-inspect ignored root worktree content",
+            ],
+        };
+    }
+    if (
+        opts?.force !== true
+        && (finalIgnoredRootStatus.stdout ?? "").trim()
+    ) {
+        return {
+            removed,
+            errors: [
+                "root worktree gained ignored files during removal, use --force to delete it",
+            ],
+        };
+    }
+    try {
+        const registrationFence = captureExistingWorktreeRegistrationFence(
+            resolved,
+            wsPath,
+            branch,
+            workspaceIdentity,
+        );
+        removeRegisteredWorktree(
+            resolved,
+            wsPath,
+            workspaceIdentity,
+            true,
+            dirname(wsPath),
+            registrationFence,
+            undefined,
+            undefined,
+            opts?.force === true
+                ? undefined
+                : (quarantinedPath) => {
+                    const quarantinedStatus = inspectRootStatus(quarantinedPath);
+                    if (
+                        quarantinedStatus.error
+                        || quarantinedStatus.status !== 0
+                    ) {
+                        throw new Error(
+                            (quarantinedStatus.stderr ?? "").trim()
+                            || quarantinedStatus.error?.message
+                            || "unable to inspect quarantined root worktree status",
+                        );
+                    }
+                    if ((quarantinedStatus.stdout ?? "").trim()) {
+                        throw new Error(
+                            "root worktree changed during removal, use --force to delete it",
+                        );
+                    }
+                    const quarantinedIgnoredStatus = inspectIgnoredRootStatus(
+                        quarantinedPath,
+                    );
+                    if (
+                        quarantinedIgnoredStatus.error
+                        || quarantinedIgnoredStatus.status !== 0
+                    ) {
+                        throw new Error(
+                            (quarantinedIgnoredStatus.stderr ?? "").trim()
+                            || quarantinedIgnoredStatus.error?.message
+                            || "unable to inspect quarantined ignored root worktree content",
+                        );
+                    }
+                    if ((quarantinedIgnoredStatus.stdout ?? "").trim()) {
+                        throw new Error(
+                            "root worktree gained ignored files during removal, use --force to delete it",
+                        );
+                    }
+                },
+        );
         removed.push(basename(resolved));
+    } catch (error) {
+        errors.push((error as Error).message);
     }
 
     return { removed, errors };
@@ -1203,12 +8494,14 @@ function removeUnifiedWorkspace(
 function removeMultiRepoWorkspace(
     resolved: string,
     wsPath: string,
+    branch: string,
+    workspaceIdentity: DirectoryIdentity,
     opts?: { force?: boolean },
 ): RemoveResult {
     const removed: string[] = [];
     const errors: string[] = [];
 
-    const sourceEntries = scanDirectory(resolved);
+    const sourceEntries = scanDirectory(resolved, { strict: true });
 
     for (const entry of sourceEntries) {
         const wsEntryPath = join(wsPath, entry.name);
@@ -1217,29 +8510,59 @@ function removeMultiRepoWorkspace(
         }
 
         if (entry.isGitRepo) {
-            const args = ["worktree", "remove", wsEntryPath];
-            if (opts?.force) {
-                args.push("--force");
+            assertDirectoryIdentity(wsPath, workspaceIdentity);
+            if (!isValidWorktree(wsEntryPath, entry.path)) {
+                // Multi-repo mode's copy of the veto above, gated the same way for symmetry —
+                // but say plainly that this is not reachable today for the shape it was
+                // written for. `assertWorkspaceOwnership`, from `assertWorkspaceBranch`,
+                // raises `Workspace repository '<name>' is not owned by its source
+                // repository` on BOTH sides of the flag before this loop runs, so multi-repo
+                // never produces the refusal below and -f never gets here. Measured, and
+                // pinned by a test; relaxing that assert is a separate decision from the one
+                // this gate implements.
+                if (opts?.force !== true) {
+                    errors.push(unmanagedPathRefusal(wsEntryPath, pathContent(wsEntryPath)));
+                }
+                continue;
             }
-
-            const result = spawnSync("git", args, {
-                cwd: entry.path,
-                encoding: "utf-8",
-                stdio: ["pipe", "pipe", "pipe"],
-            });
-
-            if (result.status !== 0) {
-                const stderr = (result.stderr ?? "").trim();
-                errors.push(`${entry.name}: ${stderr}`);
-            } else {
+            const entryIdentity = captureDirectoryIdentity(wsEntryPath);
+            try {
+                const registrationFence = captureExistingWorktreeRegistrationFence(
+                    entry.path,
+                    wsEntryPath,
+                    branch,
+                    entryIdentity,
+                );
+                removeRegisteredWorktree(
+                    entry.path,
+                    wsEntryPath,
+                    entryIdentity,
+                    opts?.force === true,
+                    dirname(wsPath),
+                    registrationFence,
+                );
                 removed.push(entry.name);
+            } catch (error) {
+                errors.push(relayNestedRemovalError(entry.name, wsEntryPath, error));
             }
         } else {
             try {
-                rmSync(wsEntryPath, { recursive: true, force: true });
+                assertDirectoryIdentity(wsPath, workspaceIdentity);
+                const current = scanDirectory(wsPath, { strict: true })
+                    .find((candidate) => candidate.name === entry.name);
+                if (current?.isGitRepo) {
+                    errors.push(`${entry.name}: became a Git repository before deletion`);
+                    continue;
+                }
+                const entryIdentity = capturePathIdentity(wsEntryPath);
+                removePathByQuarantine(wsEntryPath, entryIdentity, dirname(wsPath));
+                if (existsSync(wsEntryPath)) {
+                    errors.push(`${entry.name}: path was recreated during deletion`);
+                    continue;
+                }
                 removed.push(entry.name);
-            } catch {
-                // ignore
+            } catch (error) {
+                errors.push(relayNestedRemovalError(entry.name, wsEntryPath, error));
             }
         }
     }
@@ -1247,11 +8570,21 @@ function removeMultiRepoWorkspace(
     // Try to remove the workspace directory itself
     try {
         if (existsSync(wsPath)) {
+            assertDirectoryIdentity(wsPath, workspaceIdentity);
+            if (errors.length > 0) return { removed, errors };
             const remaining = readdirSync(wsPath);
             if (remaining.length === 0) {
-                rmSync(wsPath, { recursive: true });
+                removeDirectoryByQuarantine(wsPath, workspaceIdentity);
             } else if (opts?.force) {
-                rmSync(wsPath, { recursive: true, force: true });
+                const remainingRepositories = scanDirectory(wsPath, { strict: true })
+                    .filter((entry) => entry.isGitRepo);
+                if (remainingRepositories.length > 0) {
+                    errors.push(
+                        `Workspace ownership changed before deletion (${remainingRepositories.map(({ name }) => name).join(", ")}).`,
+                    );
+                    return { removed, errors };
+                }
+                removeDirectoryByQuarantine(wsPath, workspaceIdentity);
             } else {
                 errors.push(
                     `Workspace directory not empty (${remaining.length} items remaining). Use -f to force.`,

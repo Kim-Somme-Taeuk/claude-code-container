@@ -1,0 +1,527 @@
+$Root = Split-Path -Parent $PSScriptRoot
+Import-Module (Join-Path $Root 'Ccc.HyperV.Core.psm1') -Force
+Import-Module (Join-Path $Root 'Ccc.HyperV.Linux.psm1') -Force
+Import-Module (Join-Path $Root 'Ccc.HyperV.Diagnostics.psm1') -Force
+Import-Module (Join-Path $Root 'Ccc.HyperV.Snapshots.psm1') -Force
+
+Describe 'CCC Hyper-V JSON contracts' {
+    It 'accepts the exact owned VM contract' {
+        $Contract = [pscustomobject]@{
+            schemaVersion = 1
+            vmId = '12345678-1234-1234-1234-123456789abc'
+            vmName = 'ccc-0123456789abcdef-linux-ci-01-11111111111111111111111111111111'
+            ownershipMarker = 'ccc-device-lab:0123456789abcdef:linux-ci-01:11111111111111111111111111111111'
+        }
+        { Assert-CccOwnedVmContract $Contract } | Should -Not -Throw
+    }
+
+    It 'rejects missing and additional fields' {
+        $Missing = [pscustomobject]@{ schemaVersion = 1; vmId = '12345678-1234-1234-1234-123456789abc' }
+        $Additional = [pscustomobject]@{
+            schemaVersion = 1
+            vmId = '12345678-1234-1234-1234-123456789abc'
+            vmName = 'ccc-0123456789abcdef-linux-ci-01-11111111111111111111111111111111'
+            ownershipMarker = 'ccc-device-lab:0123456789abcdef:linux-ci-01:11111111111111111111111111111111'
+            command = 'Get-Process'
+        }
+        { Assert-CccOwnedVmContract $Missing } | Should -Throw
+        { Assert-CccOwnedVmContract $Additional } | Should -Throw
+    }
+}
+
+Describe 'CCC Hyper-V snapshot fallback state machine' {
+    BeforeEach {
+        $script:Vm = [pscustomobject]@{ Id = [Guid]'12345678-1234-1234-1234-123456789abc'; CheckpointType = 'Production' }
+        $script:Snapshots = @()
+        $script:CreateCalls = 0
+        $script:Reader = { @($script:Snapshots) }
+        $script:Remover = { $script:Snapshots = @() }
+        $script:Writer = { param($TargetVm, $Policy) $TargetVm.CheckpointType = $Policy }
+        $script:VmReader = { $script:Vm }
+    }
+
+    It 'cleans a partial production checkpoint, falls back, and restores Production' {
+        $Creator = {
+            param($TargetVm, $Name)
+            $script:CreateCalls++
+            $script:Snapshots = @([pscustomobject]@{ Id = [Guid]::NewGuid(); Name = $Name; SnapshotType = 'Recovery' })
+            if ($script:CreateCalls -eq 1) { throw 'production-failed' }
+            [pscustomobject]@{ unexpectedProviderOutput = $true }
+        }
+        $Result = New-CccVmSnapshot $script:Vm 'ccc-0123456789abcdef-baseline' 'Production' $script:Reader $Creator $script:Remover $script:Writer $script:VmReader
+        @($Result).Count | Should -Be 1
+        $Result.ok | Should -BeTrue
+        $script:CreateCalls | Should -Be 2
+        $script:Vm.CheckpointType | Should -Be 'Production'
+        $script:Snapshots.Count | Should -Be 1
+    }
+
+    It 'cleans a partial ProductionOnly checkpoint before returning the provider failure' {
+        $script:Vm.CheckpointType = 'ProductionOnly'
+        $Creator = { param($TargetVm, $Name) $script:Snapshots = @([pscustomobject]@{ Name = $Name }); throw 'provider-failed' }
+        { New-CccVmSnapshot $script:Vm 'ccc-0123456789abcdef-baseline' 'ProductionOnly' $script:Reader $Creator $script:Remover $script:Writer $script:VmReader } | Should -Throw 'provider-failed'
+        $script:Snapshots.Count | Should -Be 0
+    }
+
+    It 'rejects a VM whose live checkpoint policy differs from the backend contract' {
+        $script:Vm.CheckpointType = 'ProductionOnly'
+        $Creator = { $script:CreateCalls++ }
+        { New-CccVmSnapshot $script:Vm 'ccc-0123456789abcdef-baseline' 'Production' $script:Reader $Creator $script:Remover $script:Writer $script:VmReader } | Should -Throw 'hyper-v-snapshot-policy-invalid'
+        $script:CreateCalls | Should -Be 0
+    }
+
+    It 'fails reconciliation when a partial checkpoint cannot be removed' {
+        $Creator = { param($TargetVm, $Name) $script:Snapshots = @([pscustomobject]@{ Name = $Name }); throw 'production-failed' }
+        $BrokenRemover = { throw 'remove-failed' }
+        { New-CccVmSnapshot $script:Vm 'ccc-0123456789abcdef-baseline' 'Production' $script:Reader $Creator $BrokenRemover $script:Writer $script:VmReader } | Should -Throw 'hyper-v-snapshot-reconciliation-failed'
+    }
+
+    It 'removes the fallback candidate when standard checkpoint creation fails' {
+        $Creator = { param($TargetVm, $Name) $script:Snapshots = @([pscustomobject]@{ Name = $Name }); throw 'create-failed' }
+        { New-CccVmSnapshot $script:Vm 'ccc-0123456789abcdef-baseline' 'Production' $script:Reader $Creator $script:Remover $script:Writer $script:VmReader } | Should -Throw 'hyper-v-snapshot-standard-fallback-failed'
+        $script:Snapshots.Count | Should -Be 0
+        $script:Vm.CheckpointType | Should -Be 'Production'
+    }
+
+    It 'preserves all exact-name candidates when the final observation is ambiguous' {
+        $Creator = {
+            param($TargetVm, $Name)
+            $script:Snapshots = @(
+                [pscustomobject]@{ Id = [Guid]::NewGuid(); Name = $Name; SnapshotType = 'Standard' },
+                [pscustomobject]@{ Id = [Guid]::NewGuid(); Name = $Name; SnapshotType = 'Standard' }
+            )
+        }
+        { New-CccVmSnapshot $script:Vm 'ccc-0123456789abcdef-baseline' 'Production' $script:Reader $Creator $script:Remover $script:Writer $script:VmReader } | Should -Throw 'hyper-v-snapshot-reconciliation-ambiguous'
+        $script:Snapshots.Count | Should -Be 2
+    }
+
+    It 'removes the candidate when the final observation cannot be read' {
+        $Reader = {
+            $script:ReadCalls++
+            if ($script:ReadCalls -eq 2) { throw 'read-failed' }
+            @($script:Snapshots)
+        }
+        $script:ReadCalls = 0
+        $Creator = {
+            param($TargetVm, $Name)
+            $script:Snapshots = @([pscustomobject]@{ Id = [Guid]::NewGuid(); Name = $Name; SnapshotType = 'Standard' })
+        }
+
+        { New-CccVmSnapshot $script:Vm 'ccc-0123456789abcdef-baseline' 'Production' $Reader $Creator $script:Remover $script:Writer $script:VmReader } | Should -Throw 'hyper-v-snapshot-create-invalid-result'
+        $script:Snapshots.Count | Should -Be 0
+    }
+
+    It 'removes the candidate when the final observation fields are invalid' {
+        $Creator = {
+            param($TargetVm, $Name)
+            $script:Snapshots = @([pscustomobject]@{ Id = 'not-a-guid'; Name = $Name; SnapshotType = 'Standard' })
+        }
+
+        { New-CccVmSnapshot $script:Vm 'ccc-0123456789abcdef-baseline' 'Production' $script:Reader $Creator $script:Remover $script:Writer $script:VmReader } | Should -Throw 'hyper-v-snapshot-create-invalid-result'
+        $script:Snapshots.Count | Should -Be 0
+    }
+
+    It 'quarantines the VM as Disabled when Production policy restoration fails' {
+        $Creator = {
+            param($TargetVm, $Name)
+            $script:CreateCalls++
+            $script:Snapshots = @([pscustomobject]@{ Name = $Name })
+            if ($script:CreateCalls -eq 1) { throw 'production-failed' }
+        }
+        $Writer = { param($TargetVm, $Policy) if ($Policy -eq 'Production') { throw 'restore-failed' }; $TargetVm.CheckpointType = $Policy }
+        { New-CccVmSnapshot $script:Vm 'ccc-0123456789abcdef-baseline' 'Production' $script:Reader $Creator $script:Remover $Writer $script:VmReader } | Should -Throw 'hyper-v-snapshot-policy-restore-failed'
+        $script:Vm.CheckpointType | Should -Be 'Disabled'
+        $script:Snapshots.Count | Should -Be 0
+    }
+
+    It 'reports quarantine failure when neither safe policy can be established' {
+        $Creator = {
+            param($TargetVm, $Name)
+            $script:CreateCalls++
+            $script:Snapshots = @([pscustomobject]@{ Name = $Name })
+            if ($script:CreateCalls -eq 1) { throw 'production-failed' }
+        }
+        $Writer = { param($TargetVm, $Policy) if ($Policy -in @('Production', 'Disabled')) { throw 'policy-failed' }; $TargetVm.CheckpointType = $Policy }
+        { New-CccVmSnapshot $script:Vm 'ccc-0123456789abcdef-baseline' 'Production' $script:Reader $Creator $script:Remover $Writer $script:VmReader } | Should -Throw 'hyper-v-snapshot-policy-quarantine-failed'
+        $script:Snapshots.Count | Should -Be 0
+    }
+}
+
+Describe 'CCC Hyper-V snapshot journal repair' {
+    InModuleScope Ccc.HyperV.Snapshots {
+        BeforeEach {
+            $script:RepairVm = [pscustomobject]@{ Id = [Guid]'12345678-1234-1234-1234-123456789abc'; CheckpointType = 'Standard' }
+            $script:RepairSnapshots = @([pscustomobject]@{ Name = 'ccc-0123456789abcdef-baseline' })
+            $script:RepairPolicyWrites = 0
+            $script:RepairPolicyWriter = {
+                param($TargetVm, $Policy)
+                $script:RepairPolicyWrites++
+                $script:RepairVm.CheckpointType = $Policy
+            }
+            $script:RepairVmReader = { param($VmId) $script:RepairVm }
+            $script:RepairSnapshotReader = { param($TargetVm) @($script:RepairSnapshots) }
+        }
+
+        It 'restores the durable Production policy before accepting one candidate' {
+            $Result = Repair-CccVmSnapshotState $script:RepairVm 'ccc-0123456789abcdef-baseline' 'Production' `
+                $script:RepairPolicyWriter $script:RepairVmReader $script:RepairSnapshotReader
+            $Result.checkpointPolicy | Should -Be 'Production'
+            $Result.candidateCount | Should -Be 1
+            $script:RepairPolicyWrites | Should -Be 1
+        }
+
+        It 'preserves ambiguous candidates for fail-closed reconciliation' {
+            $script:RepairSnapshots = @(
+                [pscustomobject]@{ Name = 'ccc-0123456789abcdef-baseline' },
+                [pscustomobject]@{ Name = 'ccc-0123456789abcdef-baseline' }
+            )
+            { Repair-CccVmSnapshotState $script:RepairVm 'ccc-0123456789abcdef-baseline' 'Production' `
+                $script:RepairPolicyWriter $script:RepairVmReader $script:RepairSnapshotReader } | Should -Throw 'hyper-v-snapshot-reconciliation-ambiguous'
+            $script:RepairSnapshots.Count | Should -Be 2
+        }
+
+        It 'confirms Disabled quarantine when policy restoration fails' {
+            $script:RepairPolicyWriter = {
+                param($TargetVm, $Policy)
+                $script:RepairPolicyWrites++
+                if ($Policy -eq 'Production') { throw 'restore-failed' }
+                $script:RepairVm.CheckpointType = $Policy
+            }
+            { Repair-CccVmSnapshotState $script:RepairVm 'ccc-0123456789abcdef-baseline' 'Production' `
+                $script:RepairPolicyWriter $script:RepairVmReader $script:RepairSnapshotReader } | Should -Throw 'hyper-v-snapshot-policy-restore-failed'
+            $script:RepairVm.CheckpointType | Should -Be 'Disabled'
+            $script:RepairPolicyWrites | Should -Be 2
+        }
+
+        It 'does not automatically remove a pre-existing Disabled quarantine' {
+            $script:RepairVm.CheckpointType = 'Disabled'
+            { Repair-CccVmSnapshotState $script:RepairVm 'ccc-0123456789abcdef-baseline' 'Production' `
+                $script:RepairPolicyWriter $script:RepairVmReader $script:RepairSnapshotReader } | Should -Throw 'hyper-v-snapshot-policy-quarantined'
+            $script:RepairVm.CheckpointType | Should -Be 'Disabled'
+            $script:RepairPolicyWrites | Should -Be 0
+        }
+    }
+}
+
+Describe 'CCC Hyper-V VM ownership fencing' {
+    InModuleScope Ccc.HyperV.Core {
+        BeforeEach {
+            $Contract = [pscustomobject]@{
+                schemaVersion = 1
+                vmId = '12345678-1234-1234-1234-123456789abc'
+                vmName = 'ccc-0123456789abcdef-linux-ci-01-11111111111111111111111111111111'
+                ownershipMarker = 'ccc-device-lab:0123456789abcdef:linux-ci-01:11111111111111111111111111111111'
+            }
+        }
+
+        It 'rejects a missing VM' {
+            Mock Get-CccVmById { @() }
+            { Get-CccOwnedVm $Contract } | Should -Throw 'hyper-v-vm-not-found'
+        }
+
+        It 'rejects ambiguous VM identity' {
+            Mock Get-CccVmById { @([pscustomobject]@{}, [pscustomobject]@{}) }
+            { Get-CccOwnedVm $Contract } | Should -Throw 'hyper-v-vm-identity-ambiguous'
+        }
+
+        It 'rejects a name or marker mismatch' {
+            Mock Get-CccVmById {
+                @([pscustomobject]@{
+                    Id = [Guid]$Contract.vmId
+                    Name = $Contract.vmName
+                    Notes = 'foreign-owner'
+                })
+            }
+            { Get-CccOwnedVm $Contract } | Should -Throw 'hyper-v-vm-ownership-mismatch'
+        }
+
+        It 'returns the exact owned VM' {
+            Mock Get-CccVmById {
+                @([pscustomobject]@{
+                    Id = [Guid]$Contract.vmId
+                    Name = $Contract.vmName
+                    Notes = $Contract.ownershipMarker
+                })
+            }
+            (Get-CccOwnedVm $Contract).Name | Should -Be $Contract.vmName
+        }
+    }
+}
+
+Describe 'CCC Hyper-V Linux bootstrap address selection' {
+    It 'keeps only same-prefix routable addresses' {
+        $Prefixes = @([pscustomobject]@{ IPAddress = '172.20.0.1'; PrefixLength = 20 })
+        $Selected = @(Select-CccBootstrapIpv4Address @('169.254.1.2', '172.20.1.8', '10.0.0.2') $Prefixes)
+        $Selected.Count | Should -Be 1
+        $Selected[0] | Should -Be '172.20.1.8'
+    }
+
+    It 'bounds the result to eight unique addresses' {
+        $Prefixes = @([pscustomobject]@{ IPAddress = '172.20.0.1'; PrefixLength = 16 })
+        $Candidates = 2..12 | ForEach-Object { '172.20.0.' + $_ }
+        $Selected = @(Select-CccBootstrapIpv4Address $Candidates $Prefixes)
+        $Selected.Count | Should -Be 8
+    }
+}
+
+Describe 'CCC Hyper-V Linux bootstrap operation' {
+    It 'reads the default switch and returns a bounded result contract' {
+        $Vm = [pscustomobject]@{ Id = [Guid]'12345678-1234-1234-1234-123456789abc' }
+        $Result = Get-CccLinuxBootstrapNetworkResult -Vm $Vm `
+            -VmAdapterReader { param($TargetVm) @([pscustomobject]@{ Name = 'CCC Bootstrap DHCP'; SwitchName = 'Default Switch'; MacAddress = '00155D010203'; IPAddresses = @('172.20.1.8', '169.254.1.2') }) } `
+            -ManagementAdapterReader { @([pscustomobject]@{ IPAddresses = @('172.20.0.1') }) } `
+            -HostPrefixReader { @([pscustomobject]@{ IPAddress = '172.20.0.1'; PrefixLength = 20; InterfaceIndex = 42 }) } `
+            -NeighborReader { @() }
+        $Result.ok | Should -BeTrue
+        @($Result.addresses).Count | Should -Be 1
+        $Result.addresses[0] | Should -Be '172.20.1.8'
+    }
+
+    It 'falls back to the bounded neighbor table entry matching the bootstrap MAC' {
+        $Vm = [pscustomobject]@{ Id = [Guid]'12345678-1234-1234-1234-123456789abc' }
+        $Result = Get-CccLinuxBootstrapNetworkResult -Vm $Vm `
+            -VmAdapterReader { @([pscustomobject]@{ Name = 'CCC Bootstrap DHCP'; SwitchName = 'Default Switch'; MacAddress = '00155D010203'; IPAddresses = @() }) } `
+            -ManagementAdapterReader { @([pscustomobject]@{ IPAddresses = @('172.20.0.1') }) } `
+            -HostPrefixReader { @([pscustomobject]@{ IPAddress = '172.20.0.1'; PrefixLength = 20; InterfaceIndex = 42 }) } `
+            -NeighborReader { @(
+                [pscustomobject]@{ IPAddress = '172.20.1.9'; LinkLayerAddress = '00-15-5d-01-02-03'; InterfaceIndex = 42; State = 'Reachable' },
+                [pscustomobject]@{ IPAddress = '172.20.1.10'; LinkLayerAddress = '00-15-5d-ff-ff-ff'; InterfaceIndex = 42; State = 'Reachable' },
+                [pscustomobject]@{ IPAddress = '172.20.1.11'; LinkLayerAddress = '00-15-5d-01-02-03'; InterfaceIndex = 42; State = 'Unreachable' },
+                [pscustomobject]@{ IPAddress = '172.20.1.12'; LinkLayerAddress = '00-15-5d-01-02-03'; InterfaceIndex = 99; State = 'Reachable' },
+                [pscustomobject]@{ IPAddress = '172.20.1.13'; LinkLayerAddress = '00-15-5d-01-02-03'; InterfaceIndex = 42; State = 'Unknown' },
+                [pscustomobject]@{ IPAddress = '172.20.1.14'; LinkLayerAddress = '00-15-5d-01-02-03'; InterfaceIndex = 42; State = $null }
+            ) }
+        @($Result.addresses) | Should -Be @('172.20.1.9')
+        $Result.diagnosticCode | Should -BeNullOrEmpty
+    }
+
+    It 'falls back to the exact Default Switch host prefix when management adapter inspection fails' {
+        $Vm = [pscustomobject]@{ Id = [Guid]'12345678-1234-1234-1234-123456789abc' }
+        $Result = Get-CccLinuxBootstrapNetworkResult -Vm $Vm `
+            -VmAdapterReader { @([pscustomobject]@{ Name = 'CCC Bootstrap DHCP'; SwitchName = 'Default Switch'; MacAddress = '00155D010203'; IPAddresses = @() }) } `
+            -ManagementAdapterReader { throw 'private path' } `
+            -HostPrefixReader { @(
+                [pscustomobject]@{ IPAddress = '172.20.0.1'; PrefixLength = 20; InterfaceIndex = 42; InterfaceAlias = 'vEthernet (Default Switch)' },
+                [pscustomobject]@{ IPAddress = '10.0.0.1'; PrefixLength = 24; InterfaceIndex = 7; InterfaceAlias = 'Ethernet' }
+            ) } `
+            -NeighborReader { @([pscustomobject]@{ IPAddress = '172.20.1.9'; LinkLayerAddress = '00-15-5d-01-02-03'; InterfaceIndex = 42; State = 'Reachable' }) }
+        @($Result.addresses) | Should -Be @('172.20.1.9')
+        $Result.diagnosticCode | Should -BeNullOrEmpty
+    }
+
+    It 'preserves the management adapter diagnostic when no exact fallback prefix exists' {
+        $Vm = [pscustomobject]@{ Id = [Guid]'12345678-1234-1234-1234-123456789abc' }
+        $Result = Get-CccLinuxBootstrapNetworkResult -Vm $Vm `
+            -VmAdapterReader { @([pscustomobject]@{ Name = 'CCC Bootstrap DHCP'; SwitchName = 'Default Switch'; MacAddress = '00155D010203'; IPAddresses = @() }) } `
+            -ManagementAdapterReader { throw 'private path' } `
+            -HostPrefixReader { @([pscustomobject]@{ IPAddress = '10.0.0.1'; PrefixLength = 24; InterfaceIndex = 7; InterfaceAlias = 'Ethernet' }) }
+        @($Result.addresses).Count | Should -Be 0
+        $Result.diagnosticCode | Should -Be 'hyper-v-bootstrap-management-adapter-inspection-failed'
+    }
+
+    It 'reports a bounded diagnostic when neighbor inspection fails' {
+        $Vm = [pscustomobject]@{ Id = [Guid]'12345678-1234-1234-1234-123456789abc' }
+        $Result = Get-CccLinuxBootstrapNetworkResult -Vm $Vm `
+            -VmAdapterReader { @([pscustomobject]@{ Name = 'CCC Bootstrap DHCP'; SwitchName = 'Default Switch'; MacAddress = '00155D010203'; IPAddresses = @() }) } `
+            -ManagementAdapterReader { @([pscustomobject]@{ IPAddresses = @('172.20.0.1') }) } `
+            -HostPrefixReader { @([pscustomobject]@{ IPAddress = '172.20.0.1'; PrefixLength = 20; InterfaceIndex = 42 }) } `
+            -NeighborReader { throw 'private failure' }
+        @($Result.addresses).Count | Should -Be 0
+        $Result.diagnosticCode | Should -Be 'hyper-v-bootstrap-neighbor-inspection-failed'
+    }
+
+    It 'returns an empty bounded result when the bootstrap adapter is absent' {
+        $Vm = [pscustomobject]@{ Id = [Guid]'12345678-1234-1234-1234-123456789abc' }
+        $Result = Get-CccLinuxBootstrapNetworkResult -Vm $Vm -VmAdapterReader { @() }
+        $Result.ok | Should -BeTrue
+        @($Result.addresses).Count | Should -Be 0
+        $Result.diagnosticCode | Should -BeNullOrEmpty
+    }
+
+    It 'classifies VM adapter inspection failure without exposing the exception' {
+        $Vm = [pscustomobject]@{ Id = [Guid]'12345678-1234-1234-1234-123456789abc' }
+        $Result = Get-CccLinuxBootstrapNetworkResult -Vm $Vm -VmAdapterReader { throw 'private path' }
+        @($Result.addresses).Count | Should -Be 0
+        $Result.diagnosticCode | Should -Be 'hyper-v-bootstrap-vm-adapter-inspection-failed'
+    }
+
+    It 'classifies host prefix inspection failure without exposing the exception' {
+        $Vm = [pscustomobject]@{ Id = [Guid]'12345678-1234-1234-1234-123456789abc' }
+        $Result = Get-CccLinuxBootstrapNetworkResult -Vm $Vm `
+            -VmAdapterReader { @([pscustomobject]@{ Name = 'CCC Bootstrap DHCP'; SwitchName = 'Default Switch'; MacAddress = '00155D010203'; IPAddresses = @() }) } `
+            -ManagementAdapterReader { @([pscustomobject]@{ IPAddresses = @('172.20.0.1') }) } `
+            -HostPrefixReader { throw 'private path' }
+        @($Result.addresses).Count | Should -Be 0
+        $Result.diagnosticCode | Should -Be 'hyper-v-bootstrap-host-prefix-inspection-failed'
+    }
+
+    It 'classifies a bootstrap adapter on a foreign switch' {
+        $Vm = [pscustomobject]@{ Id = [Guid]'12345678-1234-1234-1234-123456789abc' }
+        $Result = Get-CccLinuxBootstrapNetworkResult -Vm $Vm `
+            -VmAdapterReader { param($TargetVm) @([pscustomobject]@{ Name = 'CCC Bootstrap DHCP'; SwitchName = 'Foreign'; MacAddress = '00155D010203'; IPAddresses = @() }) }
+        $Result.diagnosticCode | Should -Be 'hyper-v-bootstrap-network-adapter-identity-mismatch'
+    }
+}
+
+Describe 'CCC Hyper-V guest boot diagnostic operation' {
+    It 'returns Generation 1 heartbeat, disk, media, and boot-order evidence' {
+        $Vm = [pscustomobject]@{
+            Id = [Guid]'12345678-1234-1234-1234-123456789abc'
+            Name = 'ccc-0123456789abcdef-linux-ci-01-11111111111111111111111111111111'
+            State = 'Running'
+            Uptime = [TimeSpan]::FromSeconds(30)
+            Generation = 1
+        }
+        $Result = Get-CccGuestBootDiagnosticResult -Vm $Vm `
+            -IntegrationServiceReader { param($TargetVm) @([pscustomobject]@{ Id = [Guid]'84eaae65-2f2e-45f5-9bb5-0e857dc8eb47'; Name = 'Heartbeat'; Enabled = $true; PrimaryStatus = 2; SecondaryStatus = 0 }) } `
+            -BiosReader { param($TargetVm) [pscustomobject]@{ StartupOrder = @('IDE', 'CD') } } `
+            -HardDiskReader { param($TargetVm) @([pscustomobject]@{ ControllerType = 'IDE'; ControllerNumber = 0; ControllerLocation = 0; Path = 'C:\disk.vhdx' }) } `
+            -DvdReader { param($TargetVm) @([pscustomobject]@{ ControllerType = 'IDE'; ControllerNumber = 1; ControllerLocation = 0; Path = 'C:\seed.iso' }, [pscustomobject]@{ ControllerType = 'IDE'; ControllerNumber = 1; ControllerLocation = 1; Path = $null }) } `
+            -VhdReader { param($Path) [pscustomobject]@{ VhdFormat = 'VHDX'; VhdType = 'Dynamic'; Size = 32GB; FileSize = 4GB; MinimumSize = 3GB; LogicalSectorSize = 512; PhysicalSectorSize = 4096 } }
+        $Result.ok | Should -BeTrue
+        $Result.heartbeatEnabled | Should -BeTrue
+        $Result.heartbeatPrimaryStatus | Should -Be 2
+        $Result.hardDiskCount | Should -Be 1
+        $Result.dvdCount | Should -Be 2
+        $Result.hardDiskControllers[0] | Should -Be 'ide'
+        @($Result.bootDeviceTypes).Count | Should -Be 2
+        $Result.bootDeviceTypes[0] | Should -Be 'hard-disk'
+        $Result.bootDeviceTypes[1] | Should -Be 'dvd'
+        $Result.hardDisks[0].vhdFormat | Should -Be 'VHDX'
+        $Result.hardDisks[0].sizeBytes | Should -Be 32GB
+        $Result.dvdDrives[0].mediaAttached | Should -BeTrue
+        $Result.dvdDrives[1].mediaAttached | Should -BeFalse
+        $Result.diagnosticComplete | Should -BeTrue
+        @($Result.diagnosticErrors).Count | Should -Be 0
+    }
+
+    It 'normalizes Hyper-V OnOffState firmware values without degrading diagnostics' {
+        $Vm = [pscustomobject]@{
+            Id = [Guid]'12345678-1234-1234-1234-123456789abc'
+            Name = 'ccc-0123456789abcdef-linux-ci-01-11111111111111111111111111111111'
+            State = 'Running'
+            Uptime = [TimeSpan]::FromSeconds(30)
+            Generation = 2
+        }
+        $Result = Get-CccGuestBootDiagnosticResult -Vm $Vm `
+            -IntegrationServiceReader { @([pscustomobject]@{ Id = [Guid]'84eaae65-2f2e-45f5-9bb5-0e857dc8eb47'; Name = 'Heartbeat'; Enabled = 'On'; PrimaryStatus = 2; SecondaryStatus = 0 }) } `
+            -FirmwareReader { [pscustomobject]@{ SecureBoot = 'On'; BootOrder = @([pscustomobject]@{ BootType = 'Drive'; Device = [pscustomobject]@{ Type = 'Vhd' } }) } } `
+            -HardDiskReader { @([pscustomobject]@{ ControllerType = 'SCSI'; ControllerNumber = 0; ControllerLocation = 0; Path = 'C:\disk.vhdx' }) } `
+            -DvdReader { @() } `
+            -VhdReader { [pscustomobject]@{ VhdFormat = 'VHDX'; VhdType = 'Dynamic'; Size = 32GB; FileSize = 4GB; MinimumSize = 3GB; LogicalSectorSize = 512; PhysicalSectorSize = 4096 } }
+
+        $Result.secureBootEnabled | Should -BeTrue
+        $Result.heartbeatEnabled | Should -BeTrue
+        @($Result.diagnosticErrors) | Should -Not -Contain 'hyper-v-diagnostic-firmware-incomplete'
+        @($Result.diagnosticErrors) | Should -Not -Contain 'hyper-v-diagnostic-integration-services-incomplete'
+    }
+
+    It 'returns bounded partial evidence when optional Hyper-V readers fail' {
+        $Vm = [pscustomobject]@{
+            Id = [Guid]'12345678-1234-1234-1234-123456789abc'
+            Name = 'ccc-0123456789abcdef-linux-ci-01-11111111111111111111111111111111'
+            State = 'Running'
+            Uptime = [TimeSpan]::FromSeconds(30)
+            Generation = 2
+        }
+        $Result = Get-CccGuestBootDiagnosticResult -Vm $Vm `
+            -IntegrationServiceReader { throw 'private integration failure' } `
+            -FirmwareReader { throw 'private firmware failure' } `
+            -HardDiskReader { throw 'private disk failure' } `
+            -DvdReader { throw 'private dvd failure' }
+
+        $Result.ok | Should -BeTrue
+        $Result.state | Should -Be 'Running'
+        $Result.generation | Should -Be 2
+        $Result.uptimeMs | Should -Be 30000
+        $Result.diagnosticComplete | Should -BeFalse
+        @($Result.diagnosticErrors) | Should -Be @(
+            'hyper-v-diagnostic-integration-services-unavailable',
+            'hyper-v-diagnostic-firmware-unavailable',
+            'hyper-v-diagnostic-hard-disks-unavailable',
+            'hyper-v-diagnostic-dvd-drives-unavailable'
+        )
+        ($Result | ConvertTo-Json -Depth 8) | Should -Not -Match 'private'
+    }
+
+    It 'returns bounded disk evidence when VHD inspection fails' {
+        $Vm = [pscustomobject]@{
+            Id = [Guid]'12345678-1234-1234-1234-123456789abc'
+            Name = 'ccc-0123456789abcdef-linux-ci-01-11111111111111111111'
+            State = 'Running'
+            Uptime = [TimeSpan]::FromSeconds(30)
+            Generation = 1
+        }
+        $Result = Get-CccGuestBootDiagnosticResult -Vm $Vm `
+            -IntegrationServiceReader { @([pscustomobject]@{ Id = [Guid]'84eaae65-2f2e-45f5-9bb5-0e857dc8eb47'; Name = 'Heartbeat'; Enabled = $true; PrimaryStatus = 2; SecondaryStatus = 0 }) } `
+            -BiosReader { [pscustomobject]@{ StartupOrder = @('IDE') } } `
+            -HardDiskReader { @([pscustomobject]@{ ControllerType = 'IDE'; ControllerNumber = 0; ControllerLocation = 0; Path = 'C:\secret-disk.vhdx' }) } `
+            -DvdReader { @() } `
+            -VhdReader { throw 'private VHD inspection failure' }
+
+        $Result.ok | Should -BeTrue
+        $Result.hardDiskCount | Should -Be 1
+        $Result.hardDisks[0].controllerType | Should -Be 'ide'
+        $Result.hardDisks[0].vhdFormat | Should -Be ''
+        $Result.diagnosticComplete | Should -BeFalse
+        @($Result.diagnosticErrors) | Should -Contain 'hyper-v-diagnostic-vhd-inspection-incomplete'
+        ($Result | ConvertTo-Json -Depth 8) | Should -Not -Match 'private|secret-disk|C:\\'
+    }
+
+    It 'survives sparse VM and reader objects under strict mode' {
+        $Vm = [pscustomobject]@{
+            Id = [Guid]'12345678-1234-1234-1234-123456789abc'
+            Name = 'ccc-0123456789abcdef-linux-ci-01-11111111111111111111111111111111'
+        }
+        $Result = Get-CccGuestBootDiagnosticResult -Vm $Vm `
+            -IntegrationServiceReader { @([pscustomobject]@{}) } `
+            -HardDiskReader { @([pscustomobject]@{}) } `
+            -DvdReader { @() }
+
+        $Result.ok | Should -BeTrue
+        $Result.state | Should -Be 'Unknown'
+        $Result.generation | Should -BeNullOrEmpty
+        $Result.diagnosticComplete | Should -BeFalse
+        @($Result.diagnosticErrors) | Should -Contain 'hyper-v-diagnostic-vm-observation-incomplete'
+        @($Result.diagnosticErrors) | Should -Contain 'hyper-v-diagnostic-integration-services-incomplete'
+        @($Result.diagnosticErrors) | Should -Contain 'hyper-v-diagnostic-hard-disks-incomplete'
+    }
+
+    It 'contains throwing CIM-style property getters without leaking their errors' {
+        $Vm = [pscustomobject]@{
+            Id = [Guid]'12345678-1234-1234-1234-123456789abc'
+            Name = 'ccc-0123456789abcdef-linux-ci-01-11111111111111111111111111111111'
+            State = 'Running'
+            Generation = 2
+        }
+        $Vm | Add-Member -MemberType ScriptProperty -Name Uptime -Value { throw 'private uptime failure' }
+        $Service = [pscustomobject]@{
+            Id = [Guid]'84eaae65-2f2e-45f5-9bb5-0e857dc8eb47'
+            Name = 'Heartbeat'
+            PrimaryStatus = 2
+            SecondaryStatus = 0
+        }
+        $Service | Add-Member -MemberType ScriptProperty -Name Enabled -Value { throw 'private service failure' }
+        $Firmware = [pscustomobject]@{ SecureBoot = $true }
+        $Firmware | Add-Member -MemberType ScriptProperty -Name BootOrder -Value { throw 'private firmware failure' }
+        $Disk = [pscustomobject]@{}
+        $Disk | Add-Member -MemberType ScriptProperty -Name ControllerType -Value { throw 'private disk failure' }
+        $IntegrationServiceReader = { param($TargetVm) @($Service) }.GetNewClosure()
+        $FirmwareReader = { param($TargetVm) $Firmware }.GetNewClosure()
+        $HardDiskReader = { param($TargetVm) @($Disk) }.GetNewClosure()
+
+        $Result = Get-CccGuestBootDiagnosticResult -Vm $Vm `
+            -IntegrationServiceReader $IntegrationServiceReader `
+            -FirmwareReader $FirmwareReader `
+            -HardDiskReader $HardDiskReader `
+            -DvdReader { @() }
+
+        $Result.ok | Should -BeTrue
+        $Result.diagnosticComplete | Should -BeFalse
+        @($Result.diagnosticErrors) | Should -Contain 'hyper-v-diagnostic-vm-observation-incomplete'
+        @($Result.diagnosticErrors) | Should -Contain 'hyper-v-diagnostic-integration-services-incomplete'
+        @($Result.diagnosticErrors) | Should -Contain 'hyper-v-diagnostic-firmware-incomplete'
+        @($Result.diagnosticErrors) | Should -Contain 'hyper-v-diagnostic-hard-disks-incomplete'
+        ($Result | ConvertTo-Json -Depth 8) | Should -Not -Match 'private'
+    }
+}

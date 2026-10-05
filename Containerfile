@@ -15,7 +15,22 @@ COPY scripts/localhost-proxy/ .
 RUN CGO_ENABLED=0 go build -ldflags='-s -w' -o ccc-proxy .
 
 # ==========================================================
-# Stage 3: Main image
+# Stage 3: Build bundled Device Lab MCP
+# ==========================================================
+FROM node:22-slim AS mcp-builder
+WORKDIR /build
+COPY package.json package-lock.json tsconfig.json ./
+COPY packages/hyper-v/package.json ./packages/hyper-v/package.json
+COPY packages/device-lab/package.json ./packages/device-lab/package.json
+COPY device-lab-mcp/package.json ./device-lab-mcp/package.json
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY packages ./packages
+COPY device-lab-mcp ./device-lab-mcp
+COPY scripts/workspace-build.mjs ./scripts/workspace-build.mjs
+RUN node scripts/workspace-build.mjs build && npm run build:device-lab-mcp && node scripts/workspace-build.mjs assemble
+
+# ==========================================================
+# Stage 4: Main image
 # ==========================================================
 FROM ubuntu:24.04
 
@@ -57,6 +72,7 @@ RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y \
     git \
     sudo \
+    bubblewrap \
     unzip \
     wget \
     locales \
@@ -80,6 +96,10 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y \
     scrot \
     iptables \
     nftables \
+    qemu-system-x86 \
+    qemu-utils \
+    ovmf \
+    cpu-checker \
     && rm -rf /var/lib/apt/lists/* \
     && update-alternatives --set iptables /usr/sbin/iptables-nft \
     && update-alternatives --set ip6tables /usr/sbin/ip6tables-nft \
@@ -130,6 +150,11 @@ WORKDIR /home/ccc
 
 # Trust all directories (container is isolated, ownership mismatches from bind mounts)
 RUN git config --global --add safe.directory '*'
+USER root
+RUN mkdir -p /home/ccc/.ccc/labs /host-stage && \
+    touch /host-stage/gitconfig && \
+    chown -R ccc:ccc /home/ccc/.ccc /host-stage
+USER ccc
 
 # ============================================================
 # LAYER 6: mise 설치 + 설정 (거의 안 바뀜)
@@ -154,20 +179,19 @@ RUN --mount=type=secret,id=github_token,uid=1000,mode=0444 \
     ~/.local/bin/mise use -g uv@latest
 
 # ============================================================
-# LAYER 7.5: x11-mcp server (xdotool/scrot wrapper, baked into image)
-# /opt/ccc/x11-mcp/server.mjs is referenced by src/mcp-forward.ts and spawned
-# in-container via `mise exec node@22 -- node ...`. We bake it at build time
-# so the path is never dangling. Order matters for layer caching:
-#   1) mkdir + chown (root)
-#   2) COPY package*.json + npm ci  ← cacheable, only invalidates on dep change
-#   3) COPY server.mjs              ← editing the server alone reuses npm layer
+# LAYER 7.5: Device Lab MCP baked into image
+# /opt/ccc/dist/*/server.mjs paths are referenced by src/mcp-forward.ts and
+# spawned in-container via `mise exec node@22 -- node ...`. We bake bundled
+# server and its embedded workspace runtime together. The Device Lab source
+# path remains a thin launcher; the core package owns provider and Appium assets.
 # ============================================================
 USER root
-RUN mkdir -p /opt/ccc/x11-mcp && chown ccc:ccc /opt/ccc/x11-mcp
+RUN mkdir -p /opt/ccc/device-lab-mcp /opt/ccc/dist && chown -R ccc:ccc /opt/ccc
 USER ccc
-COPY --chown=ccc:ccc x11-mcp/package.json x11-mcp/package-lock.json /opt/ccc/x11-mcp/
-RUN cd /opt/ccc/x11-mcp && ~/.local/bin/mise exec node@22 -- npm ci --omit=dev --no-audit --no-fund
-COPY --chown=ccc:ccc x11-mcp/server.mjs /opt/ccc/x11-mcp/server.mjs
+COPY --from=mcp-builder --chown=ccc:ccc /build/dist/device-lab-mcp /opt/ccc/dist/device-lab-mcp
+COPY --from=mcp-builder --chown=ccc:ccc /build/dist/packages /opt/ccc/dist/packages
+RUN cd /opt/ccc/dist/packages/device-lab/appium-runtime && ~/.local/bin/mise exec node@22 -- npm ci --omit=dev --no-audit --no-fund
+RUN printf '%s\n' 'import "../dist/device-lab-mcp/server.mjs";' > /opt/ccc/device-lab-mcp/server.mjs
 
 # ============================================================
 # claude-code is installed at runtime and cached in mise volume.

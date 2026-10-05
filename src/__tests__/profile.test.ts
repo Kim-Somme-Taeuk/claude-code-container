@@ -7,11 +7,11 @@ import { vi } from "vitest";
 // We need to mock PROFILES_DIR to use a temp dir
 const mockProfilesDir = mkdtempSync(join(tmpdir(), "ccc-test-profiles-"));
 
-vi.mock("../utils.js", async (importOriginal) => {
+vi.mock("../home-layout.js", async (importOriginal) => {
     const actual = (await importOriginal()) as Record<string, unknown>;
     return {
         ...actual,
-        PROFILES_DIR: mockProfilesDir,
+        profilesDir: () => mockProfilesDir,
     };
 });
 
@@ -93,8 +93,14 @@ describe("listProfiles / profileExists / createProfile / removeProfile", () => {
         }
     });
 
-    it("listProfiles returns empty array when no profiles exist", () => {
-        expect(listProfiles()).toEqual([]);
+    it("listProfiles returns only the default profile when no named profiles exist", () => {
+        expect(listProfiles()).toEqual(["default"]);
+    });
+
+    it("treats default as an existing, reserved profile", () => {
+        expect(profileExists("default")).toBe(true);
+        expect(() => createProfile("default")).toThrow(/reserved/);
+        expect(() => removeProfile("default")).toThrow(/cannot be removed/);
     });
 
     it("profileExists returns false for nonexistent profile", () => {
@@ -106,6 +112,7 @@ describe("listProfiles / profileExists / createProfile / removeProfile", () => {
         expect(existsSync(join(mockProfilesDir, "work"))).toBe(true);
         expect(existsSync(join(mockProfilesDir, "work", "claude"))).toBe(true);
         expect(existsSync(join(mockProfilesDir, "work", "claude.json"))).toBe(true);
+        expect(existsSync(join(mockProfilesDir, "work", "codex"))).toBe(true);
     });
 
     it("profileExists returns true after createProfile", () => {
@@ -143,6 +150,10 @@ describe("BUILTIN_PROFILES", () => {
         expect(BUILTIN_PROFILES["local-llm"]).toBeDefined();
     });
 
+    it("contains lab-runner entry", () => {
+        expect(BUILTIN_PROFILES["lab-runner"]).toBeDefined();
+    });
+
     it("local-llm has CLAUDE_CODE_ATTRIBUTION_HEADER=0 in env", () => {
         expect(BUILTIN_PROFILES["local-llm"].settings?.env?.CLAUDE_CODE_ATTRIBUTION_HEADER).toBe("0");
     });
@@ -151,6 +162,10 @@ describe("BUILTIN_PROFILES", () => {
 describe("isBuiltinProfile", () => {
     it("returns true for local-llm", () => {
         expect(isBuiltinProfile("local-llm")).toBe(true);
+    });
+
+    it("returns true for lab-runner", () => {
+        expect(isBuiltinProfile("lab-runner")).toBe(true);
     });
 
     it("returns false for custom profile name", () => {
@@ -195,6 +210,14 @@ describe("ensureProfile", () => {
         expect(profileExists("local-llm")).toBe(true);
         const settingsPath = join(mockProfilesDir, "local-llm", "claude", "settings.json");
         expect(existsSync(settingsPath)).toBe(true);
+    });
+
+    it("creates lab-runner built-in profile without requiring user settings", () => {
+        const created = ensureProfile("lab-runner");
+        expect(created).toBe(true);
+        expect(profileExists("lab-runner")).toBe(true);
+        expect(existsSync(join(mockProfilesDir, "lab-runner", "claude"))).toBe(true);
+        expect(existsSync(join(mockProfilesDir, "lab-runner", "claude", "settings.json"))).toBe(false);
     });
 
     it("returns false when profile already exists", () => {

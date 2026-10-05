@@ -8,7 +8,7 @@ import {
     readFileSync,
     unlinkSync,
 } from "fs";
-import { dirname, join, resolve } from "path";
+import { basename, dirname, join, relative, resolve } from "path";
 import { fileURLToPath } from "url";
 import {
     formatScannedFiles,
@@ -33,9 +33,14 @@ import {
     getClaudeJsonFile,
     collectForwardedEnv,
     writeEnvFile,
+    LAB_RUNNER_PROFILE_NAME,
 } from "./utils.js";
 
-import { ensureClipboardServer } from "./clipboard-server.js";
+import { ensureClipboardServer, hasAnyActiveSessionsExcept, retireClipboardServerFromPortFile } from "./clipboard-server.js";
+import { clipboardPortFile as clipboardPortFilePath, DEFAULT_PROFILE_NAME, defaultProfileDir, ensureDefaultProfileDir, migrateHomeLayout, normalizeProfile } from "./home-layout.js";
+import { prepareCodexLaunch } from "./codex-launch.js";
+import { ContainerRestartRequiredError, formatContainerStartupError } from "./container-restart-guidance.js";
+import { buildCodexResumeRecoveryCommand } from "./codex-resume-recovery.js";
 import { maybeAttachCodexClipboardImage } from "./codex-clipboard-image.js";
 import {
     parseWorktreeArg,
@@ -48,43 +53,135 @@ import {
     fixBrokenWorktree,
     getWorkspacePath,
     getWorktreeGitMounts,
+    assertWorkspaceBranch,
+    assertWorkspaceRootOwnership,
+    strandedBranchRegistrations,
+    terminalSafeLiteral,
+    pasteableArgument,
+    type StrandedBranchRegistration,
+    repairWorkspaceRootOwnership,
+    hasGitMetadata,
+    detectWorktreeWorkspaceBranch,
     workspaceExists,
     needsSubmoduleSetup,
     initWithSubmodules,
+    DamagedWorkspaceMetadataError,
+    MissingWorkspaceRootRegistrationError,
+    canRecreateMissingWorkspaceRootRegistration,
+    WorktreeContentConflictError,
+    setAsideConflictingContent,
+    repairWorkspaceWorktree,
 } from "./worktree.js";
 import {
     getContainerName,
     isDockerDesktop,
     ensureDockerRunning,
     isContainerRunning,
+    isContainerConfirmedStopped,
     isContainerExists,
+    getContainerIdentity,
+    getManagedProjectContainerIdentity,
+    type ContainerIdentity,
     isImageExists,
     getImageLabel,
-    ensureImage,
     startProjectContainer,
     stopProjectContainer,
     removeProjectContainer,
     syncClipboardShims,
     getContainerStatus,
     getCurrentImageId,
-    resolveCredentialHostPath,
+    ensureCredentialHostDir,
     prepareCodexConfigForContainer,
+    ensureContainerManagerSocketAccess,
     restoreCodexConfigHostOwnership,
 } from "./docker.js";
+import {
+    DEVICE_BROKER_DEFAULT_HOST,
+    ensureHostDeviceBroker,
+} from "@ccc/device-lab/device-lab-broker.js";
 import {
     ensureClaudeInContainer,
     ensureTools,
     ensureUvAvailable,
-    saveClaudeBinaryToVolume,
     CLAUDE_BIN_PATH,
 } from "./container-setup.js";
 import {
     createSessionLock,
-    getActiveSessionsForProject,
+    getActiveSessionsForContainer,
+    getSessionLockClaimsForProjectFamily,
+    recreateContainerWithoutInterruptingSessions,
+    withContainerLifecycleLock,
+    withContainerSetupLockAsync,
+    withProjectFamilyLifecycleLock,
+    withProjectFamilyLifecycleLockAsync,
     cleanupSession,
     setupSignalHandlers,
     setSession,
+    setSessionContainerId,
 } from "./session.js";
+
+export const RUNNING_CONTAINER_UPDATE_DEFERRED_MESSAGE = "Update available; deferred because the existing container is running. It will be applied after the container stops.";
+export const INITIALLY_RUNNING_CONTAINER_UPDATE_DEFERRED_MESSAGE = "Update available; deferred because the container was running when this session started. Restart ccc after that session exits to upgrade.";
+export const CONTAINER_SETUP_RESTART_MESSAGE = "Container became unavailable during setup, restarting...";
+
+export function containerUpdateDeferredMessage(containerWasInitiallyRunning: boolean): string {
+    return containerWasInitiallyRunning
+        ? INITIALLY_RUNNING_CONTAINER_UPDATE_DEFERRED_MESSAGE
+        : RUNNING_CONTAINER_UPDATE_DEFERRED_MESSAGE;
+}
+
+export function ensureSetupContainerAvailable(
+    containerId: string,
+    restart: () => string,
+    runningProbe: typeof isContainerRunning = isContainerRunning,
+    log: (message: string) => void = console.log,
+): string {
+    if (runningProbe(containerId, "id")) return containerId;
+    log(CONTAINER_SETUP_RESTART_MESSAGE);
+    return restart();
+}
+
+type ContainerSetupLock = <T>(
+    containerPrefix: string,
+    operation: () => Promise<T> | T,
+) => Promise<T>;
+
+export async function withContainerSetupReadiness<T>(
+    containerPrefix: string,
+    operation: () => Promise<T> | T,
+    setupLock: ContainerSetupLock = withContainerSetupLockAsync,
+): Promise<T> {
+    return setupLock(containerPrefix, operation);
+}
+
+export function ensureToolsForSetupContainer(
+    containerId: string,
+    setupTool: ToolDefinition,
+    restart: () => string,
+    runningProbe: typeof isContainerRunning = isContainerRunning,
+    installer: typeof ensureTools = ensureTools,
+): string {
+    let readyContainerId = containerId;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt++) {
+        readyContainerId = ensureSetupContainerAvailable(
+            readyContainerId,
+            restart,
+            runningProbe,
+        );
+        try {
+            installer(readyContainerId, setupTool);
+            return readyContainerId;
+        } catch (error) {
+            // Retry only when setup actually lost its container. Retrying a
+            // package/probe failure against the same live container can double
+            // the mutation deadline and race an in-container cleanup.
+            if (runningProbe(readyContainerId, "id")) throw error;
+            lastError = error;
+        }
+    }
+    throw new Error("Failed to install tools in container", { cause: lastError });
+}
 import { buildMcpConfig } from "./mcp-forward.js";
 import { setupLocalhostProxy } from "./localhost-proxy-setup.js";
 import {
@@ -100,22 +197,163 @@ import {
 import { getToolByName, getAllTools, getAllCredentialMounts, getDefaultTool, type ToolDefinition } from "./tool-registry.js";
 import { resolveTool, getDefaultToolPreference, setDefaultToolPreference } from "./tool-detect.js";
 import { formatRuntimeSummary, runtimeCli, setRuntimeOverride } from "./container-runtime.js";
+import { devicesCliAsync } from "./device-lab-admin.js";
+import { labsCli } from "./lab-runner-admin.js";
+
+export function createWorktreeSessionLock(
+    projectId: string,
+    workspacePath: string,
+    expectedBranch: string,
+    profile?: string,
+    familyLock: typeof withProjectFamilyLifecycleLock = withProjectFamilyLifecycleLock,
+    branchGuard: typeof assertWorkspaceBranch = assertWorkspaceBranch,
+    lockCreator: typeof createSessionLock = createSessionLock,
+    sourcePath?: string,
+): string {
+    return familyLock(projectId, () => {
+        branchGuard(workspacePath, expectedBranch, spawnSync, sourcePath);
+        return lockCreator(projectId, profile);
+    });
+}
+
+export function runWorktreeLifecycleOperation<T>(
+    workspacePath: string,
+    expectedBranch: string,
+    operation: () => T,
+    familyLock: typeof withProjectFamilyLifecycleLock = withProjectFamilyLifecycleLock,
+    branchGuard: typeof assertWorkspaceBranch = assertWorkspaceBranch,
+    sourcePath?: string,
+): T {
+    const projectId = getProjectId(workspacePath);
+    return familyLock(projectId, () => {
+        branchGuard(workspacePath, expectedBranch, spawnSync, sourcePath);
+        return operation();
+    });
+}
 
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+function deviceBrokerBindHostForContainer(): string {
+    return DEVICE_BROKER_DEFAULT_HOST;
+}
+
+async function prepareHostDeviceBroker(fullPath: string, profile?: string): Promise<void> {
+    const result = await ensureHostDeviceBroker({
+        cwd: fullPath,
+        profile,
+        trustedCliPaths: [__filename],
+        bindHost: deviceBrokerBindHostForContainer(),
+        probeHost: DEVICE_BROKER_DEFAULT_HOST,
+        timeoutMs: 250,
+        startupTimeoutMs: 2500,
+    });
+    if (!("ok" in result) || result.ok !== true) {
+        const detail = "error" in result && result.error ? `${result.error}${"detail" in result && result.detail ? `: ${result.detail}` : ""}` : "unknown error";
+        const diagnostic = "diagnostics" in result && Array.isArray(result.diagnostics) && result.diagnostics.length > 0
+            ? ` ${result.diagnostics.join("; ")}.`
+            : "";
+        console.warn(`[ccc] WARNING: device broker auto-start failed (${detail}).${diagnostic} Host-backed device MCP tools may be unavailable.`);
+    }
+}
 
 // Progress indicator for startup steps (dim text on stderr)
 function progress(msg: string): void {
     process.stderr.write(`\x1b[2m▸ ${msg}\x1b[0m\n`);
 }
 
+export function replaceStoppedContainerWithoutInterruptingSessions(
+    containerName: string,
+    containerPrefix: string,
+    currentLockFile: string,
+    expectedContainerId: string,
+    expectedImageId: string,
+    replace: (containerId: string) => void,
+    replacementGuard: typeof recreateContainerWithoutInterruptingSessions = recreateContainerWithoutInterruptingSessions,
+    statusProbe: typeof getContainerStatus = getContainerStatus,
+    containerWasInitiallyRunning = false,
+): boolean {
+    if (containerWasInitiallyRunning) return false;
+    let stoppedContainerId: string | null = null;
+    return replacementGuard(
+        containerPrefix,
+        currentLockFile,
+        () => replace(stoppedContainerId!),
+        () => {
+            const status = statusProbe(containerName);
+            if (
+                !status.exists
+                || status.running
+                || status.containerId !== expectedContainerId
+                || status.imageId !== expectedImageId
+            ) return false;
+            stoppedContainerId = status.containerId;
+            return true;
+        },
+    );
+}
+
+export function stoppedContainerReplacementBlockReason(
+    containerName: string,
+    containerPrefix: string,
+    currentLockFile: string,
+    stoppedProbe: typeof isContainerConfirmedStopped = isContainerConfirmedStopped,
+    sessionProbe: typeof getActiveSessionsForContainer = getActiveSessionsForContainer,
+    containerWasInitiallyRunning = false,
+): string | null {
+    // A later stopped observation must not let this invocation reverse the
+    // ownership decision it made after finding an already-running container.
+    // The next CCC invocation can recover it after taking a fresh baseline.
+    if (containerWasInitiallyRunning) {
+        return "the container was running when this session started";
+    }
+    if (!stoppedProbe(containerName)) {
+        return "the container is not confirmed stopped";
+    }
+    const currentLockName = basename(currentLockFile);
+    const otherClaims = sessionProbe(containerPrefix).filter((claim) => claim !== currentLockName);
+    return otherClaims.length > 0
+        ? `${otherClaims.length} live or indeterminate session lock claim(s) remain`
+        : null;
+}
+
+export function containerReplacementBlockReason(
+    containerName: string,
+    containerPrefix: string,
+    currentLockFile: string,
+    expectedContainerId: string,
+    sessionProbe: typeof getActiveSessionsForContainer = getActiveSessionsForContainer,
+    statusProbe: typeof getContainerStatus = getContainerStatus,
+): string | null {
+    const currentLockName = basename(currentLockFile);
+    const claims = sessionProbe(containerPrefix, currentLockFile);
+    const currentClaims = claims.filter((claim) => claim === currentLockName);
+    if (currentClaims.length !== 1) {
+        return "the current session lock ownership could not be verified";
+    }
+    const otherClaims = claims.filter((claim) => claim !== currentLockName);
+    if (otherClaims.length > 0) {
+        return `${otherClaims.length} live or indeterminate session lock claim(s) remain: ${otherClaims.join(", ")}`;
+    }
+    const status = statusProbe(containerName);
+    if (!status.exists || !status.containerId) {
+        return "the container identity could not be verified";
+    }
+    if (status.containerId !== expectedContainerId) {
+        return "the container identity changed before replacement";
+    }
+    return null;
+}
+
 
 // === Helpers ===
 function ensureDirs(profile?: string): void {
-    mkdirSync(DATA_DIR, { recursive: true });
+    mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
     const claudeDir = getClaudeDir(profile);
-    mkdirSync(claudeDir, { recursive: true });
+    // A new default-profile folder is marked as the no-profile account (home-layout.ts).
+    if (claudeDir === join(defaultProfileDir(), "claude")) ensureDefaultProfileDir();
+    mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
     // Ensure claude.json exists for file mount (onboarding state)
     const claudeJsonFile = getClaudeJsonFile(profile);
     if (!existsSync(claudeJsonFile)) {
@@ -124,7 +362,7 @@ function ensureDirs(profile?: string): void {
     // Prepare every coding-agent credential dir unconditionally so any tool the
     // user later invokes already has its host source on disk.
     for (const mount of getAllCredentialMounts()) {
-        mkdirSync(resolveCredentialHostPath(mount, profile), { recursive: true });
+        ensureCredentialHostDir(mount, profile);
     }
 }
 
@@ -217,68 +455,6 @@ export function buildToolInvocation(tool: ToolDefinition, args: string[]): strin
     return [tool.binary, ...tool.defaultFlags, ...args];
 }
 
-/**
- * Decide whether a codex exit looks like a real failure worth auto-recovering
- * from. Excludes clean exits (0), user interrupts (SIGINT/SIGTERM, exit 130/143),
- * and signal-terminated exits with `signal` set.
- */
-function isCodexLikelyFailure(status: number | null, signal: NodeJS.Signals | null): boolean {
-    if (signal === "SIGINT" || signal === "SIGTERM" || signal === "SIGHUP") return false;
-    if (status == null) return false;
-    if (status === 0) return false;
-    if (status === 130 || status === 143) return false;
-    return true;
-}
-
-/**
- * Force-update codex inside the container to the latest npm release.
- * Returns true on success.
- */
-function forceUpdateCodexInContainer(containerName: string): boolean {
-    const r = spawnSync(
-        runtimeCli(),
-        [
-            "exec", "-w", "/home/ccc", containerName, "sh", "-c",
-            "~/.local/bin/mise exec node@22 -- npm install -g @openai/codex@latest --force && ~/.local/bin/mise reshim 2>/dev/null; true",
-        ],
-        { stdio: "inherit" },
-    );
-    return r.status === 0;
-}
-
-/**
- * Last-resort recovery when update+retry didn't fix codex's state mismatch.
- * Wipes every file and subdirectory under /home/ccc/.codex except `auth.json`
- * and `config.toml`. Bind-mounted to the host, so this clears the host's
- * ~/.codex too. Then retries the codex command once.
- */
-async function offerCodexStateWipe(containerName: string, execArgs: string[]): Promise<number> {
-    console.error("\n[ccc] codex state is still incompatible after the update.");
-    const answer = await prompt(
-        "Wipe everything in ~/.codex except auth.json + config.toml and retry? Session history is lost. [y/N]: ",
-        true,
-    );
-    if (answer !== "y" && answer !== "yes") {
-        console.error("[ccc] Leaving ~/.codex untouched.");
-        return 1;
-    }
-
-    spawnSync(
-        runtimeCli(),
-        [
-            "exec", containerName, "sh", "-c",
-            // Top-level entries: keep auth.json and config.toml, drop everything else
-            // (subdirectories, sqlite files of any extension, JSON state files, etc.).
-            'find /home/ccc/.codex -mindepth 1 -maxdepth 1 ! -name auth.json ! -name config.toml -exec rm -rf {} + 2>/dev/null; true',
-        ],
-        { stdio: "ignore" },
-    );
-
-    console.error("[ccc] Wiped ~/.codex (kept auth.json + config.toml). Retrying codex...");
-    const retry = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" });
-    return retry.status ?? 1;
-}
-
 export async function maybeAttachCodexClipboardImageForCommand(
     projectPath: string,
     cmd: string[],
@@ -327,7 +503,13 @@ async function ensureMiseConfig(projectPath: string): Promise<void> {
 async function exec(
     projectPath: string,
     cmd: string[],
-    options: { interactive?: boolean; env?: Record<string, string>; tool?: ToolDefinition } = {},
+    options: {
+        interactive?: boolean;
+        env?: Record<string, string>;
+        tool?: ToolDefinition;
+        expectedWorktreeBranch?: string;
+        expectedWorktreeSourcePath?: string;
+    } = {},
     profile?: string,
 ): Promise<void> {
     // Check Docker is running first
@@ -357,7 +539,19 @@ async function exec(
     }
     const { setupTool, commandTool } = resolveExecTools(cmd, options.tool);
     const shouldEnsureTool = commandTool !== undefined || options.tool !== undefined;
-    const sessionLockFile = createSessionLock(projectId, profile);
+    const worktreeBranch = options.expectedWorktreeBranch ?? detectWorktreeWorkspaceBranch(fullPath);
+    const sessionLockFile = worktreeBranch
+        ? createWorktreeSessionLock(
+            projectId,
+            fullPath,
+            worktreeBranch,
+            profile,
+            withProjectFamilyLifecycleLock,
+            assertWorkspaceBranch,
+            createSessionLock,
+            options.expectedWorktreeSourcePath,
+        )
+        : createSessionLock(projectId, profile);
     setSession(sessionLockFile, fullPath, profile, (commandTool ?? options.tool)?.name ?? "command");
     setupSignalHandlers();
 
@@ -365,10 +559,14 @@ async function exec(
     // the port file exists and can be bind-mounted (file mount requires the file
     // to already exist at docker run time).
     const clipboardPort = await ensureClipboardServer().catch(() => null);
-    const clipboardPortFile = join(DATA_DIR, "clipboard.port");
+    const clipboardPortFile = clipboardPortFilePath();
 
     // Detect worktree mounts (source .git directories needed for git operations)
-    const worktreeMounts = getWorktreeGitMounts(fullPath);
+    const worktreeMounts = getWorktreeGitMounts(
+        fullPath,
+        worktreeBranch !== null,
+        `/project/${projectId}`,
+    );
     if (process.env.DEBUG && worktreeMounts.length > 0) {
         console.error(`[ccc:debug] worktreeGitMounts (${worktreeMounts.length}):`);
         for (const m of worktreeMounts) {
@@ -381,109 +579,198 @@ async function exec(
     progress("Checking container...");
     const containerStatus = getContainerStatus(targetContainer);
     let wasAlreadyRunning = containerStatus.running;
+    const sessionContainerPrefix = profile ? `${projectId}--p--${profile}` : projectId;
+    const recreateStoppedContainer = (recreate: (containerId: string) => void) => (
+        replaceStoppedContainerWithoutInterruptingSessions(
+            targetContainer,
+            sessionContainerPrefix,
+            sessionLockFile,
+            containerStatus.containerId!,
+            containerStatus.imageId!,
+            recreate,
+            recreateContainerWithoutInterruptingSessions,
+            getContainerStatus,
+            containerStatus.running,
+        )
+    );
 
     // Auto-upgrade container if image has been rebuilt
     if (containerStatus.exists) {
         const currentImageId = getCurrentImageId();
-        if (currentImageId && containerStatus.imageId && containerStatus.imageId !== currentImageId) {
-            const activeSessions = getActiveSessionsForProject(projectId);
-            if (activeSessions.length <= 1) {
+        if (
+            currentImageId
+            && containerStatus.containerId
+            && containerStatus.imageId
+            && containerStatus.imageId !== currentImageId
+        ) {
+            const recreated = recreateStoppedContainer((stoppedContainerId) => {
                 const oldImageId = containerStatus.imageId;
 
                 progress("Upgrading container to new image...");
-                spawnSync(runtimeCli(), ["stop", targetContainer], { stdio: "ignore" });
-                spawnSync(runtimeCli(), ["rm", targetContainer], { stdio: "ignore" });
+                const removed = spawnSync(runtimeCli(), ["rm", stoppedContainerId], { stdio: "ignore" });
+                if (removed.error || removed.status !== 0) {
+                    throw new Error("Container image upgrade aborted because the stopped container could not be removed.");
+                }
+                wasAlreadyRunning = false;
 
                 // Remove old image (now dangling). Silently fails if still in use by other containers.
                 if (oldImageId) {
                     spawnSync(runtimeCli(), ["rmi", oldImageId], { stdio: "ignore" });
                 }
-            } else {
-                console.log("Update available, but other sessions are active. Restart ccc after closing other sessions to upgrade.");
+            });
+            if (!recreated) {
+                console.log(containerUpdateDeferredMessage(containerStatus.running));
             }
         }
     }
 
     // Start or get container (with extra mounts for worktree workspaces)
     if (!wasAlreadyRunning) progress("Starting container...");
-    const containerName = startProjectContainer(
-        fullPath,
-        () => ensureDirs(profile),
-        worktreeMounts.length > 0 ? worktreeMounts : undefined,
-        clipboardPortFile,
-        profile,
-        // When the container is recreated (missing mounts), its writable layer
-        // is fresh — npm tool wrappers, claude binary, etc. must be reinstalled.
-        // Force the post-startup setup path to run even though the *old*
-        // container was running when we snapshot-ed status above.
-        () => { wasAlreadyRunning = false; },
-    );
-    restoreCodexConfigHostOwnership(containerName);
+    progress("Preparing device broker...");
+    await prepareHostDeviceBroker(fullPath, profile).catch((error) => {
+        console.warn(`[ccc] WARNING: device broker auto-start failed (${error instanceof Error ? error.message : String(error)}). Host-backed device MCP tools may be unavailable.`);
+    });
+    const recreateInsideLifecycleLock = (recreate: () => void) => {
+        const blockedReason = containerReplacementBlockReason(
+            targetContainer,
+            sessionContainerPrefix,
+            sessionLockFile,
+            containerStatus.containerId ?? "",
+            getActiveSessionsForContainer,
+            getContainerStatus,
+        );
+        if (blockedReason) {
+            if (process.env.DEBUG) console.error(`[ccc] Automatic container replacement blocked: ${blockedReason}.`);
+            return false;
+        }
+        recreate();
+        return true;
+    };
+    const startContainer = (
+        mounts = worktreeMounts.length > 0 ? worktreeMounts : undefined,
+        portFile: string | undefined = clipboardPortFile,
+        onRecreate: (() => void) | undefined = () => { wasAlreadyRunning = false; },
+    ): string => {
+        return withContainerLifecycleLock(sessionContainerPrefix, () => {
+            let readyContainerId: string | null = null;
+            startProjectContainer(
+                fullPath,
+                () => ensureDirs(profile),
+                mounts,
+                portFile,
+                profile,
+                onRecreate,
+                recreateInsideLifecycleLock,
+                (containerId) => {
+                    readyContainerId = containerId;
+                    setSessionContainerId(containerId);
+                },
+                containerStatus.running ? containerStatus.containerId ?? undefined : undefined,
+            );
+            if (!readyContainerId) {
+                throw new Error("Container became unavailable before the session handoff.");
+            }
+            return readyContainerId;
+        });
+    };
+    const projectMountPath = `/project/${projectId}`;
+    const runMiseInstall = (readyContainerName: string) => {
+        // Keep mise's stderr visible — that's where it streams download/build
+        // progress. This remains non-fatal by design, but simultaneous joiners
+        // must not pass the setup lock while the first install is still active.
+        spawnSync(
+            runtimeCli(),
+            [
+                "exec", "-w", projectMountPath, readyContainerName,
+                "sh", "-c", "mise trust -a >/dev/null 2>&1 || true; mise install -y || true",
+            ],
+            { stdio: "inherit" },
+        );
+    };
+    // A running container is not necessarily setup-ready. Hold the distinct
+    // setup lock from start/handoff through the complete preparation phase, so
+    // a simultaneous joiner cannot exec while the creator is still installing
+    // commands or configuring the container.
+    progress("Synchronizing container setup...");
+    let containerName = await withContainerSetupReadiness(sessionContainerPrefix, async () => {
+        let readyContainerName = startContainer();
+        restoreCodexConfigHostOwnership(readyContainerName);
 
-    // Skip heavy setup if container was already running (another session set it up)
-    if (!wasAlreadyRunning) {
-        // Ensure tools are installed (claude via curl + npm tools from registry).
-        // Retry once if a concurrent session stopped the container during setup.
-        progress("Checking tools...");
-        if (shouldEnsureTool) {
-            for (let attempt = 0; attempt < 2; attempt++) {
-                if (!isContainerRunning(containerName)) {
-                    console.log("Container stopped during setup (concurrent session), restarting...");
-                    startProjectContainer(fullPath, () => ensureDirs(profile), undefined, undefined, profile);
-                }
-                try {
-                    ensureTools(containerName, setupTool);
-                    break;
-                } catch {
-                    if (attempt === 1) {
-                        console.error("Failed to install tools in container");
-                        process.exit(1);
-                    }
-                }
+        // Skip heavy setup if the container was already running before this
+        // launch; the setup lock guarantees a simultaneous creator has finished
+        // that work before this joiner reaches the lightweight path.
+        if (!wasAlreadyRunning) {
+            // Setup steps. spawnSync blocks the event loop so wrapping in Promise.all
+            // doesn't actually parallelize — run each step with its own progress line
+            // so the user can see exactly where time is being spent.
+            progress("Ensuring uv...");
+            ensureUvAvailable(readyContainerName);
+
+            progress("Building MCP config...");
+            const forwardedMcp = await buildMcpConfig(profile);
+
+            progress("Setting up localhost proxy...");
+            setupLocalhostProxy(readyContainerName);
+
+            if (forwardedMcp.length > 0) {
+                console.error(`MCP forwarded: ${forwardedMcp.join(", ")}`);
+            }
+
+            // Verify container is still running before exec.
+            readyContainerName = ensureSetupContainerAvailable(
+                readyContainerName,
+                () => startContainer(undefined, undefined, undefined),
+            );
+        } else {
+            // Container already running — only rebuild MCP config (lightweight, may have changed)
+            const forwardedMcp = await buildMcpConfig(profile);
+            if (forwardedMcp.length > 0) {
+                console.error(`MCP forwarded: ${forwardedMcp.join(", ")}`);
             }
         }
 
-        // Setup steps. spawnSync blocks the event loop so wrapping in Promise.all
-        // doesn't actually parallelize — run each step with its own progress line
-        // so the user can see exactly where time is being spent.
-        progress("Ensuring uv...");
-        ensureUvAvailable(containerName);
+        if (!wasAlreadyRunning) {
+            progress("Installing project tools (mise)...");
+            runMiseInstall(readyContainerName);
+        }
 
+        // This is deliberately the final restart-capable readiness step. A
+        // late setup checkpoint may have returned a replacement container, so
+        // prove/install the requested command against that final pinned ID.
+        if (shouldEnsureTool) {
+            progress("Checking tools...");
+            readyContainerName = ensureToolsForSetupContainer(
+                readyContainerName,
+                setupTool,
+                () => startContainer(undefined, undefined, undefined),
+            );
+        }
+        if (commandTool?.name === "claude") {
+            // Re-verify after mise because a project shim can replace the fixed
+            // command path while setup owns the readiness lock.
+            ensureClaudeInContainer(readyContainerName);
+        } else if (commandTool?.name === "codex") {
+            prepareCodexConfigForContainer(readyContainerName);
+        }
         progress("Syncing clipboard shims...");
-        syncClipboardShims(containerName, __dirname);
-
-        progress("Building MCP config...");
-        const forwardedMcp = buildMcpConfig(profile);
-
-        progress("Setting up localhost proxy...");
-        setupLocalhostProxy(containerName);
-
-        if (forwardedMcp.length > 0) {
-            console.error(`MCP forwarded: ${forwardedMcp.join(", ")}`);
-        }
-
-        // Verify container is still running before exec.
-        if (!isContainerRunning(containerName)) {
-            console.log("Container was stopped during setup, restarting...");
-            startProjectContainer(fullPath, () => ensureDirs(profile), undefined, undefined, profile);
-        }
-    } else {
-        // Container already running — only rebuild MCP config (lightweight, may have changed)
-        const forwardedMcp = await buildMcpConfig(profile);
-        if (forwardedMcp.length > 0) {
-            console.error(`MCP forwarded: ${forwardedMcp.join(", ")}`);
-        }
-    }
+        syncClipboardShims(readyContainerName, __dirname);
+        // Runs for new, restarted, reused and deferred containers alike, on the final ID.
+        ensureContainerManagerSocketAccess(readyContainerName);
+        return readyContainerName;
+    }).catch((error) => {
+        if (error instanceof ContainerRestartRequiredError) throw error;
+        const detail = error instanceof Error ? `: ${error.message}` : "";
+        throw new Error(`Container setup failed${detail}`, { cause: error });
+    });
 
     // Build docker exec command
-    const projectMountPath = `/project/${projectId}`;
     const clipboardHost = clipboardPort
         ? ((process.platform === "linux" && !isDockerDesktop()) ? "127.0.0.1" : "host.docker.internal")
         : null;
     let clipboardToken: string | null = null;
     if (clipboardPort) {
         try {
-            const portFileContent = readFileSync(join(DATA_DIR, "clipboard.port"), "utf-8").trim();
+            const portFileContent = readFileSync(clipboardPortFilePath(), "utf-8").trim();
             clipboardToken = portFileContent.split(":").slice(1).join(":") || null;
         } catch {
             clipboardToken = null;
@@ -577,92 +864,35 @@ async function exec(
     const envFile = writeEnvFile(envEntries);
     execArgs.push("--env-file", envFile);
 
+    let preparationStatus: number | null = null;
+    if (commandTool?.name === "codex" && options.interactive !== false) {
+        const preparation = prepareCodexLaunch(runtimeCli(), [...execArgs, containerName], resolvedCmd);
+        if (!preparation.ok) {
+            console.error(`[ccc] ${preparation.error}`);
+            preparationStatus = preparation.status;
+        } else {
+            resolvedCmd = preparation.command;
+            if (preparation.notice) console.error(`[ccc] ${preparation.notice}`);
+        }
+    }
+
     if (options.interactive !== false && process.stdin.isTTY && process.stdout.isTTY) {
         execArgs.push("-it");
+        if (commandTool?.name === "codex" && preparationStatus === null) {
+            resolvedCmd = buildCodexResumeRecoveryCommand(resolvedCmd);
+        }
     }
 
     execArgs.push(containerName);
 
-    // Run mise setup and the user command as SEPARATE docker exec calls.
-    // mise install can be slow on first run (downloads tool binaries).
-    // Running them in a single sh -c caused mise's shell hooks to intercept
-    // the exec syscall, producing spurious "Argument list too long" errors.
-    //
-    // Trust is handled via MISE_TRUSTED_CONFIG_PATHS baked into `docker run`
-    // (see docker.ts), so `mise trust` is no longer needed here.
-    // `mise install -y` auto-reshims when it installs anything, so an
-    // explicit `mise reshim` would be redundant — dropped.
-    const runMiseInstall = () => {
-        // Keep mise's stderr visible — that's where it streams download/build
-        // progress (e.g. "downloading node@22…"). `|| true` already makes the
-        // step non-fatal; muting stderr just hid the install activity and made
-        // long first-run installs look hung.
-        spawnSync(
-            runtimeCli(),
-            [
-                "exec", "-w", projectMountPath, containerName,
-                "sh", "-c", "mise trust -a >/dev/null 2>&1 || true; mise install -y || true",
-            ],
-            { stdio: "inherit" },
-        );
-    };
-
     if (commandTool?.name === "claude") {
-        // Always refresh the fixed claude path before exec.
-        // Existing running containers may predate the current install policy.
-        progress("Checking claude install...");
-        ensureClaudeInContainer(containerName);
-
-        if (!wasAlreadyRunning) {
-            progress("Installing project tools (mise)...");
-            runMiseInstall();
-            // Re-verify claude wasn't overwritten by a mise shim at the path.
-            ensureClaudeInContainer(containerName);
-        }
-
         // Run claude directly (no shell wrapper — avoids mise interception)
         execArgs.push(CLAUDE_BIN_PATH, ...cmd.slice(1));
     } else {
-        if (!wasAlreadyRunning) {
-            runMiseInstall();
-        }
-        if (commandTool?.name === "codex") {
-            prepareCodexConfigForContainer(containerName);
-        }
         execArgs.push(...resolvedCmd);
     }
 
-    let resultStatus: number;
-    if (commandTool?.name === "codex") {
-        // Codex recovery ladder:
-        //   1) Run with inherited stdio (preserves the TUI when it works).
-        //   2) On unexpected non-zero exit (anything other than 0/Ctrl-C/SIGTERM),
-        //      force-update codex in the container and retry once.
-        //   3) If the retry still fails the same way, prompt to wipe codex's
-        //      state DB files and retry one more time.
-        // We don't pattern-match stderr because codex sometimes routes startup
-        // errors through stdout (especially on Windows + Docker Desktop), which
-        // is inherited, not captured, when the TUI needs a TTY.
-        const first = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" });
-        resultStatus = first.status ?? 1;
-        if (isCodexLikelyFailure(first.status, first.signal)) {
-            console.error("\n[ccc] codex exited with an unexpected error. Updating codex in container and retrying...");
-            if (forceUpdateCodexInContainer(containerName)) {
-                console.error("[ccc] Retrying codex...");
-                const retry = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" });
-                resultStatus = retry.status ?? 1;
-                if (isCodexLikelyFailure(retry.status, retry.signal)) {
-                    resultStatus = await offerCodexStateWipe(containerName, execArgs);
-                }
-            } else {
-                console.error("[ccc] Codex update failed in container.");
-                resultStatus = await offerCodexStateWipe(containerName, execArgs);
-            }
-        }
-    } else {
-        const result = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" });
-        resultStatus = result.status ?? 1;
-    }
+    const resultStatus = preparationStatus ?? spawnSync(runtimeCli(), execArgs, { stdio: "inherit" }).status ?? 1;
     restoreCodexConfigHostOwnership(containerName);
     try { unlinkSync(envFile); } catch { /* ignore cleanup error */ }
 
@@ -774,7 +1004,59 @@ function handleWorktreeList(cwd: string): void {
  * Prepare worktree workspace (create or reuse), return the workspace path.
  * Does NOT execute any command — the caller runs the standard command dispatch.
  */
-async function prepareWorktree(
+/**
+ * Repairs one broken worktree, and when the repair cannot merge the content, says why and
+ * offers the one mechanical step that unblocks it.
+ *
+ * Choosing which version of a file wins is the operator's call, so ccc does not make it. What
+ * it can do is move the local versions somewhere safe so the branch's versions can be checked
+ * out, which loses nothing and is undone by moving them back.
+ */
+async function repairBrokenWorktree(
+    cwd: string,
+    wsPath: string,
+    name: string,
+    branch: string,
+): Promise<void> {
+    try {
+        const fixed = fixBrokenWorktree(cwd, wsPath, name, branch, true);
+        console.log(fixed
+            ? `  ${name}: fixed (content preserved)`
+            : `  ${name}: failed to fix (content unchanged)`);
+        return;
+    } catch (error) {
+        if (!(error instanceof WorktreeContentConflictError)) {
+            // Not a disagreement about content. The repair already rolled itself back, so the
+            // directory is as it was; report it and leave the rest of the workspace alone.
+            console.log(`  ${name}: failed to fix (content unchanged) - ${(error as Error).message}`);
+            return;
+        }
+        const relativeConflicts = error.conflicts.map((path) => relative(error.worktreeRoot, path));
+        console.log(`  ${name}: cannot merge - these files differ between your copy and branch '${branch}':`);
+        for (const conflict of relativeConflicts) console.log(`      ${conflict}`);
+        console.log("      Nothing was changed or lost; the directory is exactly as it was.");
+        console.log("      ccc can move your versions aside so the branch's versions can be checked out.");
+        console.log("      Your versions stay on disk and can be moved back or merged by hand.");
+        const answer = await prompt("  Move them aside and repair? (y/N) ", true);
+        if (answer !== "y" && answer !== "yes") {
+            console.log(`  ${name}: left unrepaired (content unchanged)`);
+            return;
+        }
+        const preserved = setAsideConflictingContent(error.worktreeRoot, error.conflicts);
+        console.log(`  ${name}: your versions moved to ${preserved}`);
+        try {
+            const fixed = fixBrokenWorktree(cwd, wsPath, name, branch, true);
+            console.log(fixed
+                ? `  ${name}: fixed (remaining content preserved)`
+                : `  ${name}: failed to fix (content unchanged)`);
+        } catch (retryError) {
+            console.log(`  ${name}: failed to fix (content unchanged) - ${(retryError as Error).message}`);
+            console.log(`      Your set-aside versions remain in ${preserved}`);
+        }
+    }
+}
+
+async function prepareWorktreeUnlocked(
     cwd: string,
     branch: string,
 ): Promise<string> {
@@ -789,14 +1071,54 @@ async function prepareWorktree(
     const wsPath = getWorkspacePath(cwd, branch);
 
     if (workspaceExists(cwd, branch)) {
+        if (hasGitMetadata(cwd)) {
+            repairWorkspaceRootOwnership(wsPath, cwd, branch);
+            try {
+                assertWorkspaceRootOwnership(wsPath, cwd);
+            } catch (error) {
+                if (!(error instanceof MissingWorkspaceRootRegistrationError)) throw error;
+                console.error(error.message);
+                console.error("");
+                let preflightFence: (() => void) | undefined;
+                if (!canRecreateMissingWorkspaceRootRegistration(
+                    wsPath,
+                    cwd,
+                    branch,
+                    (assertUnchanged) => { preflightFence = assertUnchanged; },
+                )) throw error;
+                const answer = await prompt(
+                    `Recreate the missing Git worktree registration now? (y/N) `,
+                    true,
+                );
+                if (answer !== "y" && answer !== "yes") throw error;
+                let recoveryFailure: string | undefined;
+                const repaired = repairWorkspaceRootOwnership(
+                    wsPath,
+                    cwd,
+                    branch,
+                    {
+                        confirmedMissingRegistration: true,
+                        reportFailure: (reason) => { recoveryFailure = reason; },
+                        preflightFence,
+                    },
+                );
+                if (!repaired) {
+                    throw new Error(
+                        `Could not recreate the missing Git worktree registration for '${wsPath}'. Workspace files were left unchanged.`
+                        + (recoveryFailure
+                            ? ` Reason: ${terminalSafeLiteral(recoveryFailure.slice(0, 500))}`
+                            : " Reason: Git registration conditions changed during recovery."),
+                    );
+                }
+                console.log(`Recreated Git worktree registration: ${wsPath}`);
+                assertWorkspaceRootOwnership(wsPath, cwd);
+            }
+        } else {
+            assertWorkspaceBranch(wsPath, branch, spawnSync, cwd);
+        }
         // Check for branch collision (C2 fix): different branch names can map
         // to the same workspace path (e.g., feature/login → feature-login)
-        const gitResult = spawnSync(
-            "git",
-            ["rev-parse", "--abbrev-ref", "HEAD"],
-            { cwd: wsPath, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-        );
-        const actualBranch = (gitResult.stdout ?? "").trim();
+        const actualBranch = detectWorktreeWorkspaceBranch(wsPath) ?? "";
         if (actualBranch && actualBranch !== branch) {
             console.error(
                 `Error: Workspace exists for branch '${actualBranch}', not '${branch}'.`,
@@ -827,12 +1149,7 @@ async function prepareWorktree(
             );
             if (answer === "y" || answer === "yes") {
                 for (const entry of broken) {
-                    const fixed = fixBrokenWorktree(cwd, wsPath, entry.name, branch);
-                    if (fixed) {
-                        console.log(`  ${entry.name}: fixed (content preserved)`);
-                    } else {
-                        console.log(`  ${entry.name}: failed to fix (content unchanged)`);
-                    }
+                    await repairBrokenWorktree(cwd, wsPath, entry.name, branch);
                 }
             }
         }
@@ -880,7 +1197,250 @@ async function prepareWorktree(
         }
     }
 
+    // `allowTrackedGitlinks` because this runs on both arms of the branch above, including the
+    // one that just opened an existing workspace. Without it, a tracked submodule whose
+    // workspace copy has no `.git` is refused here as "not owned by its source repository" —
+    // after ccc has already printed that it is continuing without it. The skip reached
+    // detection and the mounts and then died one call later, which is the same shape this task
+    // was opened to remove. The flag is not a blanket permission: isNestedTrackedGitlink checks
+    // the entry really is a tracked gitlink of its owner, and `removeWorkspace` already relies
+    // on exactly this. Creation-time protection is elsewhere — repairWorkspace's source scan.
+    assertWorkspaceBranch(wsPath, branch, spawnSync, cwd, { allowTrackedGitlinks: true });
     return wsPath;
+}
+
+async function prepareWorktree(cwd: string, branch: string): Promise<string> {
+    const workspacePath = getWorkspacePath(cwd, branch);
+    const projectId = getProjectId(workspacePath);
+    const run = () => withProjectFamilyLifecycleLockAsync(
+        projectId,
+        () => prepareWorktreeUnlocked(cwd, branch),
+    );
+    try {
+        return await run();
+    } catch (error) {
+        // ccc knows the repository, the checkout and the command. Printing the command and
+        // making the operator retype it is not a remedy — offer to run it.
+        if (!(error instanceof DamagedWorkspaceMetadataError) || error.repairs.length === 0) throw error;
+        console.error((error as Error).message);
+        console.error("");
+        for (const repair of error.repairs) {
+            console.error(`  git worktree repair ${repair.checkoutPath}`);
+            console.error(`    in ${repair.sourcePath}`);
+        }
+        const answer = await prompt(
+            `Run ${error.repairs.length === 1 ? "this" : "these"} now? (y/N) `,
+            true,
+        );
+        if (answer !== "y" && answer !== "yes") throw error;
+        let repairedAny = false;
+        for (const repair of error.repairs) {
+            const outcome = repairWorkspaceWorktree(repair);
+            console.error(outcome.ok
+                ? `  repaired ${repair.checkoutPath}`
+                : `  could not repair ${repair.checkoutPath}${outcome.detail ? `: ${outcome.detail}` : ""}`);
+            repairedAny ||= outcome.ok;
+        }
+        // Retried only when something actually changed, so a failed repair surfaces the
+        // original diagnosis instead of an identical second one.
+        if (!repairedAny) throw error;
+        return await run();
+    }
+}
+
+export function withWorkspaceRemovalLifecycleLock<T>(
+    projectId: string,
+    force: boolean,
+    operation: () => T,
+    lifecycleLock: typeof withProjectFamilyLifecycleLock = withProjectFamilyLifecycleLock,
+    activeSessions: typeof getSessionLockClaimsForProjectFamily = getSessionLockClaimsForProjectFamily,
+): T {
+    return lifecycleLock(projectId, () => {
+        const sessions = activeSessions(projectId);
+        if (sessions.length > 0 && !force) {
+            throw new Error(`Workspace has ${sessions.length} session ownership claim(s); stop sessions first or use -f to force removal.`);
+        }
+        return operation();
+    });
+}
+
+export function listWorkspaceContainerNames(
+    workspacePath: string,
+    runner: typeof spawnSync = spawnSync,
+    cli = runtimeCli(),
+): string[] {
+    const baseName = getContainerName(workspacePath);
+    const result = runner(
+        cli,
+        ["ps", "-a", "--format", "{{.Names}}"],
+        { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    if (result.error || result.status !== 0) {
+        throw new Error("Unable to list workspace containers.");
+    }
+    return (result.stdout ?? "")
+        .split(/\r?\n/)
+        .map((name) => name.trim())
+        .filter((name) => name === baseName || name.startsWith(`${baseName}--p--`));
+}
+
+export function removeWorkspaceContainerByIdentity(
+    containerName: string,
+    identityProbe: typeof getContainerIdentity = getContainerIdentity,
+    runner: typeof spawnSync = spawnSync,
+    cli = runtimeCli(),
+    existsProbe: typeof isContainerExists = isContainerExists,
+): boolean {
+    const identity = identityProbe(containerName);
+    if (!identity) {
+        if (existsProbe(containerName)) {
+            throw new Error("Workspace container identity inspection failed; workspace removal was aborted.");
+        }
+        return false;
+    }
+    if (identity.running) {
+        const stopped = runner(cli, ["stop", identity.containerId], { stdio: "ignore" });
+        if (stopped.error || stopped.status !== 0) throw new Error("Failed to stop workspace container.");
+    }
+    const removed = runner(cli, ["rm", identity.containerId], { stdio: "ignore" });
+    if (removed.error || removed.status !== 0) throw new Error("Failed to remove workspace container.");
+    return true;
+}
+
+export function removeManagedWorkspaceContainerByIdentity(
+    containerName: string,
+    workspacePath: string,
+    identityProbe: typeof getManagedProjectContainerIdentity = getManagedProjectContainerIdentity,
+    runner: typeof spawnSync = spawnSync,
+    cli = runtimeCli(),
+    existsProbe: typeof isContainerExists = isContainerExists,
+): boolean {
+    return removeWorkspaceContainerByIdentity(
+        containerName,
+        (name) => identityProbe(name, workspacePath),
+        runner,
+        cli,
+        existsProbe,
+    );
+}
+
+export function removeWorkspaceContainers(
+    workspacePath: string,
+    listContainers: (workspacePath: string) => string[] = listWorkspaceContainerNames,
+    removeContainer: (containerName: string, workspacePath: string) => boolean = removeManagedWorkspaceContainerByIdentity,
+): string[] {
+    const removed: string[] = [];
+    for (const containerName of listContainers(workspacePath)) {
+        if (!removeContainer(containerName, workspacePath)) continue;
+        removed.push(containerName);
+    }
+    return removed;
+}
+
+export type WorkspaceContainerRemoval = {
+    containerName: string;
+    identity: ContainerIdentity;
+};
+
+export function prepareWorkspaceContainerRemovalPlan(
+    workspacePath: string,
+    listContainers: (workspacePath: string) => string[] = listWorkspaceContainerNames,
+    identityProbe: (
+        containerName: string,
+        workspacePath: string,
+    ) => ContainerIdentity | null = getManagedProjectContainerIdentity,
+    existsProbe: typeof isContainerExists = isContainerExists,
+): WorkspaceContainerRemoval[] {
+    const plan: WorkspaceContainerRemoval[] = [];
+    const seenIds = new Set<string>();
+    for (const containerName of listContainers(workspacePath)) {
+        const identity = identityProbe(containerName, workspacePath);
+        if (!identity) {
+            if (existsProbe(containerName)) {
+                throw new Error(
+                    "Workspace container identity inspection failed; workspace removal was aborted.",
+                );
+            }
+            continue;
+        }
+        if (seenIds.has(identity.containerId)) {
+            throw new Error("Workspace container inventory contains a duplicate identity.");
+        }
+        seenIds.add(identity.containerId);
+        plan.push({ containerName, identity });
+    }
+    return plan;
+}
+
+export function removePreparedWorkspaceContainers(
+    plan: readonly WorkspaceContainerRemoval[],
+    runner: typeof spawnSync = spawnSync,
+    cli = runtimeCli(),
+): string[] {
+    const removed: string[] = [];
+    for (const entry of plan) {
+        if (!removeWorkspaceContainerByIdentity(
+            entry.containerName,
+            () => entry.identity,
+            runner,
+            cli,
+        )) {
+            continue;
+        }
+        removed.push(entry.containerName);
+    }
+    return removed;
+}
+
+// Extracted so it can be tested. Inline, this branch was reachable only by running the CLI,
+// and the previous change to it shipped with no test at all — the suite stayed green while the
+// operator was told to use a flag that could not help them. It is one line of logic; the reason
+// it is a function is that a line no test can reach is a line that drifts.
+// Deliberately no longer says "Use -f to force". Every refusal `removeWorkspace` produces now
+// carries its own remedy, and they are not all the same one: an unreadable directory needs a
+// chmod BEFORE -f, and -f refuses it until then. A standing line telling the operator to use
+// -f contradicted the specific line printed directly above it — which is the same shape as
+// `forceWouldNotHelp`, the flag this replaced, and the reason it existed.
+export function workspaceRemovalAdvice(
+    force: boolean,
+    removed: readonly string[] = [],
+): string {
+    // `removed` is consulted BEFORE `force`. Partial removal is reachable under -f — more
+    // likely there than without it, since -f is what gets far enough to remove some and stop
+    // — and returning early on force handed the operator who forced the weaker sentence in
+    // the state that needs the stronger one.
+    if (removed.length > 0) {
+        return `Removed ${removed.length} item(s) before stopping — the workspace is partly`
+            + " dismantled. See the errors above.";
+    }
+    if (force) return "Workspace removal did not complete.";
+    // `removed` is why this takes a second argument. Taking only `force` made the line a
+    // guess, and the guess was measured wrong on the most ordinary refusal there is: a
+    // workspace with two submodules, one of them dirty. `ccc rm` deregisters the clean one,
+    // refuses on the dirty one, and the summary said "Nothing was removed" two lines under
+    // the CLI's own `removed: services/api`. The workspace is half dismantled at that point
+    // and the operator has to be told so, because the next thing they decide is whether to
+    // re-run or to go looking for what is missing.
+    return "Nothing was removed. See the errors above.";
+}
+
+export function workspaceRemovalCompleted(
+    result: { errors: string[] },
+): boolean {
+    return result.errors.length === 0;
+}
+
+export function removeWorkspaceThenContainers<T extends { errors: string[] }>(
+    removeWorkspaceOperation: () => T,
+    removeContainersOperation: () => string[],
+): { result: T; removedContainers: string[] } {
+    const result = removeWorkspaceOperation();
+    return {
+        result,
+        removedContainers: workspaceRemovalCompleted(result)
+            ? removeContainersOperation()
+            : [],
+    };
 }
 
 function handleWorktreeRemove(
@@ -890,33 +1450,24 @@ function handleWorktreeRemove(
 ): void {
     const wsPath = getWorkspacePath(cwd, branch);
 
-    // Check for active sessions before removing (M2/M3 fix)
     const wsProjectId = getProjectId(wsPath);
-    const activeSessions = getActiveSessionsForProject(wsProjectId);
-    if (activeSessions.length > 0 && !force) {
-        console.error(
-            `Error: Workspace @${branch} has ${activeSessions.length} active session(s).`,
-        );
-        console.error(`Stop sessions first or use -f to force removal.`);
-        process.exit(1);
-    }
-
-    // Stop and remove associated container first
+    let removalResult: ReturnType<typeof removeWorkspace> | null = null;
     try {
-        ensureDockerRunning();
-        const containerName = getContainerName(wsPath);
-        if (isContainerExists(containerName)) {
-            console.log(`Stopping container ${containerName}...`);
-            spawnSync(runtimeCli(), ["stop", containerName], { stdio: "ignore" });
-            spawnSync(runtimeCli(), ["rm", containerName], { stdio: "ignore" });
-        }
-    } catch {
-        // Docker not running, skip container cleanup
-    }
-
-    console.log(`Removing workspace @${branch}...`);
-    try {
-        const result = removeWorkspace(cwd, branch, { force });
+        withWorkspaceRemovalLifecycleLock(wsProjectId, force, () => {
+            assertRemovableWorkspace(wsPath, branch, cwd);
+            ensureDockerRunning();
+            console.log(`Removing workspace @${branch}...`);
+            const containerRemovalPlan = prepareWorkspaceContainerRemovalPlan(wsPath);
+            const completed = removeWorkspaceThenContainers(
+                () => removeWorkspace(cwd, branch, { force }),
+                () => removePreparedWorkspaceContainers(containerRemovalPlan),
+            );
+            removalResult = completed.result;
+            for (const containerName of completed.removedContainers) {
+                console.log(`Removed associated container ${containerName}.`);
+            }
+        });
+        const result = removalResult!;
 
         for (const name of result.removed) {
             console.log(`  removed: ${name}`);
@@ -925,16 +1476,162 @@ function handleWorktreeRemove(
             console.error(`  error: ${err}`);
         }
 
-        if (result.errors.length > 0 && !force) {
-            console.error(`\nSome items could not be removed. Use -f to force.`);
+        if (!workspaceRemovalCompleted(result)) {
+            console.error(`\n${workspaceRemovalAdvice(force, result.removed)}`);
             process.exit(1);
         } else {
             console.log("Workspace removed.");
+            // Removed is not the same as finished. A registration recorded on the other side
+            // of the container boundary survives the removal still holding the branch, and
+            // the next `ccc @<branch>` dies on it with a message whose only noun is a path
+            // that does not exist here. Say it now, while the operator is still looking.
+            const stranded = strandedBranchRegistrations(cwd, branch);
+            if (stranded.length > 0) console.error(strandedBranchNotice(branch, stranded));
         }
     } catch (e) {
         console.error(`Error: ${(e as Error).message}`);
+        const removalNote = workspaceRemovalFailureNote(e, force);
+        if (removalNote) console.error(removalNote);
         process.exit(1);
     }
+}
+
+// An ownership assert raises before `removeWorkspace` returns anything, so the summary line
+// below the error list is never reached and the operator gets only the raw sentence. It names
+// no cause, no remedy, and — the part that matters — does not say that -f cannot lift it.
+//
+// That asymmetry is real and worth stating out loud rather than only in a test: after the
+// force gate, `ccc rm -f` DELETES this shape in unified mode and REFUSES it here, and nothing
+// else tells the operator which mode they are in. `forceWouldNotHelp` was deleted because -f
+// had become the way through; this is the live case where it has not, and the sentence that
+// flag existed to produce is still needed. It belongs here, in the catch, rather than as a
+// field on a result this path never returns.
+// Extracted so a test can drive the assertion the removal path ACTUALLY makes, rather than
+// an assertion written to look like it. The first version of this fix was pinned by a test
+// that called `assertWorkspaceBranch` with the options spelled out beside it — which passes
+// whatever `src/index.ts` does, so reverting the call site left the suite green. Coupling by
+// resemblance instead of by execution, which is the mistake this task has now paid for three
+// times.
+export function assertRemovableWorkspace(
+    workspacePath: string,
+    branch: string,
+    sourcePath: string,
+    spawn: typeof spawnSync = spawnSync,
+): void {
+    // The same options `removeWorkspace` uses on its own copy of this assert, and the same
+    // ones the arm that OPENS a workspace passes. Without them `ccc rm` and `ccc rm -f` both
+    // died on a workspace whose tracked submodule is not a linked worktree — `Workspace
+    // repository 'services/api' is not owned by its source repository` — while
+    // `removeWorkspace()` on that same workspace returned {"removed":["src"],"errors":[]}.
+    // The CLI refused what the library it wraps does fine, contradicted the NOTE printed on
+    // that very workspace ("`ccc rm` will not delete it unless you pass -f", with -f being
+    // what had just refused), and left the partial-removal state unrecoverable, since the way
+    // out of that state is `--force`.
+    //
+    // This does not widen what is deletable: `allowTrackedGitlinks` admits only gitlinks the
+    // workspace's own index tracks, so a genuinely foreign repository at that path still
+    // refuses under both flags.
+    assertWorkspaceBranch(workspacePath, branch, spawn, sourcePath, {
+        allowTrackedGitlinks: true,
+    });
+}
+
+/**
+ * What is still holding the branch after a successful removal, and the commands that clear it.
+ *
+ * Extracted from the print site so it can be asserted directly: every defect this notice has
+ * had was a defect in its TEXT, and the text was the one thing no test read. The first version
+ * named `git worktree prune`, which does nothing to a locked registration. The second named
+ * `git worktree unlock` with no argument, which exits 129. The third named
+ * `git worktree unlock <the first locked path>` and "prune there", which fixes one repository
+ * out of however many are listed and leaves the operator's next `ccc @<branch>` refusing on
+ * the second — and said nothing at all about a listed repository that was stranded but not
+ * locked.
+ *
+ * So: one line per repository, unlock before prune because prune alone will not clear a locked
+ * one, and `-C` on every command because `git worktree unlock` is scoped to the repository
+ * that recorded the registration — run in the wrong one of the listed repositories it exits
+ * 128, and the sentence that just printed two repositories cannot say "there".
+ */
+export function strandedBranchNotice(
+    branch: string,
+    stranded: StrandedBranchRegistration[],
+): string {
+    // Nothing held means nothing to say. The call site guards on this too, but an exported
+    // function that answers "Branch 'x' is still held ... Run these:" with no repository and no
+    // command under it is a message that is not true, and the guard belonging only to the
+    // caller is how the same sentence gets printed by the next caller.
+    if (stranded.length === 0) return "";
+    const lines = [
+        `\nBranch '${branch}' is still held by a worktree registration recorded at a path`
+        + " that cannot be reached from here, in:",
+    ];
+    for (const { repository, lockedPaths } of stranded) {
+        lines.push(`  ${terminalSafeLiteral(repository)}`);
+        for (const path of lockedPaths) {
+            lines.push(`      locked, held by: ${terminalSafeLiteral(path)}`);
+        }
+    }
+    lines.push("Run these, or the next `ccc @" + `${branch}\` will refuse:`);
+    for (const { repository, lockedPaths } of stranded) {
+        const repo = pasteableArgument(repository);
+        for (const path of lockedPaths) {
+            // `--` because the recorded path is read verbatim out of a registry gitdir file and
+            // may begin with a dash. Without it `git worktree unlock -foo` answers
+            // `error: unknown switch 'f'` and a usage line, exit 129 — measured, and precisely
+            // the failure this notice was rewritten to stop producing. With it, git stops
+            // parsing options and reports `fatal: '-foo' is not a working tree`.
+            lines.push(`  git -C ${repo} worktree unlock -- ${pasteableArgument(path)}`);
+        }
+        lines.push(`  git -C ${repo} worktree prune`);
+    }
+    return lines.join("\n");
+}
+
+export function workspaceRemovalFailureNote(error: unknown, force: boolean): string | null {
+    const message = (error as Error)?.message ?? "";
+    // The narrower substring, because the class has more than one sentence in it. Matching
+    // "is not owned by its source repository" caught `assertWorkspaceOwnership` and silently
+    // missed `assertWorkspaceRootOwnership`'s "Workspace is not owned by source repository
+    // '<path>'" — same class, same need, one word apart. A guard written against one message
+    // rather than one class is the string-literal version of the layout mistake below.
+    //
+    // Measured, this also catches a third sentence not named above — "Nested Git repository
+    // metadata is not owned by its parent or a registered worktree". That is deliberate to
+    // keep: same class, the note's opening sentence is accurate for it, and the remedy
+    // applies. But it is claimed by a substring rather than decided, and a fourth message
+    // containing these three words, for a class where the remedy is wrong, would be claimed
+    // silently. The version that stops this recurring is a typed error on the ownership
+    // asserts, matched on instead of prose; widening the literal only moves the boundary.
+    if (!message.includes("not owned by")) return null;
+    // Two things this note MUST NOT do, both measured after the first version did them:
+    //
+    // It said "this is the multi-repo layout". The same assert raises in unified mode — a
+    // foreign repository at a tracked submodule's path produces the identical sentence — so
+    // that was the message asserting something it cannot check, again.
+    //
+    // It stopped at "delete the directory yourself". Doing that leaves a registration in the
+    // source holding the branch, marked `prunable`, and `ccc rm` afterwards answers
+    // "Workspace not found" — a different dead end, and the next `ccc @<branch>` walks into
+    // the registration bug this whole task is about. A remedy is not a remedy until the state
+    // it leaves behind is also named.
+    return "\nccc will not remove a workspace whose nested repository it cannot prove it owns"
+        + `${force ? ", and -f does not lift this" : ""}.`
+        + "\nMove what you want to keep out of the workspace, then delete the workspace"
+        + " directory yourself."
+        // "in each nested repository" was the first version, and it was validated in the
+        // multi-repo layout, where it terminates. In the unified layout the workspace root is
+        // ITSELF a linked worktree of the source root, so hand-deleting it always leaves a
+        // registration there and nothing among the nested repositories can clear it — the
+        // operator followed the sentence exactly and landed on the outcome its own last clause
+        // promised they were avoiding. Naming the source too is a no-op in multi-repo, where
+        // the root is not a git repository at all, and is the one that matters in unified.
+        //
+        // Third time in this task that a fix was measured in one layout and shipped for both.
+        // Whatever comes next gets run in both before it ships.
+        + "\nThat leaves worktree registrations still holding the branch: run"
+        + " `git worktree prune` in the source repository if it is one, and in each nested"
+        + " repository, or the next `ccc @<branch>` will refuse.";
 }
 
 function showHelp(): void {
@@ -953,7 +1650,7 @@ TOOLS:
     ccc codex               Run Codex
     ccc opencode            Run OpenCode
 
-PROFILES (separate claude credential directories):
+PROFILES (separate Claude and Codex logins; "default" is used without CCC_PROFILE):
     CCC_PROFILE=<name> ccc      Run with profile
     ccc profile list            List all profiles
     ccc profile add <name>      Create profile
@@ -971,6 +1668,36 @@ CONTAINER MANAGEMENT:
     ccc rm                  Remove current project's container
     ccc status              Show all containers status
     ccc doctor              Health check and diagnostics
+    ccc devices             Show device-lab status for this owner
+    ccc devices list        List current-project device definitions
+    ccc devices list --all-projects
+                            List device definitions across all projects
+    ccc devices create <backend> <id>
+                            Create an owner-scoped device definition
+    ccc devices start <id>  Start a device (Windows Sandbox defaults minimized)
+    ccc devices reboot <id> Reboot a Hyper-V Windows or Linux VM
+    ccc devices status <id> Show broker-owned device status
+    ccc devices backends    Show device backend prerequisites
+    ccc devices doctor      Device-lab diagnostics
+    ccc devices smoke       Non-destructive device backend smoke checks
+    ccc devices smoke --real-provider
+                            Opt-in real provider readiness smoke checks
+    ccc devices setup hyper-v
+                            Diagnose Hyper-V host setup without changing Windows
+    ccc devices setup hyper-v --confirm
+                            Request elevation and enable Hyper-V; never reboots automatically
+    ccc devices stop <id>   Stop a current-project device definition
+    ccc devices stop --all-projects
+                            Stop devices across all projects
+    ccc devices delete <id> Delete a current-project stopped device definition
+    ccc devices prune       Remove stopped current-project device definitions
+    ccc devices prune --all-projects
+                            Remove stopped definitions across all projects
+    ccc devices broker status [--verbose]
+    ccc labs                Show lab-runner container VM readiness
+    ccc labs smoke          Non-starting lab-runner VM readiness smoke check
+    ccc labs shell          Open bash in the built-in lab-runner profile
+    ccc labs run <command>  Run a command in the built-in lab-runner profile
     ccc runtime             Show detected container runtime
     ccc clean               Clean stopped containers and images
     ccc clean --volumes     Also remove cached volumes
@@ -989,6 +1716,7 @@ OPTIONS:
     --runtime <name>        Use docker or podman for this invocation
     --default <tool>        Set default tool (claude/gemini/codex/opencode)
     --default               Show current default tool
+    -v, --version           Show the CCC CLI version
     -h, --help              Show this help
 
 EXAMPLES:
@@ -1027,6 +1755,38 @@ export function parseArgs(args: string[]): {
     return { worktreeArg, filteredArgs };
 }
 
+export function informationalCommand(args: string[]): "help" | "version" | null {
+    const { filteredArgs } = parseArgs(args);
+    let command: string | undefined;
+    for (let i = 0; i < filteredArgs.length; i += 1) {
+        if ((filteredArgs[i] === "--env" || filteredArgs[i] === "--runtime") && i + 1 < filteredArgs.length) {
+            i += 1;
+            continue;
+        }
+        command = filteredArgs[i];
+        break;
+    }
+    if (command === "-h" || command === "--help" || command === "help") return "help";
+    if (command === "-v" || command === "--version" || command === "version") return "version";
+    return null;
+}
+
+// Move a pre-layout ~/.ccc into profiles/ and run/ (doc/common/REQ__ccc-home-layout.md).
+// Host-side only: inside a ccc container ~/.ccc holds container state, not the host layout.
+function migrateHostHomeLayout(): void {
+    if (process.env[CONTAINER_ENV_KEY] === CONTAINER_ENV_VALUE) return;
+    try {
+        migrateHomeLayout({
+            // Sessions of an older ccc use ~/.ccc/locks even when run/locks exists.
+            hasLiveSessions: () => [join(DATA_DIR, "locks"), join(DATA_DIR, "run", "locks")]
+                .some((directory) => hasAnyActiveSessionsExcept(null, directory)),
+            retireLegacyClipboard: retireClipboardServerFromPortFile,
+        });
+    } catch (error) {
+        console.error(`ccc: ~/.ccc layout migration skipped (${(error as Error).message}); the old paths keep working.`);
+    }
+}
+
 // === Main ===
 async function main(): Promise<void> {
     const args = process.argv.slice(2);
@@ -1034,13 +1794,28 @@ async function main(): Promise<void> {
     // Unified parsing: @branch and remaining args
     const { worktreeArg, filteredArgs } = parseArgs(args);
 
-    // Profile from CCC_PROFILE env var
-    const profile = process.env.CCC_PROFILE || undefined;
+    // Informational commands must never validate profiles, create worktrees,
+    // start containers, or reconcile the host device broker.
+    const informational = informationalCommand(args);
+    if (informational === "help") {
+        showHelp();
+        return;
+    }
+    if (informational === "version") {
+        console.log(CLI_VERSION);
+        return;
+    }
+
+    migrateHostHomeLayout();
+
+    // Profile from CCC_PROFILE env var; "default" is the no-profile account.
+    const requestedProfile = process.env.CCC_PROFILE || undefined;
+    if (requestedProfile !== undefined && !validateProfileName(requestedProfile)) {
+        console.error(`Error: Invalid CCC_PROFILE="${requestedProfile}". Use lowercase letters, digits, ., _, - only.`);
+        process.exit(1);
+    }
+    const profile = normalizeProfile(requestedProfile);
     if (profile !== undefined) {
-        if (!validateProfileName(profile)) {
-            console.error(`Error: Invalid CCC_PROFILE="${profile}". Use lowercase letters, digits, ., _, - only.`);
-            process.exit(1);
-        }
         if (!profileExists(profile)) {
             if (isBuiltinProfile(profile)) {
                 ensureProfile(profile);
@@ -1062,7 +1837,12 @@ async function main(): Promise<void> {
                 console.error(`Unknown tool: ${nextArg}. Available: ${getAllTools().map(t => t.name).join(", ")}`);
                 process.exit(1);
             }
-            setDefaultToolPreference(nextArg);
+            try {
+                setDefaultToolPreference(nextArg);
+            } catch (error) {
+                console.error(`Error: ${(error as Error).message}`);
+                process.exit(1);
+            }
             console.log(`Default tool set to: ${nextArg}`);
             return;
         } else {
@@ -1097,6 +1877,8 @@ async function main(): Promise<void> {
 
     let command = cmdArgs[0];
     let cwd = process.cwd();
+    let expectedWorktreeBranch: string | undefined;
+    let expectedWorktreeSourcePath: string | undefined;
 
     // @ prefix → worktree workspace
     if (worktreeArg) {
@@ -1118,10 +1900,13 @@ async function main(): Promise<void> {
             if (process.env.DEBUG) {
                 console.error(`[ccc:debug] worktree: originalCwd=${cwd} branch=${parsed.branch}`);
             }
+            expectedWorktreeSourcePath = cwd;
             cwd = await prepareWorktree(cwd, parsed.branch);
+            expectedWorktreeBranch = parsed.branch;
             // command stays as filteredArgs[0] (parseArgs already separated @branch)
         }
     }
+    expectedWorktreeBranch ??= detectWorktreeWorkspaceBranch(cwd) ?? undefined;
 
     switch (command) {
         case "-h":
@@ -1130,12 +1915,30 @@ async function main(): Promise<void> {
             showHelp();
             break;
 
+        case "-v":
+        case "--version":
+        case "version":
+            console.log(CLI_VERSION);
+            break;
+
         case "stop":
-            stopProjectContainer(cwd, profile);
+            if (expectedWorktreeBranch) {
+                runWorktreeLifecycleOperation(cwd, expectedWorktreeBranch, () => {
+                    stopProjectContainer(cwd, profile, { force: cmdArgs.includes("--force") || cmdArgs.includes("-f") });
+                }, withProjectFamilyLifecycleLock, assertWorkspaceBranch, expectedWorktreeSourcePath);
+            } else {
+                stopProjectContainer(cwd, profile, { force: cmdArgs.includes("--force") || cmdArgs.includes("-f") });
+            }
             break;
 
         case "rm":
-            removeProjectContainer(cwd, profile);
+            if (expectedWorktreeBranch) {
+                runWorktreeLifecycleOperation(cwd, expectedWorktreeBranch, () => {
+                    removeProjectContainer(cwd, profile, { force: cmdArgs.includes("--force") || cmdArgs.includes("-f") });
+                }, withProjectFamilyLifecycleLock, assertWorkspaceBranch, expectedWorktreeSourcePath);
+            } else {
+                removeProjectContainer(cwd, profile, { force: cmdArgs.includes("--force") || cmdArgs.includes("-f") });
+            }
             break;
 
         case "status":
@@ -1150,6 +1953,37 @@ async function main(): Promise<void> {
             const { runDoctor } = await import("./doctor.js");
             const healthy = runDoctor(cwd);
             process.exit(healthy ? 0 : 1);
+            break;
+        }
+
+        case "devices": {
+            const status = await devicesCliAsync(cmdArgs.slice(1), cwd, profile);
+            if (cmdArgs[1] === "broker" && cmdArgs[2] === "serve" && status === 0) {
+                return;
+            }
+            process.exit(status);
+            break;
+        }
+
+        case "labs": {
+            const subcommand = cmdArgs[1] || "status";
+            if (subcommand === "shell") {
+                ensureProfile(LAB_RUNNER_PROFILE_NAME);
+                await exec(cwd, ["bash"], { ...envOpt, expectedWorktreeBranch, expectedWorktreeSourcePath }, LAB_RUNNER_PROFILE_NAME);
+                break;
+            }
+            if (subcommand === "run") {
+                const labCommand = cmdArgs.slice(2);
+                if (labCommand.length === 0) {
+                    console.error("Usage: ccc labs run <command>");
+                    process.exit(1);
+                }
+                ensureProfile(LAB_RUNNER_PROFILE_NAME);
+                await exec(cwd, labCommand, { ...envOpt, expectedWorktreeBranch, expectedWorktreeSourcePath }, LAB_RUNNER_PROFILE_NAME);
+                break;
+            }
+            const status = labsCli(cmdArgs.slice(1), cwd);
+            process.exit(status);
             break;
         }
 
@@ -1210,6 +2044,10 @@ async function main(): Promise<void> {
                         console.error(`Error: Invalid profile name "${name}".`);
                         process.exit(1);
                     }
+                    if (name === DEFAULT_PROFILE_NAME) {
+                        console.error(`Error: "${DEFAULT_PROFILE_NAME}" is the account used without CCC_PROFILE; it always exists.`);
+                        process.exit(1);
+                    }
                     if (profileExists(name)) {
                         console.error(`Error: Profile "${name}" already exists.`);
                         process.exit(1);
@@ -1222,6 +2060,10 @@ async function main(): Promise<void> {
                 case "rm": {
                     if (!name) {
                         console.error("Usage: ccc profile rm <name>");
+                        process.exit(1);
+                    }
+                    if (name === DEFAULT_PROFILE_NAME) {
+                        console.error(`Error: the "${DEFAULT_PROFILE_NAME}" profile cannot be removed; it holds the credentials used without CCC_PROFILE.`);
                         process.exit(1);
                     }
                     if (!profileExists(name)) {
@@ -1240,18 +2082,18 @@ async function main(): Promise<void> {
         }
 
         case "shell":
-            await exec(cwd, ["bash"], { ...envOpt }, profile);
+            await exec(cwd, ["bash"], { ...envOpt, expectedWorktreeBranch, expectedWorktreeSourcePath }, profile);
             break;
 
         case "update": {
             const tool = resolveTool(process.env);
-            await exec(cwd, tool.updateCommand, { tool, ...envOpt }, profile);
+            await exec(cwd, tool.updateCommand, { tool, ...envOpt, expectedWorktreeBranch, expectedWorktreeSourcePath }, profile);
             break;
         }
 
         case undefined: {
             const tool = resolveTool(process.env);
-            await exec(cwd, buildToolInvocation(tool, []), { tool, ...envOpt }, profile);
+            await exec(cwd, buildToolInvocation(tool, []), { tool, ...envOpt, expectedWorktreeBranch, expectedWorktreeSourcePath }, profile);
             break;
         }
 
@@ -1259,12 +2101,12 @@ async function main(): Promise<void> {
             const tool = getToolByName(command);
             if (tool) {
                 const toolArgs = cmdArgs.slice(1);
-                await exec(cwd, buildToolInvocation(tool, toolArgs), { tool, ...envOpt }, profile);
+                await exec(cwd, buildToolInvocation(tool, toolArgs), { tool, ...envOpt, expectedWorktreeBranch, expectedWorktreeSourcePath }, profile);
             } else if (command.startsWith("-")) {
                 const defTool = resolveTool(process.env);
-                await exec(cwd, buildToolInvocation(defTool, cmdArgs), { tool: defTool, ...envOpt }, profile);
+                await exec(cwd, buildToolInvocation(defTool, cmdArgs), { tool: defTool, ...envOpt, expectedWorktreeBranch, expectedWorktreeSourcePath }, profile);
             } else {
-                await exec(cwd, cmdArgs, { ...envOpt }, profile);
+                await exec(cwd, cmdArgs, { ...envOpt, expectedWorktreeBranch, expectedWorktreeSourcePath }, profile);
             }
             break;
     }
@@ -1273,7 +2115,10 @@ async function main(): Promise<void> {
 // Run main only when executed directly (not when imported by test frameworks)
 if (!process.env.VITEST) {
     main().catch((err) => {
-        console.error(err);
+        try { cleanupSession(); } catch (cleanupError) {
+            console.error(`[ccc] cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+        }
+        console.error(formatContainerStartupError(err, Boolean(process.env.DEBUG)));
         process.exit(1);
     });
 }
