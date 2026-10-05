@@ -143,6 +143,80 @@ Hyper-V mouse coordinates are pixels of the latest returned PNG and expire after
 The latest Windows (2026-09-25) and Linux (2026-09-26) Level 3 GUI runs have passed on the Windows Hyper-V host. A successful screenshot or native input call by itself does not prove that a guest UI changed. Capture a second screenshot to check the result.
 
 To check both guests on a Windows Hyper-V host, run `npm run test:level3:hyper-v`. For one guest, use `npm run test:level3:hyper-v:windows` or `npm run test:level3:hyper-v:linux`. These default tests verify screenshot, pointer, keyboard and visible scroll through packaged MCP, and check a nonce file created inside the guest by GUI typing (the console on Windows, the X11 session on Linux). The Linux run prepares Xfce automatically during `start`. These host runs cannot be executed from inside a development container; run them on the Windows host.
+The shared GUI journey also enumerates the test application's window, focuses its
+returned handle, and drags the pointer to a separately observed cursor endpoint.
+These tools must actually run; advertising them alone does not satisfy the final
+capability coverage check.
+
+Windows Sandbox defaults to `minimized:true`. Its host launch requests minimized
+nonactivation (Shell show mode 7), and helper recovery never escalates to a visible
+connection. Explicit `minimized:false` still opens an interactive Sandbox window.
+The native application may override a shell show request, so a passing fake-provider
+test does not prove that fullscreen host applications remain undisturbed. Verify
+foreground-window behavior on Windows before claiming that guarantee.
+
+Helper bootstrap and one-shot recovery share the requested operation deadline;
+expiry does not permit a fresh minimum-duration retry. Successful process launch
+alone does not establish readiness: `start` must still observe a working cursor
+probe. See [Microsoft's ShellExecute show modes](https://learn.microsoft.com/en-us/windows/win32/shell/shell-shellexecute).
+
+Logon and recovery can request bootstrap concurrently. Bootstrap serializes its
+file/process changes and reuses an exactly identified live helper, preserving its
+script and redirected logs. An uncertain process identity is a failure to inspect,
+not permission to overwrite logs or kill a process. A separate daemon lock prevents
+two request loops; one-shot requests do not take that lifetime lock.
+
+A missing helper-ready marker does not mean the host viewer needs another
+connection. Recovery preserves a successful session launch and retries guest
+bootstrap without opening another viewer. The local failure bundle includes
+`ccc-guest-helper-bootstrap-phase.json` to distinguish early discovery from
+helper launch; its presence does not establish working computer input.
+
+The Sandbox real E2E passes its configured operation timeout (180 seconds by
+default) as `bootTimeoutMs` on both initial start and the existing single-use
+recovery start. This includes provider startup and cursor readiness; it does not
+change the public start default or make a launched process count as ready.
+
+Sandbox E2E guest commands require an explicit zero exit status. A nonzero or
+missing status reports `guest-exec-failed` and writes bounded stdout/stderr to
+`results/device-lab-real/windows-sandbox-exec-<uuid>.json` before cleanup. This
+private local evidence can contain sensitive output; it is not printed in the
+test summary. A successful command still needs the existing window-list and
+focus checks to prove the GUI action worked.
+
+The Sandbox E2E uses its own Windows PowerShell/WinForms window to display the
+uploaded text file; it does not require Notepad to be installed. Window selection
+requires the launched process ID and the exact test-specific title before focus.
+The child uses `CreateNoWindow` to avoid creating a console, without applying
+`WindowStyle.Hidden` to the GUI process. The test's existing Sandbox teardown
+closes the window. If enumeration cannot find it, the E2E captures process
+liveness and the child's starting/shown/failed phase in private exec evidence
+before teardown. The phase does not replace the real window-list/focus proof.
+Window discovery and focus have separate E2E failure stages. A focus MCP error,
+including a plain-text reply, is saved in the same private evidence bundle;
+only exact known focus error codes appear in the terminal summary.
+Broker-backed focus requests preserve the validated opaque `handle` across the
+backend child-process boundary, for both Sandbox numeric handles and macOS
+handles. Input validation still rejects malformed handles before dispatch.
+
+If Sandbox startup fails, the E2E now saves a local
+`results/device-lab-real/windows-sandbox-bootstrap-<uuid>.json` bundle before
+stopping/deleting its device. It contains only bounded, fixed startup logs and
+markers from that test's owner/device. This raw local bundle is separate from
+sanitized MCP error JSON; review it locally before sharing. Capture errors do
+not prevent cleanup. The console reference makes the actual startup evidence
+available after cleanup, rather than requiring another run merely to collect it.
+
+For a focused Windows Sandbox rerun from PowerShell, explicitly enable level 2:
+
+```powershell
+$env:CCC_TEST_LEVEL = '2'
+node --import tsx scripts/real-tests/run.ts scripts/real-tests/level2-windows-sandbox.ts
+```
+
+Without that setting, the standalone Sandbox scenario reports SKIP rather than
+running the test. SKIP is not evidence of a working Sandbox.
+
 
 ## When the display is unavailable
 
@@ -341,3 +415,5 @@ Call `devices({view:"available", backend:"android-emulator"})` to obtain install
 For physical devices, `attach` requires `udid` on iOS. Android uses USB by default and requires `serial`; with `connection:"wifi"`, provide `host` or a network `serial` (port defaults to 5555). Obtain selectors from `devices` with the corresponding backend and `view:"available"`.
 
 Compact waits return `matched` as the single condition flag; `matched:false` means the completed observation did not meet the condition. Transport or command failures remain errors. Detailed waits may retain native status and provider condition fields.
+
+Broker backend-enum diagnostics use backend-specific physical identifiers (`serial` for Android, `udid` for iOS). Their broker endpoint uses `brokerPort`; it must not leak into the wireless device `port` input. The real-test suite validates these probe arguments before dispatch so an input rejection cannot masquerade as provider coverage.

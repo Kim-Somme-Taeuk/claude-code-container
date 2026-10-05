@@ -51,7 +51,11 @@ beforeEach(async () => {
         proc.stdin = new Writable({
             write(chunk, _encoding, done) {
                 proc.input.push(Buffer.from(chunk));
-                if (persistent) persistentInput?.(proc, chunk.toString());
+                if (persistent) {
+                    const wire = chunk.toString();
+                    const encoded = /FromBase64String\('([A-Za-z0-9+/=]+)'\)/.exec(wire);
+                    persistentInput?.(proc, encoded ? Buffer.from(encoded[1], "base64").toString("utf16le") : wire);
+                }
                 done();
             },
             final(done) {

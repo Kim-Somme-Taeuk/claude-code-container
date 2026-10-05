@@ -8,6 +8,7 @@ import {
     hyperVProviderDiagnosticCode,
     hyperVTypedErrorCode,
     hyperVTypedErrorOperation,
+    hyperVTypedNativeDiagnostics,
     publicHyperVCreateConfiguration,
     redactHyperVDeviceSecrets,
     redactHyperVResultSecrets,
@@ -654,5 +655,29 @@ describe("Hyper-V memory admission evidence", () => {
     it.each([null, [], {}, { ...capacity, availableMb: "6000" }, { ...capacity, reserveMb: -1 },
         { ...capacity, shortfallMb: Infinity }, { ...capacity, requestedMb: Number.MAX_SAFE_INTEGER + 1 }])("omits malformed capacity %j", (value) => {
         expect(redactProviderCommandInput({ ...execution, capacity: value }, true)).not.toHaveProperty("capacity");
+    });
+});
+
+
+describe("bounded native error diagnostics", () => {
+    const typed = (fields: Record<string, unknown> = {}) => new HyperVWindowsError({
+        category: "native", operation: "Set-VMFirmware", code: "InvalidParameter", ...fields,
+    });
+    it("preserves signed HRESULT and numeric category for direct and wrapped native failures", () => {
+        const error = typed({ nativeHResult: -2147024809, nativeErrorCategory: 5 });
+        for (const failure of [error, new Error("host secret", { cause: error })]) {
+            expect(hyperVTypedNativeDiagnostics(failure)).toEqual({ nativeHResult: -2147024809, nativeErrorCategory: 5 });
+        }
+    });
+    it.each([
+        typed(), new Error("host secret"), { nativeHResult: -1, nativeErrorCategory: 5 },
+        typed({ nativeHResult: "secret", nativeErrorCategory: "InvalidArgument" }),
+        typed({ nativeHResult: -2147483649, nativeErrorCategory: -1 }),
+        typed({ nativeHResult: 2147483648, nativeErrorCategory: 32 }),
+        typed({ nativeHResult: 0.5, nativeErrorCategory: 0.5 }),
+        typed({ category: "transport", nativeHResult: -1, nativeErrorCategory: 5 }),
+        typed({ operation: "host secret", nativeHResult: -1, nativeErrorCategory: 5 }),
+    ])("omits absent, untyped, out-of-range or non-native facts", (failure) => {
+        expect(hyperVTypedNativeDiagnostics(failure)).toEqual({});
     });
 });

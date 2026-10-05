@@ -5,8 +5,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, truncateSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { cleanupWindowsSandboxMinimizeWatchdogs, windowsHelperScript, windowsReadyMinimizeWatchdogArgs, windowsSandboxGuestProcessStatus, windowsSandboxMinimizeWatchdogArgs, windowsSandboxRuntimeDelta, windowsSandboxSessionIdsFromListOutput, windowsWsbConfigLaunchArgs } from "@ccc/device-lab/providers/backends/windows-sandbox.mjs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { classifyWindowsSandboxHelperStderr, windowsSandboxHelperLogEvidence, launchWindowsSandboxSession, runWindowsHelperBootstrapFallback, runWindowsHelperRequestOnce, windowsMinimizedStartProcessArgs, cleanupWindowsSandboxMinimizeWatchdogs, windowsHelperScript, windowsReadyMinimizeWatchdogArgs, windowsSandboxGuestProcessStatus, windowsSandboxMinimizeWatchdogArgs, windowsSandboxRuntimeDelta, windowsSandboxSessionIdsFromListOutput, windowsWsbConfigLaunchArgs } from "@ccc/device-lab/providers/backends/windows-sandbox.mjs";
 import { installDefaultImplicitBroker } from "./helpers/device-lab-mcp-fixture.js";
 
 const repoRoot = join(__dirname, "../..");
@@ -233,8 +233,11 @@ require('node:module').syncBuiltinESMExports();`);
         expect(typeof encoded).toBe("string");
         const script = Buffer.from(encoded as string, "base64").toString("utf16le");
         expect(script).toContain(`$ConfigPath = '${configPath}'`);
-        expect(script).toContain("$WindowStyle = 'Normal'");
-        expect(script).toContain("Start-Process -FilePath $ConfigPath -WindowStyle $WindowStyle -PassThru");
+        expect(script).toContain("ShellExecute($ConfigPath, '', '', 'open', 7)");
+        expect(script).not.toContain("-WindowStyle Normal");
+        const visible = Buffer.from(windowsWsbConfigLaunchArgs(configPath, false).at(-1) as string, "base64").toString("utf16le");
+        expect(visible).toContain("Start-Process -FilePath $ConfigPath -WindowStyle Normal");
+        expect(visible).not.toContain("ShellExecute");
         expect(script).not.toContain("$ReadyMarkerPath");
         expect(script).not.toContain("ShowWindowAsync");
         expect(script).not.toContain("wsb start");
@@ -308,11 +311,14 @@ require('node:module').syncBuiltinESMExports();`);
         });
         expect(create.isError).not.toBe(true);
         const created = JSON.parse(((create.content as Array<{ text?: string }>)[0].text ?? "{}")) as {
-            device: { deviceId: string; helper: { scratchDir: string; toolsDir: string; hostHelperScript: string } };
+            device: { deviceId: string; helper: { scratchDir: string; toolsDir: string; hostHelperScript: string; bootstrapReadyMarkerPath: string; bootstrapPhasePath: string } };
         };
         expect(created.device.deviceId).toBe("windows-win-helper");
         expect(created.device).toEqual(expect.objectContaining({ minimized: true }));
         expect(created.device.helper.scratchDir).toContain("windows-win-helper");
+        writeFileSync(created.device.helper.bootstrapReadyMarkerPath, "stale previous boot");
+        writeFileSync(created.device.helper.bootstrapPhasePath, "stale phase");
+        writeFileSync(`${created.device.helper.bootstrapPhasePath}.tmp`, "stale temporary phase");
 
         expect(readFileSync(logPath, { encoding: "utf-8", flag: "a+" })).not.toContain("wsb start");
         const inventory = await client.callTool({
@@ -396,9 +402,12 @@ require('node:module').syncBuiltinESMExports();`);
         expect(helperScript).toContain("ConvertTo-Json -Depth 32");
         expect(helperScript).toContain("'upload'");
         expect(helperScript).toContain("'download'");
+        expect(existsSync(created.device.helper.bootstrapReadyMarkerPath)).toBe(false);
+        expect(existsSync(created.device.helper.bootstrapPhasePath)).toBe(false);
+        expect(existsSync(`${created.device.helper.bootstrapPhasePath}.tmp`)).toBe(false);
         const bootstrapScript = readFileSync(started.device.helper.hostBootstrapScript, "utf-8");
-        expect(bootstrapScript).toContain("Copy-Item -Force -Path $ToolsHelper -Destination $ScratchHelper");
-        expect(bootstrapScript).toContain("Start-Process -FilePath powershell.exe");
+        expect(bootstrapScript).toContain("Copy-Item -Force -LiteralPath $ToolsHelper -Destination $ScratchHelper");
+        expect(bootstrapScript).toContain("Start-Process -FilePath $PowerShellExe");
         expect(bootstrapScript).toContain("helper-pid");
         expect(bootstrapScript).toContain("$BootstrapStderrPath");
         expect(bootstrapScript).toContain("ccc-guest-helper-bootstrap.ready.txt");
@@ -1120,6 +1129,41 @@ require('node:module').syncBuiltinESMExports();`);
         expect(existsSync(failCreated.device.helper.scratchDir)).toBe(false);
     });
 
+    it("reports an invalid Sandbox identity without exposing the device or helper paths", async () => {
+        await client.callTool({ name: "create_windows_sandbox", arguments: { name: "No runtime", deviceId: "no-runtime" } });
+        const probe = await client.callTool({ name: "cursor_position", arguments: { deviceId: "no-runtime", timeoutMs: 1000 } });
+        const value = JSON.parse((probe.content as Array<{ text: string }>)[0].text);
+        expect(probe.isError).toBe(true);
+        expect(value).toEqual({ ok: false, error: "windows-sandbox-helper-failed", helperDiagnostic: { stage: "sandbox-id-invalid", readyMarkerPresent: false } });
+        expect(JSON.stringify(value)).not.toContain(homeDir);
+    });
+
+    it("reports a rejected cursor response as a closed stage without guest exception text", async () => {
+        const deviceId = "cursor-rejected";
+        await client.callTool({ name: "create_windows_sandbox", arguments: { name: "Cursor rejected", deviceId } });
+        const started = await client.callTool({ name: "start", arguments: { waitForBoot: false, deviceId } });
+        const helper = JSON.parse((started.content as Array<{ text: string }>)[0].text).device.helper;
+        writeFileSync(helper.readyMarkerPath, "ready");
+        const responder = trackResponder(() => {
+            for (const file of readdirSync(helper.inboxDir).filter(name => name.endsWith(".json"))) {
+                const path = join(helper.inboxDir, file);
+                const request = JSON.parse(readFileSync(path, "utf8"));
+                writeFileSync(join(helper.outboxDir, file), JSON.stringify({ id: request.id, type: request.type, ok: false, error: "guest secret C:\\private\\file" }));
+                rmSync(path, { force: true });
+            }
+        }, 10);
+        try {
+            const probe = await client.callTool({ name: "cursor_position", arguments: { deviceId, timeoutMs: 1000 } });
+            const value = JSON.parse((probe.content as Array<{ text: string }>)[0].text);
+            expect(probe.isError).toBe(true);
+            expect(value).toEqual({ ok: false, error: "windows-sandbox-helper-response-rejected", helperDiagnostic: { stage: "response-rejected", readyMarkerPresent: true } });
+            expect(JSON.stringify(value)).not.toMatch(/secret|private/);
+        } finally {
+            clearInterval(responder);
+            await client.callTool({ name: "stop", arguments: { deviceId } });
+        }
+    });
+
     it("falls back to a one-shot helper request when the long-running helper does not answer", { timeout: TIMEOUT }, async () => {
         const create = await client.callTool({
             name: "create_windows_sandbox",
@@ -1154,6 +1198,18 @@ require('node:module').syncBuiltinESMExports();`);
             expect(text).toContain("Request file:");
             expect(text).toContain("Response file:");
             expect(text).toContain("Helper heartbeat:");
+
+            const cursorProbe = await client.callTool({ name: "cursor_position", arguments: {
+                deviceId: "windows-one-shot", timeoutMs: 2000,
+            } });
+            expect(cursorProbe.isError).toBe(true);
+            const cursorFailure = JSON.parse((cursorProbe.content as Array<{ text: string }>)[0].text);
+            expect(cursorFailure).toMatchObject({ error: "windows-sandbox-helper-timeout", helperDiagnostic: {
+                stage: "response-timeout", logEvidence: { bootstrapStarted: false, bootstrapReady: false, helperHeartbeat: false, bootstrapStderr: "absent", helperStderr: "absent" }, readyMarkerPresent: expect.any(Boolean), bootstrapAttempted: expect.any(Boolean),
+                bootstrapOk: expect.any(Boolean), requestAttempted: true, requestOk: true, responseParseFailed: false,
+            } });
+            expect(JSON.stringify(cursorFailure)).not.toContain(homeDir);
+            expect(JSON.stringify(cursorFailure)).not.toMatch(/stdout|stderr|Inbox|command/);
 
             const log = await waitForLog(logPath, /-OnceRequestPath/);
             expect(log).toMatch(/wsb exec --id [0-9a-f-]{36} --command powershell\.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\ccc\\scratch\\inbox\\[0-9a-f-]{36}\.json\.ps1/);
@@ -1197,6 +1253,25 @@ require('node:module').syncBuiltinESMExports();`);
         }
     });
 
+    it.each([undefined, { ok: false }])("recovers a missing or failed session launch while still requiring cursor readiness", { timeout: TIMEOUT }, async (helperSessionLaunch) => {
+        const deviceId = "session-recovery";
+        await client.callTool({ name: "create_windows_sandbox", arguments: { name: "Session recovery", deviceId } });
+        await client.callTool({ name: "start", arguments: { waitForBoot: false, deviceId } });
+        try {
+            const statePath = windowsStatePath();
+            const state = JSON.parse(readFileSync(statePath, "utf8"));
+            state.devices.find((device: { id: string }) => device.id === deviceId).helperSessionLaunch = helperSessionLaunch;
+            writeFileSync(statePath, JSON.stringify(state));
+            const before = await waitForStableLog(logPath);
+            const probe = await client.callTool({ name: "cursor_position", arguments: { deviceId, timeoutMs: 350 } });
+            expect(probe.isError).toBe(true);
+            const after = await waitForStableLog(logPath);
+            expect((after.slice(before.length).match(/wsb connect --id/g) || []).length).toBe(1);
+        } finally {
+            await client.callTool({ name: "stop", arguments: { deviceId } });
+        }
+    });
+
     it("retries ExistingLogin without using invalid run-as modes when no Sandbox login session exists yet", { timeout: TIMEOUT }, async () => {
         writeFileSync(failExistingLoginPath, "fail");
         const logBefore = readFileSync(logPath, { encoding: "utf-8", flag: "a+" });
@@ -1226,16 +1301,17 @@ require('node:module').syncBuiltinESMExports();`);
             expect(exec.isError).toBe(true);
             const text = (exec.content as Array<{ text?: string }>)[0].text ?? "";
             expect(text).toContain("Bootstrap exec attempts:");
-            expect(text).toContain("Bootstrap visible connect fallback:");
-            expect(text).toContain("autoMinimizeAfterVisible=");
+            expect(text).not.toContain("visible connect fallback");
+            expect(text).not.toContain("autoMinimizeAfterVisible");
             expect(text).toContain("runAs=ExistingLogin");
-            expect(text).not.toContain("Request exec fallback:");
+
             expect(text).not.toContain("runAs=Default");
             expect(text).not.toContain("runAs=implicit");
 
             const log = readFileSync(logPath, "utf-8");
             const newLog = log.slice(logBefore.length);
-            expect((newLog.match(/wsb connect --id/g) || []).length).toBeGreaterThanOrEqual(1);
+            // Start already created the viewer; missing readiness and login failure must not reconnect.
+            expect((newLog.match(/wsb connect --id/g) || []).length).toBe(1);
             expect((newLog.match(/--run-as ExistingLogin/g) || []).length).toBeGreaterThanOrEqual(1);
             expect(newLog).not.toContain("--run-as Default");
         } finally {
@@ -1512,5 +1588,126 @@ require('node:module').syncBuiltinESMExports();`);
                 arguments: { deviceId: "windows-malformed-lock", force: true, confirmDestructive: true },
             });
         }
+    });
+});
+
+
+describe("Sandbox background launch and helper deadlines", () => {
+    const helper = { guestBootstrapScript: "C:\\ccc\\tools\\bootstrap.ps1", readyMarkerPath: "/nonexistent-sandbox-bootstrap-marker" };
+    const device = { sandboxId: "11111111-1111-4111-8111-111111111111", minimized: true };
+    it("requests nonactivating minimized connect and preserves waited exit status", () => {
+        const generated = Buffer.from(windowsMinimizedStartProcessArgs("C:\\Program Files\\wsb.exe", ["connect", "--id", device.sandboxId], false).at(-1) as string, "base64").toString("utf16le");
+        expect(generated).toContain("ShellExecute($Executable, $Arguments, '', 'open', 7)");
+        expect(generated).toContain("$Executable = 'C:\\Program Files\\wsb.exe'");
+        expect(generated).toContain(`connect --id ${device.sandboxId}`);
+        expect(generated).not.toContain("Start-Process");
+        const waited = Buffer.from(windowsMinimizedStartProcessArgs("wsb.exe", ["stop"], true).at(-1) as string, "base64").toString("utf16le");
+        expect(waited).toContain("-Wait -PassThru");
+        expect(waited).toContain("exit $Process.ExitCode");
+    });
+    it.each([0, 1])("observes the background COM launcher exit (%s) within the remaining budget", status => {
+        const runLauncher = vi.fn(() => ({ status }));
+        const spawnSession = vi.fn();
+        const result = launchWindowsSandboxSession("wsb.exe", device.sandboxId, true, 250, { platform: "win32", runLauncher, spawnSession });
+        expect(runLauncher).toHaveBeenCalledWith("powershell.exe", expect.any(Array), 250);
+        expect(spawnSession).not.toHaveBeenCalled();
+        expect(result.ok).toBe(status === 0);
+        if (status !== 0) expect(result.error).toBe("session-connect-launcher-failed");
+    });
+    it("never launches a connection after its budget and keeps explicit foreground mode available", () => {
+        const runLauncher = vi.fn();
+        const unref = vi.fn();
+        const spawnSession = vi.fn(() => ({ pid: 42, unref }));
+        const hooks = { platform: "win32", runLauncher, spawnSession };
+        expect(launchWindowsSandboxSession("wsb.exe", device.sandboxId, true, 0, hooks).ok).toBe(false);
+        expect(runLauncher).not.toHaveBeenCalled();
+        expect(spawnSession).not.toHaveBeenCalled();
+        expect(launchWindowsSandboxSession("wsb.exe", device.sandboxId, false, 250, hooks).ok).toBe(true);
+        expect(spawnSession).toHaveBeenCalledWith("wsb.exe", ["connect", "--id", device.sandboxId], expect.objectContaining({ windowsHide: false }));
+        expect(unref).toHaveBeenCalledOnce();
+    });
+    it("spends at most 75 percent of a short bootstrap budget without a one-second retry floor", async () => {
+        let clock = 0;
+        const execute = vi.fn((_wsb, _id, _command, timeout) => {
+            expect(timeout).toBe(225);
+            clock += timeout;
+            return { ok: false, result: { error: { code: "ETIMEDOUT" } }, attempts: [] };
+        });
+        const result = await runWindowsHelperBootstrapFallback(device, helper, "wsb", 300, { now: () => clock, execute, wait: async (ms: number) => { clock += ms; } });
+        expect(execute).toHaveBeenCalledTimes(1);
+        expect(result).toMatchObject({ attempted: true, ok: false, failure: "timeout", deadlineExhausted: true });
+        expect(clock).toBe(225);
+    });
+    it.each([0, -10])("never launches bootstrap after a consumed budget (%s)", async timeout => {
+        const execute = vi.fn();
+        const result = await runWindowsHelperBootstrapFallback(device, helper, "wsb", timeout, { now: () => 100, execute });
+        expect(execute).not.toHaveBeenCalled();
+        expect(result).toMatchObject({ attempted: false, ok: false, failure: "timeout", deadlineExhausted: true });
+    });
+    it.each([["0x80070520 private-host", "login-unavailable"], ["private failure", "command-failed"]])("classifies failed bootstrap without exposing native text", async (stderr, failure) => {
+        let clock = 0;
+        const execute = vi.fn(() => ({ ok: false, result: { status: 1, stderr }, attempts: [] }));
+        const result = await runWindowsHelperBootstrapFallback(device, helper, "wsb", 300, { now: () => clock, execute, wait: async (ms: number) => { clock += ms; } });
+        expect(result).toMatchObject({ failure, deadlineExhausted: true });
+        expect(execute).toHaveBeenCalledTimes(1);
+        expect(clock).toBe(225);
+    });
+    it("does not accept late bootstrap success", async () => {
+        let clock = 0;
+        const result = await runWindowsHelperBootstrapFallback(device, helper, "wsb", 100, { now: () => clock,
+            execute: () => { clock = 76; return { ok: true, result: { status: 0 }, attempts: [] }; } });
+        expect(result).toMatchObject({ ok: false, failure: "timeout", deadlineExhausted: true });
+    });
+    it("keeps an on-time successful bootstrap distinct from actual helper readiness", async () => {
+        const result = await runWindowsHelperBootstrapFallback(device, helper, "wsb", 100, { now: () => 0,
+            execute: () => ({ ok: true, runAs: "ExistingLogin", result: { status: 0 }, attempts: [] }) });
+        expect(result).toMatchObject({ ok: true, ready: false, runAs: "ExistingLogin" });
+    });
+    it("does not launch or create a one-shot script after its deadline", async () => {
+        const execute = vi.fn();
+        const result = await runWindowsHelperRequestOnce(device, {}, "wsb", "/unused/request", "/unused/response", 0, { now: () => 10, execute });
+        expect(result).toMatchObject({ attempted: false, ok: false, deadlineExhausted: true });
+        expect(execute).not.toHaveBeenCalled();
+    });
+});
+
+
+describe("bounded Sandbox helper log evidence", () => {
+    it.each([
+        [null, "absent"], ["", "empty"], [" \r\n", "empty"], ["PSSecurityException C:\\secret", "script-policy"],
+        ["UnauthorizedAccessException secret", "access-denied"], ["PathNotFound C:\\secret", "path-not-found"],
+        ["ParserError: token=secret", "parse-error"], ["unrecognized localized error secret", "other-error"],
+        ["x".repeat(4097), "oversized"], ["é".repeat(2049), "oversized"],
+    ])("classifies fixed log tokens without retaining text", (text, expected) => {
+        expect(classifyWindowsSandboxHelperStderr(text)).toBe(expected);
+    });
+    it("reads only fixed bounded logs and marker phases", () => {
+        const root = mkdtempSync(join(tmpdir(), "ccc-helper-evidence-"));
+        try {
+            expect(windowsSandboxHelperLogEvidence(root)).toEqual({ bootstrapStarted: false, bootstrapReady: false, helperHeartbeat: false, bootstrapStderr: "absent", helperStderr: "absent" });
+            writeFileSync(join(root, "ccc-guest-helper-bootstrap.stdout.txt"), "bootstrap-start 2026-10-04T00:00:00Z\nhelper-pid 123");
+            writeFileSync(join(root, "ccc-guest-helper-bootstrap.ready.txt"), "2026-10-04T00:00:00Z");
+            writeFileSync(join(root, "ccc-guest-helper.heartbeat.txt"), "\uFEFFheartbeat 2026-10-04T00:00:00Z\ninbox-files secret.json");
+            writeFileSync(join(root, "ccc-guest-helper-bootstrap.stderr.txt"), "UnauthorizedAccessException secret");
+            writeFileSync(join(root, "ccc-guest-helper.stderr.txt"), "x".repeat(4097));
+            writeFileSync(join(root, "arbitrary-secret.txt"), "secret");
+            const evidence = windowsSandboxHelperLogEvidence(root);
+            expect(evidence).toEqual({ bootstrapStarted: true, bootstrapReady: true, helperHeartbeat: true, bootstrapStderr: "access-denied", helperStderr: "oversized" });
+            expect(JSON.stringify(evidence)).not.toMatch(/secret|123|2026/);
+            writeFileSync(join(root, "ccc-guest-helper-bootstrap.ready.txt"), " ");
+            writeFileSync(join(root, "ccc-guest-helper.heartbeat.txt"), "heartbeat-error secret");
+            expect(windowsSandboxHelperLogEvidence(root)).toMatchObject({ bootstrapReady: false, helperHeartbeat: false });
+        } finally { rmSync(root, { recursive: true, force: true }); }
+    });
+    it("rejects linked logs and marker files without reading their targets", context => {
+        const root = mkdtempSync(join(tmpdir(), "ccc-helper-evidence-"));
+        try {
+            const target = join(root, "secret-target");
+            writeFileSync(target, "bootstrap-start secret");
+            fileSymlinkOrSkip(context, target, join(root, "ccc-guest-helper-bootstrap.stdout.txt"));
+            fileSymlinkOrSkip(context, target, join(root, "ccc-guest-helper-bootstrap.stderr.txt"));
+            fileSymlinkOrSkip(context, target, join(root, "ccc-guest-helper-bootstrap.ready.txt"));
+            expect(windowsSandboxHelperLogEvidence(root)).toMatchObject({ bootstrapStarted: false, bootstrapReady: false, bootstrapStderr: "unreadable" });
+        } finally { rmSync(root, { recursive: true, force: true }); }
     });
 });

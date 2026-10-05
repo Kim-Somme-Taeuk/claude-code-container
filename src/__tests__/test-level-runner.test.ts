@@ -1,6 +1,6 @@
 import Ajv from "ajv";
 import { toolInputError } from "../../device-lab-mcp/src/tool-arguments.mjs";
-import { missingWindowsImageProbe, probeMissingMacosImage } from "../../scripts/real-tests/level2-broker-e2e.ts";
+import { backendProviderEnumDiagnostics, missingWindowsImageProbe, probeMissingMacosImage } from "../../scripts/real-tests/level2-broker-e2e.ts";
 import { spawn, spawnSync } from "child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -16,6 +16,7 @@ import { androidDeviceE2EPrerequisites, prepareAndroidDeviceApp } from "../../sc
 import { androidEmulatorAppSelection, androidEmulatorCreateRequest, deviceFromPayload } from "../../scripts/real-tests/android-emulator-e2e.ts";
 import { currentDisplayPrerequisiteResult } from "../../scripts/real-tests/level1-display-e2e.ts";
 import { startWindowsSandboxE2EDevice } from "../../scripts/real-tests/windows-sandbox-e2e.ts";
+import { realMcpToolRequestTimeoutMs } from "../../scripts/real-tests/device-lab-mcp-client.ts";
 import {
     normalizeProviderConcurrency,
     partitionProviderFiles,
@@ -757,11 +758,13 @@ describe("test level runner", () => {
             return { status: 0, stdout: "", stderr: "" };
         };
         let startCount = 0;
-        const callTool = async (tool: string) => {
+        const startBudgets: unknown[] = [];
+        const callTool = async (tool: string, args: any) => {
             if (tool === "status") {
                 return mcpTextResult({ device: { deviceId: "windows-real-sandbox-test", status: "running", sandboxId: ownedId } });
             }
             startCount += 1;
+            startBudgets.push({ boot: args.bootTimeoutMs, transport: realMcpToolRequestTimeoutMs(tool, args) });
             return startCount === 1
                 ? mcpTextResult("CO_E_APPSINGLEUSE", true)
                 : mcpTextResult({ device: { deviceId: "windows-real-sandbox-test", status: "running", sandboxId: ownedId } });
@@ -771,8 +774,10 @@ describe("test level runner", () => {
             wsb: "wsb",
             runner,
             retryDelayMs: 0,
+            bootTimeoutMs: 180000,
         });
         expect(started.device.sandboxId).toBe(ownedId);
+        expect(startBudgets).toEqual([{ boot: 180000, transport: 210000 }, { boot: 180000, transport: 210000 }]);
         expect(stopped).toEqual([ownedId]);
         expect(stopped).not.toContain(preExistingId);
         expect(stopped).not.toContain(concurrentForeignId);
@@ -2058,6 +2063,23 @@ describe("test level runner", () => {
         expect(text).toContain("iOS wireless supports only action:status");
         expect(text).toContain("Android physical wireless action diagnostics MCP");
         expect(text).toContain("iOS physical wireless action diagnostics MCP");
+    });
+
+    it("keeps backend enum diagnostic probes schema-valid across physical providers", () => {
+        const probes = backendProviderEnumDiagnostics({ brokerPort: 17373, port: 17373, detail: true });
+        const physical = probes.filter(([tool]) => tool === "attach" || tool === "wireless");
+        expect(physical).toHaveLength(4);
+        for (const [tool, args] of physical) {
+            expect(toolInputError(tool, args), `${tool}:${args.backend}`).toBeNull();
+            expect(args.brokerPort).toBe(17373);
+            const publicArgs = Object.fromEntries(Object.entries(args)
+                .filter(([key]) => !HIDDEN_LEGACY_TRANSPORT_KEYS.has(key)));
+            expect(new Ajv({ strict: false }).compile(TOOLS.find(t => t.name === tool)!.inputSchema)(publicArgs)).toBe(true);
+        }
+        const iosAttach = physical.find(([tool, args]) => tool === "attach" && args.backend === "ios-device")![1];
+        expect(iosAttach.udid).toBe("00000000-0000000000000000");
+        expect(iosAttach).not.toHaveProperty("serial");
+        for (const [tool, args] of physical) if (tool === "wireless") expect(args).not.toHaveProperty("port");
     });
 
     it("sends a valid missing-image create probe without confusing broker and device ports", () => {

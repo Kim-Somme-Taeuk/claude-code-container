@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { hiddenWindowsPowerShellArgs } from "#device-lab/providers/state/windows-system-powershell.mjs";
+import { nestedDevelopmentPrograms } from "./nested-powershell-sources.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const assetRoot = join(repoRoot, "packages", "device-lab", "powershell");
@@ -281,13 +282,7 @@ async function setupDiagnosticsSources() {
 }
 
 async function nestedDevelopmentSources() {
-    const module = pathToFileURL(join(repoRoot, "scripts", "real-tests", "nested-hyper-v.ts")).href;
-    const probe = spawnSync(process.execPath, ["--import", "tsx", "-e",
-        `import(${JSON.stringify(module)}).then(m => process.stdout.write(JSON.stringify([m.NESTED_CLAIM_COMMAND,m.NESTED_PREPARE_COMMAND,m.nestedLaunchCommand('a'.repeat(32),'b'.repeat(64),'22.23.2','windows')])))`,
-    ], { cwd: repoRoot, encoding: "utf8", timeout: 60000, maxBuffer: 1024 * 1024, windowsHide: true });
-    if (probe.error || probe.status !== 0) throw new Error("nested-development-programs-unavailable");
-    const programs = JSON.parse(probe.stdout);
-    if (!Array.isArray(programs) || programs.length !== 3 || programs.some(p => typeof p !== "string" || !p)) throw new Error("nested-development-programs-invalid");
+    const programs = nestedDevelopmentPrograms(repoRoot);
     const directory = mkdtempSync(join(tmpdir(), "ccc-nested-programs-"));
     return programs.map((program, index) => {
         const file = join(directory, `nested-${index}.ps1`);

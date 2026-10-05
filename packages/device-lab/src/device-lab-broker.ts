@@ -80,7 +80,7 @@ import type { HyperVCreateEffect, HyperVCreateVirtualMachineRequest } from "@ccc
 import type { HyperVWindowsNetworkClient, HyperVWindowsOperation } from "@ccc/hyper-v/low-level/index.js";
 import { withElevatedHyperVNetworkExecutor, type WithElevatedHyperVNetworkExecutorOptions } from "./device-lab/broker/hyper-v/elevated-network-session.js";
 import { hyperVElevationGateStatus, withHyperVElevationGate } from "./device-lab/broker/hyper-v/elevation-gate.js";
-import { hyperVBoundedErrorCode, hyperVProviderDiagnosticCode, hyperVTypedErrorCode, hyperVTypedErrorOperation, publicHyperVArtifactCleanup, publicHyperVCreateConfiguration, publicHyperVNetworkCleanup, redactHyperVDeviceSecrets, redactHyperVResultSecrets, redactProviderCommandInput } from "./device-lab/broker/hyper-v/public-response.js";
+import { hyperVBoundedErrorCode, hyperVProviderDiagnosticCode, hyperVTypedErrorCode, hyperVTypedErrorOperation, hyperVTypedNativeDiagnostics, publicHyperVArtifactCleanup, publicHyperVCreateConfiguration, publicHyperVNetworkCleanup, redactHyperVDeviceSecrets, redactHyperVResultSecrets, redactProviderCommandInput } from "./device-lab/broker/hyper-v/public-response.js";
 export { redactProviderCommandInput } from "./device-lab/broker/hyper-v/public-response.js";
 import { createRecordingDeviceLabHyperVWindowsClient } from "./device-lab/broker/hyper-v/lifecycle-adapter.js";
 import { brokerHyperVWindowsSession, retainBrokerHyperVWindowsSessions } from "./device-lab/broker/hyper-v/session-pool.js";
@@ -782,6 +782,7 @@ type ProviderCommandResult = {
     capacity?: HyperVMemoryCapacity;
     typedCreateInvalidResult?: boolean;
     typedCreateOperation?: HyperVWindowsOperation;
+    typedCreateNativeDiagnostics?: ReturnType<typeof hyperVTypedNativeDiagnostics>;
 };
 type ProviderCommandRunnerOptions = {
     timeoutMs: number;
@@ -10167,6 +10168,7 @@ async function runTypedHyperVCreate(
         return {
             mode: "exec", provider: "hyper-v", status: 1, stdout: "", stderr: "", error: code, typedCreateInvalidResult,
             ...(typedCreateOperation ? { typedCreateOperation } : {}),
+            typedCreateNativeDiagnostics: hyperVTypedNativeDiagnostics(error),
         };
     }
 }
@@ -11010,6 +11012,7 @@ export function runBrokerBackendChild(
 
 function deviceLabBackendToolArgs(parsed: DeviceToolParamSuccess): Record<string, unknown> {
     const allowed = new Set([
+        "handle",
         "backend",
         "action",
         "serial",
@@ -13055,6 +13058,7 @@ async function lifecycleCommandInvokeUnlocked(
                         ...(isHyperVBackend(parsed.backend) && execution.typedCreateOperation
                             ? { operation: execution.typedCreateOperation }
                             : {}),
+                        ...(isHyperVBackend(parsed.backend) ? execution.typedCreateNativeDiagnostics : {}),
                         ...(rollback ? { rollback } : {}),
                         ...(androidRollback ? { rollback: androidRollback } : {}),
                         result: {

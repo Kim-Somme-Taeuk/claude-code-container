@@ -199,13 +199,86 @@ describe("container SSH credential copy", () => {
         sourceRoot: string,
         copiedRoot: string,
         env: NodeJS.ProcessEnv = process.env,
+        privilegedRead = false,
     ): ReturnType<typeof spawnSync> {
         return spawnSync(
             "sh",
-            ["-c", sshCredentialCopyShell(), "ccc-ssh-copy", sourceRoot, copiedRoot],
+            ["-c", sshCredentialCopyShell(privilegedRead), "ccc-ssh-copy", sourceRoot, copiedRoot],
             { encoding: "utf8", env },
         );
     }
+
+    const canElevate = process.platform !== "win32" && process.getuid?.() !== 0
+        && spawnSync("sudo", ["-n", "true"], { stdio: "ignore", timeout: 5000 }).status === 0;
+
+    it.skipIf(!canElevate)("copies a private host key across a UID boundary without changing host permissions", () => {
+        const root = makeRoot();
+        const source = join(root, "host-ssh");
+        const copied = join(root, "ssh-copy");
+        mkdirSync(source, { mode: 0o700 });
+        writeFileSync(join(source, "id_ed25519"), "fixture-key-not-a-real-secret", { mode: 0o600 });
+        expect(spawnSync("sudo", ["-n", "chown", "-R", "0:0", source]).status).toBe(0);
+        try {
+            expect(runCopy(source, copied).status).toBe(1);
+            const result = runCopy(source, copied, process.env, true);
+            expect(result.status, result.stderr).toBe(0);
+            expect(readFileSync(join(copied, "id_ed25519"), "utf8")).toBe("fixture-key-not-a-real-secret");
+            expect(statSync(copied).uid).toBe(process.getuid!());
+            expect(statSync(join(copied, "id_ed25519")).uid).toBe(process.getuid!());
+            expect(statSync(join(copied, "id_ed25519")).mode & 0o777).toBe(0o600);
+            expect(statSync(source).uid).toBe(0);
+            expect(statSync(source).mode & 0o777).toBe(0o700);
+            expect(readdirSync(root).some(name => name.startsWith(".ccc-ssh-archive."))).toBe(false);
+        } finally {
+            expect(spawnSync("sudo", ["-n", "chown", "-R", `${process.getuid!()}:${process.getgid!()}`, source]).status).toBe(0);
+        }
+    });
+
+    it("cleans archive and stale credentials when the privileged reader fails", () => {
+        const root = makeRoot();
+        const source = join(root, "source");
+        const copied = join(root, "ssh-copy");
+        const bin = join(root, "bin");
+        for (const path of [source, copied, bin]) mkdirSync(path);
+        writeFileSync(join(copied, "id_ed25519"), "stale-fixture");
+        writeFileSync(join(bin, "sudo"), "#!/bin/sh\nexit 42\n", { mode: 0o755 });
+        expect(runCopy(source, copied, { ...process.env, PATH: `${bin}:${process.env.PATH}` }, true).status).toBe(1);
+        expect(readdirSync(root)).toEqual(expect.not.arrayContaining(["ssh-copy"]));
+        expect(readdirSync(root).some(name => name.startsWith(".ccc-ssh-archive.") || name.includes(".next."))).toBe(false);
+    });
+
+    it("replaces a copied completion-marker symlink without touching its target", () => {
+        const root = makeRoot();
+        const source = join(root, "source");
+        const copied = join(root, "ssh-copy");
+        const outside = join(root, "outside");
+        mkdirSync(source);
+        writeFileSync(outside, "untouched");
+        symlinkSync(outside, join(source, ".ccc-copy-complete"));
+        expect(runCopy(source, copied).status).toBe(0);
+        expect(readFileSync(outside, "utf8")).toBe("untouched");
+        expect(readFileSync(join(copied, ".ccc-copy-complete"), "utf8")).toBe("complete\n");
+    });
+
+    it.each(["chmod", "publish", "extract"])("invalidates stale credentials and staging on %s failure", failure => {
+        const root = makeRoot();
+        const source = join(root, "source");
+        const copied = join(root, "ssh-copy");
+        const bin = join(root, "bin");
+        for (const path of [source, copied, bin]) mkdirSync(path);
+        writeFileSync(join(source, "id_ed25519"), "new-fixture");
+        writeFileSync(join(copied, "id_ed25519"), "stale-fixture");
+        writeFileSync(join(copied, ".ccc-copy-complete"), "complete\n");
+        const command = failure === "publish" ? "mv" : failure === "extract" ? "tar" : "chmod";
+        const body = failure === "publish" ? 'case "$1" in *.next.*) exit 42;; esac\nexec /bin/mv "$@"'
+            : failure === "extract" ? 'case "$1" in --no-same-owner) exit 42;; esac\nexec /bin/tar "$@"' : "exit 42";
+        writeFileSync(join(bin, command), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+        // This fixture tests extraction failure without requiring privilege.
+        writeFileSync(join(bin, "sudo"), '#!/bin/sh\nshift\nexec "$@"\n', { mode: 0o755 });
+        expect(runCopy(source, copied, { ...process.env, PATH: `${bin}:${process.env.PATH}` }, failure === "extract").status).toBe(1);
+        expect(readdirSync(root)).not.toContain("ssh-copy");
+        expect(readdirSync(root).filter(name => name.startsWith("."))).toEqual([]);
+    });
 
     it("replaces an existing copy instead of nesting the source directory", () => {
         const root = makeRoot();

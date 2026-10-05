@@ -14,7 +14,7 @@ function Write-HyperVWindowsSuccess([string]$Operation, [object[]]$Items) {
     } | ConvertTo-Json -Compress -Depth 6
 }
 
-function Write-HyperVWindowsFailure([string]$Operation, [string]$ErrorCode) {
+function Write-HyperVWindowsFailure([string]$Operation, [string]$ErrorCode, [System.Management.Automation.ErrorRecord]$Failure) {
     if ($ErrorCode -notmatch '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\z') {
         $ErrorCode = "native-operation-failed"
     }
@@ -23,6 +23,8 @@ function Write-HyperVWindowsFailure([string]$Operation, [string]$ErrorCode) {
         operation = $Operation
         ok = $false
         errorCode = $ErrorCode
+        nativeHResult = [int]$Failure.Exception.HResult
+        nativeErrorCategory = [int]$Failure.CategoryInfo.Category
     } | ConvertTo-Json -Compress -Depth 3
 }
 
@@ -2336,7 +2338,7 @@ try {
         $ErrorCode = (([string]$_.FullyQualifiedErrorId) -replace '[^A-Za-z0-9._:-]', '-').Trim('-')
         if ($ErrorCode.Length -gt 128) { $ErrorCode = $ErrorCode.Substring(0, 128) }
     }
-    Write-HyperVWindowsFailure $Operation $ErrorCode
+    Write-HyperVWindowsFailure $Operation $ErrorCode $_
     # Deliberately not `exit`. PowerShell's exit is not scoped to a script block, so when this asset
     # runs as `& ([ScriptBlock]::Create($source))` — how both transports invoke it — an exit here
     # unwinds past the caller instead of returning to it. Under the reused session that discards the

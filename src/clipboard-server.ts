@@ -494,11 +494,18 @@ function ensurePersistentPS(): ChildProcess {
     return persistentPS;
 }
 
+// PowerShell 5.1 stdin/stdout inherit host code pages. Keep source ASCII on
+// the wire and explicitly encode responses for readNativeFrame's UTF-8 decoder.
+export function windowsClipboardCommand(command: string): string {
+    const encoded = Buffer.from(command, "utf16le").toString("base64");
+    return `[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); $OutputEncoding = [Console]::OutputEncoding; . ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encoded}'))))`;
+}
+
 async function runPSCommand(command: string, timeout = 8000): Promise<string> {
     let ps: ChildProcess;
     try { ps = ensurePersistentPS(); } catch { throw new ClipboardReadError(); }
     const prefix = psAssemblyLoaded ? "" : "Add-Type -AssemblyName System.Windows.Forms\nAdd-Type -AssemblyName System.Drawing\n";
-    const output = await readNativeFrame(ps, `${prefix}${command}\n'${PS_MARKER}'\n`, psAssemblyLoaded ? timeout : 8000, killPersistentPS);
+    const output = await readNativeFrame(ps, `${windowsClipboardCommand(prefix + command)}\n'${PS_MARKER}'\n`, psAssemblyLoaded ? timeout : 8000, killPersistentPS);
     psAssemblyLoaded = true;
     return output;
 }
@@ -941,8 +948,25 @@ async function readAllClipboardDarwin(): Promise<Omit<ClipboardSnapshot, "timest
     const nativeOutput = await runDarwinCommand();
     if (nativeOutput !== null) {
         const parsed = parseDarwinHelperOutput(nativeOutput);
-        if (parsed) return parsed;
-        throw new ClipboardReadError();
+        if (!parsed) throw new ClipboardReadError();
+        if (parsed.imagePng) return parsed;
+
+        // A successful native read may contain only a file reference or an
+        // image representation that NSImage could not decode. Do not bypass
+        // the existing fallbacks just because the helper is installed.
+        const converted = execCommand("pngpaste", ["-"]);
+        if (converted.status === 0 && converted.stdout.length > 0) {
+            return { ...parsed, targets: [...new Set([...parsed.targets, "image/png"])], imagePng: converted.stdout };
+        }
+        const fileFallback = readDarwinClipboardImageFileFallback();
+        if (fileFallback.targets.length > 0) return { ...fileFallback, marker: parsed.marker };
+        if (parsed.text) {
+            const textFallback = buildImageFileClipboardFallbackFromPaths(
+                parseClipboardImagePathText(parsed.text.toString("utf8")),
+            );
+            if (textFallback.targets.length > 0) return { ...textFallback, marker: parsed.marker };
+        }
+        return parsed;
     }
 
     // Fallback: parallel osascript + pbpaste (~250ms)

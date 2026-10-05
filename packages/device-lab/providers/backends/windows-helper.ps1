@@ -324,9 +324,22 @@ function Invoke-CccRequest {
     Remove-Item -Force -Path $RequestPath
 }
 if ($OnceRequestPath) { Invoke-CccRequest $OnceRequestPath; exit }
-Set-Content -Path (Join-Path $Downloads 'ccc-guest-helper.ready.txt') -Value (Get-Date).ToString('o') -Encoding UTF8
-while ($true) {
-  Write-CccHeartbeat
-  Get-ChildItem -Path $Inbox -Filter '*.json' -ErrorAction SilentlyContinue | ForEach-Object { Invoke-CccRequest $_.FullName }
-  Start-Sleep -Milliseconds 250
+$DaemonMutexHash = [Security.Cryptography.SHA256]::Create()
+try {
+  $DaemonMutexKey = [BitConverter]::ToString($DaemonMutexHash.ComputeHash([Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($PSCommandPath).ToUpperInvariant()))).Replace('-', '')
+} finally { $DaemonMutexHash.Dispose() }
+$DaemonMutex = [Threading.Mutex]::new($false, ('Global\CccDeviceLab-daemon-' + $DaemonMutexKey))
+$DaemonMutexOwned = $false
+try {
+  try { $DaemonMutexOwned = $DaemonMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $DaemonMutexOwned = $true }
+  if (-not $DaemonMutexOwned) { return }
+  Set-Content -Path (Join-Path $Downloads 'ccc-guest-helper.ready.txt') -Value (Get-Date).ToString('o') -Encoding UTF8
+  while ($true) {
+    Write-CccHeartbeat
+    Get-ChildItem -Path $Inbox -Filter '*.json' -ErrorAction SilentlyContinue | ForEach-Object { Invoke-CccRequest $_.FullName }
+    Start-Sleep -Milliseconds 250
+  }
+} finally {
+  if ($DaemonMutexOwned) { $DaemonMutex.ReleaseMutex() }
+  $DaemonMutex.Dispose()
 }

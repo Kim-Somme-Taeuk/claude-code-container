@@ -54,7 +54,7 @@ import type {
     HyperVWindowsOperation,
 } from "./contracts.js";
 import { parseHyperVWindowsGuestBootDiagnostic } from "./diagnostic.js";
-import { HyperVWindowsError } from "./errors.js";
+import { HyperVWindowsError, parseHyperVWindowsNativeDiagnostics } from "./errors.js";
 
 const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NATIVE_ERROR_CODE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -411,12 +411,15 @@ function decodeEnvelope(
         throw error("protocol", operation, "response-envelope-invalid");
     }
     if (envelope.ok === false) {
-        if (!hasExactKeys(envelope, ["schemaVersion", "operation", "ok", "errorCode"])
+        const nativeDiagnostics = parseHyperVWindowsNativeDiagnostics(envelope);
+        if (!nativeDiagnostics || !hasExactKeys(envelope, ["schemaVersion", "operation", "ok", "errorCode",
+            ...["nativeHResult", "nativeErrorCategory"].filter((key) => Object.hasOwn(envelope, key))])
             || typeof envelope.errorCode !== "string"
             || !NATIVE_ERROR_CODE_PATTERN.test(envelope.errorCode)) {
             throw error("protocol", operation, "response-envelope-invalid");
         }
-        throw error("native", operation, envelope.errorCode, execution.status ?? undefined);
+        throw new HyperVWindowsError({ category: "native", operation, code: envelope.errorCode,
+            ...(execution.status === null ? {} : { nativeStatus: execution.status }), ...nativeDiagnostics });
     }
     if (!hasExactKeys(envelope, ["schemaVersion", "operation", "ok", "items"]) || !Array.isArray(envelope.items)) {
         throw error("protocol", operation, "response-envelope-invalid");

@@ -186,6 +186,11 @@ function brokerEnumSample(toolName, route, facetKey, facetValue, index) {
             args.sourceImage = "/tmp/ccc-level2-missing-image.qcow2";
         }
     }
+    if (toolName === "wireless") delete args.port; // brokerPort owns transport; port is Android pairing input.
+    if (toolName === "attach" && args.backend === "ios-device") {
+        delete args.serial;
+        args.udid = "00000000-0000000000000000";
+    }
     if (toolName === "delete") args.confirmDestructive = true;
     if (toolName === "snapshot") {
         args.confirmDestructive = true;
@@ -200,7 +205,7 @@ function brokerEnumSample(toolName, route, facetKey, facetValue, index) {
     return args;
 }
 
-function backendProviderEnumDiagnostics(route) {
+export function backendProviderEnumDiagnostics(route) {
     const diagnostics = [];
     for (const tool of DEVICE_LAB_MCP_TOOLS) {
         const schemas = [tool.inputSchema, ...(tool.inputSchema?.oneOf || [])];
@@ -954,6 +959,7 @@ export async function runBrokerE2E(options: any = {}) {
                     inputRejections++;
                     continue;
                 }
+                assert.strictEqual(toolInputError(tool, args), null, `${facet}: enum probe must reach provider diagnostics`);
                 const result = markExpectedToolError(await callTool(tool, { detail: true, ...args }));
                 const text = result?.content?.map((item) => item?.text || "").join("\n") || "";
                 assert.ok(Array.isArray(result?.content) && result.content.length > 0, `${facet}: missing MCP response content`);

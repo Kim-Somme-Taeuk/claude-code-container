@@ -7,6 +7,65 @@ const cursor = result({ result: { content: [{ type: "text", text: JSON.stringify
 const args = { deviceId: "test-vm", waitForBoot: true, bootTimeoutMs: 1000 };
 
 describe("start waits for configured desktop control transport", () => {
+    it("retains only classified helper logs", async () => {
+        let clock = 0;
+        const invoke = async () => result({ ok: false, helperDiagnostic: { logEvidence: {
+            bootstrapStarted: true, bootstrapReady: false, helperHeartbeat: "PRIVATE", bootstrapStderr: "parse-error", helperStderr: "PRIVATE", raw: "PRIVATE",
+        } } });
+        const observed = await finishStartReadiness(start(), args, 0, invoke, { now: () => clock, sleep: async (ms: number) => { clock += ms; } });
+        expect(JSON.parse(observed.content[0].text).readiness.helper.logEvidence).toEqual({ bootstrapStarted: true, bootstrapReady: false, bootstrapStderr: "parse-error" });
+        expect(JSON.stringify(observed)).not.toContain("PRIVATE");
+    });
+    it.each(["login-unavailable", "timeout", "command-failed"])("retains bounded bootstrap failure %s", async bootstrapFailure => {
+        let clock = 0;
+        const invoke = vi.fn(async () => result({ ok: false, helperDiagnostic: { bootstrapFailure, bootstrapDeadlineExhausted: true, stderr: "PRIVATE" } }));
+        const observed = await finishStartReadiness(start(), args, 0, invoke, { now: () => clock, sleep: async (ms: number) => { clock += ms; } });
+        expect(JSON.parse(observed.content[0].text).readiness.helper).toEqual({ bootstrapFailure, bootstrapDeadlineExhausted: true });
+        expect(JSON.stringify(observed)).not.toContain("PRIVATE");
+    });
+    it.each([
+        [result({ ok: false, error: "private-token", helperDiagnostic: { readyMarkerPresent: false, requestAttempted: true, requestOk: false, guestStatus: 1, stdout: "secret" } }), "provider-error"],
+        [result({ ok: true }), "missing-cursor"],
+    ])("retains bounded last probe evidence", async (probe, lastProbe) => {
+        let clock = 500;
+        const observed = await finishStartReadiness(start("windows-sandbox"), args, 0, async () => probe, {
+            now: () => clock, sleep: async (ms: number) => { clock += ms; },
+        });
+        const value = JSON.parse(observed.content[0].text);
+        expect(value.readiness).toMatchObject({ attempts: 1, lastProbe });
+        if (lastProbe === "provider-error") expect(value.readiness.helper).toEqual({ readyMarkerPresent: false, requestAttempted: true, requestOk: false, guestStatus: 1 });
+        expect(JSON.stringify(value)).not.toMatch(/secret|private-token|stdout/);
+    });
+    it.each(["sandbox-id-invalid", "prerequisites-missing", "session-connect-failed", "response-rejected", "response-timeout"])("retains the closed helper stage %s across a later provider error", async (stage) => {
+        let clock = 0;
+        const invoke = vi.fn().mockResolvedValueOnce(result({ ok: false, helperDiagnostic: { stage, readyMarkerPresent: false, error: "secret" } }))
+            .mockResolvedValueOnce(result({ ok: false, error: "private-host-message" }));
+        const observed = await finishStartReadiness(start("windows-sandbox"), args, 0, invoke, { now: () => clock, sleep: async (ms: number) => { clock += ms; } });
+        expect(JSON.parse(observed.content[0].text).readiness).toEqual({ attempts: 2, lastProbe: "provider-error", helper: { stage, readyMarkerPresent: false }, helperAttempt: 1 });
+        expect(JSON.stringify(observed)).not.toMatch(/secret|private-host-message/);
+    });
+    it("drops unknown helper stages and replaces earlier evidence with the latest valid helper observation", async () => {
+        let clock = 0;
+        const invoke = vi.fn().mockResolvedValueOnce(result({ ok: false, helperDiagnostic: { stage: "response-timeout", requestOk: false } }))
+            .mockResolvedValueOnce(result({ ok: false, helperDiagnostic: { stage: "C:\\secret", requestOk: true } }));
+        const observed = await finishStartReadiness(start(), args, 0, invoke, { now: () => clock, sleep: async (ms: number) => { clock += ms; } });
+        expect(JSON.parse(observed.content[0].text).readiness).toEqual({ attempts: 2, lastProbe: "provider-error", helper: { requestOk: true }, helperAttempt: 2 });
+        expect(JSON.stringify(observed)).not.toContain("secret");
+    });
+    it("reports when provider start consumed the whole readiness budget", async () => {
+        const invoke = vi.fn();
+        const observed = await finishStartReadiness(start(), args, 0, invoke, { now: () => 1000 });
+        expect(JSON.parse(observed.content[0].text).readiness).toEqual({ attempts: 0, lastProbe: "not-attempted" });
+        expect(invoke).not.toHaveBeenCalled();
+    });
+    it("retains earlier helper evidence with its attempt when the last probe throws", async () => {
+        let clock = 0;
+        const invoke = vi.fn().mockResolvedValueOnce(result({ ok: false, helperDiagnostic: { requestOk: false } }))
+            .mockRejectedValueOnce(new Error("C:\\private token=secret"));
+        const observed = await finishStartReadiness(start(), args, 0, invoke, { now: () => clock, sleep: async (ms: number) => { clock += ms; } });
+        expect(JSON.parse(observed.content[0].text).readiness).toEqual({ attempts: 2, lastProbe: "transport-exception", helper: { requestOk: false }, helperAttempt: 1 });
+        expect(JSON.stringify(observed)).not.toMatch(/private|secret/);
+    });
     it.each(["macos-vm", "windows-sandbox"])("probes %s with explicit targeting before returning success", async backend => {
         const invoke = vi.fn(async () => cursor);
         const original = start(backend);
@@ -86,6 +145,7 @@ describe("start waits for configured desktop control transport", () => {
         let clock = 500;
         const observed = await finishStartReadiness(start(), args, 0, async () => { clock = 1001; return cursor; }, { now: () => clock });
         expect(JSON.parse(observed.content[0].text).detail).toBe("control-transport-timeout");
+        expect(JSON.parse(observed.content[0].text).readiness).toEqual({ attempts: 1, lastProbe: "late-response" });
     });
     it("keeps nested boot errors visible instead of compacting them to ok", async () => {
         const original = result({ device: { id: args.deviceId, backend: "ios-simulator" }, boot: { ready: false, error: "simctl timed out" } });

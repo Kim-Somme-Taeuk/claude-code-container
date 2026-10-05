@@ -43,3 +43,16 @@ Codex image paste through CCC must survive host clipboard image type variation a
 - Windows native threading: [Clipboard STA requirement](https://learn.microsoft.com/en-us/dotnet/api/system.windows.forms.clipboard.clear). Clipboard operations must run in STA mode.
 - created: 2026-06-07
 - source: task: TASK__fix-codex-image-paste-clipboard-type-stall
+
+## macOS native fallback continuity
+
+A valid native helper snapshot without image bytes must still try the existing
+local converter, pasteboard file reference, and image-path text fallbacks. Keep
+the snapshot change marker so a concurrent clipboard change discards fallback
+bytes. Native image snapshots stay on the fast path; failed fallback leaves
+ordinary text intact. No remote image URL fetching is introduced.
+
+HTTP-to-Codex tests cover these paths with simulated pasteboard responses and
+real temporary PNG files. Historical Slack reproduction and native macOS
+pasteboard integration still require a Mac; these tests do not establish the
+format used by a particular Slack version.

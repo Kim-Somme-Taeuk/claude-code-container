@@ -370,6 +370,8 @@ function windowsHelperMetadata(device) {
         guestUploadsDir: "C:\\ccc\\scratch\\uploads",
         guestDownloadsDir: "C:\\ccc\\scratch\\downloads",
         readyMarkerPath: join(downloadsDir, "ccc-guest-helper.ready.txt"),
+        bootstrapReadyMarkerPath: join(downloadsDir, "ccc-guest-helper-bootstrap.ready.txt"),
+        bootstrapPhasePath: join(downloadsDir, "ccc-guest-helper-bootstrap-phase.json"),
         bootstrapStdoutPath: join(downloadsDir, "ccc-guest-helper-bootstrap.stdout.txt"),
         bootstrapStderrPath: join(downloadsDir, "ccc-guest-helper-bootstrap.stderr.txt"),
         helperStdoutPath: join(downloadsDir, "ccc-guest-helper.stdout.txt"),
@@ -450,6 +452,17 @@ function escapeXml(value) {
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&apos;");
+}
+
+function windowsHelperMutexScriptLines(variable, pathExpression, role) {
+    return [
+        `$${variable}Hash = [Security.Cryptography.SHA256]::Create()`,
+        "try {",
+        `  $${variable}Key = [BitConverter]::ToString($${variable}Hash.ComputeHash([Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath(${pathExpression}).ToUpperInvariant()))).Replace('-', '')`,
+        `} finally { $${variable}Hash.Dispose() }`,
+        `$${variable} = [Threading.Mutex]::new($false, ('Global\\CccDeviceLab-${role}-' + $${variable}Key))`,
+        `$${variable}Owned = $false`,
+    ];
 }
 
 export function windowsHelperScript(helper) {
@@ -780,36 +793,94 @@ export function windowsHelperScript(helper) {
         "    Remove-Item -Force -Path $RequestPath",
         "}",
         "if ($OnceRequestPath) { Invoke-CccRequest $OnceRequestPath; exit }",
-        "Set-Content -Path (Join-Path $Downloads 'ccc-guest-helper.ready.txt') -Value (Get-Date).ToString('o') -Encoding UTF8",
-        "while ($true) {",
-        "  Write-CccHeartbeat",
-        "  Get-ChildItem -Path $Inbox -Filter '*.json' -ErrorAction SilentlyContinue | ForEach-Object { Invoke-CccRequest $_.FullName }",
-        "  Start-Sleep -Milliseconds 250",
+        ...windowsHelperMutexScriptLines("DaemonMutex", "$PSCommandPath", "daemon"),
+        "try {",
+        "  try { $DaemonMutexOwned = $DaemonMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $DaemonMutexOwned = $true }",
+        "  if (-not $DaemonMutexOwned) { return }",
+        "  Set-Content -Path (Join-Path $Downloads 'ccc-guest-helper.ready.txt') -Value (Get-Date).ToString('o') -Encoding UTF8",
+        "  while ($true) {",
+        "    Write-CccHeartbeat",
+        "    Get-ChildItem -Path $Inbox -Filter '*.json' -ErrorAction SilentlyContinue | ForEach-Object { Invoke-CccRequest $_.FullName }",
+        "    Start-Sleep -Milliseconds 250",
+        "  }",
+        "} finally {",
+        "  if ($DaemonMutexOwned) { $DaemonMutex.ReleaseMutex() }",
+        "  $DaemonMutex.Dispose()",
         "}",
         "",
     ].join("\n");
 }
 
-function windowsHelperBootstrapScript(helper) {
+export function windowsHelperBootstrapScript(helper) {
     return [
         "$ErrorActionPreference = 'Stop'",
         `$ToolsHelper = '${helper.guestToolsDir}\\ccc-guest-helper.ps1'`,
         `$ScratchHelper = '${helper.guestHelperScript}'`,
         `$Downloads = '${helper.guestDownloadsDir}'`,
-        `$BootstrapStdoutPath = Join-Path $Downloads 'ccc-guest-helper-bootstrap.stdout.txt'`,
-        `$BootstrapStderrPath = Join-Path $Downloads 'ccc-guest-helper-bootstrap.stderr.txt'`,
-        `$StdoutPath = Join-Path $Downloads 'ccc-guest-helper.stdout.txt'`,
-        `$StderrPath = Join-Path $Downloads 'ccc-guest-helper.stderr.txt'`,
+        "$PowerShellExe = Join-Path $PSHOME 'powershell.exe'",
+        "$BootstrapStdoutPath = Join-Path $Downloads 'ccc-guest-helper-bootstrap.stdout.txt'",
+        "$BootstrapStderrPath = Join-Path $Downloads 'ccc-guest-helper-bootstrap.stderr.txt'",
+        "$BootstrapPhasePath = Join-Path $Downloads 'ccc-guest-helper-bootstrap-phase.json'",
+        "function Write-CccBootstrapPhase([string]$Stage, [string]$Code = '') {",
+        "  if (-not $BootstrapMutexOwned) { return }",
+        "  try {",
+        "    $Evidence = [ordered]@{ schemaVersion = 1; stage = $Stage }",
+        "    if ($Code) { $Evidence.error = $Code }",
+        "    [IO.File]::WriteAllText(($BootstrapPhasePath + '.tmp'), ($Evidence | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))",
+        "    Move-Item -LiteralPath ($BootstrapPhasePath + '.tmp') -Destination $BootstrapPhasePath -Force",
+        "  } catch { }", // Diagnostic I/O cannot replace the primary bootstrap failure.
+        "}",
+        "$StdoutPath = Join-Path $Downloads 'ccc-guest-helper.stdout.txt'",
+        "$StderrPath = Join-Path $Downloads 'ccc-guest-helper.stderr.txt'",
+        ...windowsHelperMutexScriptLines("BootstrapMutex", "$ScratchHelper", "bootstrap"),
+        "$CanWriteLogs = $false",
         "try {",
+        "  try { $BootstrapMutexOwned = $BootstrapMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $BootstrapMutexOwned = $true }",
+        "  if (-not $BootstrapMutexOwned) { return }",
+        "  Write-CccBootstrapPhase 'inspect-helper'",
+        // The live query also covers a launcher crash between child creation and any receipt write.
+        "  $ExpectedScript = [regex]::Escape([IO.Path]::GetFullPath($ScratchHelper))",
+        "  $ExpectedExe = [regex]::Escape([IO.Path]::GetFullPath($PowerShellExe))",
+        `  $ScriptArgument = '(?i)(?:^|\\s)-File\\s+(?:"' + $ExpectedScript + '"|' + $ExpectedScript + ')(?:\\s|$)'`,
+        `  $ExactCommand = '(?i)^\\s*(?:"' + $ExpectedExe + '"|' + $ExpectedExe + ')\\s+-NoProfile\\s+-ExecutionPolicy\\s+Bypass\\s+-File\\s+(?:"' + $ExpectedScript + '"|' + $ExpectedScript + ')\\s*$'`,
+        "  $CurrentSession = (Get-Process -Id $PID -ErrorAction Stop).SessionId",
+        "  $LiveHelpers = @()",
+        `  foreach ($Candidate in @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -OperationTimeoutSec 2 -ErrorAction Stop)) {`,
+        "    if (-not $Candidate.CommandLine) { throw 'helper-process-identity-unavailable' }",
+        "    if ($Candidate.CommandLine -notmatch $ScriptArgument) { continue }",
+        `    if ($Candidate.CommandLine -match '(?i)(?:^|\\s)-OnceRequestPath(?:\\s|$)') { continue }`,
+        "    Write-CccBootstrapPhase 'validate-helper'",
+        "    if (-not $Candidate.ExecutablePath) { throw 'helper-process-identity-unavailable' }",
+        "    if ($Candidate.CommandLine -notmatch $ExactCommand -or $Candidate.ExecutablePath -ine $PowerShellExe -or $Candidate.SessionId -ne $CurrentSession) { throw 'helper-process-identity-mismatch' }",
+        "    $Live = Get-Process -Id $Candidate.ProcessId -ErrorAction Stop",
+        "    $CreationTicks = $Candidate.CreationDate.ToUniversalTime().Ticks",
+        "    $StartTicks = $Live.StartTime.ToUniversalTime().Ticks",
+        // CIM timestamps have microsecond precision; compare at that precision, then pin exact ticks.
+        "    if ($Live.HasExited -or $Live.SessionId -ne $CurrentSession -or $Live.Path -ine $PowerShellExe -or [Math]::Abs($StartTicks - $CreationTicks) -ge 10) { throw 'helper-process-creation-mismatch' }",
+        "    $Verified = Get-Process -Id $Candidate.ProcessId -ErrorAction Stop",
+        "    if ($Verified.HasExited -or $Verified.StartTime.ToUniversalTime().Ticks -ne $StartTicks -or $Verified.Path -ine $PowerShellExe -or $Verified.SessionId -ne $CurrentSession) { throw 'helper-process-creation-mismatch' }",
+        "    $LiveHelpers += $Verified",
+        "  }",
+        "  if ($LiveHelpers.Count -gt 1) { throw 'helper-process-ambiguous' }",
+        "  if ($LiveHelpers.Count -eq 1) { Write-CccBootstrapPhase 'helper-reused'; return }",
+        "  Write-CccBootstrapPhase 'starting-helper'",
         "  New-Item -ItemType Directory -Force -Path $Downloads,(Split-Path $ScratchHelper) | Out-Null",
+        "  $CanWriteLogs = $true",
         "  Set-Content -Path $BootstrapStdoutPath -Value ('bootstrap-start ' + (Get-Date).ToString('o')) -Encoding UTF8",
-        "  Copy-Item -Force -Path $ToolsHelper -Destination $ScratchHelper",
-        "  $Process = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$ScratchHelper) -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath -WindowStyle Hidden -PassThru",
+        "  Copy-Item -Force -LiteralPath $ToolsHelper -Destination $ScratchHelper",
+        "  $Process = Start-Process -FilePath $PowerShellExe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$ScratchHelper) -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath -WindowStyle Hidden -PassThru",
         "  Add-Content -Path $BootstrapStdoutPath -Value ('helper-pid ' + $Process.Id)",
         "  Set-Content -Path (Join-Path $Downloads 'ccc-guest-helper-bootstrap.ready.txt') -Value (Get-Date).ToString('o') -Encoding UTF8",
+        "  Write-CccBootstrapPhase 'helper-started'",
         "} catch {",
-        "  Set-Content -Path $BootstrapStderrPath -Value $_.Exception.ToString() -Encoding UTF8",
+        "  $FailureCode = [string]$_.Exception.Message",
+        "  if ($FailureCode -cnotin @('helper-process-identity-unavailable','helper-process-identity-mismatch','helper-process-creation-mismatch','helper-process-ambiguous')) { $FailureCode = 'helper-bootstrap-command-failed' }",
+        "  Write-CccBootstrapPhase 'failed' $FailureCode",
+        "  if ($BootstrapMutexOwned -and $CanWriteLogs) { Set-Content -Path $BootstrapStderrPath -Value $_.Exception.ToString() -Encoding UTF8 }",
         "  throw",
+        "} finally {",
+        "  if ($BootstrapMutexOwned) { $BootstrapMutex.ReleaseMutex() }",
+        "  $BootstrapMutex.Dispose()",
         "}",
         "",
     ].join("\n");
@@ -898,6 +969,9 @@ function readWsbConfig(path) {
 function resetWindowsHelperSessionMarkers(helper) {
     for (const path of [
         helper.readyMarkerPath,
+        helper.bootstrapReadyMarkerPath,
+        helper.bootstrapPhasePath,
+        `${helper.bootstrapPhasePath}.tmp`,
         helper.bootstrapStdoutPath,
         helper.bootstrapStderrPath,
         helper.helperStdoutPath,
@@ -938,7 +1012,7 @@ function quoteWindowsProcessArgument(value) {
     return result;
 }
 
-function windowsMinimizedStartProcessArgs(executable, args, wait) {
+export function windowsMinimizedStartProcessArgs(executable, args, wait) {
     const waitFlags = wait ? " -Wait" : "";
     const exitCheck = wait ? "if ($null -ne $Process.ExitCode) { exit $Process.ExitCode }" : "";
     const argumentLine = args.map(quoteWindowsProcessArgument).join(" ");
@@ -947,7 +1021,8 @@ function windowsMinimizedStartProcessArgs(executable, args, wait) {
         "$ProgressPreference = 'SilentlyContinue'",
         `$Executable = ${psSingleQuote(executable)}`,
         `$Arguments = ${psSingleQuote(argumentLine)}`,
-        `$Process = Start-Process -FilePath $Executable -ArgumentList $Arguments -WindowStyle Minimized${waitFlags} -PassThru`,
+        wait ? `$Process = Start-Process -FilePath $Executable -ArgumentList $Arguments -WindowStyle Minimized${waitFlags} -PassThru`
+            : `(New-Object -ComObject Shell.Application).ShellExecute($Executable, $Arguments, '', 'open', 7)`,
         exitCheck,
         "exit 0",
     ].filter(Boolean).join("\n");
@@ -1014,13 +1089,14 @@ export function windowsReadyMinimizeWatchdogArgs(startedAfter, cancelPath = "", 
     return ["-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-EncodedCommand", powershellEncodedCommand(script)];
 }
 
-export function windowsWsbConfigLaunchArgs(configPath) {
+export function windowsWsbConfigLaunchArgs(configPath, minimized = true) {
     const script = [
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
         `$ConfigPath = ${psSingleQuote(configPath)}`,
-        "$WindowStyle = 'Normal'",
-        "$Process = Start-Process -FilePath $ConfigPath -WindowStyle $WindowStyle -PassThru",
+        minimized
+            ? "(New-Object -ComObject Shell.Application).ShellExecute($ConfigPath, '', '', 'open', 7)"
+            : "$Process = Start-Process -FilePath $ConfigPath -WindowStyle Normal -PassThru",
         "exit 0",
     ].join("\n");
     return ["-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-EncodedCommand", powershellEncodedCommand(script)];
@@ -1126,7 +1202,7 @@ function startWindowsSandboxDeviceRuntime(wsb, claimedSandboxId, configPath, con
     if (process.platform === "win32") {
         const startedAfter = new Date(Date.now() - 2000).toISOString();
         const baselineHandles = minimized ? windowsSandboxWindowHandles() : null;
-        const result = runWithTimeout("powershell.exe", windowsWsbConfigLaunchArgs(configPath), WINDOWS_SANDBOX_START_TIMEOUT_MS);
+        const result = runWithTimeout("powershell.exe", windowsWsbConfigLaunchArgs(configPath, minimized), WINDOWS_SANDBOX_START_TIMEOUT_MS);
         const minimizeWatchdogLaunch = minimized ? launchWindowsSandboxMinimizeWatchdog(startedAfter, cancelPath, WINDOWS_SANDBOX_MINIMIZE_WATCHDOG_MS, baselineHandles, resultPath) : { ok: true, skipped: true };
         return { ...result, launchMode: "wsb-file", minimizeWatchdogLaunch };
     }
@@ -1134,38 +1210,28 @@ function startWindowsSandboxDeviceRuntime(wsb, claimedSandboxId, configPath, con
     return { ...result, launchMode: "wsb-cli-start" };
 }
 
-function launchWindowsSandboxSession(wsb, sandboxId, minimized = true, options = {}) {
+export function launchWindowsSandboxSession(wsb, sandboxId, minimized = true, timeoutMs = 10000, {
+    platform = process.platform, runLauncher = runWithTimeout, spawnSession = spawn,
+} = {}) {
     try {
-        const autoMinimizeAfterVisible = options.autoMinimizeAfterVisible === true;
-        if (process.platform === "win32" && autoMinimizeAfterVisible) {
-            const startedAfter = new Date(Date.now() - 2000).toISOString();
-            const baselineHandles = windowsSandboxWindowHandles();
-            const child = spawn(wsb, ["connect", "--id", sandboxId], {
-                detached: true,
-                stdio: "ignore",
-                windowsHide: false,
-            });
-            child.unref();
-            const watchdog = spawn("powershell.exe", windowsReadyMinimizeWatchdogArgs(startedAfter, options.cancelPath, WINDOWS_SANDBOX_MINIMIZE_WATCHDOG_MS, baselineHandles), {
-                detached: true,
-                stdio: "ignore",
-                windowsHide: true,
-            });
-            watchdog.unref();
-            return { ok: true, pid: child.pid, minimizeWatchdogPid: watchdog.pid, autoMinimizeAfterVisible };
-        }
-        const useHiddenPowerShell = process.platform === "win32" && (minimized || autoMinimizeAfterVisible);
+        if (timeoutMs <= 0) return { ok: false, error: "session-connect-deadline-exhausted" };
+        const useHiddenPowerShell = platform === "win32" && minimized;
         const executable = useHiddenPowerShell ? "powershell.exe" : wsb;
-        const args = process.platform === "win32" && minimized
+        const args = useHiddenPowerShell
             ? windowsMinimizedStartProcessArgs(wsb, ["connect", "--id", sandboxId], false)
             : ["connect", "--id", sandboxId];
-        const child = spawn(executable, args, {
+        if (useHiddenPowerShell) {
+            const result = runLauncher(executable, args, Math.min(10000, timeoutMs));
+            return result.status === 0 && !result.error ? { ok: true }
+                : { ok: false, error: "session-connect-launcher-failed" };
+        }
+        const child = spawnSession(executable, args, {
             detached: true,
             stdio: "ignore",
             windowsHide: useHiddenPowerShell,
         });
         child.unref();
-        return { ok: true, pid: child.pid, autoMinimizeAfterVisible };
+        return { ok: true, pid: child.pid };
     } catch (error) {
         return { ok: false, error: error?.message || String(error) };
     }
@@ -1193,6 +1259,43 @@ function readDiagnosticSnippet(path) {
     } catch (error) {
         return `${path}: <read failed: ${error?.message || String(error)}>`;
     }
+}
+
+// A classification is evidence about a known log token, not a native root-cause claim.
+export function classifyWindowsSandboxHelperStderr(text) {
+    if (text === null) return "absent";
+    if (typeof text !== "string") return "unreadable";
+    if (Buffer.byteLength(text, "utf8") > WINDOWS_SANDBOX_DIAGNOSTIC_FILE_LIMIT_BYTES) return "oversized";
+    if (!text.trim()) return "empty";
+    if (/\b(?:PSSecurityException|ScriptNotAllowed)\b/i.test(text)) return "script-policy";
+    if (/\b(?:UnauthorizedAccessException|PermissionDenied|AccessDenied)\b/i.test(text)) return "access-denied";
+    if (/\b(?:ItemNotFoundException|DirectoryNotFoundException|FileNotFoundException|PathNotFound|CommandNotFoundException)\b/i.test(text)) return "path-not-found";
+    if (/\b(?:ParserError|ParseException|UnexpectedToken)\b/i.test(text)) return "parse-error";
+    return "other-error";
+}
+
+export function windowsSandboxHelperLogEvidence(downloadsDir) {
+    const read = (name) => {
+        try {
+            const path = join(downloadsDir, name);
+            assertDeviceLabPathWithinRoot(downloadsDir, path, "windows-helper-diagnostic");
+            return { text: readDeviceLabTextFile(path, "windows-helper-diagnostic", WINDOWS_SANDBOX_DIAGNOSTIC_FILE_LIMIT_BYTES) };
+        } catch (error) {
+            return { text: null, failure: error?.code === "windows-helper-diagnostic-file-too-large" ? "oversized" : "unreadable" };
+        }
+    };
+    const bootstrapStdout = read("ccc-guest-helper-bootstrap.stdout.txt");
+    const bootstrapReady = read("ccc-guest-helper-bootstrap.ready.txt");
+    const heartbeat = read("ccc-guest-helper.heartbeat.txt");
+    const bootstrapStderr = read("ccc-guest-helper-bootstrap.stderr.txt");
+    const helperStderr = read("ccc-guest-helper.stderr.txt");
+    return {
+        bootstrapStarted: typeof bootstrapStdout.text === "string" && /^\uFEFF?bootstrap-start\s+\S/m.test(bootstrapStdout.text),
+        bootstrapReady: typeof bootstrapReady.text === "string" && bootstrapReady.text.trim().length > 0,
+        helperHeartbeat: typeof heartbeat.text === "string" && /^\uFEFF?heartbeat\s+\S/m.test(heartbeat.text),
+        bootstrapStderr: bootstrapStderr.failure || classifyWindowsSandboxHelperStderr(bootstrapStderr.text),
+        helperStderr: helperStderr.failure || classifyWindowsSandboxHelperStderr(helperStderr.text),
+    };
 }
 
 function directoryDiagnostic(path) {
@@ -1259,34 +1362,38 @@ function windowsSandboxExec(wsb, sandboxId, command, timeoutMs) {
     };
 }
 
-async function runWindowsHelperBootstrapFallback(device, helper, wsb, timeoutMs) {
-    const deadline = Date.now() + Math.min(Math.max(1000, Math.floor(timeoutMs * 0.75)), 45000);
+export async function runWindowsHelperBootstrapFallback(device, helper, wsb, timeoutMs, {
+    now = Date.now, wait = sleep, execute = windowsSandboxExec,
+} = {}) {
+    // Reserve the final quarter for the actual request; never round a short
+    // caller deadline up to a fresh one-second command budget.
+    const deadline = now() + Math.min(Math.max(0, Math.floor(timeoutMs * 0.75)), 45000);
     const command = `powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ${helper.guestBootstrapScript}`;
     let lastResult = null;
     let lastAttempts = [];
-    let visibleConnectFallback = null;
-    while (Date.now() <= deadline) {
+    let attempted = false;
+    let failure = "timeout";
+    while (now() < deadline) {
         if (existsSync(helper.readyMarkerPath)) {
-            return { attempted: true, ok: true, ready: true, command, result: lastResult, attempts: lastAttempts, visibleConnectFallback };
+            return { attempted, ok: true, ready: true, command, result: lastResult, attempts: lastAttempts };
         }
-        const remainingMs = Math.max(1000, deadline - Date.now());
-        const execution = windowsSandboxExec(wsb, device.sandboxId, command, Math.min(WINDOWS_SANDBOX_EXEC_TIMEOUT_MS, remainingMs));
+        const remainingMs = deadline - now();
+        if (remainingMs <= 0) break;
+        attempted = true;
+        const execution = execute(wsb, device.sandboxId, command, Math.min(WINDOWS_SANDBOX_EXEC_TIMEOUT_MS, remainingMs));
         lastResult = execution.result;
         lastAttempts = execution.attempts;
-        if (execution.ok) {
-            return { attempted: true, ok: true, ready: existsSync(helper.readyMarkerPath), command, result: lastResult, attempts: lastAttempts, runAs: execution.runAs, visibleConnectFallback };
+        if (execution.ok && now() <= deadline) {
+            return { attempted, ok: true, ready: existsSync(helper.readyMarkerPath), command, result: lastResult, attempts: lastAttempts, runAs: execution.runAs };
         }
-        if (!visibleConnectFallback && device.minimized !== false && existingLoginUnavailable(lastResult)) {
-            visibleConnectFallback = launchWindowsSandboxSession(wsb, device.sandboxId, false, {
-                autoMinimizeAfterVisible: true,
-                cancelPath: helper.minimizeWatchdogCancelPath,
-            });
-            await sleep(2000);
-            continue;
-        }
-        await sleep(500);
+        failure = lastResult?.error?.code === "ETIMEDOUT" || now() >= deadline ? "timeout"
+            : existingLoginUnavailable(lastResult) ? "login-unavailable" : "command-failed";
+        const remainingAfterExec = deadline - now();
+        if (remainingAfterExec <= 0) break;
+        await wait(Math.min(500, remainingAfterExec));
     }
-    return { attempted: true, ok: false, ready: existsSync(helper.readyMarkerPath), command, result: lastResult, attempts: lastAttempts, visibleConnectFallback };
+    return { attempted, ok: false, ready: existsSync(helper.readyMarkerPath), command, result: lastResult,
+        attempts: lastAttempts, failure, deadlineExhausted: now() >= deadline };
 }
 
 function guestRequestPath(helper, requestPath) {
@@ -1301,12 +1408,13 @@ function psSingleQuote(value) {
     return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-async function runWindowsHelperRequestOnce(device, helper, wsb, requestPath, responsePath, timeoutMs) {
+export async function runWindowsHelperRequestOnce(device, helper, wsb, requestPath, responsePath, timeoutMs, { now = Date.now, execute = windowsSandboxExec } = {}) {
     if (!isGuid(device?.sandboxId)) {
         return { attempted: false, ok: false, command: "", result: null, error: "missing valid sandboxId" };
     }
-    const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
-    const waitMs = Math.min(5000, Math.max(1000, deadline - Date.now()));
+    const deadline = now() + Math.max(0, Number(timeoutMs) || 0);
+    if (now() >= deadline) return { attempted: false, ok: false, command: "", result: null, deadlineExhausted: true };
+    const waitMs = Math.min(5000, Math.max(0, deadline - now()));
     const requestScriptPath = `${requestPath}.ps1`;
     assertDeviceLabPathWithinRoot(helper.inboxDir, requestScriptPath, "windows-helper-one-shot-script");
     const guestScriptPath = `${helper.guestInboxDir}\\${basename(requestScriptPath)}`;
@@ -1335,24 +1443,13 @@ async function runWindowsHelperRequestOnce(device, helper, wsb, requestPath, res
     ].join("\r\n");
     writeFileAtomically(requestScriptPath, script);
     const command = `powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ${guestScriptPath}`;
-    const firstTimeoutMs = Math.min(WINDOWS_SANDBOX_EXEC_TIMEOUT_MS, Math.max(1000, deadline - Date.now()));
     try {
-        let execution = windowsSandboxExec(wsb, device.sandboxId, command, firstTimeoutMs);
-        let visibleConnectFallback = null;
-        if (!execution.ok && device.minimized !== false && existingLoginUnavailable(execution.result)) {
-            visibleConnectFallback = launchWindowsSandboxSession(wsb, device.sandboxId, false, {
-                autoMinimizeAfterVisible: true,
-                cancelPath: helper.minimizeWatchdogCancelPath,
-            });
-            await sleep(2000);
-            const remainingMs = Math.max(1000, deadline - Date.now());
-            const retry = windowsSandboxExec(wsb, device.sandboxId, command, Math.min(WINDOWS_SANDBOX_EXEC_TIMEOUT_MS, remainingMs));
-            execution = {
-                ...retry,
-                attempts: [...execution.attempts, ...retry.attempts],
-            };
-        }
-        return { attempted: true, ok: execution.ok, command, diagnosticPath, guestStatus: execution.guestStatus, result: execution.result, attempts: execution.attempts, runAs: execution.runAs, visibleConnectFallback };
+        const remainingMs = deadline - now();
+        if (remainingMs <= 0) return { attempted: false, ok: false, command, result: null, deadlineExhausted: true };
+        const execution = execute(wsb, device.sandboxId, command, Math.min(WINDOWS_SANDBOX_EXEC_TIMEOUT_MS, remainingMs));
+        return { attempted: true, ok: execution.ok && now() <= deadline, command, diagnosticPath,
+            guestStatus: execution.guestStatus, result: execution.result, attempts: execution.attempts, runAs: execution.runAs,
+            deadlineExhausted: now() > deadline };
     } finally {
         rmSync(requestScriptPath, { force: true });
     }
@@ -1388,15 +1485,19 @@ async function windowsHelperRequest(device, type, payload = {}, requestedTimeout
     let bootstrapFallback = null;
     if (!existsSync(helper.readyMarkerPath)) {
         if (!isGuid(device?.sandboxId)) {
-            return { helper, error: `Windows Sandbox helper requires a running sandbox with a valid GUID sandboxId for ${device?.id || "unknown"}` };
+            return { helper, error: `Windows Sandbox helper requires a running sandbox with a valid GUID sandboxId for ${device?.id || "unknown"}`, helperDiagnostic: { stage: "sandbox-id-invalid", readyMarkerPresent: false } };
         }
         const discovery = windowsDiscovery();
         if (!discovery.available) {
-            return { helper, error: `Windows Sandbox helper connect missing prerequisites: ${discovery.missing.join(", ")}` };
+            return { helper, error: `Windows Sandbox helper connect missing prerequisites: ${discovery.missing.join(", ")}`, helperDiagnostic: { stage: "prerequisites-missing", readyMarkerPresent: false } };
         }
-        const connected = launchWindowsSandboxSession(discovery.wsb, device.sandboxId, device.minimized !== false);
+        // A .wsb-file launch or an earlier successful connect already created the viewer.
+        // Missing helper readiness is not evidence that another viewer is needed.
+        const connected = device.status === "running" && device.helperSessionLaunch?.ok === true
+            ? { ok: true }
+            : launchWindowsSandboxSession(discovery.wsb, device.sandboxId, device.minimized !== false, Math.max(0, deadline - Date.now()));
         if (!connected.ok) {
-            return { helper, error: `Windows Sandbox helper session connect launch failed: ${connected.error}` };
+            return { helper, error: `Windows Sandbox helper session connect launch failed: ${connected.error}`, helperDiagnostic: { stage: "session-connect-failed", readyMarkerPresent: false } };
         }
         bootstrapFallback = await runWindowsHelperBootstrapFallback(device, helper, discovery.wsb, Math.max(0, deadline - Date.now()));
     }
@@ -1408,11 +1509,14 @@ async function windowsHelperRequest(device, type, payload = {}, requestedTimeout
     let requestFallback = null;
     let lastResponseParseError = null;
     const requestFallbackAt = Date.now() + Math.min(2000, Math.max(100, Math.floor(timeoutMs / 4)));
-    while (Date.now() <= deadline) {
+    while (Date.now() < deadline) {
         if (existsSync(responsePath)) {
             const parsed = tryReadJsonFile(responsePath);
             if (parsed.ok && parsed.value && typeof parsed.value === "object" && !Array.isArray(parsed.value)
-                && parsed.value.id === id && parsed.value.type === type) return { helper, response: parsed.value };
+                && parsed.value.id === id && parsed.value.type === type) {
+                if (Date.now() <= deadline) return { helper, response: parsed.value };
+                break;
+            }
             lastResponseParseError = parsed.ok ? "response id or type mismatch" : parsed.error;
         }
         if (!requestFallback && Date.now() >= requestFallbackAt) {
@@ -1425,11 +1529,16 @@ async function windowsHelperRequest(device, type, payload = {}, requestedTimeout
             if (existsSync(responsePath)) {
                 const parsed = tryReadJsonFile(responsePath);
                 if (parsed.ok && parsed.value && typeof parsed.value === "object" && !Array.isArray(parsed.value)
-                    && parsed.value.id === id && parsed.value.type === type) return { helper, response: parsed.value };
+                    && parsed.value.id === id && parsed.value.type === type) {
+                    if (Date.now() <= deadline) return { helper, response: parsed.value };
+                    break;
+                }
                 lastResponseParseError = parsed.ok ? "response id or type mismatch" : parsed.error;
             }
         }
-        await sleep(100);
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) break;
+        await sleep(Math.min(100, remainingMs));
     }
     const diagnostics = [
         `Inbox: ${helper.inboxDir}`,
@@ -1446,18 +1555,29 @@ async function windowsHelperRequest(device, type, payload = {}, requestedTimeout
         `Helper stderr: ${readDiagnosticSnippet(helper.helperStderrPath)}`,
         `Helper heartbeat: ${readDiagnosticSnippet(helper.helperHeartbeatPath)}`,
         bootstrapFallback ? `Bootstrap exec fallback: attempted=${bootstrapFallback.attempted} ok=${bootstrapFallback.ok} ready=${bootstrapFallback.ready} command=${bootstrapFallback.command} ${commandSummary(bootstrapFallback.result)}` : "",
-        bootstrapFallback?.visibleConnectFallback ? `Bootstrap visible connect fallback: ok=${bootstrapFallback.visibleConnectFallback.ok} autoMinimizeAfterVisible=${bootstrapFallback.visibleConnectFallback.autoMinimizeAfterVisible === true} ${bootstrapFallback.visibleConnectFallback.pid ? `pid=${bootstrapFallback.visibleConnectFallback.pid}` : ""} ${bootstrapFallback.visibleConnectFallback.error || ""}` : "",
         bootstrapFallback?.attempts?.length ? `Bootstrap exec attempts: ${execAttemptSummary(bootstrapFallback.attempts)}` : "",
         requestFallback ? `Request exec fallback: attempted=${requestFallback.attempted} ok=${requestFallback.ok} guestStatus=${requestFallback.guestStatus ?? "unknown"} command=${requestFallback.command} ${requestFallback.error || commandSummary(requestFallback.result)}` : "",
         requestFallback?.diagnosticPath ? `Request script stderr: ${readDiagnosticSnippet(requestFallback.diagnosticPath)}` : "",
-        requestFallback?.visibleConnectFallback ? `Request visible connect fallback: ok=${requestFallback.visibleConnectFallback.ok} autoMinimizeAfterVisible=${requestFallback.visibleConnectFallback.autoMinimizeAfterVisible === true} ${requestFallback.visibleConnectFallback.pid ? `pid=${requestFallback.visibleConnectFallback.pid}` : ""} ${requestFallback.visibleConnectFallback.error || ""}` : "",
         requestFallback?.attempts?.length ? `Request exec attempts: ${execAttemptSummary(requestFallback.attempts)}` : "",
     ];
     const error = `Windows Sandbox helper did not respond within ${timeoutMs}ms. ${diagnostics.filter(Boolean).join(" | ")}`;
     rmSync(requestPath, { force: true });
     rmSync(responsePath, { force: true });
     rmSync(`${responsePath}.tmp`, { force: true });
-    return { helper, error };
+    return { helper, error, helperDiagnostic: {
+        stage: "response-timeout",
+        logEvidence: windowsSandboxHelperLogEvidence(helper.downloadsDir),
+        readyMarkerPresent: existsSync(helper.readyMarkerPath),
+        bootstrapAttempted: bootstrapFallback?.attempted === true,
+        bootstrapOk: bootstrapFallback?.ok === true,
+        ...(["login-unavailable", "timeout", "command-failed"].includes(bootstrapFallback?.failure) ? { bootstrapFailure: bootstrapFallback.failure } : {}),
+        ...(typeof bootstrapFallback?.deadlineExhausted === "boolean" ? { bootstrapDeadlineExhausted: bootstrapFallback.deadlineExhausted } : {}),
+        requestAttempted: requestFallback?.attempted === true,
+        requestOk: requestFallback?.ok === true,
+        responseParseFailed: lastResponseParseError !== null,
+        ...(Number.isInteger(requestFallback?.guestStatus) && requestFallback.guestStatus >= -2147483648
+            && requestFallback.guestStatus <= 2147483647 ? { guestStatus: requestFallback.guestStatus } : {}),
+    } };
 }
 
 function windowsPathBasename(value) {
@@ -2095,8 +2215,11 @@ async function handleWindowsToolUnlocked(name, args) {
             const moving = args.x !== undefined || args.y !== undefined;
             if (moving && !desktopPointValid(args.x, args.y)) return textResult(false, "invalid-pointer-coordinates");
             const result = await windowsHelperRequest(device, "cursor_position", moving ? { x: args.x, y: args.y } : {}, helperTimeoutMs);
-            if (result.error) return textResult(false, result.error);
-            if (!result.response.ok) return textResult(false, result.response.error || "Windows helper cursor position failed");
+            if (result.error) return result.helperDiagnostic
+                ? jsonResult({ ok: false, error: result.helperDiagnostic.stage === "response-timeout" ? "windows-sandbox-helper-timeout" : "windows-sandbox-helper-failed", helperDiagnostic: result.helperDiagnostic })
+                : textResult(false, result.error);
+            if (!result.response.ok) return jsonResult({ ok: false, error: "windows-sandbox-helper-response-rejected",
+                helperDiagnostic: { stage: "response-rejected", readyMarkerPresent: existsSync(result.helper.readyMarkerPath) } });
             return jsonResult({ provider: "windows-helper", cursor: result.response.cursor || null, response: result.response });
         }
 

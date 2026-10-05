@@ -76,13 +76,15 @@ vi.mock("child_process", async (importOriginal) => {
                     Config: { Labels: labels },
                 }));
             }
+            const markerArgv = argv?.[0] === "exec" && argv[1] === "--user" && argv[2] === "root"
+                ? ["exec", ...argv.slice(3)] : argv;
             if (autoReadMountMarkers
-                && argv?.[0] === "exec"
-                && argv[2] === "cat"
-                && argv[3]?.includes("/.ccc-mount-identity-")) {
-                const markerName = argv[3].slice(argv[3].lastIndexOf("/") + 1);
-                mountChallengeContainerIds.add(argv[1]);
-                mountChallengePaths.add(argv[3]);
+                && markerArgv?.[0] === "exec"
+                && markerArgv[2] === "cat"
+                && markerArgv[3]?.includes("/.ccc-mount-identity-")) {
+                const markerName = markerArgv[3].slice(markerArgv[3].lastIndexOf("/") + 1);
+                mountChallengeContainerIds.add(markerArgv[1]);
+                mountChallengePaths.add(markerArgv[3]);
                 const markerReadAttempt = (mountMarkerReadAttempts.get(markerName) ?? 0) + 1;
                 mountMarkerReadAttempts.set(markerName, markerReadAttempt);
                 if (markerReadAttempt <= autoReadMountMarkerFailuresPerMarker) {
@@ -94,7 +96,7 @@ vi.mock("child_process", async (importOriginal) => {
                 }
                 return makeResult(
                     0,
-                    mismatchingMountChallengeContainerIds.has(argv[1])
+                    mismatchingMountChallengeContainerIds.has(markerArgv[1])
                         ? "wrong-mounted-directory"
                         : mountMarkers.get(markerName) ?? "",
                 );
@@ -3130,6 +3132,8 @@ describe("docker.ts module exports", () => {
             expect(name).toBe(getContainerName(projectPath));
             expect(guard).not.toHaveBeenCalled();
             expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Container update deferred"));
+            expect(spawnSyncMock.mock.calls.some((call: unknown[]) =>
+                (call[1] as string[]).includes("ccc-ssh-copy"))).toBe(true);
             expectNoContainerReplacement();
         });
 
@@ -4092,8 +4096,9 @@ describe("docker.ts module exports", () => {
                     readinessAttempts += 1;
                     return makeResult(readinessAttempts >= 3 ? 0 : 1);
                 }
-                if (args[0] === "exec" && args[2] === "cat" && args[3]?.includes("/.ccc-mount-identity-")) {
-                    const markerName = args[3].slice(args[3].lastIndexOf("/") + 1);
+                if (args[0] === "exec" && args.at(-2) === "cat" && args.at(-1)?.includes("/.ccc-mount-identity-")) {
+                    const markerPath = args.at(-1)!;
+                    const markerName = markerPath.slice(markerPath.lastIndexOf("/") + 1);
                     return readinessAttempts >= 3
                         ? makeResult(0, mountMarkers.get(markerName) ?? "")
                         : makeResult(1);

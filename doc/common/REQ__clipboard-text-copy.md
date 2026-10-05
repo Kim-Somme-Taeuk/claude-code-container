@@ -19,6 +19,9 @@ the terminal's Ctrl+C key binding or intercept process interrupt signals.
 - Preserve Korean, emoji, quotes, CRLF, spaces and trailing newlines. Empty text
   clears the clipboard. Clipboard data must travel as data through stdin, never
   as executable shell or PowerShell source. Native failures produce an error.
+- Windows persistent clipboard reads transmit PowerShell source as ASCII base64
+  of UTF-16LE and emit BOM-free UTF-8, independent of the host console codepage.
+  The response decoder preserves characters split across pipe chunks.
 - Support existing Windows/WSL, macOS, X11 and Wayland hosts. Successful writes
   invalidate old cached text/images, including reads already in flight.
 - `wl-copy`, `xclip` clipboard input and `xsel` clipboard input send text to the

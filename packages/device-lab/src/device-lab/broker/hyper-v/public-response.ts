@@ -422,6 +422,22 @@ export function hyperVTypedErrorOperation(error: unknown): HyperVWindowsOperatio
         : undefined;
 }
 
+/** Project only bounded numeric native facts, never exception messages or host identifiers. */
+export function hyperVTypedNativeDiagnostics(error: unknown): { nativeHResult?: number; nativeErrorCategory?: number } {
+    const typed = error instanceof HyperVWindowsError
+        ? error
+        : error instanceof Error && error.cause instanceof HyperVWindowsError ? error.cause : null;
+    if (!typed || typed.category !== "native" || !hyperVTypedErrorOperation(typed)) return {};
+    return {
+        ...(typeof typed.nativeHResult === "number" && Number.isInteger(typed.nativeHResult)
+            && typed.nativeHResult >= -2147483648 && typed.nativeHResult <= 2147483647
+            ? { nativeHResult: typed.nativeHResult } : {}),
+        ...(typeof typed.nativeErrorCategory === "number" && Number.isInteger(typed.nativeErrorCategory)
+            && typed.nativeErrorCategory >= 0 && typed.nativeErrorCategory <= 31
+            ? { nativeErrorCategory: typed.nativeErrorCategory } : {}),
+    };
+}
+
 function hyperVTypedErrorFamilyCode(error: unknown): string | undefined {
     return typeof error === "string"
         && error.length <= HYPER_V_DIAGNOSTIC_CODE_MAX_LENGTH

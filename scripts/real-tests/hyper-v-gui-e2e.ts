@@ -4,7 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { markExpectedToolError, parseToolPayload } from "./device-lab-mcp-client.ts";
 import { unfilteredHyperVConsolePixels } from "./hyper-v-console-host.ts";
 
-const GUI_TOOLS = ["screenshot", "click", "key", "type", "scroll", "cursor_position", "move"] as const;
+const GUI_TOOLS = ["screenshot", "click", "key", "type", "scroll", "cursor_position", "move", "window_list", "focus_window", "drag"] as const;
 
 function accepted(result: any, tool: string): any {
     const value = parseToolPayload(result);
@@ -129,6 +129,52 @@ export async function proveHyperVLinuxGuiKeyboardFile(
     assert.ok(await fileExists(8), "hyper-v-gui-keyboard-guest-file-missing");
 }
 
+export async function focusHyperVGuiWindow(
+    callTool: (tool: string, args: Record<string, unknown>) => Promise<any>,
+    direct: Record<string, unknown>,
+    guest: "windows" | "linux",
+    nonce: string,
+    wait: (milliseconds: number) => Promise<unknown> = delay,
+): Promise<void> {
+    // X11 listings need not expose process names or English terminal titles.
+    // Identify the existing terminal through its class, then require its exact
+    // handle in the public listing before exercising public focus.
+    const command = "timeout 4s sudo -n -u ccc-desktop env DISPLAY=:0 XAUTHORITY=/home/ccc-desktop/.Xauthority bash -c 'set -eo pipefail; xdotool search --onlyvisible --class xfce4-terminal | tail -n 1'";
+    for (let attempt = 0; attempt < 6; attempt++) {
+        const terminalHandle = guest === "linux"
+            ? String(accepted(await callTool("exec", { detail: true, ...direct, command, timeoutMs: 5000 }), "exec").stdout || "").trim()
+            : undefined;
+        const listing = accepted(await callTool("window_list", { detail: true, ...direct }), "window_list");
+        assert.ok(Array.isArray(listing?.windows), "hyper-v-gui-window-list-invalid");
+        for (const row of listing.windows) {
+            assert.ok(row && typeof row.title === "string" && typeof row.handle === "string"
+                && /^[1-9][0-9]{0,15}$/.test(row.handle) && Number.isSafeInteger(Number(row.handle)),
+            "hyper-v-gui-window-list-invalid");
+        }
+        const target = listing.windows.find((row: { title: string; handle: string }) => guest === "windows"
+            ? row.title.includes(`ccc-gui-${nonce}`)
+            : row.handle === terminalHandle);
+        if (target) {
+            const focused = accepted(await callTool("focus_window", { detail: true, ...direct, handle: target.handle }), "focus_window");
+            assert.equal(focused?.ok, true, "hyper-v-gui-focus-window-failed");
+            return;
+        }
+        if (attempt < 5) await wait(500);
+    }
+    throw new Error("hyper-v-gui-window-target-missing");
+}
+
+export async function proveHyperVGuiDrag(
+    callTool: (tool: string, args: Record<string, unknown>) => Promise<any>,
+    direct: Record<string, unknown>,
+): Promise<void> {
+    const dragged = accepted(await callTool("drag", { detail: true, ...direct, x1: 280, y1: 200, x2: 320, y2: 240, durationMs: 300 }), "drag");
+    assert.equal(dragged?.applied, true, "hyper-v-gui-drag-failed");
+    const cursor = accepted(await callTool("cursor_position", { detail: true, ...direct }), "cursor_position");
+    assert.ok(Math.abs(Number(cursor.x) - 320) <= 2 && Math.abs(Number(cursor.y) - 240) <= 2,
+        "hyper-v-gui-drag-cursor-position-failed");
+}
+
 export async function runHyperVGuiE2E(
     callTool: (tool: string, args: Record<string, unknown>) => Promise<any>,
     direct: Record<string, unknown>,
@@ -162,14 +208,16 @@ export async function runHyperVGuiE2E(
         // so its successful guest-file proof alone cannot prove a changed final frame.
         accepted(await callTool("key", { detail: true, ...direct, key: "Win+R" }), "key");
         await delay(800);
-        accepted(await callTool("type", { detail: true, ...direct, text: "notepad" }), "type");
+        accepted(await callTool("type", { detail: true, ...direct, text: `notepad "${file}"` }), "type");
         accepted(await callTool("key", { detail: true, ...direct, key: "Enter" }), "key");
         await delay(1500);
+        await focusHyperVGuiWindow(callTool, direct, guest, nonce);
         accepted(await callTool("key", { detail: true, ...direct, key: "Win+Up" }), "key");
         // The lines must be visually distinct: a wheel movement over nearly identical
         // line numbers changes too few pixels to prove a real viewport scroll.
         accepted(await callTool("type", { detail: true, ...direct, text: Array.from({ length: 40 }, (_, index) => `CCC ${index.toString().padStart(2, "0")} ${String.fromCharCode(65 + index % 26).repeat(28)}\r\n`).join("") }), "type");
     } else {
+        await focusHyperVGuiWindow(callTool, direct, guest, nonce);
         accepted(await callTool("type", { detail: true, ...direct, text: "awk 'BEGIN {for(n=0;n<200;n++){c=sprintf(\"%c\",65+n%26);s=\"\";for(i=0;i<60;i++)s=s c;print n,s}}'" }), "type");
         accepted(await callTool("key", { detail: true, ...direct, key: "Enter" }), "key");
     }
@@ -179,10 +227,12 @@ export async function runHyperVGuiE2E(
     const movedAway = accepted(await callTool("cursor_position", { detail: true, ...direct }), "cursor_position");
     assert.ok(Math.abs(Number(movedAway.x) - 10) <= 2 && Math.abs(Number(movedAway.y) - 10) <= 2,
         "hyper-v-gui-cursor-first-position-failed");
+    await proveHyperVGuiDrag(callTool, direct);
     accepted(await callTool("move", { detail: true, ...direct, x: 320, y: 240 }), "cursor_position");
     const cursor = accepted(await callTool("cursor_position", { detail: true, ...direct }), "cursor_position");
     assert.ok(Math.abs(Number(cursor.x) - 320) <= 2 && Math.abs(Number(cursor.y) - 240) <= 2,
         "hyper-v-gui-cursor-second-position-failed");
+    // Clear any drag selection before taking the scroll baseline.
     accepted(await callTool("click", { detail: true, ...direct, x: 320, y: 240 }), "click");
     accepted(await callTool("click", { count: 2, detail: true, ...direct, x: 320, y: 240 }), "click count=2");
     await delay(700);

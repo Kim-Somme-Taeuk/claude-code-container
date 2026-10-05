@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
     createHyperVWindowsClient,
+    createHyperVWindowsNetworkClient,
     createHyperVWindowsPowerShellExecutor,
     HYPER_V_WINDOWS_POWERSHELL_ASSET,
     HYPER_V_WINDOWS_POWERSHELL_MEMORY_BOOTSTRAP,
@@ -957,4 +958,43 @@ describe("Hyper-V Windows creation primitives", () => {
         await expect(client.setVMBios({ selector, startupOrder: ["IDE", "IDE"] }))
             .rejects.toThrow("startup-order-duplicated");
     });
+});
+
+
+describe.each(["vm", "network"] as const)("native diagnostic envelope (%s client)", (kind) => {
+    const invoke = (fields: Record<string, unknown>) => {
+        const executor = executorUsing((request) => ({ status: 1, stdout: JSON.stringify({
+            schemaVersion: 1, operation: request.operation, ok: false, errorCode: "InvalidParameter", ...fields,
+        }), stderr: "secret host and C:\\private\\file" }));
+        return kind === "vm" ? createHyperVWindowsClient(executor).startVM({ selector })
+            : createHyperVWindowsNetworkClient(executor).getVMSwitches({ kind: "all" });
+    };
+    it.each([{}, { nativeHResult: -2147024809, nativeErrorCategory: 5 },
+        { nativeHResult: -2147483648 }, { nativeHResult: 2147483647 }, { nativeErrorCategory: 0 }, { nativeErrorCategory: 31 }])(
+        "preserves bounded numeric facts and legacy envelopes", async (fields) => {
+            const caught = await invoke(fields).catch(error => error);
+            expect(caught).toBeInstanceOf(HyperVWindowsError);
+            expect(caught).toMatchObject({ category: "native", nativeStatus: 1, code: "InvalidParameter", ...fields });
+            if (!("nativeHResult" in fields)) expect(caught.nativeHResult).toBeUndefined();
+            if (!("nativeErrorCategory" in fields)) expect(caught.nativeErrorCategory).toBeUndefined();
+            expect(JSON.stringify(caught)).not.toContain("secret");
+        });
+    it.each([
+        { nativeHResult: "-2147024809" }, { nativeHResult: null }, { nativeHResult: -2147483649 },
+        { nativeHResult: 2147483648 }, { nativeHResult: 1.5 }, { nativeErrorCategory: "InvalidArgument" },
+        { nativeErrorCategory: -1 }, { nativeErrorCategory: 32 }, { nativeErrorCategory: null },
+        { nativeErrorCategory: 1.5 }, { nativeMessage: "secret" },
+    ])("rejects malformed diagnostics and unknown fields", async (fields) => {
+        await expect(invoke(fields)).rejects.toMatchObject({ category: "protocol", code: "response-envelope-invalid" });
+    });
+});
+
+it("emits numeric native diagnostics from the PowerShell error record", () => {
+    const source = readFileSync(join(process.cwd(), "packages/hyper-v/powershell/Invoke-HyperVWindowsOperation.ps1"), "utf8");
+    const emitter = source.split("function Write-HyperVWindowsFailure")[1].split("function Resolve-HyperVWindowsTrustedModulePath")[0];
+    expect(emitter).toContain("nativeHResult = [int]$Failure.Exception.HResult");
+    expect(emitter).toContain("nativeErrorCategory = [int]$Failure.CategoryInfo.Category");
+    expect(emitter).not.toContain("Exception.Message");
+    expect(emitter).not.toContain("TargetObject");
+    expect(source).toContain("Write-HyperVWindowsFailure $Operation $ErrorCode $_");
 });

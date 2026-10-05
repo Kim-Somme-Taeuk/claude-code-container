@@ -10,6 +10,22 @@ import { repoRoot } from "./helpers.ts";
 
 const TOOL_CALLS_KEY = Symbol.for("ccc.deviceLabRealTests.toolCalls");
 const TOOL_SESSIONS_KEY = Symbol.for("ccc.deviceLabRealTests.toolSessions");
+const PUBLIC_TOOL_NAMES = new Set(TOOLS.map(tool => tool.name));
+const PUBLIC_ARGUMENT_NAMES = new Set(TOOLS.flatMap(tool => Object.keys(tool.inputSchema?.properties || {})));
+
+function knownToolName(value: unknown): string | undefined {
+    return typeof value === "string" && PUBLIC_TOOL_NAMES.has(value) ? value : undefined;
+}
+
+function boundedValidationFailure(value: any) {
+    const message = value?.body?.error ?? value?.error;
+    if (typeof message !== "string") return undefined;
+    const match = /^([a-z_]+) does not support ([A-Za-z][A-Za-z0-9]*)$/.exec(message);
+    // The rejected field is absent from this tool, but must exist in the public
+    // catalog. Arbitrary unknown keys can contain private caller information.
+    if (!match || match[0] !== message || !knownToolName(match[1]) || !PUBLIC_ARGUMENT_NAMES.has(match[2])) return undefined;
+    return { kind: "unsupported-argument", tool: match[1], field: match[2] };
+}
 let nextSessionId = 0;
 const DEFAULT_REAL_MCP_TOOL_TIMEOUT_MS = 120000;
 const LONG_REAL_MCP_TOOL_TIMEOUT_MS = 360000;
@@ -427,7 +443,8 @@ export function parseToolPayload(result) {
     if (result?.isError) {
         const value = jsonContentPayload(resultContent(result));
         const structured = value && typeof value === "object" && !Array.isArray(value) ? value : null;
-        let message = formatBrokerToolFailure(structured, "mcp-tool-failed");
+        const tool = knownToolName(result?.__cccToolCallRecord?.name);
+        let message = formatBrokerToolFailure(structured, "mcp-tool-failed", tool);
         if (structured?.error === "broker-runtime-process-unverified") {
             message = "broker-runtime-process-unverified: Broker recovery could not verify the process; automatic restart was refused. Check `node dist/index.js devices broker status --verbose` before retrying.";
         }
@@ -436,7 +453,7 @@ export function parseToolPayload(result) {
             mkdirSync(join(repoRoot, "results", "device-lab-real"), { recursive: true });
             writeFileSync(join(repoRoot, relativePath), JSON.stringify({
                 schemaVersion: 1,
-                failure: brokerToolFailureEvidence(structured),
+                failure: brokerToolFailureEvidence(structured, tool),
                 privacy: "Host paths, credentials, endpoints and raw command output are omitted.",
             }, null, 2) + "\n", { encoding: "utf8", flag: "wx", mode: 0o600 });
             message += ` Diagnostics: ${relativePath}`;
@@ -555,6 +572,39 @@ export function brokerRollbackSummary(value: any): string {
 // The create failure behind a failed allocation compensation. The broker's create wrapper reports
 // that compensation at the top level (hyper-v-create-allocation-cleanup-failed) and the failure it
 // was compensating as `lifecycleFailure`, which is reduced here to codes like the rest.
+function nativeFailureNumbers(value: any) {
+    const fields: Record<string, number> = {};
+    if (Number.isInteger(value?.nativeHResult) && value.nativeHResult >= -2147483648 && value.nativeHResult <= 2147483647) fields.nativeHResult = value.nativeHResult;
+    if (Number.isInteger(value?.nativeErrorCategory) && value.nativeErrorCategory >= 0 && value.nativeErrorCategory <= 31) fields.nativeErrorCategory = value.nativeErrorCategory;
+    return fields;
+}
+
+function boundedDesktopReadiness(value: any) {
+    if (!value || !["not-attempted", "provider-error", "transport-exception", "missing-cursor", "late-response"].includes(value.lastProbe)) return undefined;
+    const attempts = safeNonNegativeInteger(value.attempts);
+    if (attempts == null) return undefined;
+    const helper: Record<string, boolean | number | string> = {};
+    if (["login-unavailable", "timeout", "command-failed"].includes(value.helper?.bootstrapFailure)) helper.bootstrapFailure = value.helper.bootstrapFailure;
+    for (const key of ["bootstrapDeadlineExhausted", "readyMarkerPresent", "bootstrapAttempted", "bootstrapOk", "requestAttempted", "requestOk", "responseParseFailed"]) {
+        if (typeof value.helper?.[key] === "boolean") helper[key] = value.helper[key];
+    }
+    if (Number.isInteger(value.helper?.guestStatus) && value.helper.guestStatus >= -2147483648 && value.helper.guestStatus <= 2147483647) helper.guestStatus = value.helper.guestStatus;
+    const stage = ["sandbox-id-invalid", "prerequisites-missing", "session-connect-failed", "response-rejected", "response-timeout"].includes(value.helper?.stage)
+        ? value.helper.stage as string : undefined;
+    const logEvidence: Record<string, string | boolean> = {};
+    for (const key of ["bootstrapStarted", "bootstrapReady", "helperHeartbeat"]) {
+        if (typeof value.helper?.logEvidence?.[key] === "boolean") logEvidence[key] = value.helper.logEvidence[key];
+    }
+    for (const key of ["bootstrapStderr", "helperStderr"]) {
+        if (["absent", "empty", "access-denied", "path-not-found", "script-policy", "parse-error", "other-error", "unreadable", "oversized"].includes(value.helper?.logEvidence?.[key])) logEvidence[key] = value.helper.logEvidence[key];
+    }
+    const helperAttempt = Number.isSafeInteger(value.helperAttempt) && value.helperAttempt > 0 && value.helperAttempt <= attempts
+        ? value.helperAttempt as number : undefined;
+    return { attempts, lastProbe: value.lastProbe,
+        ...(Object.keys(helper).length || stage || Object.keys(logEvidence).length ? { helper: { ...helper, ...(stage ? { stage } : {}), ...(Object.keys(logEvidence).length ? { logEvidence } : {}) },
+            ...(helperAttempt !== undefined ? { helperAttempt } : {}) } : {}) };
+}
+
 function boundedBrokerLifecycleFailure(value: any) {
     const body = value?.body && typeof value.body === "object" && !Array.isArray(value.body) ? value.body : null;
     const failure = body?.lifecycleFailure ?? value?.lifecycleFailure;
@@ -567,10 +617,11 @@ function boundedBrokerLifecycleFailure(value: any) {
         error,
         ...(detail && detail !== error ? { detail } : {}),
         ...(operation ? { operation } : {}),
+        ...nativeFailureNumbers(failure),
     };
 }
 
-export function brokerToolFailureEvidence(value: any) {
+export function brokerToolFailureEvidence(value: any, callName?: unknown) {
     const body = value?.body && typeof value.body === "object" && !Array.isArray(value.body) ? value.body : null;
     const attempts = Array.isArray(value?.attempts)
         ? value.attempts
@@ -596,13 +647,20 @@ export function brokerToolFailureEvidence(value: any) {
     const operation = boundedHyperVOperation(body?.operation) || boundedHyperVOperation(value?.operation);
     const rollback = boundedBrokerRollback(value);
     const lifecycleFailure = boundedBrokerLifecycleFailure(value);
+    const readiness = boundedDesktopReadiness(body?.readiness ?? value?.readiness);
+    const validation = boundedValidationFailure(value);
+    const tool = knownToolName(callName);
     const evidence: Record<string, unknown> = {
+        ...(tool ? { tool } : {}),
+        ...(validation ? { validation } : {}),
         error: boundedBrokerDiagnosticCode(value?.error),
         bodyError: boundedBrokerDiagnosticCode(body?.error),
         ...(detail ? { detail } : {}),
         ...(operation ? { operation } : {}),
         ...(rollback ? { rollback } : {}),
         ...(lifecycleFailure ? { lifecycleFailure } : {}),
+        ...nativeFailureNumbers(body ?? value),
+        ...(readiness ? { readiness } : {}),
     };
     if (body?.error === "hyper-v-snapshot-inventory-conflict") {
         evidence.snapshotInventory = {
@@ -731,7 +789,7 @@ export function brokerToolFailureEvidence(value: any) {
     return evidence;
 }
 
-export function formatBrokerToolFailure(value: any, fallback: string) {
+export function formatBrokerToolFailure(value: any, fallback: string, callName?: unknown) {
     const body = value?.body && typeof value.body === "object" && !Array.isArray(value.body)
         ? value.body
         : null;
@@ -866,7 +924,13 @@ export function formatBrokerToolFailure(value: any, fallback: string) {
     const lifecycleFailure = boundedBrokerLifecycleFailure(value);
     const operation = boundedHyperVOperation(body?.operation) || boundedHyperVOperation(value?.operation)
         || lifecycleFailure?.operation;
+    const native = nativeFailureNumbers(lifecycleFailure ?? body ?? value);
+    const readiness = boundedDesktopReadiness(body?.readiness ?? value?.readiness);
+    const validation = boundedValidationFailure(value);
+    const tool = knownToolName(callName);
     const parts = [
+        ...(validation ? [`validation=${validation.kind}`, `tool=${tool || validation.tool}`, `field=${validation.field}`]
+            : tool ? [`tool=${tool}`] : []),
         boundedBrokerDiagnosticCode(value?.error),
         boundedBrokerDiagnosticCode(body?.error),
         bootDiagnostic ? `boot=${bootDiagnostic}` : "",
@@ -877,6 +941,9 @@ export function formatBrokerToolFailure(value: any, fallback: string) {
             ? `lifecycle=${lifecycleFailure.error}${lifecycleFailure.detail ? `/${lifecycleFailure.detail}` : ""}`
             : "",
         operation ? `operation=${operation}` : "",
+        native.nativeHResult !== undefined ? `hresult=0x${(native.nativeHResult >>> 0).toString(16).padStart(8, "0")}` : "",
+        native.nativeErrorCategory !== undefined ? `category=${native.nativeErrorCategory}` : "",
+        readiness ? `readiness=${JSON.stringify(readiness)}` : "",
         // Whether the failed create left anything behind, ahead of the bulkier diagnostics below.
         brokerRollbackSummary(value),
         diagnostic,

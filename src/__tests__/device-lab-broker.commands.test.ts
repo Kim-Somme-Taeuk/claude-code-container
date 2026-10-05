@@ -2960,6 +2960,8 @@ describe("device-lab host broker lifecycle commands", () => {
     it.each([
         {
             name: "native error id",
+            operation: "New-VM",
+            diagnostics: {},
             result: {
                 status: 1,
                 stdout: JSON.stringify({ schemaVersion: 1, operation: "New-VM", ok: false, errorCode: "InvalidParameter-Microsoft.HyperV.PowerShell.Commands.NewVM" }),
@@ -2969,10 +2971,25 @@ describe("device-lab host broker lifecycle commands", () => {
         },
         {
             name: "transport failure",
+            operation: "New-VM",
+            diagnostics: {},
             result: { status: null, stdout: "", stderr: "host-specific secret", error: "spawn C:\\Users\\secret-user\\powershell.exe failed" },
             detail: "hyper-v-windows-transport-executor-failed",
         },
-    ] as const)("reports a failed typed create by its own code and operation ($name)", async ({ result, detail }) => {
+        {
+            name: "firmware native diagnostics",
+            operation: "Set-VMFirmware",
+            diagnostics: { nativeHResult: -2147024809, nativeErrorCategory: 5 },
+            result: {
+                status: 1,
+                stdout: JSON.stringify({ schemaVersion: 1, operation: "Set-VMFirmware", ok: false,
+                    errorCode: "InvalidParameter-Microsoft.HyperV.PowerShell.Commands.SetVMFirmware",
+                    nativeHResult: -2147024809, nativeErrorCategory: 5 }),
+                stderr: "host secret at C:\\private\\file",
+            },
+            detail: "hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-setvmfirmware",
+        },
+    ] as const)("reports a failed typed create by its own code and operation ($name)", async ({ result, detail, operation, diagnostics }) => {
         const cwd = join(process.env.HOME!, "broker-hyper-v-typed-create-code-test");
         mkdirSync(cwd, { recursive: true });
         const ownerId = deviceLabOwnerId(cwd);
@@ -3007,7 +3024,7 @@ describe("device-lab host broker lifecycle commands", () => {
                 if (request.operation === "Remove-HostFiles") {
                     return { status: 0, stdout: nativeEnvelope(request.operation, [{ removedCount: 0 }]), stderr: "" };
                 }
-                return request.operation === "New-VM" ? result : null;
+                return request.operation === operation ? result : null;
             },
         });
         const server = createDeviceBrokerServer({
@@ -3030,7 +3047,8 @@ describe("device-lab host broker lifecycle commands", () => {
             expect(body).toEqual(expect.objectContaining({
                 error: "provider-command-failed",
                 detail,
-                operation: "New-VM",
+                operation,
+                ...diagnostics,
                 rollback: expect.objectContaining({ ok: true }),
             }));
             expect(JSON.stringify(body)).not.toContain("secret");
@@ -5347,6 +5365,14 @@ describe("device-lab host broker lifecycle commands", () => {
         const endpoint = ownerRpcEndpoint(baseUrl, ownerId);
         const headers = ownerRpcHeaders(ownerId);
         try {
+            const rejected = await fetch(endpoint, {
+                method: "POST", headers,
+                body: JSON.stringify({ method: "broker.device.tool.invoke", params: {
+                    tool: "device_focus_window", backend: "windows-sandbox", deviceId: "win-child", handle: "42;id",
+                } }),
+            });
+            expect(rejected.status).toBe(400);
+            expect(await rejected.json()).toMatchObject({ error: "window-handle-invalid" });
             const cases: Array<[string, Record<string, unknown>?]> = [
                 ["device_exec", { command: "Write-Output ok" }],
                 ["device_screenshot"],
@@ -5357,6 +5383,7 @@ describe("device-lab host broker lifecycle commands", () => {
                 ["device_scroll", { direction: "down", amount: 2 }],
                 ["device_cursor_position"],
                 ["device_window_list"],
+                ["device_focus_window", { handle: "42" }],
                 ["device_accessibility_snapshot", { maxDepth: 1, maxNodes: 10 }],
                 ["device_upload", { localPath: "in.txt", remotePath: "C:\\ccc\\in.txt" }],
                 ["device_download", { remotePath: "C:\\ccc\\out.txt", localPath: "out.txt" }],
@@ -5436,6 +5463,7 @@ describe("device-lab host broker lifecycle commands", () => {
                 ["device_scroll", { direction: "down", amount: 2 }],
                 ["device_cursor_position"],
                 ["device_window_list"],
+                ["device_focus_window", { handle: "macos:123:456:Test Window" }],
                 ["device_accessibility_snapshot", { maxDepth: 1, maxNodes: 10 }],
                 ["device_upload", { localPath: "in.txt", remotePath: "/tmp/in.txt" }],
                 ["device_download", { remotePath: "/tmp/out.txt", localPath: "out.txt" }],

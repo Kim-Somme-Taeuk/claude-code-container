@@ -192,6 +192,13 @@ The snapshot requires a working Git checkout and Git on the test process's PATH;
 it does not bypass Git ownership refusals or include ignored files to work around
 an enumeration failure.
 
+The build's PowerShell parser collects four generated nested-development programs:
+claim acquisition, claim completion, feature preparation, and job launch. The
+collector imports the current claim functions rather than a legacy constant.
+`nested-powershell-sources.test.ts` exercises the actual TypeScript subprocess on
+every host, including hosts without PowerShell. This checks source availability;
+native syntax validation still requires PowerShell.
+
 The guest's scheduled test job uses SYSTEM. Image and VM directory permissions
 therefore contain two distinct principals (SYSTEM and Administrators); an
 interactive non-SYSTEM owner normally adds a third. The permission checks

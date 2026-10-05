@@ -263,6 +263,18 @@ function combineLiveSourceProof(
     return priority[candidate.kind] > priority[current.kind] ? candidate : current;
 }
 
+export function readDirectoryMountMarker(containerId: string, markerPath: string) {
+    const options = { encoding: "utf-8" as const, stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"] };
+    const result = spawnSync(runtimeCli(), ["exec", containerId, "cat", markerPath], options);
+    // Only this generated, non-secret challenge may need traversal through a
+    // host-owned 0700 SSH directory. Never read keys as part of mount proof.
+    if ((result.error || result.status !== 0)
+        && /^\/home\/ccc\/\.ssh\/\.ccc-mount-identity-[a-f0-9]{32}$/.test(markerPath)) {
+        return spawnSync(runtimeCli(), ["exec", "--user", "root", containerId, "cat", markerPath], options);
+    }
+    return result;
+}
+
 function proveContainerSeesCurrentBindSource(
     containerId: string,
     hostPath: string,
@@ -286,11 +298,7 @@ function proveContainerSeesCurrentBindSource(
             const challenge = getDirectoryMountChallenge(session, expected, containerPath);
             const markerIdentity = observeBindMountSourceIdentity(hostPath, expected);
             if (markerIdentity.kind !== "verified") return markerIdentity;
-            let result = spawnSync(
-                runtimeCli(),
-                ["exec", containerId, "cat", posix.join(containerPath, challenge.markerName)],
-                { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-            );
+            const result = readDirectoryMountMarker(containerId, posix.join(containerPath, challenge.markerName));
             let containerExecReady = false;
             if (result.error || result.status !== 0) {
                 session.containerExecReady ??= canExecContainer(containerId, 200);
@@ -2189,7 +2197,7 @@ export function gitSigningKeyRewriteShell(): string {
     ].join("\n");
 }
 
-export function sshCredentialCopyShell(): string {
+export function sshCredentialCopyShell(privilegedRead = false): string {
     return [
         "source_ssh_root=$1",
         "copied_ssh_root=$2",
@@ -2203,7 +2211,13 @@ export function sshCredentialCopyShell(): string {
         "  exit 0",
         "fi",
         "umask 077",
-        "if ! mkdir \"$copy_stage\" || ! cp -R \"$source_ssh_root\"/. \"$copy_stage\"/; then",
+        "if ! mkdir \"$copy_stage\"; then rm -rf -- \"$copied_ssh_root\"; exit 1; fi",
+        ...(privilegedRead ? [
+            "copy_archive=$(mktemp \"$copy_parent/.ccc-ssh-archive.XXXXXX\") || { rm -rf -- \"$copy_stage\" \"$copied_ssh_root\"; exit 1; }",
+            "trap 'rm -f -- \"$copy_archive\"' EXIT",
+            // Elevate only source reads. The caller owns the archive and extracts as ccc.
+            "if ! sudo -n tar -C \"$source_ssh_root\" -cf - . > \"$copy_archive\" || ! tar --no-same-owner --no-same-permissions -xf \"$copy_archive\" -C \"$copy_stage\"; then",
+        ] : ["if ! cp -R \"$source_ssh_root\"/. \"$copy_stage\"/; then"]),
         "  rm -rf -- \"$copy_stage\" \"$copied_ssh_root\"",
         "  exit 1",
         "fi",
@@ -2215,7 +2229,7 @@ export function sshCredentialCopyShell(): string {
         "  rm -rf -- \"$copy_stage\" \"$copied_ssh_root\"",
         "  exit 1",
         "fi",
-        "if ! printf '%s\\n' complete > \"$copy_stage/.ccc-copy-complete\" || ! chmod 600 \"$copy_stage/.ccc-copy-complete\"; then",
+        "if ! rm -f -- \"$copy_stage/.ccc-copy-complete\" || ! printf '%s\\n' complete > \"$copy_stage/.ccc-copy-complete\" || ! chmod 600 \"$copy_stage/.ccc-copy-complete\"; then",
         "  rm -rf -- \"$copy_stage\" \"$copied_ssh_root\"",
         "  exit 1",
         "fi",
@@ -2229,8 +2243,7 @@ export function sshCredentialCopyShell(): string {
         "  rm -rf -- \"$copy_previous\"",
         "  exit 0",
         "fi",
-        "rm -rf -- \"$copy_stage\" \"$copied_ssh_root\"",
-        "if [ -e \"$copy_previous\" ] || [ -L \"$copy_previous\" ]; then mv \"$copy_previous\" \"$copied_ssh_root\" || true; fi",
+        "rm -rf -- \"$copy_stage\" \"$copied_ssh_root\" \"$copy_previous\"",
         "exit 1",
     ].join("\n");
 }
@@ -2252,7 +2265,7 @@ function fixSshPermissions(containerName: string): void {
             containerName,
             "sh",
             "-c",
-            sshCredentialCopyShell(),
+            sshCredentialCopyShell(true),
             "ccc-ssh-copy",
             "/home/ccc/.ssh",
             "/tmp/.ssh-copy",
@@ -2704,6 +2717,8 @@ export function startProjectContainer(
                         throw new Error("Running container is unavailable; automatic destructive recovery was refused.");
                     }
                     console.warn(`[ccc] Container update deferred (${contractMismatchReason}) because the existing container is running. It will be applied after the container stops.`);
+                    fixSshPermissions(listedContainer.containerId);
+                    syncHostGitConfig(listedContainer.containerId);
                     return finish(listedContainer.containerId);
                 }
             } else {

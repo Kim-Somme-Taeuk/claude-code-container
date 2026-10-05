@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter, once } from "events";
 import { PassThrough, Writable } from "stream";
 import { request, type Server } from "http";
-import { resolve } from "path";
-import { readFileSync, existsSync } from "fs";
+import { resolve, join } from "path";
+import { tmpdir } from "os";
+import { readFileSync, existsSync, mkdtempSync, writeFileSync, rmSync } from "fs";
 
 const native = vi.hoisted(() => ({ spawn: vi.fn(), spawnSync: vi.fn(), platform: "win32" }));
 vi.mock("child_process", async () => ({ ...await vi.importActual<typeof import("child_process")>("child_process"), spawn: native.spawn, spawnSync: native.spawnSync }));
@@ -45,7 +46,9 @@ function fakeProcess() {
     function next() {
         if (busy || !commands.length || proc.killed) return;
         busy = true;
-        const command = commands.shift()!;
+        const wireCommand = commands.shift()!;
+        const encoded = /FromBase64String\('([A-Za-z0-9+/=]+)'\)/.exec(wireCommand);
+        const command = encoded ? Buffer.from(encoded[1], "base64").toString("utf16le") : wireCommand;
         // Model an actual helper: commands execute serially, independent of how many
         // JavaScript listeners have been attached by concurrent HTTP requests.
         scheduled = setTimeout(() => {
@@ -270,4 +273,51 @@ it.skipIf(process.platform === "win32")("serves actual Claude shell target/image
     expect(targets.toString()).toContain("image/png");
     expect(image).toEqual(png);
     expect(codex).toEqual(png);
+});
+
+
+describe("macOS native image fallback reaches the Codex reader", () => {
+    it("tries pngpaste after a valid native snapshot has no image", async () => {
+        state = { sequence: 1, image: null, text: "image caption" };
+        native.spawnSync.mockImplementation(command => ({ status: command === "pngpaste" ? 0 : 1,
+            stdout: command === "pngpaste" ? png : Buffer.alloc(0), stderr: Buffer.alloc(0) }));
+        await start("darwin");
+        const { readClipboardImagePng } = await import("../codex-clipboard-image.js");
+        expect(await readClipboardImagePng(`http://127.0.0.1:${port}`, token)).toEqual(png);
+        expect((await get("text")).body.toString()).toBe("image caption");
+    });
+
+    it.each(["file-url", "text-path"])("recovers a local PNG from %s without pngpaste", async source => {
+        const root = mkdtempSync(join(tmpdir(), "ccc-darwin-image-"));
+        try {
+            const path = join(root, "한글 image.png");
+            writeFileSync(path, png);
+            state = { sequence: 1, image: null, text: source === "text-path" ? path : null };
+            native.spawnSync.mockImplementation(command => ({ status: command === "osascript" && source === "file-url" ? 0 : 1,
+                stdout: command === "osascript" && source === "file-url" ? Buffer.from(path) : Buffer.alloc(0), stderr: Buffer.alloc(0) }));
+            await start("darwin");
+            const { readClipboardImagePng } = await import("../codex-clipboard-image.js");
+            expect(await readClipboardImagePng(`http://127.0.0.1:${port}`, token)).toEqual(png);
+        } finally { rmSync(root, { recursive: true, force: true }); }
+    });
+
+    it("discards fallback bytes when the pasteboard marker changes", async () => {
+        state = { sequence: 1, image: null, text: null };
+        native.spawnSync.mockImplementation(command => {
+            if (command === "pngpaste" && state.sequence === 1) {
+                state = { sequence: 2, image: null, text: "new clipboard" };
+                return { status: 0, stdout: png, stderr: Buffer.alloc(0) };
+            }
+            return { status: 1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+        });
+        await start("darwin");
+        expect((await get("image/png")).status).toBe(204);
+        expect((await get("text")).body.toString()).toBe("new clipboard");
+    });
+
+    it("keeps the native image fast path without invoking converters", async () => {
+        await start("darwin");
+        expect((await get("image/png")).body).toEqual(png);
+        expect(native.spawnSync).not.toHaveBeenCalled();
+    });
 });

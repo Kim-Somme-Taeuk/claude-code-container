@@ -3,7 +3,10 @@ import assert from "assert";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { hostname, homedir, uptime } from "os";
 import { basename, join } from "path";
-import { hiddenSpawnSync, realProviderTempRoot } from "./helpers.ts";
+import { hiddenSpawnSync, realProviderTempRoot, repoRoot } from "./helpers.ts";
+import { captureWindowsSandboxBootstrapEvidence } from "./windows-sandbox-bootstrap-evidence.ts";
+import { captureWindowsSandboxExecEvidence, requireWindowsSandboxExecSuccess, requireWindowsSandboxFocusSuccess, WindowsSandboxExecFailure } from "./windows-sandbox-exec-evidence.ts";
+import { findWindowsSandboxTestWindow, windowsSandboxTestWindow, windowsSandboxTestWindowPid, windowsSandboxTestWindowObservation } from "./windows-sandbox-test-window.ts";
 import {
     windowsBackend,
     windowsDiscovery,
@@ -20,7 +23,7 @@ const WSB_STOP_TIMEOUT_MS = 60000;
 class WindowsSandboxE2EFailure extends Error {}
 
 function failureDetail(error) {
-    if (error instanceof WindowsSandboxE2EFailure) return error.message.slice(0, 768);
+    if (error instanceof WindowsSandboxE2EFailure || error instanceof WindowsSandboxExecFailure) return error.message.slice(0, 768);
     if (error?.brokerPayload) {
         const detail = formatBrokerToolFailure(error.brokerPayload, "windows-sandbox-operation-failed");
         const artifact = typeof error.message === "string"
@@ -403,7 +406,10 @@ export async function cleanupPreviousWindowsSandboxE2E(options: any = {}) {
 export async function startWindowsSandboxE2EDevice(callTool, deviceId, options: any = {}) {
     const direct = { backend: "windows-sandbox" };
     const preExisting = listRunningWindowsSandboxSessions(options);
-    const startResult = await callTool("start", { detail: true, deviceId });
+    const startArgs = { detail: true, deviceId, waitForBoot: true,
+        ...(options.bootTimeoutMs !== undefined ? { bootTimeoutMs: options.bootTimeoutMs } : {}),
+    };
+    const startResult = await callTool("start", startArgs);
     if (!isWindowsSandboxSingleUseError(startResult)) return parsePayload(startResult);
     if (!preExisting.ok) return parsePayload(startResult);
     let status;
@@ -422,7 +428,7 @@ export async function startWindowsSandboxE2EDevice(callTool, deviceId, options: 
     if (!recovery.ok || recovery.stopped.length !== 1) return parsePayload(startResult);
     const retryDelayMs = options.retryDelayMs ?? 500;
     if (retryDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-    return parsePayload(await callTool("start", { detail: true, deviceId }));
+    return parsePayload(await callTool("start", startArgs));
 }
 
 export function windowsSandboxE2ECapability(level = Number(process.env.CCC_TEST_LEVEL || "0")) {
@@ -482,7 +488,7 @@ export async function runWindowsSandboxE2E(options: any = {}) {
 
             currentStep = "start device";
             stopped = false;
-            const started = await startWindowsSandboxE2EDevice(callTool, deviceId);
+            const started = await startWindowsSandboxE2EDevice(callTool, deviceId, { bootTimeoutMs: timeoutMs });
             assert.strictEqual(started.device.status, "running");
             assert.ok(String(started.device.configPath || "").includes(`${deviceId}.wsb`));
 
@@ -493,11 +499,12 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             assert.strictEqual(status.device.sandboxId, started.device.sandboxId);
 
             currentStep = "execute helper command";
-            parsePayload(await callTool("exec", { detail: true,
+            const helperExecution = parsePayload(await callTool("exec", { detail: true,
                 deviceId,
                 command: "Write-Output ccc-windows-e2e-ok",
                 timeoutMs,
             }));
+            requireWindowsSandboxExecSuccess(helperExecution, options.failureArtifactRoot || repoRoot);
 
             currentStep = "capture screenshot";
             const screenshot = await callTool("screenshot", { detail: true, deviceId, timeoutMs: screenshotTimeoutMs });
@@ -580,6 +587,7 @@ export async function runWindowsSandboxE2E(options: any = {}) {
                 command: `Set-Content -Path ${downloadRemote} -Value ccc-download-ok -Encoding ASCII`,
                 timeoutMs,
             }));
+            requireWindowsSandboxExecSuccess(createDownloadRemote, options.failureArtifactRoot || repoRoot);
             const download = parsePayload(await callTool("download", { detail: true,
                 deviceId,
                 remotePath: downloadRemote,
@@ -592,26 +600,36 @@ export async function runWindowsSandboxE2E(options: any = {}) {
             assert.match(readFileSync(downloadTarget, "utf-8"), /ccc-download-ok/);
 
             currentStep = "open test window";
+            const testWindow = windowsSandboxTestWindow(deviceId, uploadRemote);
             const opened = parsePayload(await callTool("exec", { detail: true, deviceId,
-                command: `Start-Process notepad.exe -ArgumentList '${uploadRemote}'`, timeoutMs }));
-            assert.strictEqual(opened.status, 0, "could not open the uploaded test file in Notepad");
+                command: testWindow.command, timeoutMs }));
+            requireWindowsSandboxExecSuccess(opened, options.failureArtifactRoot || repoRoot);
+            const testWindowPid = windowsSandboxTestWindowPid(opened.stdout);
+            if (testWindowPid === null) throw new WindowsSandboxE2EFailure("sandbox-test-window-pid-missing");
 
-            currentStep = "list and focus test window";
+            currentStep = "list test window";
             let targetWindow: { handle: string } | undefined;
             const windowDeadline = Date.now() + 15_000;
             do {
                 const windows = parsePayload(await callTool("window_list", { detail: true, deviceId, timeoutMs }));
                 assert.strictEqual(windows.provider, "windows-process-main-window");
                 assert.ok(Array.isArray(windows.windows));
-                targetWindow = windows.windows.find((window: any) =>
-                    String(window.processName).toLowerCase() === "notepad"
-                    && String(window.title).includes("ccc-upload")
-                    && /^[1-9][0-9]*$/.test(String(window.handle)));
+                targetWindow = findWindowsSandboxTestWindow(windows.windows, testWindowPid, testWindow.title);
                 if (!targetWindow) await new Promise(resolve => setTimeout(resolve, 250));
             } while (!targetWindow && Date.now() < windowDeadline);
-            assert.ok(targetWindow, "uploaded test file did not appear in window_list");
+            if (!targetWindow) {
+                let observation;
+                try {
+                    observation = parsePayload(await callTool("exec", { detail: true, deviceId,
+                        command: windowsSandboxTestWindowObservation(testWindowPid, testWindow.evidencePath), timeoutMs: 10000 }));
+                } catch { /* Missing evidence cannot replace the original window failure. */ }
+                throw new WindowsSandboxE2EFailure(`sandbox-test-window-not-observed.${captureWindowsSandboxExecEvidence(observation, options.failureArtifactRoot || repoRoot)}`);
+            }
             // The helper verifies that this handle actually becomes the foreground window.
-            parsePayload(await callTool("focus_window", { detail: true, deviceId, handle: String(targetWindow.handle), timeoutMs }));
+            currentStep = "focus test window";
+            const focused = await callTool("focus_window", { detail: true, deviceId, handle: String(targetWindow.handle), timeoutMs });
+            requireWindowsSandboxFocusSuccess(focused, options.failureArtifactRoot || repoRoot);
+            parsePayload(focused);
             // This scenario owns the Sandbox; its existing finally cleanup closes this test window.
 
             currentStep = "read cursor position";
@@ -676,8 +694,15 @@ export async function runWindowsSandboxE2E(options: any = {}) {
 
             passResult = { status: "PASS", deviceId, sandboxId: started.device.sandboxId, verifiedCapabilities: [...calledCapabilities].sort() };
         } catch (error) {
-            if (currentStep === "start device" && rejectedBeforeWindowsSandboxStart(error, deviceId)) stopped = true;
-            primaryFailure = new WindowsSandboxE2EFailure(`${currentStep}: ${failureDetail(error)}`, { cause: error });
+            const rejectedBeforeStart = currentStep === "start device" && rejectedBeforeWindowsSandboxStart(error, deviceId);
+            if (rejectedBeforeStart) stopped = true;
+            let evidence = "";
+            if (created && currentStep === "start device" && !rejectedBeforeStart) {
+                const captured = captureWindowsSandboxBootstrapEvidence({ homeDir: homedir(), ownerId: ownerId(), deviceId,
+                    artifactRoot: options.failureArtifactRoot || repoRoot });
+                evidence = "artifact" in captured ? ` Local raw helper logs: ${captured.artifact}` : ` ${captured.error}`;
+            }
+            primaryFailure = new WindowsSandboxE2EFailure(`${currentStep}: ${failureDetail(error)}${evidence}`, { cause: error });
         } finally {
             let cleanupFailureError = null;
             if (created && !deleted) {
