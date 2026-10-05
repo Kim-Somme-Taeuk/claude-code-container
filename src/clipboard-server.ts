@@ -18,7 +18,6 @@ import {
     readFileSync,
     writeFileSync,
     copyFileSync,
-    unlinkSync,
     readdirSync,
     openSync,
     closeSync,
