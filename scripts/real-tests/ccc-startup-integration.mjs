@@ -85,6 +85,7 @@ import {spawnSync} from 'node:child_process';
 const root=process.argv[2],project=process.argv[3],profile='smoke';
 const d=await import(root+'docker.js'), u=await import(root+'utils.js'), t=await import(root+'tool-registry.js');
 const setup=await import(root+'container-setup.js');
+const runtime=await import(root+'container-runtime.js');
 const ensureDirs=()=>{ mkdirSync(u.getClaudeDir(profile),{recursive:true,mode:0o700}); writeFileSync(u.getClaudeJsonFile(profile),'{}',{mode:0o600}); for(const mount of t.getAllCredentialMounts()) d.ensureCredentialHostDir(mount,profile); };
 const exec=(args)=>{const r=spawnSync('docker',args,{encoding:'utf8',timeout:180000}); assert.equal(r.error,undefined); assert.equal(r.status,0,r.stderr); return r.stdout.trim();};
 let ready;
@@ -93,8 +94,21 @@ const name=d.startProjectContainer(project,ensureDirs,undefined,undefined,profil
 assert.match(ready,/^[a-f0-9]{64}$/); assert.equal(exec(['inspect','--format','{{.Id}}',name]),ready);
 console.log('PASS: pinned startup ID');
 const first=ready;
-d.startProjectContainer(project,ensureDirs,undefined,undefined,profile,undefined,()=>{throw Error('running reuse requested replacement');},id=>ready=id,first);
-assert.equal(ready,first); console.log('PASS: running reuse preserves ID');
+// Like the CLI, refuse replacement of running work. A strict daemon socket alias
+// mismatch must continue through the real safe-defer daemon-ID proof, not bypass it.
+const refuseRunningReplacement=()=>{
+ const [observed]=JSON.parse(exec(['inspect',first]));
+ const socket=(observed.Mounts||[]).find(mount=>mount.Destination==='/var/run/docker.sock');
+ console.log('DIAGNOSTIC: running replacement refused '+JSON.stringify({
+  socket:socket?{Source:socket.Source,Destination:socket.Destination,Type:socket.Type,RW:socket.RW}:null,
+  runtime:runtime.getRuntimeInfo(),
+ }));
+ return false;
+};
+d.startProjectContainer(project,ensureDirs,undefined,undefined,profile,undefined,refuseRunningReplacement,id=>ready=id,first);
+assert.equal(ready,first);
+assert.equal(exec(['inspect','--format','{{.Id}}|{{.State.Running}}',name]),first+'|true');
+console.log('PASS: running reuse preserves ID and running state');
 console.log('START: selected Codex setup'); setup.ensureTools(ready,t.getToolByName('codex'));
 assert.match(exec(['exec',ready,'codex','--version']),/codex/i);
 const {withCodexConfigLock}=await import(root+'codex-config-lock.js');
