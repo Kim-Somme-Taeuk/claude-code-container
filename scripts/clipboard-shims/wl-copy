@@ -6,8 +6,8 @@ if [ -z "$CCC_CLIPBOARD_URL" ]; then
     exit 1
 fi
 
-# Refresh token from mounted port file (handles clipboard server restarts mid-session)
-if [ -f /run/ccc/clipboard.port ]; then
+# Prefer a readable mounted token; otherwise keep the per-session token.
+if [ -f /run/ccc/clipboard.port ] && [ -r /run/ccc/clipboard.port ]; then
     CCC_CLIPBOARD_TOKEN=$(cut -d: -f2- /run/ccc/clipboard.port)
 fi
 

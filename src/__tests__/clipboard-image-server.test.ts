@@ -241,7 +241,7 @@ it("preserves multi-megabyte image payloads in both native snapshot parsers", ()
     for (const parse of [mod.parseWindowsClipboardSnapshot, mod.parseDarwinHelperOutput]) {
         const result = parse(json);
         expect(result).not.toBeNull();
-        expect(result!.imagePng).toEqual(bytes);
+        expect(result!.imagePng?.equals(bytes)).toBe(true);
         expect(result!.targets).toContain("image/png");
     }
 });
