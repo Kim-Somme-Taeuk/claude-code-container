@@ -83,6 +83,11 @@ Opaque or unavailable runtime mount evidence defers clipboard daemon updates.
 An upgrade proceeds when running bind users can be excluded safely; authenticated
 legacy service remains available while the update is deferred.
 
+Unknown startup-lock ownership, including an old empty lock record, or a leftover
+recovery guard produces a bounded refusal and requires inspection. Automatic
+recovery requires proof that the recorded owner is dead; elapsed time alone is
+not sufficient.
+
 ## Harness boundary
 
 CCC bootstrap is preserved only as installation/readiness integration: use
