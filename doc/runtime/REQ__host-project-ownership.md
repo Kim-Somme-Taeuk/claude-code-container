@@ -18,6 +18,11 @@ reowning unrelated files. Retained lab volumes have a separate, bounded migratio
 described below.
 Verify the named user, primary group, HOME and final image user before reuse.
 Concurrent builds must serialize and failed builds must not publish valid caches.
+An uncached identity build has a 20-minute command budget because changing the
+image's owners can require copying and exporting a large filesystem layer.
+Identity-lock acquisition waits up to 21 minutes without stealing a live lock.
+Other command budgets remain unchanged. A build timeout reports the command
+error and a bounded tail of build diagnostics so the failing phase is visible.
 Validation containers use the same applicable runtime mapping and cgroup options
 as project containers. If no local image exists, image-download failure unwinds
 startup and session locks so retrying does not require manually removing a lock.

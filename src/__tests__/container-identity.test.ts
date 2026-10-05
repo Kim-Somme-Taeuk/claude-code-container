@@ -293,6 +293,43 @@ describe("validated derived image cache", () => {
         expect(buildCalls()).toHaveLength(2);
     });
 
+    it("allows cold builds twenty minutes without extending other command budgets or stealing a live lock", () => {
+        fakeRuntime();
+        expect(ensureIdentityImage(baseId, identity)).toBe(builtId);
+        expect(buildCalls()[0][2].timeout).toBe(1_200_000);
+        for (const [, args, options] of mocks.spawn.mock.calls) {
+            if (args[0] === "build") continue;
+            expect(options.timeout).toBe(args[0] === "image" && args[1] === "inspect" ? 30_000 : 600_000);
+        }
+        expect(mocks.lock.mock.calls[0][2]).toEqual({ waitMs: 1_260_000, reclaimStale: false });
+    });
+
+    it("reports a timed-out build's recent phase, rejects it, and permits a validated retry", () => {
+        const images = fakeRuntime();
+        const normal = mocks.spawn.getMockImplementation()!;
+        mocks.spawn.mockImplementation((command, args, options) => {
+            if (args[0] === "build") {
+                return { ...result(1, "", `old-build-output${"x".repeat(5000)}\n#6 exporting layers`),
+                    error: Object.assign(new Error("spawnSync docker ETIMEDOUT"), { code: "ETIMEDOUT" }) };
+            }
+            return normal(command, args, options);
+        });
+        let failure: unknown;
+        try { ensureIdentityImage(baseId, identity); } catch (error) { failure = error; }
+        expect(failure).toBeInstanceOf(Error);
+        const message = (failure as Error).message;
+        expect(message).toContain("ETIMEDOUT");
+        expect(message).toContain("#6 exporting layers");
+        expect(message).not.toContain("old-build-output");
+        expect(message.length).toBeLessThan(4200);
+        expect(images.size).toBe(0);
+        expect(mocks.spawn.mock.calls.some(([, args]) => args[0] === "run")).toBe(false);
+        expect(mocks.locked).toBe(false);
+        fakeRuntime();
+        expect(ensureIdentityImage(baseId, identity)).toBe(builtId);
+        expect(buildCalls()).toHaveLength(2);
+    });
+
     it("removes a newly built image that fails validation and permits a clean retry", () => {
         fakeRuntime({ invalidBuild: true });
         expect(() => ensureIdentityImage(baseId, identity)).toThrow(/valid|identity/i);

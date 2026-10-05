@@ -6,6 +6,10 @@ import { getRuntimeInfo, runtimeCli, runtimeExtraRunArgs, type RuntimeInfo } fro
 import { withSharedMutationLock } from "@ccc/device-lab/device-lab-shared-state.js";
 
 export const IDENTITY_CONTRACT_VERSION = "1";
+const IDENTITY_BUILD_TIMEOUT_MS = 1_200_000;
+// Cold ownership copy-up and layer export can exceed ten minutes. Give
+// concurrent callers another minute for the final tag/account validation.
+const IDENTITY_LOCK_WAIT_MS = IDENTITY_BUILD_TIMEOUT_MS + 60_000;
 
 /** Docker prefixes image IDs; Podman can report the same digest as bare hex. */
 export function normalizeImageId(imageId: string): string {
@@ -66,9 +70,12 @@ export function getIdentityCodexPackagesVolumeName(identity: ContainerIdentity):
 }
 
 function checked(args: string[], input?: string): string {
-    const result = spawnSync(runtimeCli(), args, { encoding: "utf-8", input, timeout: 600_000, maxBuffer: 16 * 1024 * 1024 });
+    const timeout = args[0] === "build" ? IDENTITY_BUILD_TIMEOUT_MS : 600_000;
+    const result = spawnSync(runtimeCli(), args, { encoding: "utf-8", input, timeout, maxBuffer: 16 * 1024 * 1024 });
     if (result.error || result.status !== 0) {
-        throw new Error(`Container identity ${args[0]} failed: ${result.error?.message || result.stderr || `exit ${result.status}`}`);
+        const detail = result.error?.message || `exit ${result.status}`;
+        const recentStderr = result.stderr?.trim().slice(-4096);
+        throw new Error(`Container identity ${args[0]} failed: ${detail}${recentStderr ? `\n${recentStderr}` : ""}`);
     }
     return result.stdout.trim();
 }
@@ -145,5 +152,5 @@ export function ensureIdentityImage(baseImageId: string, identity: ContainerIden
             throw new Error("Built container identity image failed UID/GID, HOME, sudo or named-user validation. Retry after correcting the base image.");
         }
         return built;
-    }, { waitMs: 600_000, reclaimStale: false });
+    }, { waitMs: IDENTITY_LOCK_WAIT_MS, reclaimStale: false });
 }

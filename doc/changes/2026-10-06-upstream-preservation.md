@@ -9,6 +9,10 @@ tool probes return their original error without deleting working installations.
 Running-container checks recognize Docker's separate tmpfs metadata and allow
 the normal five-second exec probe timeout, avoiding unnecessary refusal on a
 healthy but slower Docker host. Failed readiness checks preserve running work.
+Cold identity image generation has a separate 20-minute build budget and retains
+recent build diagnostics on failure. This covers filesystem copying and image
+export when the requested UID/GID differs from the base; validated images are
+cached for subsequent starts.
 Harness engine changes remain separate from CCC's bootstrap and path integration.
 
 ## Known ceiling
