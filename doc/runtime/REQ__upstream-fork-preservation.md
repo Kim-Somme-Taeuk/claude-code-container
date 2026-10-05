@@ -31,8 +31,9 @@ trusted previous-image UID/GID and exact bind-root identity; no guessed owners,
 symlink traversal, unrelated owner changes or concurrent active users. Access
 checks must cover the resolved default or named profile, not a hardcoded path.
 
-Configuration access repair retains ownership, ordinary modes, user settings
-and unrelated ACL permissions. Coordinate host/config writers across projects
+Configuration access repair retains contents, ownership and user settings
+without expanding unrelated principals’ effective ACL permissions. A required
+ACL mask change can affect the numeric group mode representation. Coordinate host/config writers across projects
 using the stable legacy root lock for the default profile and locks keyed by
 the resolved config for named profiles; host access restoration runs
 inside the writer lock.
