@@ -30,4 +30,3 @@ export function prepareLabStateOwnership(volume: string, imageId: string, identi
     const repaired = spawnSync(runtimeCli(), [...runArgs, "--user", "root", "--mount", `type=volume,source=${volume},target=/state`, imageId, "-c", script], { encoding: "utf-8", timeout: 300_000 });
     if (repaired.error || repaired.status !== 0) throw new Error(`Lab state ownership preparation failed for ${volume}. Existing data was retained; repair its ownership before retrying.`);
 }
-
