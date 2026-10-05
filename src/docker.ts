@@ -1724,6 +1724,38 @@ type InspectedContainerMount = {
     Name?: unknown;
 };
 
+/** Docker keeps --tmpfs mounts in HostConfig.Tmpfs instead of Mounts. */
+function normalizeInspectedTmpfsMounts(inspected: Record<string, unknown>): boolean {
+    const hostConfig = inspected.HostConfig;
+    if (!hostConfig || typeof hostConfig !== "object" || Array.isArray(hostConfig)) return true;
+    const tmpfs = (hostConfig as Record<string, unknown>).Tmpfs;
+    if (tmpfs === undefined || tmpfs === null) return true;
+    if (typeof tmpfs !== "object" || Array.isArray(tmpfs)) return false;
+    if (!Array.isArray(inspected.Mounts)) return false;
+    const mounts = [...inspected.Mounts];
+    for (const [destination, options] of Object.entries(tmpfs)) {
+        if (!destination.startsWith("/") || posix.normalize(destination) !== destination
+            || typeof options !== "string") return false;
+        const tokens = options === "" ? [] : options.split(",");
+        if (tokens.some((token) => !/^(?:rw|ro|exec|noexec|suid|nosuid|dev|nodev|sync|async|dirsync|atime|noatime|diratime|nodiratime|relatime|strictatime|lazytime|nolazytime|(?:size|nr_inodes|nr_blocks)=[0-9]+[kKmMgG%]?|mode=[0-7]{3,4}|(?:uid|gid)=[0-9]+)$/.test(token))) return false;
+        const access = tokens.filter((token) => token === "rw" || token === "ro");
+        if (access.length > 1) return false;
+        // Docker/kernel tmpfs defaults to writable when neither ro nor rw is given.
+        const writable = access[0] !== "ro";
+        const existing = mounts.filter((mount) => mount && typeof mount === "object"
+            && mount.Destination === destination);
+        if (existing.length > 0) {
+            // A second representation cannot hide a conflicting mount or access mode.
+            if (existing.length !== 1 || existing[0].Type !== "tmpfs"
+                || existing[0].RW !== writable) return false;
+        } else {
+            mounts.push({ Source: "", Destination: destination, Type: "tmpfs", RW: writable });
+        }
+    }
+    inspected.Mounts = mounts;
+    return true;
+}
+
 function inspectContainerJsonOnce(containerId: string): Record<string, unknown> | null {
     const result = spawnSync(
         runtimeCli(),
@@ -1733,9 +1765,9 @@ function inspectContainerJsonOnce(containerId: string): Record<string, unknown> 
     if (result.error || result.status !== 0) return null;
     try {
         const inspected = JSON.parse((result.stdout ?? "").trim()) as unknown;
-        return inspected && typeof inspected === "object"
-            ? inspected as Record<string, unknown>
-            : null;
+        if (!inspected || typeof inspected !== "object" || Array.isArray(inspected)) return null;
+        const record = inspected as Record<string, unknown>;
+        return normalizeInspectedTmpfsMounts(record) ? record : null;
     } catch {
         return null;
     }

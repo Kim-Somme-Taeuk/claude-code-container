@@ -2194,6 +2194,47 @@ describe("docker.ts module exports", () => {
             })).toHaveLength(1);
         });
 
+        it.each(["rw,noexec,nosuid,nodev,mode=0711", "noexec,nosuid,nodev,mode=0711", "", "duplicate representation"])("reuses Docker HostConfig.Tmpfs mounts: %s", options => {
+            const inspected = JSON.parse(makeDriftedRunningContract(() => undefined));
+            inspected.HostConfig.Tmpfs = Object.fromEntries(inspected.Mounts
+                .filter((mount: { Type: string }) => mount.Type === "tmpfs")
+                .map((mount: { Destination: string }) => [mount.Destination, options === "duplicate representation" ? "rw" : options]));
+            if (options !== "duplicate representation") {
+                inspected.Mounts = inspected.Mounts.filter((mount: { Type: string }) => mount.Type !== "tmpfs");
+            }
+            mockReplacementRuntime(JSON.stringify(inspected));
+            const guard = vi.fn(() => false);
+            const ready = vi.fn();
+            expect(startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, undefined, guard, ready))
+                .toBe(getContainerName(projectPath));
+            expect(guard).not.toHaveBeenCalled();
+            expect(ready).toHaveBeenCalledWith(TEST_CONTAINER_ID, { startedByInvocation: false });
+            expectNoContainerReplacement();
+        });
+
+        it.each(["readonly", "contradictory access", "malformed options", "unknown access", "non-string options", "array config", "bind conflict", "access conflict", "unexpected tmpfs"])("refuses unsafe Docker HostConfig.Tmpfs: %s", fault => {
+            const inspected = JSON.parse(makeDriftedRunningContract(() => undefined));
+            const destination = "/home/ccc/.ccc/devices/owners";
+            inspected.HostConfig.Tmpfs = { [destination]: "rw,noexec,nosuid,nodev,mode=0711" };
+            if (fault === "readonly") {
+                inspected.Mounts = inspected.Mounts.filter((mount: { Destination: string }) => mount.Destination !== destination);
+                inspected.HostConfig.Tmpfs[destination] = "ro,noexec";
+            }
+            if (fault === "contradictory access") inspected.HostConfig.Tmpfs[destination] = "ro,rw";
+            if (fault === "malformed options") inspected.HostConfig.Tmpfs[destination] = "rw,,noexec";
+            if (fault === "unknown access") inspected.HostConfig.Tmpfs[destination] = "ro=true";
+            if (fault === "non-string options") inspected.HostConfig.Tmpfs[destination] = true;
+            if (fault === "array config") inspected.HostConfig.Tmpfs = [];
+            if (fault === "bind conflict") inspected.Mounts.find((mount: { Destination: string }) => mount.Destination === destination).Type = "bind";
+            if (fault === "access conflict") inspected.Mounts.find((mount: { Destination: string }) => mount.Destination === destination).RW = false;
+            if (fault === "unexpected tmpfs") inspected.HostConfig.Tmpfs["/unexpected"] = "rw";
+            mockReplacementRuntime(JSON.stringify(inspected));
+            const ready = vi.fn();
+            expect(() => startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, undefined, () => false, ready)).toThrow();
+            expect(ready).not.toHaveBeenCalled();
+            expectNoContainerReplacement();
+        });
+
         it.each(["verified", "mismatch", "unavailable", "host swap", "live challenge mismatch"])("checks opaque WSL filesystem alias: %s", outcome => {
             const inspected = JSON.parse(makeDriftedRunningContract(() => undefined));
             const mount = inspected.Mounts.find((item: { Destination: string }) => item.Destination === "/home/ccc/.claude");
