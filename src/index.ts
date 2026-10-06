@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "child_process";
+import { runContainerCommand } from "./container-command.js";
 import {
     existsSync,
     mkdirSync,
@@ -81,6 +82,7 @@ import {
     isContainerExists,
     getContainerIdentity,
     getManagedProjectContainerIdentity,
+    inspectSessionContainerOwnership,
     type ContainerIdentity,
     isImageExists,
     getImageLabel,
@@ -115,9 +117,9 @@ import {
     withProjectFamilyLifecycleLock,
     withProjectFamilyLifecycleLockAsync,
     cleanupSession,
-    setupSignalHandlers,
-    setSession,
     setSessionContainerId,
+    acquireHostSessionOwnership,
+    confirmSessionOwnership,
 } from "./session.js";
 
 export const RUNNING_CONTAINER_UPDATE_DEFERRED_MESSAGE = "Update available; deferred because the existing container is running. It will be applied after the container stops.";
@@ -540,20 +542,20 @@ async function exec(
     const { setupTool, commandTool } = resolveExecTools(cmd, options.tool);
     const shouldEnsureTool = commandTool !== undefined || options.tool !== undefined;
     const worktreeBranch = options.expectedWorktreeBranch ?? detectWorktreeWorkspaceBranch(fullPath);
-    const sessionLockFile = worktreeBranch
-        ? createWorktreeSessionLock(
-            projectId,
-            fullPath,
-            worktreeBranch,
-            profile,
-            withProjectFamilyLifecycleLock,
-            assertWorkspaceBranch,
-            createSessionLock,
-            options.expectedWorktreeSourcePath,
-        )
-        : createSessionLock(projectId, profile);
-    setSession(sessionLockFile, fullPath, profile, (commandTool ?? options.tool)?.name ?? "command");
-    setupSignalHandlers();
+    const acquire = () => acquireHostSessionOwnership({
+        projectId, projectPath: fullPath, profile,
+        toolName: (commandTool ?? options.tool)?.name ?? "command",
+    }, (request) => {
+        const runtime = runtimeCli();
+        if (runtime !== "docker" && runtime !== "podman") throw new Error("Invalid session container runtime.");
+        return { ...inspectSessionContainerOwnership(request.projectPath, request.profile), runtime };
+    });
+    const { lockFile: sessionLockFile } = worktreeBranch
+        ? await withProjectFamilyLifecycleLockAsync(projectId, () => {
+            assertWorkspaceBranch(fullPath, worktreeBranch, spawnSync, options.expectedWorktreeSourcePath);
+            return acquire();
+        })
+        : await acquire();
 
     // Start clipboard server early — must complete before container creation so
     // the port file exists and can be bind-mounted (file mount requires the file
@@ -694,6 +696,7 @@ async function exec(
     progress("Synchronizing container setup...");
     let containerName = await withContainerSetupReadiness(sessionContainerPrefix, async () => {
         let readyContainerName = startContainer();
+        await confirmSessionOwnership();
         restoreCodexConfigHostOwnership(readyContainerName);
 
         // Skip heavy setup if the container was already running before this
@@ -721,6 +724,7 @@ async function exec(
                 readyContainerName,
                 () => startContainer(undefined, undefined, undefined),
             );
+            await confirmSessionOwnership();
         } else {
             // Container already running — only rebuild MCP config (lightweight, may have changed)
             const forwardedMcp = await buildMcpConfig(profile);
@@ -744,6 +748,7 @@ async function exec(
                 setupTool,
                 () => startContainer(undefined, undefined, undefined),
             );
+            await confirmSessionOwnership();
         }
         if (commandTool?.name === "claude") {
             // Re-verify after mise because a project shim can replace the fixed
@@ -892,7 +897,8 @@ async function exec(
         execArgs.push(...resolvedCmd);
     }
 
-    const resultStatus = preparationStatus ?? spawnSync(runtimeCli(), execArgs, { stdio: "inherit" }).status ?? 1;
+    await confirmSessionOwnership();
+    const resultStatus = preparationStatus ?? await runContainerCommand(runtimeCli(), execArgs, options.interactive !== false);
     restoreCodexConfigHostOwnership(containerName);
     try { unlinkSync(envFile); } catch { /* ignore cleanup error */ }
 

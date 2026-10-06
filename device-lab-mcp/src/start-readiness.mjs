@@ -1,3 +1,4 @@
+import { waitForStartReadiness } from "@ccc/device-lab/providers/application/start-readiness.mjs";
 import { jsonResult } from "@ccc/device-lab/providers/responses.mjs";
 
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -64,38 +65,26 @@ export async function finishStartReadiness(result, args, startedAt, invoke, {
         return failure("boot-readiness-failed");
     }
     if (!["macos-vm", "windows-sandbox"].includes(backend)) return result;
-    const deadline = startedAt + startBootTimeoutMs(args, backend);
-    let readiness = { attempts: 0, lastProbe: "not-attempted" };
-    while (now() < deadline) {
-        const remaining = deadline - now();
-        const timeoutMs = Math.min(10000, remaining);
-        let probe;
-        let transportException = false;
-        const attempts = readiness.attempts + 1;
-        try { probe = await invoke("device_cursor_position", {
-            ...Object.fromEntries(["broker", "viaBroker", "implicitBroker", "host", "port", "hostCandidates", "autolaunch", "brokerProbeTimeoutMs"]
-                .filter(key => Object.hasOwn(args, key)).map(key => [key, args[key]])),
-            deviceId: args.deviceId,
-            backend,
-            ...(args.incarnationId ? { incarnationId: args.incarnationId } : {}),
-            helperTimeoutMs: timeoutMs,
-            rpcTimeoutMs: remaining,
-        }); } catch {
-            // Transport exceptions do not establish readiness. Retry only within
-            // the original start deadline and never expose raw command output.
-            probe = null;
-            transportException = true;
-        }
-        const observed = observations(probe);
-        const failed = observed.some(value => value.isError === true || value.ok === false || value.error);
-        if (now() <= deadline && !failed && observed.some(value => object(value.cursor) && Number.isFinite(value.cursor.x) && Number.isFinite(value.cursor.y))) return result;
-        const currentHelper = observed.map(value => helperEvidence(value.helperDiagnostic)).find(Boolean);
-        const helper = currentHelper || readiness.helper;
-        const helperAttempt = currentHelper ? attempts : readiness.helperAttempt;
-        readiness = { attempts, lastProbe: transportException ? "transport-exception" : failed ? "provider-error"
-            : now() > deadline ? "late-response" : "missing-cursor", ...(helper ? { helper, helperAttempt } : {}) };
-        if (now() >= deadline) break;
-        await sleep(Math.min(500, deadline - now()));
-    }
-    return failure("control-transport-timeout", readiness);
+    const outcome = await waitForStartReadiness(startedAt + startBootTimeoutMs(args, backend), {
+        now,
+        sleep,
+        probe: async ({ timeoutMs, remainingMs }) => {
+            const probe = await invoke("device_cursor_position", {
+                ...Object.fromEntries(["broker", "viaBroker", "implicitBroker", "host", "port", "hostCandidates", "autolaunch", "brokerProbeTimeoutMs"]
+                    .filter(key => Object.hasOwn(args, key)).map(key => [key, args[key]])),
+                deviceId: args.deviceId,
+                backend,
+                ...(args.incarnationId ? { incarnationId: args.incarnationId } : {}),
+                helperTimeoutMs: timeoutMs,
+                rpcTimeoutMs: remainingMs,
+            });
+            const observed = observations(probe);
+            return {
+                failed: observed.some(value => value.isError === true || value.ok === false || value.error),
+                ready: observed.some(value => object(value.cursor) && Number.isFinite(value.cursor.x) && Number.isFinite(value.cursor.y)),
+                helper: observed.map(value => helperEvidence(value.helperDiagnostic)).find(Boolean),
+            };
+        },
+    });
+    return outcome.kind === "ready" ? result : failure("control-transport-timeout", outcome.readiness);
 }

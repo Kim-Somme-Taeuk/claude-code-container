@@ -13,7 +13,7 @@ import {
 } from "./docker.js";
 import { getProjectId, MISE_VOLUME_NAME, CLI_VERSION } from "./utils.js";
 import { locksDir as sessionLocksDir } from "./home-layout.js";
-import { getActiveSessionsForProject } from "./session.js";
+import { observeActiveSessionsForContainer } from "./session.js";
 import { getRuntimeInfo, runtimeCli } from "./container-runtime.js";
 import { buildClaudeLauncherReportCommand, sanitizeForTerminal, CLAUDE_BIN_PATH } from "./container-setup.js";
 
@@ -152,7 +152,7 @@ export function runDoctor(projectPath: string): boolean {
     }
 
     // 5. Sessions
-    const activeSessions = getActiveSessionsForProject(projectId);
+    const activeSessions = observeActiveSessionsForContainer(projectId);
     if (activeSessions.length > 0) {
         checks.push({
             name: "Sessions",

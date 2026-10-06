@@ -24,8 +24,10 @@
 import { spawnSync } from "child_process";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
+import { parseRuntimeOverride, type RuntimeName } from "./domain/container-runtime.js";
+import { createContainerRuntimeSelector } from "./application/container-runtime-selection.js";
 
-export type RuntimeName = "docker" | "podman";
+export type { RuntimeName } from "./domain/container-runtime.js";
 
 export type RuntimeFlavor =
     | "docker-native"        // docker on Linux (native daemon, rootful)
@@ -85,15 +87,11 @@ export function _setRuntimeInfoForTest(info: Partial<RuntimeInfo> & { runtime: R
  * has already been cached. Throws on invalid input.
  */
 export function setRuntimeOverride(name: string | undefined | null): void {
-    if (name == null || name === "") {
+    const runtime = parseRuntimeOverride(name, "cli");
+    if (runtime === null) {
         return;
     }
-    if (name !== "docker" && name !== "podman") {
-        throw new Error(
-            `Invalid --runtime value: '${name}'. Allowed: 'docker' or 'podman'.`,
-        );
-    }
-    _runtimeOverride = name;
+    _runtimeOverride = runtime;
     _cachedInfo = null;
 }
 
@@ -112,29 +110,15 @@ function isRuntimeOnPath(name: RuntimeName): boolean {
 }
 
 /**
- * Resolve which runtime to use. Pure function over inputs + environment.
+ * Compose selection policy with the current override, environment and native probe.
  * Throws if neither runtime is available and no override is set.
  */
 function resolveRuntime(): RuntimeName {
-    if (_runtimeOverride) return _runtimeOverride;
-
-    const envOverride = process.env.CCC_RUNTIME;
-    if (envOverride) {
-        if (envOverride !== "docker" && envOverride !== "podman") {
-            throw new Error(
-                `Invalid CCC_RUNTIME value: '${envOverride}'. Allowed: 'docker' or 'podman'.`,
-            );
-        }
-        return envOverride;
-    }
-
-    // Prefer Podman, fall back to Docker.
-    if (isRuntimeOnPath("podman")) return "podman";
-    if (isRuntimeOnPath("docker")) return "docker";
-
-    throw new Error(
-        "No container runtime found. Install podman or docker and ensure the CLI is on PATH.",
-    );
+    return createContainerRuntimeSelector({
+        getExplicitOverride: () => _runtimeOverride,
+        getEnvironmentOverride: () => process.env.CCC_RUNTIME,
+        isRuntimeAvailable: isRuntimeOnPath,
+    })();
 }
 
 // === Version parsing ===

@@ -1,13 +1,75 @@
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import ts from "typescript";
+import { isWindowsLxWorkspaceLink, removeWindowsLxWorkspaceLink } from "./windows-lx-workspace-link.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const runtimePackages = ["hyper-v", "device-lab"];
 
+function entryStat(path) {
+    try { return lstatSync(path); }
+    catch (error) {
+        if (error.code === "ENOENT") return null;
+        throw error;
+    }
+}
+
+function prepareRuntimeWorkspaceLinks(projectRoot) {
+    const scope = join(projectRoot, "node_modules", "@ccc");
+    const packages = runtimePackages.map(name => {
+        const source = join(projectRoot, "packages", name);
+        const stat = entryStat(source);
+        if (!stat?.isDirectory() || stat.isSymbolicLink()
+            || JSON.parse(readFileSync(join(source, "package.json"), "utf8")).name !== `@ccc/${name}`) {
+            throw new Error(`workspace-source-invalid: ${name}`);
+        }
+        return { name, source, link: join(scope, name) };
+    });
+    for (const parent of [join(projectRoot, "node_modules"), scope]) {
+        const stat = entryStat(parent);
+        if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) {
+            throw new Error("workspace-dependency-parent-invalid: restore local npm workspace dependencies with npm ci");
+        }
+        if (!stat && parent !== scope) {
+            throw new Error("workspace-dependencies-missing: install npm workspace dependencies with npm ci");
+        }
+    }
+    // Validate both entries before changing either one or removing build output.
+    const lxLinks = new Set();
+    const repairs = packages.filter(({ name, source, link }) => {
+        let stat;
+        try { stat = entryStat(link); }
+        catch (error) {
+            if (process.platform !== "win32" || !["EACCES", "EPERM"].includes(error.code)
+                || !isWindowsLxWorkspaceLink(link)) throw error;
+            lxLinks.add(link);
+            return true;
+        }
+        if (!stat) return true;
+        if (!stat.isSymbolicLink()) {
+            throw new Error(`workspace-dependency-not-linked: @ccc/${name}; restore npm workspace dependencies with npm ci`);
+        }
+        const expectedSource = realpathSync(source);
+        try { return relative(expectedSource, realpathSync(link)) !== ""; }
+        catch (error) {
+            if (["ENOENT", "ELOOP", "ENOTDIR"].includes(error.code)) return true;
+            throw error;
+        }
+    });
+    if (!repairs.length) return;
+    if (!entryStat(scope)) mkdirSync(scope);
+    for (const { source, link } of repairs) {
+        if (lxLinks.has(link)) removeWindowsLxWorkspaceLink(link);
+        else if (entryStat(link)) unlinkSync(link);
+        symlinkSync(process.platform === "win32" ? source : relative(scope, source), link,
+            process.platform === "win32" ? "junction" : "dir");
+    }
+}
+
 export function buildWorkspacePackages(projectRoot = root) {
+    prepareRuntimeWorkspaceLinks(projectRoot);
     for (const name of runtimePackages) {
         rmSync(join(projectRoot, "packages", name, "dist"), { recursive: true, force: true });
         const result = spawnSync(process.execPath, [join(projectRoot, "node_modules/typescript/bin/tsc"),

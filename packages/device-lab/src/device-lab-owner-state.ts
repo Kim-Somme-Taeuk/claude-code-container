@@ -7,6 +7,7 @@ import {
     readSync,
 } from "fs";
 import type { Stats } from "fs";
+import { validateOwnerDevicePayload } from "../providers/domain/owner-device-payload.mjs";
 import { assertStateDirectoriesUnchanged, secureStateParentDirectory } from "./device-lab-shared-state.js";
 
 export const OWNER_DEVICE_STATE_FILE_LIMIT_BYTES = 256 * 1024;
@@ -51,34 +52,9 @@ function readBounded(descriptor: number, limitBytes: number): string {
 }
 
 function validateDevicesPayload(parsed: unknown): unknown[] {
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw stateError("owner-devices-state-invalid");
-    }
-    const devices = (parsed as { devices?: unknown }).devices;
-    if (!Array.isArray(devices)) throw stateError("owner-devices-state-invalid");
-    const ids = new Set<string>();
-    const avdNames = new Set<string>();
-    for (const device of devices) {
-        if (!device || typeof device !== "object" || Array.isArray(device)) {
-            throw stateError("owner-devices-state-invalid");
-        }
-        const id = (device as { id?: unknown }).id;
-        if (typeof id !== "string" || !OWNER_DEVICE_ID_PATTERN.test(id) || ids.has(id)) {
-            throw stateError("owner-devices-state-invalid");
-        }
-        ids.add(id);
-        const avdName = (device as { avdName?: unknown }).avdName;
-        if (avdName !== undefined) {
-            if (typeof avdName !== "string"
-                || avdName.length === 0
-                || avdName.length > 128
-                || avdNames.has(avdName)) {
-                throw stateError("owner-devices-state-invalid");
-            }
-            avdNames.add(avdName);
-        }
-    }
-    return devices;
+    const result = validateOwnerDevicePayload(parsed, OWNER_DEVICE_ID_PATTERN);
+    if (result.kind === "invalid") throw stateError("owner-devices-state-invalid");
+    return result.devices;
 }
 
 export function readOwnerDeviceStateFile(file: string, limitBytes = OWNER_DEVICE_STATE_FILE_LIMIT_BYTES): unknown[] {

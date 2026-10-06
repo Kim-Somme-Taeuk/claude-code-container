@@ -204,6 +204,66 @@ describe("session.ts", () => {
 
     // ── createSessionLock ────────────────────────────────────────────────────
 
+    describe("production session container ownership inspection", () => {
+        const exactId = "a".repeat(64);
+        const inspectActual = () => vi.importActual<typeof import("../docker.js")>("../docker.js");
+
+        it("recognizes successful empty enumeration as known absence without inspecting a container", async () => {
+            const docker = await inspectActual();
+            mockGetProjectId.mockReturnValue("project");
+            mockSpawnSync.mockReturnValue({ status: 0, stdout: "\n" });
+            expect(docker.inspectSessionContainerOwnership("/fixture/project")).toEqual({ known: true, containerId: null });
+            expect(mockSpawnSync).toHaveBeenCalledTimes(1);
+            expect(mockSpawnSync.mock.calls[0][1][0]).toBe("ps");
+        });
+
+        it.each([
+            { status: 1, stdout: "" }, { status: null, stdout: "" },
+            { status: 0, error: new Error("runtime unavailable"), stdout: "" },
+            { status: 0, stdout: "short-id" }, { status: 0, stdout: `${exactId}\n${"b".repeat(64)}` },
+        ])("keeps failed or ambiguous enumeration unknown: %j", async result => {
+            const docker = await inspectActual();
+            mockGetProjectId.mockReturnValue("project"); mockSpawnSync.mockReturnValue(result);
+            expect(docker.inspectSessionContainerOwnership("/fixture/project")).toEqual({ known: false, containerId: null });
+            expect(mockSpawnSync).toHaveBeenCalledTimes(1);
+        });
+
+        it.each([true, false])("accepts a positively verified managed exact ID when Running=%s", async running => {
+            const docker = await inspectActual();
+            const projectPath = makeLocksDir();
+            mockGetProjectId.mockReturnValue("project");
+            mockLstatSync.mockReturnValue({ isDirectory: () => true, isSymbolicLink: () => false, dev: 1n, ino: 2n });
+            const identity = docker.bindMountSourceIdentityDigest(docker.captureBindMountSourceIdentity(projectPath));
+            mockSpawnSync.mockReturnValueOnce({ status: 0, stdout: `${exactId}\n` }).mockReturnValue({ status: 0, stdout: JSON.stringify({
+                Id: exactId, State: { Running: running }, Config: { Labels: {
+                    "ccc.managed": "true", "ccc.project.path": projectPath, "ccc.project.mount-identity": identity,
+                } },
+            }) });
+            expect(docker.inspectSessionContainerOwnership(projectPath, "work")).toEqual({ known: true, containerId: exactId });
+            expect(mockSpawnSync).toHaveBeenCalledTimes(2);
+            expect(mockSpawnSync.mock.calls[0][1]).toEqual(["ps", "-aq", "--no-trunc", "-f", expect.stringMatching(/^name=\^ccc-.*--p--work\$$/)]);
+            expect(mockSpawnSync.mock.calls[1][1]).toEqual(["inspect", "-f", "{{json .}}", exactId]);
+        });
+
+        it.each(["foreign", "wrong project", "different ID"])("does not authorize a listed container with %s ownership", async mode => {
+            const docker = await inspectActual();
+            const projectPath = makeLocksDir();
+            mockGetProjectId.mockReturnValue("project");
+            mockLstatSync.mockReturnValue({ isDirectory: () => true, isSymbolicLink: () => false, dev: 1n, ino: 2n });
+            const identity = docker.bindMountSourceIdentityDigest(docker.captureBindMountSourceIdentity(projectPath));
+            mockSpawnSync.mockReturnValueOnce({ status: 0, stdout: exactId }).mockReturnValue({ status: 0, stdout: JSON.stringify({
+                Id: mode === "different ID" ? "b".repeat(64) : exactId,
+                State: { Running: true }, Config: { Labels: {
+                    "ccc.managed": mode === "foreign" ? "false" : "true",
+                    "ccc.project.path": mode === "wrong project" ? "/different/project" : projectPath,
+                    "ccc.project.mount-identity": identity,
+                } },
+            }) });
+            expect(docker.inspectSessionContainerOwnership(projectPath)).toEqual({ known: false, containerId: null });
+            expect(mockSpawnSync.mock.calls.some(call => ["stop", "rm", "exec"].includes(call[1]?.[0]))).toBe(false);
+        });
+    });
+
     describe("createSessionLock", () => {
         it("creates lock file with double-dash separator and projectId prefix (no profile)", () => {
             mockExistsSync.mockReturnValue(true);
@@ -1135,7 +1195,7 @@ describe("session.ts", () => {
             mockReadFileSync.mockReturnValue(JSON.stringify({
                 version: 2,
                 pid: 4242,
-                startToken: "windows:old-token",
+                startToken: "windows:638000000000000001",
             }));
             mockSpawnSync.mockReturnValue({
                 status: 0,
@@ -1151,15 +1211,18 @@ describe("session.ts", () => {
                 () => false,
             )).toBe(false);
 
+            expect(mockReadFileSync).not.toHaveBeenCalled();
+            expect(mockSpawnSync).not.toHaveBeenCalled();
+
             mockGetProjectId.mockReturnValue(projectId);
             setSession(`/locks/${second}`, "/home/user/proj");
             setSessionContainerId("shared-container-id");
             cleanupSession();
 
             expect(mockUnlinkSync).toHaveBeenCalledWith(`/locks/${second}`);
-            expect(mockUnlinkSync).not.toHaveBeenCalledWith(`/locks/${first}`);
-            expect(mockReadFileSync).not.toHaveBeenCalled();
-            expect(mockSpawnSync).not.toHaveBeenCalled();
+            expect(mockUnlinkSync).not.toHaveBeenCalledWith(expect.stringContaining(first));
+            expect(mockReadFileSync).toHaveBeenCalledWith(expect.stringContaining(first), "utf-8");
+            expect(mockSpawnSync.mock.calls.some(call => call[1]?.[0] === "stop")).toBe(false);
             expect(mockCleanupOwnerDevices).not.toHaveBeenCalled();
             expect(recreate).not.toHaveBeenCalled();
         });
@@ -1524,13 +1587,15 @@ describe("session.ts", () => {
             expect(mockCleanupOwnerDevices).not.toHaveBeenCalled();
         });
 
-        it("does not stop the container when a foreign lock appears stale by PID reuse", () => {
+        it("reconciles proven PID reuse before stopping the exact last-session container", () => {
             const projectId = "my-project-abc123";
             const current = `${projectId}--current.lock`;
             const stale = `${projectId}--stale.lock`;
             mockGetProjectId.mockReturnValue(projectId);
             mockExistsSync.mockReturnValue(true);
-            mockReaddirSync.mockReturnValue([current, stale]);
+            const claims = [current, stale];
+            mockReaddirSync.mockImplementation(() => [...claims]);
+            mockUnlinkSync.mockImplementation((path: string) => { claims.splice(claims.indexOf(basename(path)), 1); });
             mockReadFileSync.mockImplementation((path: string) => {
                 if (String(path).startsWith("/proc/4242/")) {
                     const fields = Array.from({ length: 20 }, (_, index) => index === 19 ? "new-start" : "0");
@@ -1551,20 +1616,22 @@ describe("session.ts", () => {
             cleanupSession();
 
             expect(mockUnlinkSync).toHaveBeenCalledWith(`/locks/${current}`);
-            expect(mockUnlinkSync).not.toHaveBeenCalledWith(expect.stringContaining(stale));
-            expect(mockReadFileSync).not.toHaveBeenCalled();
-            expect(mockSpawnSync).not.toHaveBeenCalled();
-            expect(mockCleanupOwnerDevices).not.toHaveBeenCalled();
+            expect(mockUnlinkSync).toHaveBeenCalledWith(expect.stringContaining(stale));
+            expect(mockReadFileSync).toHaveBeenCalledWith(expect.stringContaining(stale), "utf-8");
+            expect(mockSpawnSync).toHaveBeenCalledWith("docker", ["stop", "pinned-container-id"], { stdio: "ignore", timeout: 30_000, killSignal: "SIGKILL" });
+            expect(mockCleanupOwnerDevices).toHaveBeenCalledTimes(1);
         });
 
-        it("does not stop the shared container when Windows reports a different start token for the foreign session", () => {
+        it("reconciles Windows token mismatch before the fresh raw veto permits exact-ID stop", () => {
             vi.spyOn(process, "platform", "get").mockReturnValue("win32");
             const projectId = "my-project-abc123";
             const current = `${projectId}--current.lock`;
             const foreign = `${projectId}--foreign.lock`;
             mockGetProjectId.mockReturnValue(projectId);
             mockExistsSync.mockReturnValue(true);
-            mockReaddirSync.mockReturnValue([current, foreign]);
+            const claims = [current, foreign];
+            mockReaddirSync.mockImplementation(() => [...claims]);
+            mockUnlinkSync.mockImplementation((path: string) => { claims.splice(claims.indexOf(basename(path)), 1); });
             mockReadFileSync.mockReturnValue(JSON.stringify({
                 version: 2,
                 pid: 4242,
@@ -1581,10 +1648,10 @@ describe("session.ts", () => {
             cleanupSession();
 
             expect(mockUnlinkSync).toHaveBeenCalledWith(`/locks/${current}`);
-            expect(mockUnlinkSync).not.toHaveBeenCalledWith(expect.stringContaining(foreign));
-            expect(mockReadFileSync).not.toHaveBeenCalled();
-            expect(mockSpawnSync).not.toHaveBeenCalled();
-            expect(mockCleanupOwnerDevices).not.toHaveBeenCalled();
+            expect(mockUnlinkSync).toHaveBeenCalledWith(expect.stringContaining(foreign));
+            expect(mockReadFileSync).toHaveBeenCalledWith(expect.stringContaining(foreign), "utf-8");
+            expect(mockSpawnSync).toHaveBeenCalledWith("docker", ["stop", "pinned-container-id"], { stdio: "ignore", timeout: 30_000, killSignal: "SIGKILL" });
+            expect(mockCleanupOwnerDevices).toHaveBeenCalledTimes(1);
         });
 
         it("preserves a corrupt foreign lock and refuses last-session cleanup", () => {
@@ -1643,7 +1710,7 @@ describe("session.ts", () => {
             setSessionContainerId("pinned-container-id");
             cleanupSession();
 
-            expect(order).toEqual(["critical-start", "session-check", "unlink", "stop", "critical-end"]);
+            expect(order).toEqual(["critical-start", "session-check", "session-check", "stop", "unlink", "critical-end"]);
         });
 
         it("does not stop during cleanup when a foreign lock is temporarily unreadable", () => {
@@ -1873,7 +1940,7 @@ describe("session.ts", () => {
             expect(session.projectPath).toBeNull();
         });
 
-        it("continues without crashing when removeSessionLock (unlinkSync) throws an error", () => {
+        it("keeps cleanup incomplete when own claim unlink fails", () => {
             const projectId = "my-project-abc123";
             const lockFileName = `${projectId}--aabbccddeeff00112233445566778899.lock`;
             const lockFile = `/locks/${lockFileName}`;
@@ -1894,7 +1961,8 @@ describe("session.ts", () => {
 
             setSession(lockFile, projectPath);
 
-            expect(() => cleanupSession()).not.toThrow();
+            expect(() => cleanupSession()).toThrow("EACCES: permission denied");
+            expect(getCurrentSession().lockFile).toBe(lockFile);
         });
 
         it("cleanupSession should be idempotent (second call is no-op)", () => {
