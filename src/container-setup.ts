@@ -6,6 +6,7 @@
 import { spawnSync } from "child_process";
 import { getNpmTools, getToolByName, type ToolDefinition } from "./tool-registry.js";
 import { runtimeCli } from "./container-runtime.js";
+import { CLAUDE_BIN_PATH } from "./domain/tool-layout.js";
 
 // Claude's native install layout inside the container.
 //
@@ -32,7 +33,7 @@ export const CLAUDE_DATA_DIR = "/home/ccc/.local/share/claude";
 // this change still hold it, so it is a migration donor, never a launcher source.
 export const CLAUDE_LEGACY_CACHE_FILE = "/home/ccc/.local/share/mise/.claude-bin/claude";
 export const CLAUDE_EXECUTABLE = "claude";
-export const CLAUDE_BIN_PATH = "/home/ccc/.local/bin/claude";
+export { CLAUDE_BIN_PATH };
 export const CONTAINER_TOOL_PROBE_TIMEOUT_MS = 15_000;
 export const CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS = 15_000;
 export const CONTAINER_TOOL_MUTATION_TIMEOUT_MS = 5 * 60_000;
@@ -875,8 +876,7 @@ export function ensureTools(containerName: string, activeTool: ToolDefinition): 
         ensureNpmTool(containerName, activeTool);
     }
 
-    // tool-registry and this module intentionally share the fixed Claude path;
-    // use it directly to avoid depending on that circular import's init order.
+    // Tool metadata and native setup share the pure domain launcher location.
     const configuredBinary = activeTool.binary || activeTool.name;
     const executablePath = activeTool.name === "claude"
         ? CLAUDE_BIN_PATH
