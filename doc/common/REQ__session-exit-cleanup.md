@@ -83,3 +83,41 @@ Windows console-close and actual Docker/Podman shutdown require native acceptanc
 after installing the updated host CCC. Portable fixtures do not prove these paths. A client
 disconnect while a foreign owner retains the container does not authorize killing
 that container or its shared Codex daemon.
+
+## Temporary environment-file lifetime
+
+The host environment file used by `exec --env-file` can contain forwarded
+credentials. Preserve its existing serialization, native temporary-directory
+selection and public string-returning writer API. Creation must be exclusive
+with mode `0600`; an existing file or symbolic link must not be overwritten.
+
+The launch path must own its file through preparation, argument construction,
+awaited session confirmation, command execution and existing ownership
+restoration. Dispose it after ordinary or preparation-failure completion and on
+each handled error, preserving the original status or thrown value. Restoration
+stays at its current point; failed confirmation must not launch or restore.
+
+Register synchronous process-exit cleanup while the file is owned, since handled
+session signals call `process.exit` before an asynchronous `finally` can finish.
+Explicit disposal removes its listener, is idempotent and does not assign an exit
+code or throw over a primary error. Diagnostic emission failures are contained.
+
+Bind cleanup authority to metadata from the exclusively creating descriptor
+before writing secrets. Receipts and diagnostics must not contain bytes, secret
+digests, paths or arbitrary exception output. Remove only a matching regular file;
+preserve observed replacements and uncertain identity. Cleanup failures produce a
+fixed redacted diagnostic with a bounded validated errno at most. A missing file
+is already cleaned. Identity capture failure must not write credentials or
+authorize deletion of an uncertain named entry.
+
+If native inode identity is unavailable, creation fails before writing values and
+may retain an uncertain empty placeholder. Do not use a pathname or secret bytes
+as a fallback ownership proof.
+
+Verify serialization, creation failures, observed successor protection, listener
+disposal and outcome preservation with private nonsecret fixtures. Real emitted
+process tests must cover explicit exit and handled signals without a later CCC
+query. Native Windows deletion/console-close and macOS tempfile behavior require
+native acceptance. Parent cleanup cannot run after SIGKILL; this env-file contract
+does not extend the session guardian. The native identity-check-to-unlink window
+is not an atomic hostile-filesystem guarantee.

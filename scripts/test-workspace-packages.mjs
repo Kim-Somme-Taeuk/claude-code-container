@@ -1624,6 +1624,44 @@ async function verifyCompiledPublicExecReadiness(facadeUrl, runtimeUrl) {
     }
 }
 
+async function verifyOwnedEnvFile(facadeUrl, adapterUrl) {
+    const assert = (await import("node:assert/strict")).default;
+    const { existsSync, readFileSync, statSync, unlinkSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { basename, dirname } = await import("node:path");
+    const facade = await import(facadeUrl);
+    const adapter = await import(adapterUrl);
+    assert.equal(typeof adapter.writeNativeEnvFile, "function");
+    assert.equal(typeof adapter.writeOwnedNativeEnvFile, "function");
+    const entries = [["CCC_PACKAGE_FIXTURE", "nonsecret-marker"], ["SKIPPED", "line\nbreak"]];
+    const expected = "CCC_PACKAGE_FIXTURE=nonsecret-marker\n";
+    const before = process.listeners("exit");
+    const owned = facade.writeOwnedEnvFile(entries);
+    try {
+        assert.equal(typeof owned.path, "string");
+        assert.equal(typeof owned.dispose, "function");
+        assert.equal(dirname(owned.path), tmpdir());
+        assert.match(basename(owned.path), /^ccc-env-[a-f0-9]{12}$/);
+        assert.equal(readFileSync(owned.path, "utf8"), expected);
+        if (process.platform !== "win32") assert.equal(statSync(owned.path).mode & 0o777, 0o600);
+        const added = process.listeners("exit").filter(listener => !before.includes(listener));
+        assert.deepEqual(added, [owned.dispose]);
+        owned.dispose();
+        assert.equal(existsSync(owned.path), false);
+        assert.deepEqual(process.listeners("exit"), before);
+        owned.dispose();
+        assert.equal(existsSync(owned.path), false);
+        assert.deepEqual(process.listeners("exit"), before);
+    } finally { owned.dispose(); }
+    const legacy = facade.writeEnvFile(entries);
+    try {
+        assert.equal(typeof legacy, "string");
+        assert.equal(dirname(legacy), tmpdir());
+        assert.equal(readFileSync(legacy, "utf8"), expected);
+        assert.deepEqual(process.listeners("exit"), before);
+    } finally { unlinkSync(legacy); }
+}
+
 async function smoke(packageRoot) {
     assert.equal(existsSync(join(packageRoot, "node_modules")), false);
     assert.equal(existsSync(join(packageRoot, "x11-mcp")), false, "standalone X11 source was distributed");
@@ -1654,6 +1692,11 @@ async function smoke(packageRoot) {
     const cleanupPorts = pathToFileURL(join(packageRoot, "dist/ports/session-cleanup.js")).href;
     const homeLayout = pathToFileURL(join(packageRoot, "dist/home-layout.js")).href;
     for (const [path, symbol] of [
+        ["dist/adapters/session-env-file.js", "writeOwnedNativeEnvFile"],
+        ["dist/adapters/session-env-file.d.ts", "writeNativeEnvFile"],
+        ["dist/adapters/session-env-file.d.ts", "writeOwnedNativeEnvFile"],
+        ["dist/utils.d.ts", "writeEnvFile"],
+        ["dist/utils.d.ts", "writeOwnedEnvFile"],
         ["dist/domain/session-lock.d.ts", "SessionLockOwner"],
         ["dist/application/session-lock-liveness.d.ts", "createSessionLockLiveness"],
         ["dist/ports/session-lock-liveness.d.ts", "SessionLockLivenessPorts"],
@@ -1712,6 +1755,23 @@ async function smoke(packageRoot) {
         assert.ok(existsSync(join(packageRoot, path)), `architecture declaration missing: ${path}`);
         assert.ok(readFileSync(join(packageRoot, path), "utf8").includes(symbol), `architecture declaration missing: ${symbol}`);
     }
+    for (const [path, legacy, owned] of [
+        ["dist/utils.d.ts", "writeEnvFile", "writeOwnedEnvFile"],
+        ["dist/adapters/session-env-file.d.ts", "writeNativeEnvFile", "writeOwnedNativeEnvFile"],
+    ]) {
+        const declarations = readFileSync(join(packageRoot, path), "utf8");
+        assert.match(declarations, new RegExp(`export declare function ${legacy}\\(entries: Array<\\[string, string\\]>\\): string;`));
+        assert.match(declarations, new RegExp(`export declare function ${owned}\\(entries: Array<\\[string, string\\]>\\): \\{\\s*path: string;\\s*dispose\\(\\): void;\\s*\\};`));
+    }
+    const envFileHome = mkdtempSync(join(temporary, "env-file-home-"));
+    const envFileSmoke = spawnSync(process.execPath, ["--input-type=module", "-e",
+        `await (${verifyOwnedEnvFile.toString()})(${JSON.stringify(pathToFileURL(join(packageRoot, "dist/utils.js")).href)},${JSON.stringify(pathToFileURL(join(packageRoot, "dist/adapters/session-env-file.js")).href)});`], {
+        cwd: envFileHome,
+        env: { ...env, HOME: envFileHome, USERPROFILE: envFileHome, TMPDIR: envFileHome, TMP: envFileHome, TEMP: envFileHome },
+        encoding: "utf8", timeout: 120000, windowsHide: true,
+    });
+    assert.equal(envFileSmoke.status, 0, "environment file distribution proof failed");
+    console.log("PASS environment file distribution: compiled utilities and native adapter, declarations, private file bytes and disposal listener lifetime");
     const toolDetectDeclarations = readFileSync(join(packageRoot, "dist/tool-detect.d.ts"), "utf8");
     assert.match(toolDetectDeclarations, /export declare function getDefaultToolPreference\(\): string \| null;/);
     assert.match(toolDetectDeclarations, /export declare function setDefaultToolPreference\(toolName: string\): void;/);

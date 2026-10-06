@@ -7,7 +7,6 @@ import {
     mkdirSync,
     writeFileSync,
     readFileSync,
-    unlinkSync,
 } from "fs";
 import { basename, dirname, join, relative, resolve } from "path";
 import { fileURLToPath } from "url";
@@ -33,7 +32,7 @@ import {
     getClaudeDir,
     getClaudeJsonFile,
     collectForwardedEnv,
-    writeEnvFile,
+    writeOwnedEnvFile,
     LAB_RUNNER_PROFILE_NAME,
 } from "./utils.js";
 
@@ -866,41 +865,45 @@ async function exec(
         }
     }
 
-    const envFile = writeEnvFile(envEntries);
-    execArgs.push("--env-file", envFile);
-
     let preparationStatus: number | null = null;
-    if (commandTool?.name === "codex" && options.interactive !== false) {
-        const preparation = prepareCodexLaunch(runtimeCli(), [...execArgs, containerName], resolvedCmd);
-        if (!preparation.ok) {
-            console.error(`[ccc] ${preparation.error}`);
-            preparationStatus = preparation.status;
+    let resultStatus: number;
+    const envFile = writeOwnedEnvFile(envEntries);
+    try {
+        execArgs.push("--env-file", envFile.path);
+
+        if (commandTool?.name === "codex" && options.interactive !== false) {
+            const preparation = prepareCodexLaunch(runtimeCli(), [...execArgs, containerName], resolvedCmd);
+            if (!preparation.ok) {
+                console.error(`[ccc] ${preparation.error}`);
+                preparationStatus = preparation.status;
+            } else {
+                resolvedCmd = preparation.command;
+                if (preparation.notice) console.error(`[ccc] ${preparation.notice}`);
+            }
+        }
+
+        if (options.interactive !== false && process.stdin.isTTY && process.stdout.isTTY) {
+            execArgs.push("-it");
+            if (commandTool?.name === "codex" && preparationStatus === null) {
+                resolvedCmd = buildCodexResumeRecoveryCommand(resolvedCmd);
+            }
+        }
+
+        execArgs.push(containerName);
+
+        if (commandTool?.name === "claude") {
+            // Run claude directly (no shell wrapper — avoids mise interception)
+            execArgs.push(CLAUDE_BIN_PATH, ...cmd.slice(1));
         } else {
-            resolvedCmd = preparation.command;
-            if (preparation.notice) console.error(`[ccc] ${preparation.notice}`);
+            execArgs.push(...resolvedCmd);
         }
+
+        await confirmSessionOwnership();
+        resultStatus = preparationStatus ?? await runContainerCommand(runtimeCli(), execArgs, options.interactive !== false);
+        restoreCodexConfigHostOwnership(containerName);
+    } finally {
+        envFile.dispose();
     }
-
-    if (options.interactive !== false && process.stdin.isTTY && process.stdout.isTTY) {
-        execArgs.push("-it");
-        if (commandTool?.name === "codex" && preparationStatus === null) {
-            resolvedCmd = buildCodexResumeRecoveryCommand(resolvedCmd);
-        }
-    }
-
-    execArgs.push(containerName);
-
-    if (commandTool?.name === "claude") {
-        // Run claude directly (no shell wrapper — avoids mise interception)
-        execArgs.push(CLAUDE_BIN_PATH, ...cmd.slice(1));
-    } else {
-        execArgs.push(...resolvedCmd);
-    }
-
-    await confirmSessionOwnership();
-    const resultStatus = preparationStatus ?? await runContainerCommand(runtimeCli(), execArgs, options.interactive !== false);
-    restoreCodexConfigHostOwnership(containerName);
-    try { unlinkSync(envFile); } catch { /* ignore cleanup error */ }
 
     if (process.env.DEBUG) {
         // Check conversation directory state after Claude exits
