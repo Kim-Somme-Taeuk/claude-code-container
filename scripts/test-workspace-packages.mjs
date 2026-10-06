@@ -1662,6 +1662,57 @@ async function verifyOwnedEnvFile(facadeUrl, adapterUrl) {
     } finally { unlinkSync(legacy); }
 }
 
+async function verifyProfileCatalog(facadeUrl) {
+    const assert = (await import("node:assert/strict")).default;
+    const { existsSync, readFileSync, statSync, writeFileSync } = await import("node:fs");
+    const { homedir } = await import("node:os");
+    const { join } = await import("node:path");
+    const facade = await import(facadeUrl);
+    const profiles = join(homedir(), ".ccc", "profiles");
+    assert.deepEqual(facade.listProfiles(), ["default"]);
+    assert.equal(facade.profileExists("default"), true);
+    assert.equal(facade.ensureProfile("default"), false);
+    assert.equal(facade.profileExists("package-profile"), false);
+    assert.throws(() => facade.createProfile("default"), /^Error: Profile "default" is reserved\.$/);
+    assert.throws(() => facade.removeProfile("default"), /^Error: Profile "default" cannot be removed\.$/);
+    assert.throws(() => facade.ensureProfile("package-missing"),
+        /^Error: Profile "package-missing" does not exist\. Create it with: ccc profile add package-missing$/);
+    assert.equal(existsSync(profiles), false, "queries and reserved errors must not create profile storage");
+    const settings = { env: { CCC_PACKAGE_PROFILE_FIXTURE: "nonsecret-marker" } };
+    assert.equal(facade.createProfile("package-profile", settings), undefined);
+    const created = join(profiles, "package-profile");
+    assert.equal(readFileSync(join(created, "claude.json"), "utf8"), "{}");
+    assert.equal(readFileSync(join(created, "claude", "settings.json"), "utf8"), JSON.stringify(settings, null, 2));
+    assert.equal(statSync(join(created, "codex")).isDirectory(), true);
+    assert.equal(facade.ensureProfile("package-profile"), false);
+    assert.equal(facade.isBuiltinProfile("local-llm"), true);
+    assert.equal(facade.ensureProfile("local-llm"), true);
+    assert.equal(facade.ensureProfile("local-llm"), false);
+    const builtin = join(profiles, "local-llm");
+    assert.equal(readFileSync(join(builtin, "claude", "settings.json"), "utf8"),
+        JSON.stringify(facade.BUILTIN_PROFILES["local-llm"].settings, null, 2));
+    writeFileSync(join(profiles, "plain-entry"), "nonsecret-file");
+    assert.equal(facade.profileExists("plain-entry"), true);
+    const listed = facade.listProfiles();
+    assert.equal(listed[0], "default");
+    assert.deepEqual(listed.slice(1).sort(), ["local-llm", "package-profile"]);
+    if (process.platform !== "win32") {
+        for (const directory of [created, builtin]) {
+            for (const path of [directory, join(directory, "claude"), join(directory, "codex")]) {
+                assert.equal(statSync(path).mode & 0o777, 0o700);
+            }
+            for (const path of [join(directory, "claude.json"), join(directory, "claude", "settings.json")]) {
+                assert.equal(statSync(path).mode & 0o777, 0o600);
+            }
+        }
+    }
+    for (const name of ["package-profile", "local-llm", "plain-entry", "package-missing"]) {
+        assert.equal(facade.removeProfile(name), undefined);
+        assert.equal(facade.profileExists(name), false);
+    }
+    assert.deepEqual(facade.listProfiles(), ["default"]);
+}
+
 async function smoke(packageRoot) {
     assert.equal(existsSync(join(packageRoot, "node_modules")), false);
     assert.equal(existsSync(join(packageRoot, "x11-mcp")), false, "standalone X11 source was distributed");
@@ -1747,6 +1798,12 @@ async function smoke(packageRoot) {
         ["dist/docker.d.ts", "ensureImage"],
         ["dist/application/tool-preferences.d.ts", "createToolPreferences"],
         ["dist/ports/tool-preferences.d.ts", "ToolPreferencePorts"],
+        ["dist/profile.js", "createProfileCatalog"],
+        ["dist/profile.d.ts", "ProfileSettings"],
+        ["dist/profile.d.ts", "BuiltinProfile"],
+        ["dist/application/profile-catalog.js", "createProfileCatalog"],
+        ["dist/application/profile-catalog.d.ts", "createProfileCatalog"],
+        ["dist/ports/profile-catalog.d.ts", "ProfileCatalogPorts"],
         ["dist/application/requested-tool-setup.d.ts", "createRequestedToolSetup"],
         ["dist/ports/requested-tool-setup.d.ts", "RequestedToolSetupPorts"],
         ["dist/docker.d.ts", "stopProjectContainer"],
@@ -1772,6 +1829,34 @@ async function smoke(packageRoot) {
     });
     assert.equal(envFileSmoke.status, 0, "environment file distribution proof failed");
     console.log("PASS environment file distribution: compiled utilities and native adapter, declarations, private file bytes and disposal listener lifetime");
+    const profileHome = mkdtempSync(join(temporary, "profile-home-"));
+    const profileSmoke = spawnSync(process.execPath, ["--input-type=module", "-e",
+        `await (${verifyProfileCatalog.toString()})(${JSON.stringify(pathToFileURL(join(packageRoot, "dist/profile.js")).href)});`], {
+        cwd: profileHome,
+        env: { ...env, HOME: profileHome, USERPROFILE: profileHome, TMPDIR: profileHome, TMP: profileHome, TEMP: profileHome },
+        encoding: "utf8", timeout: 120000, maxBuffer: 4 * 1024 * 1024, windowsHide: true,
+    });
+    assert.equal(profileSmoke.status, 0, String(profileSmoke.error || profileSmoke.stderr || "profile distribution proof failed").slice(0, 2000));
+    const profileContract = join(packageRoot, "profile-catalog-consumer.mts");
+    writeFileSync(profileContract, [
+        'import { createProfile, ensureProfile, listProfiles, profileExists, isBuiltinProfile, removeProfile, validateProfileName, BUILTIN_PROFILES, type ProfileSettings, type BuiltinProfile } from "./dist/profile.js";',
+        'import { createProfileCatalog, type ProfileCatalog } from "./dist/application/profile-catalog.js";',
+        'import type { ProfileCatalogPorts, ProfileSettings as PortSettings, BuiltinProfile as PortBuiltin } from "./dist/ports/profile-catalog.js";',
+        'type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;',
+        'declare const ports: ProfileCatalogPorts; declare const settings: ProfileSettings; declare const builtin: BuiltinProfile;',
+        'const catalog: ProfileCatalog = createProfileCatalog(ports, "default"); const inward: PortSettings = settings; const inwardBuiltin: PortBuiltin = builtin;',
+        'const exact: [Equal<ReturnType<typeof listProfiles>, string[]>, Equal<ReturnType<typeof profileExists>, boolean>, Equal<ReturnType<typeof isBuiltinProfile>, boolean>, Equal<ReturnType<typeof ensureProfile>, boolean>, Equal<ReturnType<typeof createProfile>, void>, Equal<ReturnType<typeof removeProfile>, void>, Equal<ReturnType<typeof validateProfileName>, boolean>, Equal<typeof BUILTIN_PROFILES, Readonly<Record<string, BuiltinProfile>>>] = [true,true,true,true,true,true,true,true];',
+        '// @ts-expect-error Catalog construction requires explicit default name.',
+        'createProfileCatalog(ports);',
+        '// @ts-expect-error Public settings remain an object.',
+        'createProfile("fixture", "invalid");',
+        'void [catalog, inward, inwardBuiltin, exact];',
+    ].join("\n"));
+    try {
+        run(process.execPath, [join(root, "node_modules/typescript/bin/tsc"), "--noEmit", "--strict", "--skipLibCheck",
+            "--target", "ES2022", "--module", "NodeNext", "--moduleResolution", "NodeNext", profileContract]);
+    } finally { rmSync(profileContract); }
+    console.log("PASS profile catalog distribution: actual compiled public facade, declarations, private layout/settings, builtin ensure, file-entry queries, reserved errors and Unix modes");
     const toolDetectDeclarations = readFileSync(join(packageRoot, "dist/tool-detect.d.ts"), "utf8");
     assert.match(toolDetectDeclarations, /export declare function getDefaultToolPreference\(\): string \| null;/);
     assert.match(toolDetectDeclarations, /export declare function setDefaultToolPreference\(toolName: string\): void;/);

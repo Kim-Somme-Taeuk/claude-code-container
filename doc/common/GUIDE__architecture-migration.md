@@ -1308,3 +1308,59 @@ fresh import orders. Portable proof does not substitute for native installation.
 Known ceiling: no real installer, Docker/Podman, rootless or Windows/macOS
 acceptance is established by this packet. Native npm/Claude/UV/bubblewrap policy,
 other M11 workflows, M12–M14 and final M13 composition remain outstanding.
+
+## Explicit profile catalog policy (M11e candidate)
+
+`src/application/profile-catalog.ts` owns profile-name validation, reserved-default
+rules, ordered listing and built-in creation decisions. `createProfileCatalog`
+requires six callable `ProfileCatalogPorts` and an explicit default profile name.
+Construction checks the port bindings without invoking them. The application
+imports only its port types; the unchanged home-layout owner supplies
+`DEFAULT_PROFILE_NAME` at composition time.
+
+The six ports are `listProfileDirectoryNames`, `profileEntryExists`,
+`writeProfile`, `removeProfileDirectory`, `hasBuiltinProfile` and
+`readBuiltinSettings`. Membership and settings access remain separate operations:
+the facade checks own-property membership without evaluating a value getter,
+then reads `BUILTIN_PROFILES[name].settings` only when ensure must create that
+built-in. An existing profile or the reserved default returns `false` before
+catalog access. A missing unknown profile retains its existing error. Mutable
+catalog values and getters remain observable, including the original TypeError
+for an own entry whose value is null or undefined. No optional chaining, freeze,
+copy, cache or error conversion is added.
+
+`src/profile.ts` retains its eight runtime exports and re-exports
+`ProfileSettings` and `BuiltinProfile` from the port contract. It composes the
+application per invocation with native filesystem bindings. Validation remains
+the existing regex; create, ensure and remove do not acquire an additional name
+validation step. The list adapter lazily resolves `profilesDir()` once for its
+existence probe and again for readdir only when present, filters directories in
+native order, and the application prepends the default while excluding named
+entries equal to it. Existence still uses `existsSync`, so an existing file also
+counts as an entry.
+
+The coarse write port resolves its profile root once. It creates `claude/` and
+then `codex/` with recursive mode `0700`, writes `claude.json` as `{}` with mode
+`0600`, and only for truthy settings serializes and writes
+`claude/settings.json` with mode `0600`. Settings pass by reference. These modes
+are creation options, not a claim to reset permissions of existing files or
+directories. Serialization or native IO failure propagates unchanged and leaves
+preceding effects in place. Removal retains recursive, forced `rmSync` without
+an additional existence probe. There is no rollback, retry or storage migration.
+
+Verification anchors are the profile-catalog core, facade and type suites,
+unchanged profile/home-layout/index regressions and the recursive core boundary
+guard. Facade characterization must cover mutable catalog membership/getter
+ordering, lazy native root resolution, exact writes/modes and partial failures.
+The shared workspace package verifier must check the emitted application,
+declarations and public facade in both extracted npm and materialized
+installation payloads. These are verification requirements; task review and
+fresh QA determine the actual acceptance result.
+
+Known ceiling: this packet does not harden direct profile names, links or native
+filesystem races. Linux fixture and package proof does not certify native
+Windows/macOS credential layout, permissions or providers. Profile request
+resolution and credential/home-layout migration remain with their current
+owners. Other M11 workflows, remaining earlier milestone work, M12–M14 and M13
+composition closure still require their own implementation and acceptance;
+this slice does not complete the full architecture migration.
