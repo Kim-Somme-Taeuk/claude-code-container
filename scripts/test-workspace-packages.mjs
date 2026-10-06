@@ -1080,6 +1080,49 @@ async function verifyToolRegistryDomain(domainUrl, registryUrl) {
     }
 }
 
+async function verifyRequestedToolSetup(applicationUrl) {
+    const assert = (await import("node:assert/strict")).default;
+    const { createRequestedToolSetup } = await import(applicationUrl);
+    const target = "requested-tool target";
+    const tool = { name: "codex", binary: "before-install" };
+    const trace = [];
+    let observation = { status: 0 };
+    let probeFailure;
+    const setup = createRequestedToolSetup({
+        ensureClaudeLauncher() { assert.fail("unexpected Claude route"); },
+        ensureNpmTool(selected, original) {
+            assert.equal(selected, target);
+            assert.equal(original, tool);
+            trace.push("install");
+            original.binary = "installed-codex";
+        },
+        probeLauncher(selected, path) {
+            assert.equal(selected, target);
+            assert.equal(path, "/home/ccc/.local/bin/installed-codex");
+            trace.push("probe");
+            if (probeFailure) throw probeFailure;
+            return observation;
+        },
+        ensureCodexSandbox(selected) {
+            assert.equal(selected, target);
+            trace.push("sandbox");
+        },
+    });
+    assert.deepEqual(trace, [], "construction must perform no effects");
+    assert.equal(setup.ensure(target, tool), undefined);
+    assert.deepEqual(trace, ["install", "probe", "sandbox"]);
+    trace.length = 0;
+    observation = { status: null, error: { code: "ETIMEDOUT" } };
+    assert.throws(() => setup.ensure(target, tool), {
+        message: "Requested tool codex readiness check timed out",
+    });
+    assert.deepEqual(trace, ["install", "probe"], "timeout must prevent sandbox setup");
+    trace.length = 0;
+    probeFailure = { originalProbeFailure: true };
+    assert.throws(() => setup.ensure(target, tool), error => error === probeFailure);
+    assert.deepEqual(trace, ["install", "probe"], "probe failure must propagate before sandbox setup");
+}
+
 async function verifyToolRegistryLayout(domainUrl, registryUrl, setupUrl, runtimeUrl, first) {
     const assert = (await import("node:assert/strict")).default;
     const cp = (await import("node:child_process")).default;
@@ -1661,6 +1704,8 @@ async function smoke(packageRoot) {
         ["dist/docker.d.ts", "ensureImage"],
         ["dist/application/tool-preferences.d.ts", "createToolPreferences"],
         ["dist/ports/tool-preferences.d.ts", "ToolPreferencePorts"],
+        ["dist/application/requested-tool-setup.d.ts", "createRequestedToolSetup"],
+        ["dist/ports/requested-tool-setup.d.ts", "RequestedToolSetupPorts"],
         ["dist/docker.d.ts", "stopProjectContainer"],
         ["dist/docker.d.ts", "removeProjectContainer"],
     ]) {
@@ -1943,12 +1988,26 @@ async function smoke(packageRoot) {
     run(process.execPath, ["--input-type=module", "-e",
         `const createOwnedImportRead = ${createOwnedImportRead.toString()}; await (${verifySocketAccess.toString()})(...${JSON.stringify(socketUrls)});`]);
     console.log("PASS socket distribution: compiled core and actual public facade, strict declarations, raw observations, native fences and warning/reset lifetime");
+    const requestedToolApplication = pathToFileURL(join(packageRoot, "dist/application/requested-tool-setup.js")).href;
+    run(process.execPath, ["--input-type=module", "-e",
+        `await (${verifyRequestedToolSetup.toString()})(${JSON.stringify(requestedToolApplication)});`]);
+    const requestedToolFacadeSource = readFileSync(join(packageRoot, "dist/container-setup.js"), "utf8");
+    assert.match(requestedToolFacadeSource, /import \{ createRequestedToolSetup \} from ["']\.\/application\/requested-tool-setup\.js["'];/);
+    const requestedToolFacadeBody = requestedToolFacadeSource.match(/export function ensureTools\(containerName, activeTool\) \{([\s\S]*?)\n\}/)?.[1];
+    assert.ok(requestedToolFacadeBody, "compiled public ensureTools must be present");
+    assert.match(requestedToolFacadeBody, /createRequestedToolSetup\(\{/);
+    assert.match(requestedToolFacadeBody, /ensureClaudeLauncher: ensureClaudeInContainer/);
+    assert.match(requestedToolFacadeBody, /ensureNpmTool,/);
+    assert.match(requestedToolFacadeBody, /probeLauncher: \(target, path\) => spawnSync\(/);
+    assert.match(requestedToolFacadeBody, /ensureCodexSandbox: ensureCodexBubblewrap/);
+    assert.match(requestedToolFacadeBody, /\}\)\.ensure\(containerName, activeTool\);/);
     const toolLayoutUrls = ["domain/tool-layout", "tool-registry", "container-setup", "container-runtime"]
         .map(path => pathToFileURL(join(packageRoot, `dist/${path}.js`)).href);
     for (const first of ["registry", "setup"]) {
         run(process.execPath, ["--input-type=module", "-e",
             `const createOwnedImportRead = ${createOwnedImportRead.toString()}; await (${verifyToolRegistryLayout.toString()})(...${JSON.stringify(toolLayoutUrls)},${JSON.stringify(first)});`]);
     }
+    console.log("PASS requested-tool setup distribution: compiled core success/timeout/throw identity, exact declarations and actual public facade wiring with fenced VALID/INSTALL execution in both import orders");
     const contract = join(packageRoot, "tool-layout-consumer.mts");
     writeFileSync(contract, [
         'import { CLAUDE_BIN_PATH as domain } from "./dist/domain/tool-layout.js";',

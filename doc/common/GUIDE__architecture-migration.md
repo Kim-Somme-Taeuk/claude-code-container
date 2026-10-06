@@ -1263,3 +1263,48 @@ in `scripts/test-workspace-packages.mjs`.
 Known ceiling: tool discovery/install, workspaces, profiles and credentials (the
 rest of M11), M12–M14 and native acceptance remain outstanding. Config hardening
 (name validation, schema, retry) was intentionally not added.
+
+## Requested-tool setup policy (M11d candidate)
+
+`src/application/requested-tool-setup.ts` owns the existing install-route,
+launcher-readiness and Codex sandbox sequencing policy. Its factory accepts four
+semantic `RequestedToolSetupPorts`: `ensureClaudeLauncher`, `ensureNpmTool`,
+`probeLauncher` and `ensureCodexSandbox`. Construction checks those callables in
+that order without invoking effects. `ensure(target, tool)` is synchronous and
+returns `undefined`; the application imports only canonical domain data/types
+and its port contract.
+
+Installation dispatch uses the current tool name and passes the original tool
+object to the npm adapter. After installation, the application evaluates
+`binary || name`, including for Claude, and reads the current name again to choose
+the fixed Claude launcher or `/home/ccc/.local/bin/<binary>`. Metadata mutations,
+getters and raw probe property reads retain their original order. Exactly one
+launcher probe runs. Only `error.code === "ETIMEDOUT"` uses the existing timeout
+message; other truthy errors and nonzero, null or runtime-undefined statuses use
+the existing unavailable message. Statuses 124 and 137 are not normalized into
+timeouts. Original thrown values propagate; the application adds no retry.
+
+The Codex sandbox adapter runs only after successful launcher readiness and a
+current name of `codex`. Its failures propagate. The three effect ports return
+`void`, which TypeScript also accepts for async callbacks; trusted production
+composition supplies the existing synchronous helpers. The probe contract and
+application completion remain synchronous. These ports are not wire inputs or
+an execution sandbox.
+
+`src/container-setup.ts` keeps the public `ensureTools(...): void` facade and
+composes per invocation. Claude/npm/bubblewrap helper internals remain native and
+unchanged. The launcher adapter retains `runtimeCli()`, the exact `exec target
+test -x path` argument array, ignored stdio and 15-second timeout. The index
+caller still owns its existing conditional container-loss retry. Final
+composition extraction remains M13 work.
+
+Verification anchors are the requested-tool core/facade/type suites, the retained
+container setup, index and tool-layout regressions, and both package payload
+smokes. The source facade suite delegates through the actual factory while
+observing native calls. Distribution verifies the compiled factory, declarations,
+facade composition and existing fenced Claude VALID/INSTALL execution in both
+fresh import orders. Portable proof does not substitute for native installation.
+
+Known ceiling: no real installer, Docker/Podman, rootless or Windows/macOS
+acceptance is established by this packet. Native npm/Claude/UV/bubblewrap policy,
+other M11 workflows, M12–M14 and final M13 composition remain outstanding.

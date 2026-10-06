@@ -7,6 +7,7 @@ import { spawnSync } from "child_process";
 import { getNpmTools, getToolByName, type ToolDefinition } from "./tool-registry.js";
 import { runtimeCli } from "./container-runtime.js";
 import { CLAUDE_BIN_PATH } from "./domain/tool-layout.js";
+import { createRequestedToolSetup } from "./application/requested-tool-setup.js";
 
 // Claude's native install layout inside the container.
 //
@@ -870,29 +871,16 @@ export function ensureClaudeInContainer(containerName: string): void {
  * - npm tools: lazily install only the active tool
  */
 export function ensureTools(containerName: string, activeTool: ToolDefinition): void {
-    if (activeTool.name === "claude") {
-        ensureClaudeInContainer(containerName);
-    } else {
-        ensureNpmTool(containerName, activeTool);
-    }
-
-    // Tool metadata and native setup share the pure domain launcher location.
-    const configuredBinary = activeTool.binary || activeTool.name;
-    const executablePath = activeTool.name === "claude"
-        ? CLAUDE_BIN_PATH
-        : `/home/ccc/.local/bin/${configuredBinary}`;
-    const ready = spawnSync(
-        runtimeCli(),
-        ["exec", containerName, "test", "-x", executablePath],
-        { stdio: "ignore", timeout: CONTAINER_TOOL_PROBE_TIMEOUT_MS },
-    );
-    if ((ready.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") {
-        throw new Error(`Requested tool ${activeTool.name} readiness check timed out`);
-    }
-    if (ready.error || ready.status !== 0) {
-        throw new Error(`Requested tool ${activeTool.name} is unavailable after setup`);
-    }
-    if (activeTool.name === "codex") ensureCodexBubblewrap(containerName);
+    createRequestedToolSetup({
+        ensureClaudeLauncher: ensureClaudeInContainer,
+        ensureNpmTool,
+        probeLauncher: (target, path) => spawnSync(
+            runtimeCli(),
+            ["exec", target, "test", "-x", path],
+            { stdio: "ignore", timeout: CONTAINER_TOOL_PROBE_TIMEOUT_MS },
+        ),
+        ensureCodexSandbox: ensureCodexBubblewrap,
+    }).ensure(containerName, activeTool);
 }
 
 function ensureCodexBubblewrap(containerName: string): void {
