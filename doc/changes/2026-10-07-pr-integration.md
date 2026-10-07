@@ -64,3 +64,17 @@ See [PR integration requirements](../runtime/REQ__pr-integration.md),
 [upstream preservation requirements](../runtime/REQ__upstream-fork-preservation.md)
 and the affected M10d/M10i sections of the
 [architecture migration guide](../common/GUIDE__architecture-migration.md).
+
+## Publication CI correction
+
+On 2026-10-07, PR #9 was merged into `feature/device-mcp-squashed`.
+The authenticated PR #10 CI run exposed Dockerfile/Containerfile drift: the
+Podman recipe lacked the Codex package-volume directory and its ownership.
+Keep both recipes byte-identical, including the existing Claude runtime-install
+documentation, so both runtimes initialize the same non-root cache permissions.
+This correction changes only Containerfile and this note; the previously
+reviewed Dockerfile and TypeScript implementation are unchanged.
+
+The operator explicitly approved publication of these two PRs despite missing
+Harness lifecycle receipts after independent review and QA passed. This is a
+publication exception, not a fabricated receipt or strict Harness close.
