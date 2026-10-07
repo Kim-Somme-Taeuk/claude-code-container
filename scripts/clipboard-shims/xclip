@@ -26,30 +26,42 @@ INPUT=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -selection)
+            [ $# -ge 2 ] || { echo "xclip: missing selection" >&2; exit 1; }
             SELECTION="$2"
             shift 2
             ;;
-        -t)
+        -t|-target)
+            [ $# -ge 2 ] || { echo "xclip: missing target" >&2; exit 1; }
             TARGET="$2"
             shift 2
             ;;
-        -o)
+        -o|-out)
             OUTPUT=1
             shift
             ;;
-        -i)
+        -i|-in)
             INPUT=1
             shift
             ;;
         *)
-            shift
+            echo "xclip: unsupported clipboard option" >&2
+            exit 1
             ;;
     esac
 done
 
+case "$SELECTION" in
+    clipboard|c) ;;
+    *) echo "xclip: only clipboard selection is supported" >&2; exit 1 ;;
+esac
+[ "$INPUT" = 0 ] || [ "$OUTPUT" = 0 ] || {
+    echo "xclip: conflicting input/output options" >&2
+    exit 1
+}
+
 # Helper: fetch text endpoint, fail if empty
 _fetch_text() {
-    _data=$(curl -sf -H "Authorization: Bearer $CCC_CLIPBOARD_TOKEN" "$1" 2>/dev/null) || { echo "xclip: clipboard server error" >&2; exit 1; }
+    _data=$(curl -sf --connect-timeout 3 --max-time 10 -H "Authorization: Bearer $CCC_CLIPBOARD_TOKEN" "$1" 2>/dev/null) || { echo "xclip: clipboard server error" >&2; exit 1; }
     [ -n "$_data" ] || { echo "xclip: clipboard is empty" >&2; exit 1; }
     printf '%s' "$_data"
 }
@@ -58,7 +70,7 @@ _fetch_text() {
 _fetch_binary() {
     _tmp=$(mktemp)
     trap 'rm -f "$_tmp"' EXIT
-    if curl -sf -H "Authorization: Bearer $CCC_CLIPBOARD_TOKEN" -o "$_tmp" "$1" 2>/dev/null && [ -s "$_tmp" ]; then
+    if curl -sf --connect-timeout 3 --max-time 10 -H "Authorization: Bearer $CCC_CLIPBOARD_TOKEN" -o "$_tmp" "$1" 2>/dev/null && [ -s "$_tmp" ]; then
         cat "$_tmp"
     else
         echo "xclip: clipboard is empty or server error" >&2
@@ -66,7 +78,7 @@ _fetch_binary() {
     fi
 }
 
-# Only handle clipboard selection output for now
+# Preserve host-to-container text and image paste.
 if [ "$OUTPUT" = "1" ]; then
     case "$TARGET" in
         TARGETS)
@@ -88,12 +100,22 @@ if [ "$OUTPUT" = "1" ]; then
             _fetch_text "$CCC_CLIPBOARD_URL/clipboard/text"
             ;;
     esac
-fi
-
-# Input mode (copy) - not yet implemented, silently consume stdin
-if [ "$INPUT" = "1" ] || [ "$OUTPUT" = "0" -a "$SELECTION" = "clipboard" ]; then
-    cat > /dev/null
     exit 0
 fi
 
-exit 0
+case "$TARGET" in
+    ""|UTF8_STRING|STRING|text/plain|text/plain\;charset=utf-8|text/plain\;\ charset=utf-8|text/plain\;charset=UTF-8|text/plain\;\ charset=UTF-8) ;;
+    *) echo "xclip: only UTF-8 text copy is supported" >&2; exit 1 ;;
+esac
+_status=$(curl -fs --connect-timeout 3 --max-time 10 \
+    -H "Authorization: Bearer $CCC_CLIPBOARD_TOKEN" \
+    -H "Content-Type: text/plain;charset=utf-8" \
+    --data-binary @- -o /dev/null -w '%{http_code}' \
+    "$CCC_CLIPBOARD_URL/clipboard/text") || {
+    echo "xclip: clipboard server error" >&2
+    exit 1
+}
+case "$_status" in
+    2??) exit 0 ;;
+    *) echo "xclip: clipboard server error" >&2; exit 1 ;;
+esac

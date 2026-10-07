@@ -5,3 +5,10 @@ Dockerfile text eol=lf
 # Node script files with shebangs: esbuild's shebang strip only matches LF,
 # so CRLF + shebang in an imported .js breaks vitest with "Invalid or unexpected token".
 scripts/*.js text eol=lf
+*.ts text eol=lf
+*.mjs text eol=lf
+*.mts text eol=lf
+*.json text eol=lf
+*.ps1 text eol=lf
+*.psm1 text eol=lf
+package-lock.json whitespace=cr-at-eol

@@ -1,0 +1,176 @@
+- area: hyper-v-command-builders
+  discovered: 2026-08-25
+  notes: >
+    hyperVDeleteCommand/hyperVRecoverOrphanCommand return { executable, args }
+    where args[8] is a base64 utf16le PowerShell -EncodedCommand payload. To
+    inspect the generated script: Buffer.from(args[args.length-1],'base64').toString('utf16le').
+    Identity guards (src/host-control/hyper-v/core.ts:14-16) must be satisfied to
+    render: OWNER_ID_PATTERN=^[a-f0-9]{16}$, DEVICE_ID_PATTERN=[A-Za-z0-9._:-]{1,128},
+    INCARNATION_ID_PATTERN=^[a-f0-9]{32}$, and vmName MUST equal
+    hyperVVmName(ownerId,deviceId,incarnationId). Valid test fixtures:
+    ownerId=0123456789abcdef deviceId=windows-ci-01 incarnation=1111...(x32).
+  commands:
+    - "npm run test:hyper-v:static  # contracts PASS; pwsh parser SKIPs when PowerShell absent (exit 0)"
+    - "npx vitest run src/__tests__/device-lab-hyper-v-provider.test.ts src/__tests__/device-lab-hyper-v-public-response.test.ts src/__tests__/device-lab-hyper-v-linux-broker.test.ts"
+  env_notes: >
+    No pwsh/Hyper-V in Linux container: native PowerShell parser SKIPs, and real
+    VM delete/residue E2E is hardware-gated (Windows Hyper-V host / Windows CI only).
+
+# --- appended by qa-cli 2026-08-25 (TASK__fix-hyper-v-network-switch-teardown-identity) ---
+- topic: hyper-v-powershell-validation-skips-in-container
+  note: 'npm run build runs test:hyper-v:powershell which prints "SKIP Hyper-V PowerShell parser: PowerShell unavailable" in the Linux container; test:hyper-v:contracts (validate-hyper-v-contracts.ts) still runs and must PASS. Real Hyper-V E2E is Windows-hardware only.'
+  discovered: 2026-08-25
+- topic: cli-version-stamp
+  note: "dist/utils.js ships __CLI_VERSION__ placeholder replaced by package.json version during npm run build; verify with grep -o CLI_VERSION and confirm no leftover __CLI_VERSION__."
+  discovered: 2026-08-25
+- topic: dist-guard-grep-escaping
+  note: "Compiled dist/host-control/hyper-v/host.js keeps PowerShell as JS string literals; use grep -F fixed-string with literal $ for guard assertions. Plain grep patterns with $ can miscount."
+  discovered: 2026-08-25
+- discovered: 2026-08-26
+  area: hyper-v-diagnostics
+  note: >
+    `npm run build` runs test:hyper-v:powershell which SKIPs when PowerShell is
+    unavailable ("SKIP Hyper-V PowerShell parser: PowerShell unavailable"); this
+    is expected on Linux hosts and does not fail the build (exit 0).
+  fixture: scripts/validate-hyper-v-powershell.mjs
+- discovered: 2026-08-26
+  area: hyper-v-diagnostics
+  note: >
+    Provider diagnostic allow-list completeness check: enumerate thrown codes with
+    `grep -rhoE "throw [\"'](hyper-v-[a-z0-9-]+)" scripts --include=*.ps1 --include=*.psm1`
+    and cross-check against REDACTED_PROVIDER_DIAGNOSTIC_CODES in
+    src/device-lab/broker/hyper-v/public-response.ts. 15 codes thrown across scripts.
+- discovered: 2026-08-27
+  topic: hyper-v-powershell-parser-available-on-this-host
+  note: >-
+    A real pwsh (PowerShell 7.4.6) binary is available at
+    /tmp/claude-1001/-project-claude-code-container-e60025dac1cf/f689d932-7aa7-4cd6-97da-48cc085c31e9/scratchpad/ps/pwsh.
+    Prepend its dir to PATH to make `npm run test:hyper-v:powershell` actually PARSE
+    (PASS files=10) instead of SKIP. Assembled Hyper-V commands are base64 UTF-16LE
+    in args after -EncodedCommand; decode with Buffer.from(x,'base64').toString('utf16le')
+    then [System.Management.Automation.Language.Parser]::ParseFile to get AST error count.
+    Building command objects needs valid identities: ownerId hex, incarnationId 32-hex,
+    vmName === hyperVVmName(ownerId,deviceId,incarnationId), vmId a GUID.
+- discovered: 2026-08-27
+  topic: linux-vm-device_snapshot_restore-has-no-unit-coverage
+  note: >-
+    device-lab-hyper-v-linux-broker.test.ts exercises device_snapshot_create/delete but
+    never invokes device_snapshot_restore for linux-vm, so the broker post-restore SSH
+    readiness-poll branch (records status "running"/bootReady) is not dynamically tested.
+    Windows restore (status "stopped") is covered in device-lab-broker.commands.test.ts:968-970.
+
+- discovered: 2026-09-21
+  topic: worktree-ownership-cli-qa-platform-gates
+  note: >-
+    On the Linux QA host, Git 2.43.0 lacks `git worktree repair --relative-paths`,
+    so the supported-relative-backpointer test skips; Windows case and junction
+    tests also skip. A direct built CLI recovery fixture can still verify the
+    confirmation prompt, in-place registration, file preservation, refusal,
+    and stage-specific rollback error. Once registration succeeds, `ccc codex`
+    may exit 1 at the later Docker check when Docker is unavailable; assert the
+    `Recreated Git worktree registration` and `Using existing workspace` lines
+    and inspect Git status to distinguish that from a recovery failure.
+
+- discovered: 2026-09-21
+  topic: worktree-recovery-registration-name
+  note: >-
+    Confirmed recovery registers a temporary sibling first, so Git may assign a
+    management entry named for that temporary sibling. Read the recovered
+    workspace's .git link to find the installed entry; do not assume the
+    original missing management directory name reappears. Built CLI QA on Linux
+    confirmed recovery exit 0 and file preservation, while the reported
+    Git for Windows host still requires a retry.
+
+- discovered: 2026-09-25
+  topic: docker-in-ccc-drvfs-codex-e2e
+  note: >-
+    Inside a ccc container on a Windows/WSL2 host, use `sudo -n docker`. The
+    container's /home/ccc/.codex is a drvfs 9p bind of host `C:\Users\<u>\.ccc\codex`;
+    a scratch subdir created at /home/ccc/.codex/<name> is reachable by sibling
+    containers via `--mount "type=bind,source=C:\Users\<u>\.ccc\codex\<name>,target=..."`
+    (use --mount, not -v, because of the drive colon). A full `docker build` of the
+    repo Dockerfile finishes in about 2 minutes when the layer cache is warm; build it from a
+    minimal scratch context (Dockerfile, package*.json, scripts/{localhost-proxy,
+    clipboard-shims,ccc-x11-bridge,ccc-entrypoint.sh}, x11-mcp, device-lab-mcp
+    without node_modules) because the repo has no .dockerignore. codex is reachable
+    in sibling containers by mounting ccc-mise-cache and prepending
+    /home/ccc/.local/share/mise/shims to PATH; `timeout 90 script -qc "codex agents"
+    /dev/null </dev/null` triggers the daemon install (exit 124 = TUI waited, install ok).
+    Negative control without the packages volume prints "Permission denied (os error 13)".
+- discovered: 2026-09-25
+  topic: full-npm-test-known-unrelated-failures
+  note: >-
+    On 2026-09-25 the full `npm test` in this worktree had 9 failures unrelated to
+    container mounts: chrome-devtools-integration screenshot 90s timeout (env),
+    device-lab-broker host broker auto-start (4), and test-level-runner
+    device-lab backend/tool alignment (4), all tied to in-progress device-lab
+    work that is not committed yet.
+
+- discovered: 2026-09-26
+  topic: node-not-on-path-in-agent-bash
+  note: >-
+    In agent Bash shells `node` is not on PATH and the `mise` shell function
+    fails ("command not found:"). Use
+    `export PATH=/home/ccc/.local/share/mise/installs/node/22/bin:$PATH`.
+    pwsh 7.4.6 can be fetched into the scratchpad from the GitHub release
+    tarball (powershell-7.4.6-linux-x64.tar.gz) to make
+    `npm run test:hyper-v:powershell` PARSE (PASS files=23). `--pester` still
+    fails on Linux at run-pester.ps1:4 "CurrentUser documents directory is unavailable".
+- discovered: 2026-09-26
+  topic: device-lab-mcp-stdio-probe-from-container
+  note: >-
+    dist/device-lab-mcp/server.mjs can be driven with the repo's
+    @modelcontextprotocol/sdk client (node_modules/@modelcontextprotocol/sdk/dist/esm/client/*.js)
+    over stdio. From the ccc container the host broker at 127.0.0.1:17373 answers
+    health/owner-resolve but broker.* RPCs fail with broker-runtime-process-unverified,
+    so Hyper-V backends never appear in device_backends here; only local
+    x11-current-display (DISPLAY=:99) and container-qemu linux-vm are listed.
+    device_cursor_position x/y on non-Hyper-V backends returns payload
+    {ok:false,error:"device-cursor-move-backend-unsupported"} with MCP isError=false.
+- discovered: 2026-09-26
+  topic: full-npm-test-ios-simulator-load-flake
+  note: >-
+    Full `npm test` (about 175 s) once failed 10 tests in
+    src/__tests__/device-lab-mcp.ios-simulator.test.ts (isError true on create/dump_ui);
+    the file passes 18/18 in isolation and a second full run passed 4050/4050.
+    Treat it as a load-sensitive flake, and rerun before attributing it to a change.
+- discovered: 2026-09-26
+  topic: chrome-devtools-screenshot-timeout-in-container
+  note: >-
+    src/__tests__/chrome-devtools-integration.test.ts "takes a screenshot and returns an image"
+    times out at 90 s in both full `npm test` and isolated runs in this container
+    (5/6 pass; CHROME_BIN=/usr/bin/chromium). The test file and its helper
+    mcp-stdio-client.ts are unrelated to device-lab changes; classify as environment.
+- discovered: 2026-09-26
+  topic: hyper-v-level3-blocked-in-container
+  note: >-
+    `npm run test:level3:hyper-v:linux` in the dev container exits 1 immediately with
+    "EROFS: read-only file system, open '/home/ccc/.ccc/devices/test-runs/real-provider.lock'";
+    no powershell.exe/pwsh either. Hyper-V real proof must be operator-run on the Windows host.
+    Real-test unit files (scripts/real-tests/*.test.ts) are included in `npm test`
+    (vitest.config.ts include); run one with `node scripts/run-vitest.mjs run scripts/real-tests/<file>`.
+- discovered: 2026-09-26
+  topic: runtime-docker-from-ccc-container
+  note: >-
+    Inside a ccc container on Docker Desktop, /var/run/docker.sock is root:root 660 and ccc
+    cannot use it until ensureContainerManagerSocketAccess runs; use `sudo -n docker` for
+    host-side docker. Each sudo call costs ~5 s here (hostname not resolvable), so time
+    measurements through sudo are inflated. To drive dist/docker.js runtime helpers against
+    real Docker, put a PATH shim named `docker` that execs `sudo -n /usr/bin/docker "$@"`
+    and set CCC_RUNTIME=docker. Fake socket for gid branches: as root in a throwaway container,
+    `python3 -c 'import socket;s=socket.socket(socket.AF_UNIX);s.bind("/var/run/docker.sock")'`
+    then chown/chmod. Use throwaway names (ccc-qa-*) and strip --label ccc.managed to keep ccc
+    from treating them as project containers.
+- discovered: 2026-09-26
+  topic: device-lab-mcp-runtime-in-throwaway-container
+  note: >-
+    To exercise the shipped device-lab MCP (dist/device-lab-mcp/server.mjs, a single bundle) with a
+    container's CCC_LAB_* env, `docker cp dist/device-lab-mcp <c>:/tmp/dlm` into a throwaway ccc
+    container and drive it with a small stdio JSON-RPC client (initialize, notifications/initialized,
+    tools/call). Node is on the mise shim path when ccc-mise-cache is mounted. linux-vm tools:
+    device_create / device_image_import / device_image_list with backend "linux-vm";
+    device_backends {"broker":false} lists linux-vm status/missing without the host broker.
+    Override env per call with `docker exec -e CCC_LAB_RUNNER_STATUS=ready -e CCC_LAB_STATE_DIR=/tmp/x`
+    for a negative control. `ccc clean --volumes --dry-run` is safe (lists only) and also lists the
+    ccc image. Unrelated postgres/minio test containers on this host create anonymous volumes
+    concurrently; diff volume lists by name pattern, not whole-list.

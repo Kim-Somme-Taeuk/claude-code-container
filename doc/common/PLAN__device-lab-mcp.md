@@ -15,6 +15,17 @@ device definitions may be discoverable, but Windows Sandbox, Android Emulator,
 iOS Simulator, macOS VMs, and other heavy targets should start only after an MCP
 tool call requests them.
 
+Container agent setup follows the same lazy-start rule. `ccc codex`, `ccc
+gemini`, and `ccc opencode` may probe and install only the selected agent tool;
+startup must not inspect or install the other registered agents. Container tool
+and configuration probes have a 15-second deadline so a stalled runtime command
+unwinds the CCC process and its session-lock claim instead of leaving later
+launches blocked behind an apparently live setup process. A selected tool's
+first installation may use a longer bounded mutation deadline. Mutations are
+bounded inside the container first and use a slightly longer host-side deadline;
+every failed stage stops setup immediately so CCC never releases its session
+claim while an abandoned package or shim mutation can still be running.
+
 ## Architecture
 
 Implicit host-broker lifecycle routing preserves the public `device_*` response
@@ -23,7 +34,11 @@ lifecycle calls expose provider-compatible fields and Android emulator starts
 honor `waitForBoot` before reporting readiness.
 
 Level 3 rebuilds both the TypeScript host CLI/broker and packaged device MCP
-before real-provider execution. Windows broker recovery allows a longer cold
+before real-provider execution. The workspace, CLI and Level 3 MCP builds share
+one build script, including the Node ESM `createRequire` bridge needed by bundled
+CommonJS image dependencies. A regression test initializes the emitted server
+and lists its tools; a successful bundler exit alone is insufficient.
+Windows broker recovery allows a longer cold
 start window and reports a bounded broker-log tail when health never becomes
 ready, so a stale `dist/index.js` or opaque launch timeout cannot masquerade as
 a provider response-shape failure.
@@ -308,45 +323,38 @@ hide its desktop surface.
 
 The host boundary is a security boundary, not just an implementation detail.
 CCC must not give an AI agent a general-purpose host command channel merely so
-it can run provider E2E tests. Host-provider verification should run through a
-separate lab MCP whose authority is limited to isolated lab lifecycle,
-console/session connection, bounded file/artifact transfer, and lab teardown.
-The public concept is a `lab`, not a raw VM controller: VM, cloud worker,
-physical bench host, and privileged KVM container are provider implementations
-hidden behind the same contract. Installing CCC, syncing the candidate build,
-starting CCC inside the lab, and calling device-lab tools are test steps
-performed inside that isolated lab, not privileged host operations exposed to
-the agent.
+it can run provider E2E tests. The single public `device-lab` MCP routes typed,
+allowlisted operations through the authenticated host broker. VM technology is
+an internal provider choice rather than a second public MCP surface.
 
-Lab terminology should remain small and stable:
-- `lab`: isolated execution environment rented by the agent.
-- `target`: OS, device, screen, simulator, sandbox, or app surface inside a lab.
-- `session`: current observable/control connection to a target.
-- `provider`: backend that creates labs; hidden from normal agent workflows.
-- `lease`: scoped permission to use a physical device.
+The public VM backends are guest-oriented:
 
-The primary debugging UX is an interactive lab session, not an opaque job
-queue. The agent starts or resumes a lab, syncs the candidate workspace, opens
-a session to a target, calls allowlisted device-lab tools step by step,
-inspects screenshots/logs/artifacts, edits code in its normal workspace, syncs
-again, and repeats. Batch smoke jobs are still useful for CI and nightly runs,
-but they should be a shortcut over the same lab/session model rather than a
-separate product path. The lab MCP must not expose arbitrary host shell,
-service-manager, filesystem, Hyper-V, or device-control authority. If a fully
-isolated Windows validation environment is needed, use a disposable Windows VM
-as the lab host and run Windows Sandbox, Android Emulator, and CCC inside that
-lab; do not treat Windows Sandbox itself as the privileged orchestration host
-for nested providers.
+- `windows-vm` represents a persistent, checkpoint-capable Windows guest.
+- `linux-vm` represents a persistent Linux guest.
+- `windows-sandbox` remains separate because its lifecycle and persistence
+  contract differs from a full VM.
+- `hyper-v`, `container-qemu`, and future host technologies are providers hidden
+  behind those backends.
 
-Running the lab MCP inside a Linux container is allowed when CCC has configured
-the container with the bounded VM contract. The ordinary project container and
-the built-in `lab-runner` profile can both receive the per-container lab-state
-volume, `CCC_LAB_*` diagnostics, and `/dev/kvm` only when the host/runtime passes
-the native non-rootless KVM gates. They still must not receive broad host mounts,
-`--privileged`, host TUN/TAP exposure, or host shell access. If KVM/nested
-virtualization is unavailable, the same lab MCP should degrade to an
-unsupported/remote/disposable lab provider instead of falling back to slow or
-privileged host control.
+On Windows, the Hyper-V provider owns disposable Windows and Linux guests. On
+native Linux, the existing container-QEMU/KVM provider owns Linux guests. CCC
+automates verified image preparation, owner-scoped disks, unattended guest
+provisioning, readiness, bounded guest command/file transport, checkpoints,
+lifecycle, and deletion. Users do not manually create VMs in Hyper-V Manager.
+
+User interaction is limited to explicit trust boundaries: enabling Hyper-V and
+rebooting when Windows requires it, approving elevation, and accepting applicable
+Windows image/license terms. Normal create/start/test/stop/delete operations do
+not require a VM console or user-provided environment variables. The detailed
+Hyper-V architecture, delivery phases, and acceptance tests are defined in
+`doc/common/PLAN__hyper-v-vm-provider.md`.
+
+Container-QEMU may run inside a Linux container only when CCC configured the
+bounded VM contract. The ordinary project container and built-in `lab-runner`
+profile can receive per-container state, internal `CCC_LAB_*` diagnostics, and
+`/dev/kvm` only after the native non-rootless KVM gates pass. They must not
+receive broad host mounts, `--privileged`, host TUN/TAP exposure, or host shell
+access. Unsupported environments report an explicit unsupported/SKIP result.
 
 Lab-runner container profile status:
 - `lab-runner` is a built-in CCC profile, so it can be selected without creating
@@ -360,13 +368,13 @@ Lab-runner container profile status:
   ordinary in-container `lab-mcp` VM execution is available without starting a
   lab or host runner.
 - The default CCC container is also VM-capable when the host/runtime satisfies
-  the same bounded KVM gates. CCC mounts a per-container durable named volume,
-  injects `CCC_LAB_RUNNER=1`, `CCC_LAB_RUNNER_STATUS`, `CCC_LAB_STATE_DIR`, and
+  the same bounded KVM gates. CCC mounts a per-container durable named volume
+  only when they pass (REQ__lab-state-volume.md), always injects `CCC_LAB_RUNNER=1`, `CCC_LAB_RUNNER_STATUS`, `CCC_LAB_STATE_DIR`, and
   `CCC_LAB_NET_MODE=user`, and exposes `/dev/kvm` only on supported native
   Linux/rootful runtimes. This lets agents call `lab-mcp` from the ordinary
   project container without host shell control or user-provided environment
   variables.
-- CCC mounts a per-container durable named
+- On hosts where those gates pass, CCC mounts a per-container durable named
   volume at `/home/ccc/.ccc/labs` for lab metadata, VM disks, overlays, caches,
   snapshots, and artifacts. The volume name is derived from the container name,
   so recreating the same container/profile preserves named-lab state without
@@ -382,18 +390,18 @@ Lab-runner container profile status:
   diagnostic, but no container receives `/dev/net/tun` in this host networking
   model.
 - On Docker Desktop, podman-machine, rootless Docker/Podman, non-Linux hosts, or
-  hosts without `/dev/kvm`, CCC still creates containers with the durable state
-  volume and sets `CCC_LAB_RUNNER_STATUS=unsupported` plus a reason. The later
-  lab provider must report SKIP/unsupported instead of falling back to host
-  control.
+  hosts without `/dev/kvm`, CCC creates new containers without the durable state
+  volume (REQ__lab-state-volume.md) and sets `CCC_LAB_RUNNER_STATUS=unsupported`
+  plus a reason. The lab provider reports SKIP/unsupported, refuses lab creation
+  and image import, and never falls back to host control.
 - The Docker and Podman image definitions now include QEMU/KVM userland
   prerequisites (`qemu-system-x86`, `qemu-utils`, `ovmf`, and `cpu-checker`) so
   a supported default container or lab-runner profile can run container-local
   VMs without manual package installation or user-provided environment
   variables.
-- `lab-mcp` is now a separate CCC-managed MCP package registered alongside
-  `device-lab-mcp`. It is always discoverable in generated Claude/Codex MCP
-  config, but container-QEMU VM starts are gated by the internal
+- The former standalone `lab-mcp` package has been retired. Container-QEMU is
+  exposed as the `linux-vm` backend of the single public `device-lab` MCP, and
+  VM starts remain gated by the internal
   `CCC_LAB_RUNNER=1` and `CCC_LAB_RUNNER_STATUS=ready` diagnostics injected by
   CCC. Default containers receive those diagnostics too, so they can run
   container-QEMU labs when bounded KVM is available and otherwise report
@@ -407,8 +415,10 @@ Lab-runner container profile status:
   exist inside the lab state volume and create labs from `baseImageId`.
   `lab_disk_materialize` creates a writable owner-scoped qcow2 overlay/root disk
   from the validated source/base image, and `lab_start` materializes that disk
-  before booting when it is missing. Actual OS image download remains out of
-  scope; users or CI should place base images inside the lab state volume.
+  before booting when it is missing. The current implementation imports images
+  already present in lab state; the host-provider expansion replaces this
+  limitation with verified automatic Windows and Linux image acquisition and
+  shared base-image caching.
 - `lab_sync_workspace` and `lab_export_artifacts` are implemented as bounded
   lab-state file transfer primitives. They copy through owner-scoped lab state
   paths only, reject path traversal and out-of-root destinations, preflight the
@@ -434,8 +444,8 @@ Lab-runner container profile status:
   provisioning command through the same guest SSH channel, records sanitized
   provisioning state/history, and `lab_start` runs it automatically only when
   the lab opted into `guestAgentAutoProvision`.
-- `npm run smoke:lab-mcp` runs a fake-provider lab-mcp smoke job for CI and
-  local automation. It uses temporary lab state plus injected fake QEMU and guest
+- The device-lab Linux VM backend smoke suite runs a fake-provider job for CI
+  and local automation. It uses temporary lab state plus injected fake QEMU and guest
   transport runners to exercise provider status, image import, lab creation,
   disk materialization, start, readiness, guest push/pull, snapshot, stop, and
   delete without requiring KVM, real QEMU, SSH, or host virtualization tools.
@@ -789,6 +799,12 @@ Broker contract status:
   but incompatible, host `ccc` terminates that broker process and starts a new
   one instead of letting the container fall back to stale direct-provider
   diagnostics.
+- Capability checks match versioned families forward. A broker advertising
+  `family-vM` satisfies a required `family-vN` when `M >= N`, so an older
+  container image keeps working against a newer host broker. The in-container
+  MCP accepts a `ccc-host` broker reached over loopback that is forwarded out of
+  the container with cross-host trust; the exact listener rules live in
+  `doc/device-lab/REQ__container-broker-discovery.md`.
 - Broker owner RPC uses a zero-configuration per-owner random secret stored at
   `~/.ccc/devices/broker/auth/<owner-id>.json` with 0600 permissions. Both the
   in-container MCP client and host broker derive `x-ccc-device-token` from the
@@ -1400,8 +1416,15 @@ Physical Android device attachment status:
 - Physical serials are additionally protected by host-wide hardware lock files
   under `~/.ccc/devices/physical-leases/android-device/locks`, so two CCC
   owners cannot attach and command the same phone at the same time.
-- The host broker backs Android physical leases and attach/detach/list. Public
-  `device_wireless` handles pre-attach wireless diagnostics and public
+- Direct Android/iOS physical detach validates the exact lease claim and
+  commits owner-record removal with lease removal as one fenced mutation. A
+  lease conflict, owner-state conflict, or persistence failure returns an
+  error and preserves or rolls back both records for a retry; detach never
+  reports success while leaving an orphan hardware lease.
+- The host broker backs Android physical leases, attach/detach/list, and
+  pre-attachment wireless operations. Public `device_wireless` routes to the
+  host without requiring an owner device record or `deviceId`, so a container
+  does not need its own ADB installation. Public
   `device_attach`/`device_detach` perform the owner-scoped attach path. Broker
   Wi-Fi attach performs lease-before-`adb connect`, verifies `adb devices -l`,
   and records owner-scoped attached-device state.
@@ -1695,16 +1718,34 @@ Batched target-neutral flow status:
   replaced automatically. On Windows, replacement uses `taskkill /T` and also
   removes a surviving CCC-managed Appium listener on the reserved port, which
   migrates orphan processes created by older releases without manual cleanup.
-  The host broker advertises `windows-hidden-provider-children-v5` as a
+  The host broker advertises `windows-hidden-provider-children-v7` as a
   required compatibility capability, so a same-package-version broker that was
   started before this policy is automatically restarted instead of reused.
-  The v5 policy is inherited by every broker provider process, including the
+  The v7 policy is inherited by every broker provider process, including the
   npm Appium runtime installer, backend Node children, the Appium server, and
   Appium's adb/java descendants; sync and detached launches both retain
   `windowsHide: true` and the Node preload is de-duplicated in `NODE_OPTIONS`.
   The preload calls `syncBuiltinESMExports()` after patching `child_process`,
   ensuring ESM consumers such as the MCP SDK do not retain their original
   visible-window `spawn` binding.
+  Broker discovery first uses hidden `netstat.exe`, so an absent listener does
+  not launch PowerShell merely to confirm that no broker exists. Every remaining
+  host-side PowerShell invocation passes both Node's `windowsHide: true` and
+  PowerShell's `-WindowStyle Hidden`. The TS broker provider spawn boundary and
+  the packaged MCP command boundary inject this policy centrally and de-duplicate
+  an explicit caller policy, so new providers cannot reintroduce visible console
+  windows by omitting local flags. Level 3, durability, and PowerShell contract
+  probes use the same normalizer. It stops at `-Command`, `-EncodedCommand`, or
+  `-File`, preserving script payload arguments verbatim. Device-provider
+  PowerShell processes remain
+  command-scoped rather than sharing one persistent runspace: this preserves
+  per-command timeout, cancellation, environment isolation, and process-tree
+  ownership. The clipboard server's persistent PowerShell is a separate
+  optimization and is not the device broker execution model. Hyper-V setup and
+  network elevation retain the same hidden-window policy for nested
+  `Start-Process` calls. This prevents transient console initialization windows
+  while intentional provider UI, such as the Windows Sandbox window or an
+  explicitly confirmed UAC prompt, remains visible.
   When MCP reaches a broker without owner-resolve, it may replace `ccc-host` or
   MCP-managed runtime metadata only when owner and port both match. Windows
   replacement waits for `taskkill /T` process-tree exit before launching the
@@ -3087,7 +3128,12 @@ remain unchanged where they are the behavior under test.
     simulator is booting, CCC shuts down the just-booted owned UDID instead of
     leaving an untracked runtime. A running simulator without `xcrun`, or a
     failed `simctl shutdown`, retains its prior running generation instead of
-    being falsely recorded as stopped. Brokers advertise and MCP clients require
+    being falsely recorded as stopped. Delete rollback records each completed
+    side effect: stopped recording metadata becomes inactive, stopped Appium
+    metadata is cleared, and a successful simulator shutdown remains stopped
+    when a later `simctl delete` fails. Once the owned simulator is deleted, a
+    later recording-stage cleanup failure cannot resurrect the owner device
+    record or its stale runtime metadata. Brokers advertise and MCP clients require
     `direct-ios-lifecycle-generation-fencing-v1`, preventing reuse of a stale
     same-version broker with unconditional iOS lifecycle state writes.
 53. Direct Windows Sandbox start, stop, and delete now claim a lifecycle
@@ -3158,3 +3204,249 @@ remain unchanged where they are the behavior under test.
     intact rather than partially overwriting it. Matching host/container
     SHA-256 digests skip the transfer, and every completed install is hashed
     again; a mismatched destination is removed instead of being executed.
+59. Physical Android real E2E must be broker-aware: a client container does not
+    need a local ADB binary when the authenticated host broker owns provider
+    discovery and execution. The scenario directly invokes every advertised
+    physical Android capability and normalizes direct-provider and broker RPC
+    result contracts. Android recording stop treats a denied remote
+    `pkill -2 screenrecord` as a fallback diagnostic only after the broker has
+    identity-checked, signaled, and observed exit of its owned host recorder;
+    PID reuse, failed host signaling, and a recorder that remains alive still
+    fail closed. Brokers advertise and clients require
+    `android-recording-signal-fallback-v1`.
+60. Cross-host physical E2E files must be created under the shared project
+    `results/` tree, not a container-only temporary directory. Broker-reported
+    Windows paths are normalized against the expected shared artifact before
+    file contents are verified. App installation exposes bounded
+    `helperTimeoutMs`, and broker error envelopes fail with their actual
+    diagnostic. A device-side package verifier rejection remains a real error
+    and is not converted into a skip or silently bypassed.
+61. The physical Android fixture is a standard target-SDK 35 APK produced with
+    Android `javac`, `d8`, `aapt2`, `zipalign`, and `apksigner`, and carries v1,
+    v2, and v3 signatures. Fixture materialization verifies the APK signing
+    block and v2/v3 scheme IDs so a handcrafted v1-only archive cannot silently
+    return. The real-device scenario validates the public app lifecycle through
+    install, launch, running-process wait, permission mutation, force-stop,
+    reset, clear-data, and uninstall without changing package-verifier or USB
+    security settings. It also normalizes direct-provider and broker physical
+    stop contracts: both must prove that the real device was preserved, while
+    the broker expresses this as a successful no-op provider command followed
+    by owner attachment and lease cleanup.
+62. Recorder start rollback must cover metadata persistence exceptions as well
+    as compare-and-set conflicts. After an external recorder process starts,
+    a thrown owner-state write terminates that exact spawned process, waits for
+    exit with a bounded force-kill fallback, and disarms its exit callback
+    before rollback. The exception path performs no compensating owner-state
+    mutation, so a concurrently installed successor recording generation is
+    preserved unchanged.
+63. Linux container-QEMU is a `device-lab` backend, not a second public MCP.
+    The backend name is `linux-vm`; it shares canonical owner identity, locking,
+    lifecycle, inventory, file transfer, snapshot, and error-result contracts
+    with the other device providers. The standalone `lab-mcp` registration,
+    build output, package surface, and legacy `lab_*` tools are retired. The
+    `ccc labs` CLI remains only as a non-starting KVM/QEMU readiness diagnostic
+    for the `device-lab` Linux VM backend.
+64. Hyper-V network marker classification treats a missing switch `Notes`
+    value as an empty marker and validates legacy 24-character ownership tokens
+    with ordinal ASCII character bounds rather than PowerShell regex state.
+    Classification itself therefore remains total under Windows PowerShell 5.1.
+    An empty, malformed, or foreign marker fails closed unless persisted state
+    proves the exact switch ID, NAT InstanceID, and subnet prefix. With that
+    complete evidence, CCC repairs only the switch marker under elevation,
+    verifies the write, and restores the original marker if a later step fails.
+    Brokers advertise and Level 3 requires `hyper-v-setup-network-v11` and
+    `hyper-v-network-failure-diagnostics-v11` (this contract arrived in v10 and
+    v9), replacing older brokers that lack the exact-identity marker repair
+    contract.
+65. Unattended Hyper-V Linux guests use Canonical's dated generic Ubuntu Server
+    QCOW2. Canonical documents the Azure VHD artifact as unable to run on
+    on-premises Hyper-V, so CCC rejects that source. The provider verifies the
+    pinned QCOW2 checksum, converts it to a fixed VHD with the Google-signed
+    Android SDK `qemu-img`, normalizes that file, converts it to a dynamic VHDX
+    with native `Convert-VHD`,
+    expands it to 32 GiB with `Resize-VHD`, validates it with `Get-VHD`, and
+    then publishes it. The image is bound to the catalog's fixed
+    Generation 2 UEFI contract. Linux VM creation disables Hyper-V Secure Boot
+    for compatibility with Linux Generation 2 guests that do not boot while it
+    is enabled; Windows VM creation continues to enable Secure Boot with the
+    Microsoft Windows template. Device state and the public create
+    configuration expose this choice as `secureBootEnabled`; request-provided
+    templates cannot override the backend-owned policy. Secure-Boot-enabled
+    Windows profiles require Generation 2 and reject Generation 1 images
+    before provider execution. Acquisition reserves twice the source virtual
+    size, the final 32 GiB virtual disk size, and an 8 GiB conversion margin.
+    Interrupted `.acquire-work` state is
+    removed under the image preparation lock before each retry while the
+    checksum-bound QCOW2 cache is retained. The checksum-pinned source
+    already contains `EFI/BOOT/BOOTX64.EFI` and `EFI/ubuntu/shimx64.efi`;
+    native Hyper-V conversion preserves those files.
+    Every catalog update must run
+    `npm run test:hyper-v:ubuntu-image -- --source <downloaded-qcow2>
+    [--qemu-img <path>]`; that bounded verifier binds the QCOW2 SHA-256,
+    confirms its format, converts a private copy through fixed VHD and back to
+    raw sectors, and parses the
+    disk's GPT and FAT32 structures to require both
+    non-empty loaders without mounting the guest filesystem.
+    Acquisition therefore does not mount or mutate the EFI partition and does
+    not cross a Storage cmdlet UAC boundary. VM creation follows Canonical
+    Multipass by passing `BootDevice=VHD` to `New-VM`, disabling dynamic memory,
+    and preserving Hyper-V's generated Generation 2 firmware order.
+    Linux cloud-init does not run online package updates before SSH readiness:
+    the pinned Ubuntu Server image already contains OpenSSH. The seed preserves
+    inherited host keys until it installs the owner-scoped ED25519 pair through
+    Base64 `write_files` entries with root ownership and explicit modes, writes
+    the network configuration, normalizes Windows-generated private-key line
+    endings to LF, validates the SSH daemon configuration, and
+    enables that local service directly. Brokers advertise
+    `hyper-v-provider-image-finalization-v39`, preventing an Azure-only image,
+    direct-QEMU-VHDX, Linux-Secure-Boot, or package-update-blocking broker from
+    being reused by Level 3.
+66. Hyper-V device deletion treats `hyper-v-network-switch-in-use` as deferred
+    shared-infrastructure cleanup after the target VM deletion is confirmed.
+    The deleted device's allocation is atomically removed, its owner artifacts
+    and operation journal may be finalized, and the owned switch/NAT state is
+    retained for attached CCC guests. Other cleanup failures remain fail-closed
+    and preserve the allocation for diagnosis and retry. Brokers advertise and
+    Level 3 requires `hyper-v-setup-network-v11` (this cleanup contract arrived
+    in v10).
+67. Automatic Hyper-V image acquisition holds source and partial VHDX file
+    artifacts in a non-inheriting Windows DACL restricted to the current CCC
+    user SID, SYSTEM, and Administrators. Setup recursively rejects reparse
+    points, replaces each existing file and directory owner/DACL, and verifies
+    the exact SID, rights, and inheritance tuple before use. CCC acquisition
+    remains serialized by the profile `prepare.lock`. Within that boundary,
+    partial VHD file handles use read/write/delete sharing because the Windows
+    Virtual Disk API requires all three modes when reopening a VHD.
+    ACL isolation and the profile lock, rather than share denial, fence
+    non-trusted replacement and concurrent CCC mutation while permitting
+    `Get-VHD` to reopen the disk through the Windows Virtual
+    Disk API. Because write sharing permits
+    in-place changes,
+    the source QCOW2 is SHA-256 checked before and after conversion and the
+    partial VHDX is checked before and after its Hyper-V inspection. The
+    published image must match the validated partial
+    hash both before and after final inspection, and the broker hashes it once
+    more before writing the manifest. A mismatch fails closed; processes under
+    the current CCC user SID remain part of the trusted host principal.
+    Brokers advertise and Level 3 requires
+    `hyper-v-provider-image-finalization-v28`
+    for this guard contract. Acquisition reports distinct bounded stages for
+    source hash/inspection, conversion, and partial
+    open/hash/inspection so host-only failures do not collapse into a generic
+    image-inspection diagnostic.
+68. Worktree common Git-directory mounts are part of the core container
+    contract, not an additive compatibility update. A running container that
+    lacks a root or tracked-submodule common directory must be replaced when
+    session ownership permits; otherwise CCC preserves the live container but
+    refuses the new join instead of exposing a workspace whose `.git` forward
+    pointer resolves to missing management metadata. Per-worktree container
+    backpointer overlays remain additive because their absence does not remove
+    the common object, ref, index, or worktree registration storage.
+69. Host Git configuration copied into a CCC container must not retain a host
+    absolute `user.signingkey` path for a standard private key beneath `.ssh`.
+    Provisioning reads the setting through `git config`, normalizes Windows
+    separators for classification, requires an exact match beneath the current
+    host home, and verifies that a staged replacement copy has a completion
+    marker plus a regular non-symlink key before rewriting a recognized name to
+    `/tmp/.ssh-copy/<name>`. Inline keys, relative paths, multiple values, and
+    paths outside the exact host `.ssh` directory remain unchanged. This keeps
+    `commit.gpgsign=true` usable without interpreting or broadly rewriting
+    unrelated host configuration values.
+70. Automatic Hyper-V image profiles no longer mount the prepared VHDX merely
+    to rediscover the catalog's VM generation. `Mount-VHD | Get-Disk` requires
+    Storage-management privileges that are not implied by membership in
+    Hyper-V Administrators and made otherwise valid automatic acquisition fail
+    before VM creation. CCC still validates the source and prepared VHDX with
+    `Get-VHD`, rejects differencing parents, fences and re-hashes every
+    publication transition, and records the profile's fixed generation. The
+    destructive Level 3 boot and guest-readiness checks remain the authoritative
+    compatibility proof. Brokers advertise and Level 3 requires
+    `hyper-v-provider-image-finalization-v39` for this contract, including
+    guest-visible content comparison between the fixed VHD and published VHDX.
+    The same contract requires generic Ubuntu QCOW2 guests to receive only a
+    NoCloud `cidata` seed; an Azure `ovf-env.xml` must not share that medium
+    because it can preempt NoCloud user and SSH-key provisioning. The
+    Linux seed uses ISO9660 plus Joliet without UDF so NoCloud's ISO9660 device
+    discovery can select it; Windows unattend media keeps UDF compatibility.
+    The cloud-config payload is serialized from a structured object and must
+    not contain the invalid scalar top-level `user` field.
+71. Worktree discovery does not recursively enumerate untracked `.git` paths.
+    Managed nested repositories come from tracked Gitlinks, while direct child
+    repositories remain available through the bounded one-directory scan.
+    This removes the Windows `git ls-files --others ... **/.git/**` startup
+    process that could fail with `0x800700e8` or stall on large dependency and
+    build trees. Ignored and deeper untracked repositories remain unmanaged;
+    projects that require nested worktree handling register them as submodules.
+72. Hyper-V VM creation does not use a QEMU-produced VHDX as a differencing
+    parent. After verifying the prepared base hash and VHD metadata, CCC copies
+    it sequentially into an owner-scoped independent VHDX, forces the output to
+    disk, hashes the output while its handle remains exclusive, closes both
+    handles independently, and checks file length, VHDX format, virtual size,
+    and absence of a parent. CCC then re-hashes the base before attaching the
+    clone. Before disk creation, CCC replaces the owner-scoped device directory
+    ACL with an inheritance-protected allowlist containing only the current host
+    user, SYSTEM, and Administrators, then verifies owner, SID, rights,
+    inheritance, and rule count. Those principals and the per-device operation
+    lock are the explicit trust boundary between handle closure and Hyper-V
+    attach. This removes the remaining
+    `New-VHD -Differencing` compatibility boundary while preserving immutable
+    shared-image verification. Brokers
+    advertise and Level 3 requires
+    `hyper-v-provider-image-finalization-v28` for this contract.
+73. Hyper-V guest-readiness failures preserve a complete bounded boot
+    observation outside the compact terminal summary. The broker's
+    `hyper-v-guest-readiness-diagnostics-v24` contract exposes allowlisted boot
+    entry types, controller coordinates, VHD format/type/size/sector metadata,
+    DVD attachment state, integration-service status, and diagnostic error
+    codes. Linux failures also retain bounded managed SSH, bootstrap KVP,
+    bootstrap PowerShell stage diagnostics,
+    bootstrap SSH, and network-finalization counters without addresses or raw
+    command output. The same contract pins host-key negotiation to ed25519 and disables the
+    bootstrap DHCP address check only while strict verification uses the
+    validated managed-address alias. Bootstrap readiness enables bounded
+    OpenSSH verbose diagnostics after rejection and compares the reported
+    ed25519 SHA-256 fingerprint with the owner-pinned fingerprint. Because
+    `sshd` may listen with the image's default key before cloud-init installs
+    the seeded host key, a mismatch is retried until the readiness deadline.
+    Every attempt uses `StrictHostKeyChecking=yes`; CCC never adopts the
+    observed bootstrap key or writes a temporary `known_hosts` file.
+    Interrupted cache updates are reconciled from the authoritative owner pin
+    before the next identity validation.
+    Migration ignores OpenSSH key comments and compares only the allocated
+    address, ed25519 algorithm, and structurally validated key blob, allowing
+    v13/v14 `ccc-host` entries to converge to the v16 cache format.
+    No managed Hyper-V readiness, exec, or transfer path enables `accept-new`,
+    and the guest host private key is never transferred. Only
+    observed/matches/adopted booleans are retained so
+    cloud-init key drift is distinguishable from authentication failure without
+    exposing key, fingerprint, or address material.
+    Those counters also select a specific bounded failure code
+    for missing guest signals, bootstrap inspection, address discovery,
+    bootstrap SSH, or network finalization instead of collapsing every case
+    into `ssh-connection-timeout`. The Linux real test writes that safe evidence
+    to `results/device-lab-real/hyper-v-linux-diagnostic-latest.json` plus a
+    timestamped record before cleanup. Host paths, VM names, credentials,
+    endpoints, and raw PowerShell output are never copied into these records.
+74. An unattended Hyper-V run needs no UAC prompt when the CCC fabric
+    already exists and at most one when it does not. Broker-internal
+    compensation (failed-create rollback, create-residue recovery, and journal
+    replay ahead of any command other than `device_delete`) releases the
+    device's allocation but keeps the shared switch, gateway, and NAT, so it
+    never needs Administrator; only an explicit `device_delete` without
+    `preserveNetwork` tears the fabric down (`hyper-v-setup-network-v11`). The
+    one exception is create-residue recovery for a device with no recorded
+    incarnation, which stays destructive; see
+    `doc/device-lab/REQ__hyper-v-network-teardown-identity.md` for the exact
+    rule. A declined or unanswered prompt sets the broker's in-memory elevation
+    gate to `refused`: later administrator transactions start no relay and fail
+    with `hyper-v-network-elevation-suppressed` until the broker restarts. The
+    gate can only deny, is never persisted, and is reported as
+    `hyperVElevationGate` in the broker `/status`. The Level 3 broker preflight
+    prints it and, while it is `refused`, stops the run before any step starts
+    (the non-Hyper-V Level 3 steps included), naming the remedy: restart the
+    broker, and run an attended `ccc devices setup hyper-v --confirm` first when
+    nobody will answer a prompt. Typed create failures report a bounded `hyper-v-ps-*` or
+    `hyper-v-windows-<category>-*` detail plus the failed `operation`
+    (`hyper-v-network-failure-diagnostics-v11`), and batch exact-name VM
+    absence is proven by a host-wide inventory read
+    (`hyper-v-windows-library-v17`).

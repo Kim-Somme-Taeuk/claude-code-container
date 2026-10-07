@@ -5,7 +5,7 @@ import {
     jsonResult,
     textResult,
     truncateDiagnosticText,
-} from "../../device-lab-mcp/src/responses.mjs";
+} from "@ccc/device-lab/providers/responses.mjs";
 
 function resultText(result: { content: Array<{ text?: string }> }): string {
     return result.content[0]?.text || "";
@@ -38,7 +38,7 @@ describe("device-lab MCP diagnostic response bounds", () => {
         const text = resultText(result);
         const parsed = JSON.parse(text) as Record<string, unknown>;
 
-        expect(result.isError).toBe(false);
+        expect(result.isError).toBe(true);
         expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(MCP_ERROR_TEXT_LIMIT_BYTES);
         expect(parsed).toEqual(expect.objectContaining({
             ok: false,
@@ -49,7 +49,21 @@ describe("device-lab MCP diagnostic response bounds", () => {
             maxBytes: MCP_ERROR_TEXT_LIMIT_BYTES,
         }));
         expect(parsed.originalBytes).toEqual(expect.any(Number));
-        expect(parsed).not.toHaveProperty("detail");
+        expect(parsed.detail).toEqual(expect.stringContaining("diagnostic truncated"));
+    });
+
+    it("marks only explicit outer failure without interpreting opaque payload fields", () => {
+        for (const data of [
+            { error: "user data" }, { ok: true, error: "user data" },
+            { ok: true, result: { ok: false, error: "guest command data" } },
+            { stdout: '{"ok":false,"error":"guest output"}' },
+            { found: false },
+        ]) {
+            const result = jsonResult(data);
+            expect(result.isError).toBe(false);
+            expect(JSON.parse(resultText(result))).toEqual(data);
+        }
+        expect(jsonResult({ ok: false, error: "provider-failed" }).isError).toBe(true);
     });
 
     it("bounds command failures and tiny explicit truncation budgets", () => {

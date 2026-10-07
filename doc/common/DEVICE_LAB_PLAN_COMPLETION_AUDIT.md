@@ -40,9 +40,9 @@ harness handoffs rather than from conversation memory.
 | Mobile Appium dependencies and high-level mobile action vocabulary | implemented | `device-lab-mcp/package.json`, Appium broker validation in `src/device-lab-broker.ts`, mobile tool schemas, Android/iOS Appium test suites, and broker Appium tests. |
 | Bounded mobile/device flow runners | implemented | `mobile_run_flow` and `device_run_flow` schemas, flow routing in `device-lab-mcp/src/server.mjs`, and foundation/flow tests. |
 | Video recording across supported backends | implemented | Android ADB, iOS Simulator simctl, Windows helper, macOS SSH helper, broker-routed Android/iOS simulator paths, and video recording tests/handoff. |
-| File/path/secret policy and provider in-guest transfer hardening | implemented | `device-lab-mcp/src/policy/files.mjs`, `lab-mcp` file policy, file policy tests, Android/Windows/macOS provider transfer tests, `TASK__file-secret-content-policy`, and `TASK__provider-inguest-transfer-hardening`. |
-| Lab MCP, container-QEMU provider, workspace/artifact sync, base images, snapshots, reboot, targets, sessions | implemented | `lab-mcp/src/provider.mjs`, `lab-mcp/src/tools.mjs`, `src/lab-runner-admin.ts`, lab-mcp provider/foundation/smoke tests, and lab-runner/container VM commits. |
-| Bounded guest SSH, guest exec, guest push/pull, guest-agent status/session/provisioning | implemented | `lab-mcp/src/provider.mjs`, `lab_guest_*` schemas, provider tests, `TASK__lab-mcp-ssh-guest-transport`, `TASK__lab-mcp-guest-exec`, `TASK__lab-guest-agent-session`, and `TASK__lab-guest-agent-provisioning`. |
+| File/path/secret policy and provider in-guest transfer hardening | implemented | `device-lab-mcp/src/policy/files.mjs`, the Linux VM backend file policy, file policy tests, Android/Windows/macOS/Linux provider transfer tests, `TASK__file-secret-content-policy`, and `TASK__provider-inguest-transfer-hardening`. |
+| Linux VM container-QEMU provider, workspace/artifact sync, base images, snapshots, reboot, targets, sessions | implemented | `device-lab-mcp/src/backends/linux-vm.mjs`, public `device_*` schemas, `src/lab-runner-admin.ts`, device-lab Linux VM provider/foundation/smoke tests, and lab-runner/container VM commits. The former standalone `lab-mcp` registration and package are retired. |
+| Bounded Linux VM guest SSH, exec, push/pull, guest-agent status/session/provisioning | implemented | `device-lab-mcp/src/backends/linux-vm.mjs`, public `device_exec`, `device_upload`, `device_download`, `device_guest_agent_*` schemas, provider tests, and the historical guest transport task evidence. |
 | CLI support and package integration | implemented | `src/device-lab-admin.ts`, `src/lab-runner-admin.ts`, `src/mcp-forward.ts`, package file tests, admin smoke/prune/cleanup tests, and README/PLAN docs. |
 | Zero-configuration default container VM contract | implemented | `src/docker.ts`, `src/lab-runner-admin.ts`, docker/docker-args/lab-runner-admin tests, `ccc labs smoke`, and `TASK__container-native-vm-e2e-contract`. |
 
@@ -88,6 +88,29 @@ percentage estimate, is authoritative for their current live-proof status.
 | Live defects converted to regressions | Windows guest-helper recording is broker-routed without a nested owner/device lock; explicit helper timeouts override the fast RPC path; ZIP creation uses `System.IO.Compression.ZipFile` instead of the optional PowerShell archive module; helper error responses preserve request type; recording status accepts envelope, nested, and bare state shapes; preflight removes orphaned test-prefix directories. |
 | Cleanup evidence | `devices.json` contained no `windows-real-sandbox-*` record after the pass. Nineteen historical test-owned artifact directories were removed, and a second scan returned zero. |
 | Physical Android cold-start inventory | A live USB check exposed two nested timeout defects before attachment: the MCP classified `device_inventory` as a one-second fast operation, while the host broker allowed only five seconds for `adb devices -l`. Inventory now uses the ordinary 60-second broker RPC budget and gives ADB at least 15 seconds to cold-start its daemon; focused regression assertions cover both deadlines. |
+| Pre-attachment wireless routing | `device_wireless` now routes through the host broker without requiring an owner device record or `deviceId`. This prevents a container without ADB from reporting `android-wireless-missing-adb` when host ADB can see the phone. Capability `physical-unattached-wireless-routing-v1` forces an older broker to be repaired before this route is used, and a broker-routing regression test covers an unauthorized USB device returned by the host. |
+| Detached physical-device reattach | A live attach exposed that a historical `detached` owner record was rejected as already attached before host authorization was checked. Exact same-owner/same-ID/same-hardware detached records can now be atomically replaced on reattach; unauthorized hardware returns `android-device-not-attachable`, releases the provisional lease, and preserves detached state. A focused broker RPC regression proves the unauthorized failure followed by successful reattach without duplicate records. |
+
+## Physical Device Stabilization Gate
+
+This checklist is the fixed completion gate for physical devices. Items remain
+open until the listed operation has passed through the public packaged MCP
+against real hardware; unit or fake-provider coverage alone does not close an
+item.
+
+| Gate | Current status | Required evidence |
+| --- | --- | --- |
+| Android host discovery and ADB cold start | PASS | Broker inventory found USB serial `273834b121017ece` and reported the live ADB state. |
+| Android unauthorized/offline diagnostics | PASS | The connected phone was reported as `unauthorized`, not missing or attachable; detached-record reattach now preserves this host diagnosis. |
+| Android pre-attach wireless routing | AUTOMATED PASS / LIVE RECHECK REQUIRED | The no-local-ADB broker route and compatibility capability are regression tested; rerun against the repaired host broker. |
+| Android USB trust and owner attach | BLOCKED BY DEVICE APPROVAL | Unlock the phone and approve the host RSA debugging prompt, then prove `device_attach` and lease creation. |
+| Android core device operations | PENDING | Prove status, exec, screenshot, upload, download, install, launch, reset-safe behavior, and recording through packaged MCP. |
+| Android mobile/Appium operations | PENDING | Prove session setup, UI dump, gestures, text/key input, app controls, clipboard, waits, and screenshot through packaged MCP. |
+| Android detach, unplug/replug, stale lease, and wireless reconnect | PENDING | Prove cleanup and recovery without stale owner, lease, Appium, recording, or process metadata. |
+| iOS physical discovery, trust, attach, operations, and detach | PENDING ON MACOS HARDWARE | Requires a macOS host, Xcode trust, and a connected iOS device. |
+
+Physical-device stabilization is not complete while any applicable row above is
+`PENDING`, `BLOCKED`, or `LIVE RECHECK REQUIRED`.
 
 ## Regression Prevention Audit
 
@@ -103,7 +126,7 @@ during live Android and Windows work are covered as follows:
 | Android AVD creation, broker lifecycle result shapes, file transfer location, unsupported airplane-mode behavior, stale instrumentation, Appium startup, and clipboard routing | Android emulator unit/integration suites plus the 52-capability real emulator E2E. |
 | Windows Sandbox bootstrap, helper mappings, one-shot recovery, active helper preservation, visible-connect fallback, minimization, screenshot/helper response shapes, recording, and cleanup | Windows backend/broker suites plus the 21-capability real Sandbox E2E. |
 | Public fake-device diagnostics and provider identity assertions | Broker Level 2 E2E, broker-routing tests, and public capability matrix assertions. |
-| Physical Android ADB daemon cold start | Broker inventory asserts a 15-second minimum provider deadline and MCP timeout bounds assert a 60-second RPC deadline. Host broker `1.1.73` completed live ADB inventory and found USB serial `273834b121017ece`; attach and command proof remain pending because ADB reports `unauthorized` until the user accepts the device-side USB debugging prompt. |
+| Physical Android ADB daemon cold start and host-only wireless routing | Broker inventory asserts a 15-second minimum provider deadline and MCP timeout bounds assert a 60-second RPC deadline. Host broker `1.1.73` completed live ADB inventory and found USB serial `273834b121017ece`; host-only `device_wireless` routing has a dedicated no-device-ID regression. Attach and command proof remain pending because ADB reports `unauthorized` until the user accepts the device-side USB debugging prompt. |
 
 This is regression coverage for known, reproducible defects, not a claim that
 future host, OS, driver, or hardware failures are impossible. Real-provider
@@ -962,6 +985,19 @@ The following verification evidence has been collected:
 | Live container proof | Running the built synchronizer through the real Docker socket against the current project container changed the stale device-lab bundle from SHA-256 `7492de62...` to the host build's `08913570...`; x11 and lab bundles already matched and were not rewritten. A second synchronization preserved all three destination mtimes, proving digest-based transfer elision. A fresh stdio smoke against `/opt/ccc/dist/device-lab-mcp/server.mjs` passed all 81 advertised public tool dispatches. The already-connected MCP process still requires a normal session restart to load the replaced module bytes. |
 | Final release gates | The final single-worker full suite passed with 86 files passed, 7 skipped, 1,808 tests passed, and 50 platform skips. Build, TypeScript, ESLint, bundled MJS syntax, source and packaged broker E2E, both production audits, package dry-run, and `git diff --check` passed. |
 
+## 2026-07-16 Physical Android Live Reverification
+
+| Area | Evidence |
+| --- | --- |
+| USB trust and ownership | A real Samsung `SM_N960N` (`273834b121017ece`, Android 10) moved from ADB `unauthorized` to `device` after the user accepted the RSA trust prompt. Public `device_inventory` discovered it, `device_attach` created an owner-scoped USB attachment and lease, and detach/re-attach released and replaced the exact lease without powering off or disconnecting the phone. |
+| Live non-destructive controls | Public MCP calls passed for `device_status`, `device_exec`, raw and mobile PNG screenshots, `mobile_session_status`, `mobile_unlock`, `mobile_home`, `mobile_dump_ui` through `adb-uiautomator`, project-path-translated upload/download with matching SHA-256, remote cleanup, recording start/status, and Appium clipboard set/get with exact text round-trip. |
+| E2E contract repair | The physical Android real-test no longer requires `adb` inside the MCP client container when the host broker owns ADB. It directly covers every capability advertised by `androidRealBackend`, including inventory and unattached wireless status, unwraps broker RPC result envelopes, and accepts both direct and broker lifecycle status contracts. Capability coverage and payload normalization regressions pass. |
+| Samsung recording stop | The live run reproduced Samsung Android 10 denying `adb shell pkill -2 screenrecord` even after CCC successfully identity-checked and signaled its owned host recorder. Broker stop now treats that remote command as a diagnostic fallback when the verified host recorder was actually signaled and exited, then continues artifact pull, remote cleanup, and generation-fenced state clearing. Brokers advertise and clients require `android-recording-signal-fallback-v1`; a default-runner regression proves denied `pkill` still finalizes the owned recording while PID-reuse and stubborn-process failures remain fail-closed. |
+| Cross-host artifact paths | Physical E2E artifacts now live under the ignored project `results/` tree rather than container-only `/tmp`. The broker translates those paths to the registered Windows project root, while the shared mount lets the client verify non-empty recordings and downloaded bytes. Returned Windows paths are compared by normalized artifact identity instead of direct Linux string equality. |
+| Bounded app installation | Public `device_install_app` and `mobile_install_app` schemas expose bounded `helperTimeoutMs`; the physical scenario requests 120 seconds. Broker error envelopes with null results are promoted to their actual diagnostic instead of producing misleading `undefined provider` assertions. |
+| Fixture correction | The verifier failure was caused by the old handcrafted v1-only fixture APK, not by a required Samsung security exception. The replacement is compiled and packaged with Android Platform/Build Tools 35 (`javac`, `d8`, `aapt2`, `zipalign`, and `apksigner`), targets SDK 35, and verifies with v1, v2, and v3 signatures. Fixture materialization checks the APK signing block and v2/v3 scheme IDs, and a focused regression prevents reintroducing the legacy archive shape. No package-verifier, USB-install, or device security setting was disabled. |
+| Final physical proof | The reloaded `1.1.73` broker advertises `android-recording-signal-fallback-v1`. The complete physical E2E passed on the Samsung device: inventory, attach/lease, status, shell, screenshots, UIAutomator, Appium clipboard, upload/download, recording and artifact pull, plus fixture install, launch, process wait, permission mutation, force-stop, reset, clear-data, uninstall, physical-preserving stop, and cleanup. The scenario now asserts the real `mobile_wait_for_app` contract (`running` and `pid`) and accepts both direct physical-preservation metadata and the broker's successful no-op/lease-cleanup stop contract. |
+
 ## Current Follow-Up Queue
 
 ### Windows Host Broker Repair Identity
@@ -1064,6 +1100,143 @@ are not used.
   `git diff --check` passed. The platform skips remain honest environmental
   limits rather than evidence for unavailable iOS/macOS/physical-device hosts.
 
+## 2026-07-19 Windows Owner-Resolve Regression
+
+- Host-side MCP processes now send the canonical `/project/<project-id>` mount
+  to `/v1/owner/resolve`. They no longer send a native Windows checkout path,
+  which the broker correctly rejects as a noncanonical owner request.
+- Owner-resolve readiness retains at most eight attempts and preserves the last
+  HTTP status and broker error instead of replacing them with a generic timeout
+  and an oversized repeated diagnostic.
+- Broker startup registers its launch owner once, and failed isolated broker
+  E2E runs preserve their temporary home so auth, registration, runtime, and
+  log evidence remains inspectable.
+- Regressions cover Windows host-path canonicalization, canonical owner-resolve
+  request bodies, bounded failure diagnostics, and all-skipped parent/child
+  result consistency.
+
 Run full strict proof on hosts with the required providers and leased hardware
 until the final summary reports `skip=0`, `fail=0`, and
 `strictSkipFailures=0`.
+
+## 2026-07-19 Real-Provider Run Serialization
+
+- Level 3 and real-provider durability runs now share one host-user execution
+  lock and fail fast when another destructive provider suite is active.
+- The regression reproduces the overlap in-process and verifies that sync and
+  async launch paths use the same lock and release it after completion.
+- Missing-device attach diagnostics now always pass an explicit impossible
+  Android serial. They cannot select and attach the only real USB device on a
+  developer host.
+- Interrupted Windows cleanup now reconciles a lock-verified Sandbox GUID even
+  when owner state was prematurely persisted as `stopped`; only matching
+  current-owner test evidence is eligible for this recovery.
+- The public Windows `device_stop` path performs the same generation-checked
+  reconciliation, allowing `ccc devices stop <id>` to recover interrupted
+  state without adopting a foreign Sandbox runtime.
+- Windows durability permits test-prefixed residue to reach that verified E2E
+  cleanup path. It uses authoritative `wsb list --raw` GUIDs instead of stale
+  client UI PIDs, removes only fixed-prefix immediate temp children, and can
+  remove an orphan test directory only after both host-lock and runtime absence
+  are verified.
+- Its Windows launcher runs the built public broker-status repair after build
+  and before provider execution, so a source checkout replaces an incompatible
+  in-memory broker without a separate install or operator command.
+- Compact real-provider failures preserve bounded multiline assertion details,
+  and the Windows scenario prefixes failures with its current lifecycle or tool
+  stage so repeated live runs identify the failing contract without a separate
+  verbose rerun.
+- Cleanup validates remaining singleton evidence before removing owner state;
+  foreign-host, prior-boot, malformed, or mismatched locks are preserved and
+  fail closed.
+- Real-provider transfer fixtures now always live under `results/.tmp`, the
+  project boundary visible to the host broker. The broker accepts both the
+  canonical container mount path and a native host path inside its checkout,
+  while continuing to reject absolute paths outside that checkout. Windows
+  E2E also fails immediately on broker `ok: false` payloads instead of
+  misreporting a missing provider field. Regressions lock the broker path
+  translation and the Windows helper upload/download provider contract.
+  Package version `1.1.74` forced replacement of a `1.1.73` broker that
+  predated this routing fix.
+- Live `1.1.74` Windows durability completed the provider scenario but found
+  the canonical owner device directory after `device_delete`. Broker deletion
+  had removed the state record without removing helper/config/download
+  artifacts. Version `1.1.75` makes artifact removal part of the delete
+  transaction: it validates the owner path, removes and verifies the directory
+  before deleting state, and returns a bounded 502 failure while preserving
+  state if cleanup fails. Regressions prove both successful removal and
+  failure-state preservation.
+- A live Windows Level 3 run after the Sandbox durability proof exposed an
+  Android E2E-only allocation race: the scenario selected a host-socket-free
+  port before invoking MCP, without considering broker owner state or holding
+  the broker allocation lock. The real scenario now omits `port` from
+  `device_create` and makes the broker's state, ADB, and lock-aware allocator
+  the sole authority. It also marks a device as cleanup-owned only after a
+  successful create response. A regression locks the portless request
+  contract.
+- The first live Android-emulator durability run then failed before cycle one
+  because its AVD residue inventory passed `avdmanager.bat` directly to
+  Node's synchronous process API on Windows, which returns `EINVAL`. The
+  inventory now uses the same `cmd.exe /d /s /c` batch-launch contract as
+  provider commands, including quoted SDK paths. A regression verifies the
+  exact Windows invocation and prevents direct batch spawning.
+- Historical Android E2E failures can leave dozens of independently verified
+  test-owned records and directories. Durability still detects every item and
+  fails closed, but console diagnostics are now bounded: lists above four
+  entries show per-kind counts and one compact example per kind. The complete
+  list is retained in a single per-target/phase latest JSON report in the
+  system temporary durability diagnostic directory.
+- The next live Android durability preflight found 29 historical items: one
+  state record, 25 owner artifacts, one SDK AVD, and two temp directories. The
+  runner now performs a verified current-owner E2E-only recovery before cycle
+  one. State-backed devices must match the Android backend and exact device/AVD
+  suffix contract and are removed through the direct force-delete backend;
+  state-free AVDs must be absent from the live ADB AVD inventory. Owner
+  directories must be immediate non-symlink test-prefix children, and all
+  categories are reinspected before provider execution. Foreign, mismatched,
+  malformed, active-orphan, or unqueryable evidence remains untouched.
+- Android force-delete now probes ADB even when persisted status is `stopped`.
+  A live target is killed and verified before state/AVD deletion, preventing a
+  stale stopped record from leaving an emulator process behind. Regressions
+  cover stopped-but-live deletion, Windows batch AVD deletion, live AVD
+  identity inventory, verified state/orphan/artifact/temp recovery, foreign
+  ownership, active orphan refusal, and mandatory zero-residue reinspection.
+- Android physical-device durability no longer requires manual serial export.
+  If neither supported serial variable is set, the runner selects from
+  ADB-authorized non-emulator devices once before cycle one. Current-owner
+  leases take priority, followed by unleased devices in code-unit lexical
+  order, so multiple connected devices remain deterministic. A set containing
+  only known foreign-owner leases fails before mutation. The selected
+  serial is printed and injected only into the durability child environment;
+  explicit serial configuration continues to override automatic selection.
+- The first automatic physical-device durability preflight found two old
+  owner artifact directories and one expired aggregate-only lease whose
+  authoritative hardware lock was already absent. Physical durability now
+  reconciles verified current-owner `android-device-real-e2e-*` residue before
+  device selection. State-backed residue uses the normal fenced detach path;
+  aggregate-only residue is removed by an exact owner/hardware/device/claim
+  transaction that refuses fresh leases, duplicate hardware entries, and
+  successor or foreign locks. Artifacts are deleted only after lease/state
+  verification and the complete preflight is rerun. Regression tests cover
+  the observed lock-free aggregate case, active-lease refusal, generation-lock
+  conflict preservation, foreign state rejection, and mandatory zero-residue
+  reinspection before a provider cycle starts.
+- The next physical-device durability run selected the authorized USB device
+  but returned a strict skip because the physical scenario still required a
+  manually supplied APK/package/permission tuple. The physical scenario now
+  follows the emulator contract: no app inputs selects the repository's
+  checksum-verified, v1/v2/v3-signed fixture, a complete external tuple
+  overrides it, and a partial tuple fails before attachment. Compact
+  `--fail-on-skip` runs now print the skipped test and reason instead of only a
+  category count, so future prerequisite failures remain actionable.
+- The first fixture-backed physical-device durability cycle completed its
+  provider scenario but exposed a fresh test lease left only in the legacy
+  `android-device.json` aggregate. Broker-owned status heartbeats were
+  refreshing the authoritative hardware lock through the direct provider and
+  unintentionally creating that aggregate; broker detach then removed only the
+  lock. Heartbeats now update an aggregate entry only when one already exists.
+  Durability also reconciles aggregate-only current-owner test leases before
+  and after each cycle, but only when the authoritative lock is absent and the
+  exact owner/device/hardware/claim generation is unambiguous. Regression tests
+  cover non-synthesis, fresh orphan removal, authoritative-lock refusal, and
+  successful post-cycle recovery.

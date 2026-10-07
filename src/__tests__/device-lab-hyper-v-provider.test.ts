@@ -1,0 +1,3097 @@
+import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from "child_process";
+import { createHash } from "crypto";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join, resolve } from "path";
+import { describe, expect, expectTypeOf, it } from "vitest";
+import {
+    HYPER_V_FIRST_LOGON_COMMAND_LINE_LIMIT,
+    HYPER_V_FIRST_LOGON_LAUNCHER,
+    HYPER_V_FIRST_LOGON_SCRIPT_NAME,
+    HYPER_V_UBUNTU_VIRTUAL_SIZE_BYTES,
+    hyperVAcquireBaseImageCommand,
+    hyperVAcquireBaseImagePrepareCommand,
+    hyperVAcquireBaseImageFinalizeCommand,
+    hyperVBootstrapNetworkCleanupCommand,
+    hyperVBootstrapNetworkCommand,
+    hyperVCleanupNetworkCommand,
+    hyperVCreateCommand,
+    hyperVDeleteCommand,
+    hyperVEnsureNetworkCommand,
+    hyperVGuestBootDiagnosticCommand,
+    hyperVGuestDownloadCommand,
+    hyperVGuestExecCommand,
+    hyperVGuestProvisionCommand,
+    hyperVGuestReadyCommand,
+    hyperVGuestUploadCommand,
+    hyperVLinuxScpDownloadCommand,
+    hyperVLinuxScpUploadCommand,
+    hyperVLinuxNetworkFinalizeCommand,
+    hyperVLinuxSeedCommand,
+    hyperVLinuxSshExecCommand,
+    hyperVLinuxSshReadyCommand,
+    hyperVPrepareBaseImageCommand,
+    hyperVReadinessCommand,
+    hyperVRebootCommand,
+    hyperVRecoverOrphanCommand,
+    hyperVSnapshotName,
+    hyperVSnapshotRepairCommand,
+    hyperVSetupCommand,
+    hyperVStartCommand,
+    hyperVStatusCommand,
+    hyperVStopCommand,
+    hyperVVmName,
+    parseHyperVReadiness,
+    parseHyperVRecoveryObservation,
+    parseHyperVBaseImageObservation,
+    parseHyperVAcquireBaseImagePrepareObservation,
+    parseHyperVBootstrapNetworkCleanupObservation,
+    parseHyperVBootstrapNetworkObservation,
+    parseHyperVDeleteObservation,
+    parseHyperVGuestExecObservation,
+    parseHyperVGuestBootDiagnosticObservation,
+    parseHyperVGuestProvisionObservation,
+    parseHyperVGuestReadyFailureObservation,
+    parseHyperVGuestReadyObservation,
+    parseHyperVGuestTransferObservation,
+    parseHyperVNetworkObservation,
+    parseHyperVNetworkCleanupObservation,
+    parseHyperVSnapshotRepairObservation,
+    parseHyperVSetupObservation,
+    parseHyperVVmObservation,
+} from "@ccc/device-lab/host-control/hyper-v/index.js";
+import { hyperVProviderDiagnosticCode } from "@ccc/device-lab/device-lab/broker/hyper-v/public-response.js";
+import { isoWriterLines, jsonScript } from "@ccc/device-lab/host-control/hyper-v/core.js";
+import { HYPER_V_QEMU_IMG_SIGNATURE_STATUSES } from "@ccc/device-lab/host-control/hyper-v/contracts.js";
+import { hyperVPowerShellAssetPath } from "@ccc/device-lab/host-control/hyper-v/powershell-assets.js";
+
+const ownerId = "0123456789abcdef";
+const deviceId = "windows-ci-01";
+const incarnationId = "11111111111111111111111111111111";
+const vmId = "12345678-1234-1234-1234-123456789abc";
+const baseImageSha256 = "a".repeat(64);
+
+function scriptOf(command: { args: string[]; input?: string }): string {
+    const fileIndex = command.args.indexOf("-File");
+    if (fileIndex >= 0) {
+        const file = command.args[fileIndex + 1];
+        if (!file) throw new Error("missing PowerShell file path");
+        return readFileSync(file, "utf8");
+    }
+    const encoded = command.args.at(-1);
+    if (!encoded) throw new Error("missing encoded PowerShell script");
+    const decoded = Buffer.from(encoded, "base64").toString("utf16le");
+    if (decoded.includes("$E=[Console]::In.ReadToEnd().Trim()")) {
+        if (!command.input) throw new Error("missing streamed PowerShell program");
+        return Buffer.from(command.input, "base64").toString("utf8");
+    }
+    return decoded;
+}
+
+// Generated probes exceed Windows' command-line limit; execute an owned script file.
+function spawnPowerShell(args: string[], options: SpawnSyncOptionsWithStringEncoding) {
+    // A child Windows PowerShell must not inherit another PowerShell edition's modules.
+    const env = { ...(options.env ?? process.env) };
+    for (const key of Object.keys(env)) if (key.toLowerCase() === "psmodulepath") delete env[key];
+    options = { ...options, env };
+    const index = args.indexOf("-EncodedCommand");
+    if (index < 0) return spawnSync("powershell.exe", args, options);
+    const root = mkdtempSync(join(tmpdir(), "ccc-powershell-probe-"));
+    const script = join(root, "probe.ps1");
+    try {
+        writeFileSync(script, "\ufeff" + Buffer.from(args[index + 1], "base64").toString("utf16le"));
+        return spawnSync("powershell.exe", [...args.slice(0, index), "-File", script], options);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+// Parses a generated program with the host's Windows PowerShell 5.1 parser, without running it.
+function parseWithWindowsPowerShell(program: string) {
+    const parser = [
+        "$Encoded = [Console]::In.ReadToEnd().Trim()",
+        "$Program = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Encoded))",
+        "$Tokens = $null; $Errors = $null",
+        "[Management.Automation.Language.Parser]::ParseInput($Program, [ref]$Tokens, [ref]$Errors) | Out-Null",
+        "if (@($Errors).Count -gt 0) { [Console]::Error.WriteLine((@($Errors | ForEach-Object { $_.Message }) -join [Environment]::NewLine)); exit 1 }",
+    ].join("\n");
+    return spawnPowerShell([
+        "-WindowStyle",
+        "Hidden",
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-EncodedCommand",
+        Buffer.from(parser, "utf16le").toString("base64"),
+    ], {
+        input: Buffer.from(program, "utf8").toString("base64"),
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 30_000,
+        maxBuffer: 1024 * 1024,
+    });
+}
+
+function loaderOf(command: { args: string[] }): string {
+    const encoded = command.args.at(-1);
+    if (!encoded) throw new Error("missing encoded PowerShell loader");
+    return Buffer.from(encoded, "base64").toString("utf16le");
+}
+
+
+// Windows PowerShell 5.1 lacks these accelerators; use [UInt64]/[UInt32]/[UInt16] instead.
+const WINDOWS_POWERSHELL_UNSUPPORTED_ACCELERATOR = /\[(?:ulong|uint|ushort|sbyte|semver)\]/i;
+describe("Hyper-V provider adapter", () => {
+    it("restricts provisioning media filesystem masks at compile time", () => {
+        expectTypeOf<Parameters<typeof isoWriterLines>[0]>().toEqualTypeOf<3 | 7 | undefined>();
+    });
+    it("compiles the generated ISO diagnostic expression and preserves nested failure codes", () => {
+        const line = isoWriterLines().find(line => line.includes("$CauseMessage -match"))!;
+        const pattern = line.match(/-match '([^']+)'/)?.[1];
+        expect(pattern).toBeTruthy();
+        const expression = new RegExp(pattern!);
+        expect(expression.exec("wrapper: hyper-v-provisioning-media-copy-incomplete")?.[0]).toBe("hyper-v-provisioning-media-copy-incomplete");
+        expect(expression.test("other failure")).toBe(false);
+    });
+    it("hides every host PowerShell adapter process", () => {
+        const command = hyperVReadinessCommand("powershell.exe");
+        expect(command.args.slice(0, 2)).toEqual(["-WindowStyle", "Hidden"]);
+        expect(command.args).toContain("-NonInteractive");
+    });
+
+    it.skipIf(process.platform !== "win32")("creates provisioning ISO media from a fenced file tree", () => {
+        const root = mkdtempSync(join(tmpdir(), "ccc-hyper-v-media-probe-"));
+        try {
+            const generated = scriptOf(hyperVGuestProvisionCommand({
+                executable: "powershell.exe",
+                ownerId,
+                deviceId,
+                incarnationId,
+                vmName: hyperVVmName(ownerId, deviceId, incarnationId),
+                vmId,
+                diskPath: join(root, "root.vhdx"),
+                deviceRoot: root,
+                credentialPath: join(root, "guest.credential.xml"),
+                provisioningMediaPath: join(root, "autounattend.iso"),
+                guestUsername: "ccc01234567",
+                guestPassword: "Ccc!7this-is-a-long-disposable-password",
+            }));
+            const assertStart = generated.indexOf("function Assert-NoReparsePath");
+            const assertEnd = generated.indexOf("\n$Vm =", assertStart);
+            const typeStart = generated.indexOf("if (-not ('CccIsoStreamWriter' -as [type]))");
+            const typeMarker = "'@ -Language CSharp -ErrorAction Stop\n}";
+            const typeEnd = generated.indexOf(typeMarker, typeStart) + typeMarker.length;
+            const writerStart = generated.indexOf("function Remove-CccIsoSourceRoot");
+            const writerEnd = generated.indexOf("\n  Write-CccIso $IsoFiles", writerStart);
+            expect({ assertStart, assertEnd, typeStart, typeEnd, writerStart, writerEnd }).toEqual(expect.objectContaining({
+                assertStart: expect.any(Number),
+                assertEnd: expect.any(Number),
+                typeStart: expect.any(Number),
+                typeEnd: expect.any(Number),
+                writerStart: expect.any(Number),
+                writerEnd: expect.any(Number),
+            }));
+            expect(Math.min(assertStart, assertEnd, typeStart, typeEnd, writerStart, writerEnd)).toBeGreaterThanOrEqual(0);
+            const isoPath = join(root, "probe.iso").replace(/'/g, "''");
+            const sourceRoot = join(root, "private", "probe.source").replace(/'/g, "''");
+            const probeScript = [
+                "$ErrorActionPreference = 'Stop'",
+                jsonScript([], undefined, true).slice(jsonScript([], undefined, true).indexOf("function Assert-NoReparsePath")),
+                generated.slice(typeStart, typeEnd),
+                generated.slice(writerStart, writerEnd),
+                `$IsoPath = '${isoPath}'`,
+                `$SourceRoot = '${sourceRoot}'`,
+                "$IsoFiles = [ordered]@{ 'probe.txt' = [Text.Encoding]::UTF8.GetBytes('ccc-hyper-v-media-probe') }",
+                "try {",
+                "  Write-CccIso $IsoFiles $IsoPath 'CCC_PROBE' $SourceRoot",
+                "  $IsoItem = Get-Item -LiteralPath $IsoPath -Force -ErrorAction Stop",
+                "  $IsoText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($IsoPath))",
+                "  if ($IsoText.IndexOf('probe.txt', [StringComparison]::OrdinalIgnoreCase) -lt 0) { throw 'hyper-v-provisioning-media-probe-name-missing' }",
+                "  if ($IsoText.IndexOf('ccc-hyper-v-media-probe', [StringComparison]::Ordinal) -lt 0) { throw 'hyper-v-provisioning-media-probe-content-missing' }",
+                "  if (Test-Path -LiteralPath $SourceRoot) { throw 'hyper-v-provisioning-media-probe-source-residue' }",
+                "  [ordered]@{ ok = $true; contentVerified = $true; length = [long]$IsoItem.Length } | ConvertTo-Json -Compress",
+                "} finally {",
+                "  Remove-Item -LiteralPath $IsoPath -Force -ErrorAction SilentlyContinue",
+                "}",
+            ].join("\n");
+            const result = spawnPowerShell([
+                "-WindowStyle",
+                "Hidden",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                Buffer.from(probeScript, "utf16le").toString("base64"),
+            ], {
+                encoding: "utf8",
+                timeout: 30_000,
+                maxBuffer: 1024 * 1024,
+                windowsHide: true,
+            });
+            expect(result.status, result.stderr || result.error?.message).toBe(0);
+            expect(result.stdout).toContain('"ok":true');
+            expect(result.stdout).toContain('"contentVerified":true');
+            expect(result.stdout).toMatch(/"length":\d+/);
+
+            const cleanupIsoPath = join(root, "cleanup-failure.iso").replace(/'/g, "''");
+            const cleanupSourceRoot = join(root, "private", "cleanup-failure.source").replace(/'/g, "''");
+            const primaryIsoPath = join(root, "primary-failure.iso").replace(/'/g, "''");
+            const primarySourceRoot = join(root, "private", "primary-failure.source").replace(/'/g, "''");
+            const cleanupFailureScript = [
+                "$ErrorActionPreference = 'Stop'",
+                jsonScript([], undefined, true).slice(jsonScript([], undefined, true).indexOf("function Assert-NoReparsePath")),
+                generated.slice(typeStart, typeEnd),
+                generated.slice(writerStart, writerEnd),
+                "$OriginalRemoveCccIsoSourceRoot = ${function:Remove-CccIsoSourceRoot}",
+                "function Invoke-CccCleanupFailureCase([string]$IsoPath, [string]$SourceRoot, [Collections.IDictionary]$IsoFiles, [string]$ExpectedFailure) {",
+                "  $script:CccCleanupCalls = 0",
+                "  function Remove-CccIsoSourceRoot([string]$Candidate) {",
+                "    $script:CccCleanupCalls++",
+                "    if ($script:CccCleanupCalls -gt 1) { throw 'injected-cleanup-failure' }",
+                "    & $OriginalRemoveCccIsoSourceRoot $Candidate",
+                "  }",
+                "  try {",
+                "    Write-CccIso $IsoFiles $IsoPath 'CCC_PROBE' $SourceRoot",
+                "    throw 'expected-write-ccc-iso-failure'",
+                "  } catch {",
+                "    if ([string]$_.Exception.Message -ne $ExpectedFailure) { throw }",
+                "    [Console]::Out.WriteLine($ExpectedFailure)",
+                "  } finally {",
+                "    & $OriginalRemoveCccIsoSourceRoot $SourceRoot",
+                "    Remove-Item -LiteralPath $IsoPath -Force -ErrorAction SilentlyContinue",
+                "  }",
+                "}",
+                `$CleanupIsoPath = '${cleanupIsoPath}'`,
+                `$CleanupSourceRoot = '${cleanupSourceRoot}'`,
+                "$ValidFiles = [ordered]@{ 'probe.txt' = [Text.Encoding]::UTF8.GetBytes('cleanup-failure') }",
+                "Invoke-CccCleanupFailureCase $CleanupIsoPath $CleanupSourceRoot $ValidFiles 'hyper-v-provisioning-media-source-cleanup-failed'",
+                `$PrimaryIsoPath = '${primaryIsoPath}'`,
+                `$PrimarySourceRoot = '${primarySourceRoot}'`,
+                "$InvalidFiles = [ordered]@{ '../bad' = [Text.Encoding]::UTF8.GetBytes('primary-failure') }",
+                "Invoke-CccCleanupFailureCase $PrimaryIsoPath $PrimarySourceRoot $InvalidFiles 'hyper-v-provisioning-media-source-entry-invalid'",
+            ].join("\n");
+            const cleanupFailureResult = spawnPowerShell([
+                "-WindowStyle",
+                "Hidden",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                Buffer.from(cleanupFailureScript, "utf16le").toString("base64"),
+            ], {
+                encoding: "utf8",
+                timeout: 30_000,
+                maxBuffer: 1024 * 1024,
+                windowsHide: true,
+            });
+            expect(cleanupFailureResult.status, cleanupFailureResult.stderr || cleanupFailureResult.error?.message).toBe(0);
+            expect(cleanupFailureResult.stdout).toContain("hyper-v-provisioning-media-source-cleanup-failed");
+            expect(cleanupFailureResult.stdout).toContain("hyper-v-provisioning-media-source-entry-invalid");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it("streams the standard Ubuntu acquisition program over stdin instead of the Windows command line", () => {
+        const acquire = hyperVAcquireBaseImageCommand({
+            executable: "powershell.exe",
+            profile: "ubuntu-lts",
+            imageRoot: "/cache",
+            expectedGeneration: 2,
+        });
+
+        expect(acquire.args).toContain("-EncodedCommand");
+        expect(acquire.args).not.toContain("-");
+        const loader = Buffer.from(acquire.args.at(-1)!, "base64").toString("utf16le");
+        expect(loader).toContain("$E=[Console]::In.ReadToEnd().Trim()");
+        expect(loader).toContain("[ScriptBlock]::Create($P)");
+        expect(loader).toContain("$env:CCC_HYPER_V_STAGE=$null");
+        expect(loader).toContain("$S=$env:CCC_HYPER_V_STAGE");
+        expect(acquire.input).toMatch(/^[A-Za-z0-9+/=]+$/);
+        const acquireScript = scriptOf(acquire);
+        expect(acquireScript).toContain("Save-BoundedDownload");
+        expect(acquireScript).toContain("CCC_HYPER_V_RESULT_B64:");
+        expect(acquireScript).toContain("function Set-CccAcquireStage");
+        expect(acquireScript).toContain("$env:CCC_HYPER_V_STAGE = $script:CccAcquireStage");
+        expect(acquireScript).toContain("$env:CCC_HYPER_V_STAGE = $Stage");
+        expect(acquireScript).toContain("throw $script:CccAcquireStage");
+        expect(acquireScript.indexOf("try {"))
+            .toBeLessThan(acquireScript.indexOf("Import-Module Hyper-V -ErrorAction Stop"));
+        const acquireStages = [
+            "Set-CccAcquireStage 'hyper-v-base-image-download-failed'",
+            "Set-CccAcquireStage 'hyper-v-base-image-hash-failed'",
+            "Set-CccAcquireStage 'hyper-v-base-image-source-hash-failed'",
+            "Set-CccAcquireStage 'hyper-v-base-image-source-inspection-failed'",
+            "Set-CccAcquireStage 'hyper-v-base-image-convert-failed'",
+            "Set-CccAcquireStage 'hyper-v-base-image-partial-open-failed'",
+            "Set-CccAcquireStage 'hyper-v-base-image-partial-hash-failed'",
+            "Set-CccAcquireStage 'hyper-v-base-image-partial-inspection-failed'",
+            "Set-CccAcquireStage 'hyper-v-base-image-final-move-failed'",
+            "Set-CccAcquireStage 'hyper-v-base-image-final-inspection-failed'",
+            "Set-CccAcquireStage 'hyper-v-base-image-final-observation-failed'",
+        ];
+        for (let index = 1; index < acquireStages.length; index++) {
+            expect(acquireScript.indexOf(acquireStages[index - 1]))
+                .toBeLessThan(acquireScript.indexOf(acquireStages[index]));
+        }
+        expect(acquire.args.join(" ").length).toBeLessThan(2048);
+        expect(acquireScript).toContain("ubuntu-24.04-server-cloudimg-amd64.img");
+        expect(acquireScript).not.toContain("-azure.vhd.tar.gz");
+    });
+
+    it("keeps generated Hyper-V PowerShell free of PowerShell 7-only type accelerators", () => {
+        const root = join(__dirname, "..", "..", "packages", "device-lab", "src", "host-control", "hyper-v");
+        const offenders = readdirSync(root)
+            .filter((file) => file.endsWith(".ts"))
+            .filter((file) => WINDOWS_POWERSHELL_UNSUPPORTED_ACCELERATOR.test(readFileSync(join(root, file), "utf-8")));
+        expect(offenders).toEqual([]);
+    });
+
+    it("builds automatic image phase commands without inline VHD operations", () => {
+        for (const profile of ["windows-server", "ubuntu-lts"] as const) {
+            const options = { executable: "powershell.exe", profile, imageRoot: "/cache", expectedGeneration: 2 } as const;
+            const prepare = scriptOf(hyperVAcquireBaseImagePrepareCommand(options));
+            const finalize = scriptOf(hyperVAcquireBaseImageFinalizeCommand({
+                ...options,
+                expectedPartialSha256: "a".repeat(64),
+                expectedPartialFileId: "123",
+                expectedVirtualSizeBytes: profile === "ubuntu-lts" ? HYPER_V_UBUNTU_VIRTUAL_SIZE_BYTES : 64 * 1024 * 1024 * 1024,
+                expectedVhdType: "Dynamic",
+                ...(profile === "ubuntu-lts" ? {
+                    expectedSourceVhdSha256: "b".repeat(64), expectedSourceFileId: "456", expectedQemuSha256: "c".repeat(64),
+                } : {}),
+            }));
+            expect(prepare).toContain("$CccAcquirePhase = 'prepare'");
+            expect(prepare.indexOf("if (Test-Path -LiteralPath $ImagePath) { throw 'hyper-v-base-image-unmanaged-existing' }"))
+                .toBeLessThan(prepare.indexOf("Protect-CccImageDirectory $ProfileRoot"));
+            expect(finalize).toContain("$CccAcquirePhase = 'finalize'");
+            // The broker runs these through Windows PowerShell 5.1, which has no [ulong]/[uint]/[ushort]
+            // accelerators; a PowerShell 7 spelling fails the finalizer before it reads the partial image.
+            expect(prepare).not.toMatch(WINDOWS_POWERSHELL_UNSUPPORTED_ACCELERATOR);
+            expect(finalize).not.toMatch(WINDOWS_POWERSHELL_UNSUPPORTED_ACCELERATOR);
+            expect(prepare).not.toMatch(/\b(?:Get|Convert|Resize)-VHD\b/);
+            expect(finalize).not.toMatch(/\b(?:Get|Convert|Resize)-VHD\b/);
+            expect(finalize).toContain("$PartialHashBefore -ne $ExpectedPartialHash");
+            expect(finalize).toContain("$PartialGuard = [IO.File]::Open($PartialPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)");
+            expect(finalize.indexOf("$PartialGuard.Dispose(); $PartialGuard = $null"))
+                .toBeLessThan(finalize.indexOf("[IO.File]::Move($PartialPath, $ImagePath)"));
+            expect(finalize.indexOf("$PartialHashBefore -ne $ExpectedPartialHash"))
+                .toBeLessThan(finalize.indexOf("[IO.File]::Move($PartialPath, $ImagePath)"));
+            if (profile === "ubuntu-lts") {
+                expect(prepare).toContain("$NormalizedVhdPath");
+                expect(finalize).toContain("& $QemuImg compare -f vpc -F vhdx $NormalizedVhdPath $PartialPath");
+            }
+        }
+    });
+
+    it("parses bounded automatic preparation observations and rejects extra fields", () => {
+        const observation = {
+            ok: true, profile: "windows-server", imagePath: "/cache/windows-server/base.vhdx",
+            partialPath: "/cache/windows-server/base.partial.vhdx", partialSha256: "a".repeat(64), partialSizeBytes: 1024,
+        };
+        const marked = (value: unknown) => `CCC_HYPER_V_RESULT_B64:${Buffer.from(JSON.stringify(value)).toString("base64")}`;
+        expect(parseHyperVAcquireBaseImagePrepareObservation(marked(observation))).toEqual(observation);
+        expect(parseHyperVAcquireBaseImagePrepareObservation(marked({ ...observation, extra: true }))).toBeNull();
+        expect(parseHyperVAcquireBaseImagePrepareObservation(marked({ ...observation, partialPath: "relative.vhdx" }))).toBeNull();
+        expect(parseHyperVAcquireBaseImagePrepareObservation("garbage")).toBeNull();
+    });
+
+    it.skipIf(process.platform !== "win32")("classifies bounded-loader validation, parse, and execution failures on Windows PowerShell 5.1", () => {
+        const acquire = hyperVAcquireBaseImageCommand({
+            executable: "powershell.exe",
+            profile: "ubuntu-lts",
+            imageRoot: "C:\\ccc-loader-probe",
+            expectedGeneration: 2,
+        });
+        const run = (input: string) => spawnSync(acquire.executable, acquire.args, {
+            input,
+            encoding: "utf8",
+            windowsHide: true,
+            timeout: 15_000,
+        });
+        const encoded = (program: string) => Buffer.from(program, "utf8").toString("base64");
+
+        const success = run(encoded("Write-Output 'ccc-hyper-v-loader-ok'"));
+        expect(success.status, success.stderr || success.error?.message).toBe(0);
+        expect(success.stdout).toContain("ccc-hyper-v-loader-ok");
+
+        const invalid = run("not-base64!");
+        expect(invalid.status).toBe(1);
+        expect(invalid.stderr).toContain("hyper-v-powershell-program-invalid");
+
+        const parseFailure = run(encoded("if ("));
+        expect(parseFailure.status).toBe(1);
+        expect(parseFailure.stderr).toContain("hyper-v-powershell-parse-failed");
+
+        const knownFailure = run(encoded("throw 'hyper-v-vm-ownership-mismatch'"));
+        expect(knownFailure.status).toBe(1);
+        expect(knownFailure.stderr).toContain("hyper-v-vm-ownership-mismatch");
+
+        const runtimeFailure = run(encoded("throw 'untrusted secret-bearing failure'"));
+        expect(runtimeFailure.status).toBe(1);
+        expect(runtimeFailure.stderr).toContain("hyper-v-powershell-execution-failed");
+        expect(runtimeFailure.stderr).not.toContain("secret-bearing");
+
+        for (const stage of ["download", "hash", "archive-check", "extract", "normalize", "inspection", "finalize"]) {
+            const diagnostic = `hyper-v-base-image-${stage}-failed`;
+            const stageFailure = run(encoded([
+                `$env:CCC_HYPER_V_STAGE = '${diagnostic}'`,
+                "throw 'untrusted stage failure'",
+            ].join("\n")));
+            expect(stageFailure.status).toBe(1);
+            expect(stageFailure.stderr).toContain(diagnostic);
+            expect(stageFailure.stderr).not.toContain("untrusted stage failure");
+        }
+
+        const inheritedStage = spawnSync(acquire.executable, acquire.args, {
+            input: encoded("throw 'untrusted inherited-stage failure'"),
+            encoding: "utf8",
+            windowsHide: true,
+            timeout: 15_000,
+            env: { ...process.env, CCC_HYPER_V_STAGE: "hyper-v-base-image-hash-failed" },
+        });
+        expect(inheritedStage.status).toBe(1);
+        expect(inheritedStage.stderr).toContain("hyper-v-powershell-execution-failed");
+        expect(inheritedStage.stderr).not.toContain("hyper-v-base-image-hash-failed");
+    });
+
+    it.skipIf(process.platform !== "win32")("keeps a Canonical ZIP readable by tar while a non-delete-sharing handle is held", () => {
+        const root = mkdtempSync(join(tmpdir(), "ccc-hyper-v-archive-lock-"));
+        const payload = join(root, "payload.txt");
+        const archive = join(root, "source.vhdx.zip");
+        writeFileSync(payload, "archive-lock-probe");
+        try {
+            const created = spawnSync("tar.exe", ["-a", "-cf", archive, "-C", root, "payload.txt"], {
+                encoding: "utf8",
+                windowsHide: true,
+                timeout: 30_000,
+            });
+            expect(created.status, created.stderr || created.error?.message).toBe(0);
+            const escapedArchive = archive.replace(/'/g, "''");
+            const probe = [
+                "$ErrorActionPreference = 'Stop'",
+                `$Archive = '${escapedArchive}'`,
+                "$Handle = [IO.File]::Open($Archive, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)",
+                "try { & tar.exe -tf $Archive; if ($LASTEXITCODE -ne 0) { throw 'tar-read-failed' } } finally { $Handle.Dispose() }",
+            ].join("\n");
+            const result = spawnPowerShell([
+                "-WindowStyle",
+                "Hidden",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                Buffer.from(probe, "utf16le").toString("base64"),
+            ], {
+                encoding: "utf8",
+                windowsHide: true,
+                timeout: 30_000,
+            });
+            expect(result.status, result.stderr || result.error?.message).toBe(0);
+            expect(result.stdout).toContain("payload.txt");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it.skipIf(process.platform !== "win32")("creates an unencrypted SSH key through PowerShell 5.1 without native empty-argument rewriting", () => {
+        const root = mkdtempSync(join(tmpdir(), "ccc-hyper-v-keygen-probe-"));
+        const privateKeyPath = join(root, "id_ed25519");
+        try {
+            const seed = hyperVLinuxSeedCommand({
+                executable: "powershell.exe",
+                ownerId,
+                deviceId: "linux-keygen-probe",
+                incarnationId,
+                vmName: hyperVVmName(ownerId, "linux-keygen-probe", incarnationId),
+                vmId,
+                diskPath: join(root, "root.vhdx"),
+                deviceRoot: root,
+                privateRoot: root,
+                seedDiskPath: join(root, "cidata.iso"),
+                sshPrivateKeyPath: privateKeyPath,
+                sshPublicKeyPath: `${privateKeyPath}.pub`,
+                sshHostPrivateKeyPath: join(root, "ssh_host_ed25519_key"),
+                sshHostPublicKeyPath: join(root, "ssh_host_ed25519_key.pub"),
+                knownHostsPath: join(root, "known_hosts"),
+                guestUsername: "ccc01234567",
+                networkAddress: "172.29.0.10",
+                networkGateway: "172.29.0.1",
+                networkPrefixLength: 24,
+                macAddress: "02:11:22:33:44:66",
+            });
+            const generated = scriptOf(seed);
+            const functionStart = generated.indexOf("function New-CccSshKey");
+            const functionEnd = generated.indexOf("\nif (-not (Test-Path", functionStart);
+            expect(functionStart).toBeGreaterThanOrEqual(0);
+            expect(functionEnd).toBeGreaterThan(functionStart);
+            const escapedPath = privateKeyPath.replace(/'/g, "''");
+            const probe = [
+                "$ErrorActionPreference = 'Stop'",
+                generated.slice(functionStart, functionEnd),
+                "$SshKeygen = (Get-Command ssh-keygen.exe -ErrorAction Stop).Source",
+                `$Status = New-CccSshKey $SshKeygen 'ccc-device-lab-${vmId}' '${escapedPath}'`,
+                "if ($Status -ne 0) { throw 'hyper-v-linux-ssh-keygen-probe-failed' }",
+            ].join("\n");
+            const created = spawnPowerShell([
+                "-WindowStyle",
+                "Hidden",
+                "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-EncodedCommand", Buffer.from(probe, "utf16le").toString("base64"),
+            ], { encoding: "utf8", timeout: 30_000, windowsHide: true });
+            expect(created.status, created.stderr || created.error?.message).toBe(0);
+
+            const readable = spawnSync("ssh-keygen.exe", ["-y", "-f", privateKeyPath], {
+                encoding: "utf8",
+                timeout: 15_000,
+                windowsHide: true,
+            });
+            expect(readable.status, readable.stderr || readable.error?.message).toBe(0);
+            expect(readable.stdout).toMatch(/^ssh-ed25519 [A-Za-z0-9+/=]+/);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it("parses a framed base-image result from noisy Windows PowerShell stdin output", () => {
+        const observation = {
+            ok: true,
+            profile: "ubuntu-lts",
+            imagePath: "/state/images/hyper-v/ubuntu-lts/base.vhdx",
+            sha256: "a".repeat(64),
+            sizeBytes: 1024,
+            virtualSizeBytes: 64 * 1024 * 1024 * 1024,
+            vhdType: "Dynamic",
+            generation: 2,
+            reused: false,
+        };
+        const framed = Buffer.from(JSON.stringify(observation), "utf8").toString("base64");
+        expect(parseHyperVBaseImageObservation(`PS C:\\> command text\r\nPS C:\\> CCC_HYPER_V_RESULT_B64:${framed}\r\nPS C:\\>`)).toEqual(observation);
+        expect(parseHyperVBaseImageObservation("CCC_HYPER_V_RESULT_B64:not-base64")).toBeNull();
+    });
+
+    it("builds an explicit elevated Hyper-V setup command without automatic reboot", () => {
+        const setup = hyperVSetupCommand("powershell.exe");
+        const script = scriptOf(setup);
+        expect(script).toContain("Start-Process -FilePath $Executable -Verb RunAs");
+        expect(script.match(/-WindowStyle Hidden -PassThru/g)).toHaveLength(2);
+        const innerEncoded = /\$InnerEncoded = '([^']+)'/.exec(script)?.[1];
+        expect(innerEncoded).toBeTruthy();
+        const innerScript = Buffer.from(innerEncoded!, "base64").toString("utf16le");
+        expect(innerScript).toContain("Microsoft-Hyper-V-All");
+        expect(innerScript).toContain("S-1-5-32-578");
+        expect(innerScript).toContain("SecurityIdentifier]::new($SetupUserSid)");
+        expect(innerScript).toContain("Translate([Security.Principal.NTAccount])");
+        expect(innerScript).not.toContain("S-1-5-21-");
+        expect(innerScript).toContain("Add-LocalGroupMember");
+        expect(innerScript).toContain("-All -NoRestart");
+        expect(innerScript).not.toContain("Restart-Computer");
+        expect(script).not.toContain("Restart-Computer");
+        expect(parseHyperVSetupObservation(JSON.stringify({
+            ok: true,
+            featureName: "Microsoft-Hyper-V-All",
+            beforeState: "Disabled",
+            afterState: "Enabled",
+            changed: true,
+            elevated: true,
+            rebootRequired: true,
+            hyperVAdministratorsMember: true,
+            membershipChanged: true,
+            managementAccess: false,
+            sessionRefreshRequired: true,
+        }))).toEqual({
+            ok: true,
+            featureName: "Microsoft-Hyper-V-All",
+            beforeState: "Disabled",
+            afterState: "Enabled",
+            changed: true,
+            elevated: true,
+            rebootRequired: true,
+            hyperVAdministratorsMember: true,
+            membershipChanged: true,
+            managementAccess: false,
+            sessionRefreshRequired: true,
+        });
+        expect(parseHyperVSetupObservation('{"ok":true,"featureName":"Other"}')).toBeNull();
+        expect(parseHyperVSetupObservation(JSON.stringify({
+            ok: true,
+            featureName: "Microsoft-Hyper-V-All",
+            beforeState: "Enabled",
+            afterState: "Enabled",
+            changed: false,
+            elevated: false,
+            rebootRequired: false,
+            sessionRefreshRequired: "false",
+        }))).toBeNull();
+
+        const networkSetup = hyperVSetupCommand("powershell.exe", {
+            switchName: "CCC Device Lab",
+            natName: "CCCDeviceLab",
+            marker: "ccc-device-lab:hyper-v-network:v1",
+            prefix: "172.29.0.0/24",
+            gateway: "172.29.0.1",
+            prefixLength: 24,
+            allowExistingNat: true,
+        });
+        const networkOuter = scriptOf(networkSetup);
+        expect(networkOuter).toContain("[IO.Pipes.PipeDirection]::InOut");
+        expect(networkOuter).toContain("$Writer.WriteLine($NetworkProgramEncoded)");
+        expect(networkOuter.indexOf("$ClientProcessId -ne [uint32]$Child.Id"))
+            .toBeLessThan(networkOuter.indexOf("$Writer.WriteLine($NetworkProgramEncoded)"));
+        const networkInnerEncoded = networkOuter.match(/\$InnerEncoded = '([^']+)'/)?.[1];
+        expect(networkInnerEncoded).toBeTruthy();
+        const networkInner = Buffer.from(networkInnerEncoded!, "base64").toString("utf16le");
+        expect(networkInner).toContain("$NetworkProgramEncoded = $Reader.ReadLine()");
+        expect(networkInner).toContain("hyper-v-setup-network-program-invalid");
+        expect(networkInner).not.toContain("New-NetIPAddress");
+        expect(networkOuter).not.toContain("New-NetIPAddress");
+        expect(networkSetup.args.join(" ").length).toBeLessThan(2048);
+
+        const parsedNetwork = parseHyperVSetupObservation(JSON.stringify({
+            ok: true,
+            featureName: "Microsoft-Hyper-V-All",
+            beforeState: "Enabled",
+            afterState: "Enabled",
+            changed: false,
+            elevated: true,
+            rebootRequired: false,
+            network: {
+                ok: true,
+                switchName: "CCC Device Lab",
+                switchId: vmId,
+                natName: "CCCDeviceLab",
+                natInstanceId: "ccc-network-instance-1",
+                prefix: "172.29.0.0/24",
+                gateway: "172.29.0.1",
+                interfaceIndex: 42,
+                createdSwitch: false,
+                createdNat: false,
+            },
+        }));
+        expect(parsedNetwork?.network).toEqual(expect.objectContaining({
+            switchId: vmId,
+            natInstanceId: "ccc-network-instance-1",
+        }));
+    });
+
+    it("imports immutable base VHDX files with hash and format verification", () => {
+        const command = hyperVPrepareBaseImageCommand({
+            executable: "powershell.exe",
+            profile: "windows-11",
+            sourceImagePath: "/project/images/windows-11.vhdx",
+            sourceRoot: "/project",
+            imagePath: "/state/images/hyper-v/windows-11/base.vhdx",
+            imageRoot: "/state/images/hyper-v",
+        });
+        const script = scriptOf(command);
+        expect(script).toContain("Get-FileHash -LiteralPath $SourceImage -Algorithm SHA256");
+        expect(script).toContain("Get-VHD -Path $TempPath");
+        expect(script).toContain("function Get-CccVhdGeneration");
+        expect(script).toContain("Mount-VHD -Path $Path -ReadOnly -NoDriveLetter");
+        expect(script.match(/Get-CccVhdGeneration \$ImagePath/g)).toHaveLength(2);
+        expect(script).toContain("hyper-v-base-image-profile-conflict");
+        expect(script.match(/hyper-v-base-image-invalid-parent/g)).toHaveLength(2);
+        expect(script).toContain("hyper-v-base-image-copy-hash-mismatch");
+        expect(script).toContain("Remove-Item -LiteralPath $TempPath -Force");
+        expect(script).toContain("Move-Item -LiteralPath $TempPath -Destination $ImagePath");
+        expect(() => hyperVPrepareBaseImageCommand({
+            executable: "powershell.exe",
+            profile: "windows-11",
+            sourceImagePath: "/foreign/windows-11.vhdx",
+            sourceRoot: "/project",
+            imagePath: "/state/images/hyper-v/windows-11/base.vhdx",
+            imageRoot: "/state/images/hyper-v",
+        })).toThrow("hyper-v-base-image-source-outside-owner-root");
+        expect(() => hyperVPrepareBaseImageCommand({
+            executable: "powershell.exe",
+            profile: "windows-11",
+            sourceImagePath: "/project/images/windows-11.vhdx",
+            sourceRoot: "/project",
+            imagePath: "/foreign/base.vhdx",
+            imageRoot: "/state/images/hyper-v",
+        })).toThrow("hyper-v-base-image-target-outside-owner-root");
+        expect(parseHyperVBaseImageObservation(JSON.stringify({
+            ok: true,
+            profile: "windows-11",
+            imagePath: "/state/images/hyper-v/windows-11/base.vhdx",
+            sha256: "A".repeat(64),
+            sizeBytes: 1024,
+            virtualSizeBytes: 64 * 1024 * 1024 * 1024,
+            vhdType: "Dynamic",
+            generation: 2,
+            reused: false,
+        }))).toEqual({
+            ok: true,
+            profile: "windows-11",
+            imagePath: "/state/images/hyper-v/windows-11/base.vhdx",
+            sha256: "a".repeat(64),
+            sizeBytes: 1024,
+            virtualSizeBytes: 64 * 1024 * 1024 * 1024,
+            vhdType: "Dynamic",
+            generation: 2,
+            reused: false,
+        });
+        expect(parseHyperVBaseImageObservation('{"ok":true,"profile":"linux"}')).toBeNull();
+        expect(parseHyperVBaseImageObservation(JSON.stringify({ ok: true, profile: "windows-11", imagePath: "/state/base.vhdx", sha256: "a".repeat(64), sizeBytes: 1, virtualSizeBytes: 64, vhdType: "Differencing", reused: true }))).toBeNull();
+    });
+
+    it("builds a fixed Microsoft Windows Server VHDX acquisition command", () => {
+        const command = hyperVAcquireBaseImageCommand({
+            executable: "powershell.exe",
+            profile: "windows-server",
+            imageRoot: "/state/images/hyper-v",
+            expectedGeneration: 2,
+        });
+        const script = scriptOf(command);
+        expect(command).toMatchObject({ mode: "exec", provider: "hyper-v", executable: "powershell.exe" });
+        expect(script).toContain("https://go.microsoft.com/fwlink/?clcid=0x409&country=us&culture=en-us&linkid=2345826");
+        expect(script).toContain("$WindowsMaxBytes = [long]16GB");
+        expect(script).toContain("ResponseHeadersRead");
+        expect(script).toContain("$Response.Content.Headers.ContentLength");
+        expect(script).toContain("$RequiredBytes = [long]$ContentLength + [long]10GB");
+        expect(script.indexOf("$ContentLength -gt $MaximumBytes")).toBeLessThan(script.indexOf("$RequiredBytes = [long]$ContentLength"));
+        expect(script.indexOf("$DestinationDrive.AvailableFreeSpace -lt $RequiredBytes")).toBeLessThan(script.indexOf("$OutputStream = [IO.File]::Open"));
+        expect(script).toContain("$Handler.AllowAutoRedirect = $false");
+        expect(script).toContain("Add-Type -AssemblyName System.Net.Http -ErrorAction Stop");
+        expect(script).toContain("for ($Redirects = 0; $Redirects -le 10; $Redirects++)");
+        expect(script).toContain("& $ValidateHopUri $CurrentUri");
+        expect(script).toContain("[Uri]::new($CurrentUri, $Response.Headers.Location)");
+        expect(script).toContain("$HostName -eq 'aka.ms'");
+        expect(script).toContain(".download.microsoft.com");
+        expect(script).toContain("software-static.download.prss.microsoft.com");
+        expect(script).not.toContain("$HostName.EndsWith('.microsoft.com')");
+        expect(script).not.toMatch(/\$ValidateMicrosoftVhdx[^\n]+aka\.ms/);
+        expect(script).toContain("AbsolutePath.EndsWith('.vhdx'");
+        expect(script.indexOf("Set-CccAcquireStage 'hyper-v-base-image-download-failed'"))
+            .toBeLessThan(script.indexOf("Set-CccAcquireStage 'hyper-v-base-image-partial-open-failed'"));
+        expect(script.indexOf("Set-CccAcquireStage 'hyper-v-base-image-partial-inspection-failed'"))
+            .toBeLessThan(script.indexOf("Assert-BaseVhd $PartialPath"));
+        expect(script.indexOf("Save-BoundedDownload $WindowsUrl $PartialPath"))
+            .toBeLessThan(script.indexOf("Protect-CccImageDirectory $ProfileRoot", script.indexOf("Save-BoundedDownload $WindowsUrl $PartialPath")));
+        expect(script.indexOf("Protect-CccImageDirectory $ProfileRoot", script.indexOf("Save-BoundedDownload $WindowsUrl $PartialPath")))
+            .toBeLessThan(script.indexOf("$PartialGuard = [IO.File]::Open($PartialPath"));
+        expect(script).toContain("Assert-BaseVhd $PartialPath");
+        expect(script).toContain("base.partial.vhdx");
+        expect(script).toContain("hyper-v-base-image-unmanaged-existing");
+        expect(script).not.toContain("Write-BaseObservation $ExistingVhd $true");
+        expect(script).toContain("Move-Item -LiteralPath $PartialPath -Destination $ImagePath");
+        expect(script).not.toContain("Remove-Item -LiteralPath $PartialPath -Force -ErrorAction SilentlyContinue");
+        expect(script).toContain("function Assert-NoReparsePath");
+        expect(script).toContain("hyper-v-path-reparse-point-rejected");
+        expect(script).not.toContain("$SourceUrl =");
+    });
+
+    it("builds a checksummed generic QCOW2 to native VHDX conversion command", () => {
+        const command = hyperVAcquireBaseImageCommand({
+            executable: "powershell.exe",
+            profile: "ubuntu-lts",
+            imageRoot: "/state/images/hyper-v",
+            expectedGeneration: 2,
+        });
+        const script = scriptOf(command);
+        expect(script).toContain("$SourceImagePath =");
+        expect(script).toContain("function Protect-CccImageDirectory([string]$Path)");
+        expect(script).toContain("$Security.SetAccessRuleProtection($true, $false)");
+        expect(script).toContain("$Security.SetOwner($CurrentSid)");
+        expect(script).toContain("[IO.Directory]::SetAccessControl($Target, $Security)");
+        expect(script).toContain("[IO.File]::SetAccessControl($Target, $Security)");
+        expect(script).toContain("$AllowedSids = @($AllowedSidObjects.Value)");
+        expect(script).toContain("foreach ($Sid in $AllowedSidObjects)");
+        expect(script).toContain("$Observed.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $CurrentSid.Value");
+        expect(script).toContain("if ($ObservedRules.Count -ne $AllowedSids.Count) { throw 'hyper-v-base-image-acl-failed' }");
+        expect(script).toContain("$Matching[0].FileSystemRights -ne $FullControl");
+        expect(script).toContain("Get-ChildItem -LiteralPath $Parent -Force -ErrorAction Stop");
+        expect(script).toContain("$Entry.Attributes -band [IO.FileAttributes]::ReparsePoint");
+        expect(script).toContain("Protect-CccImageDirectory $ProfileRoot");
+        expect(script.match(/Protect-CccImageDirectory \$ProfileRoot/g)?.length).toBeGreaterThanOrEqual(3);
+        expect(script).toContain("source.qcow2");
+        expect(script).toContain("$ImageDownloadPath = Join-Path $WorkPath 'source.download.qcow2'");
+        expect(script).toContain("Test-Path -LiteralPath $SourceImagePath -PathType Container");
+        expect(script).toContain("Test-Path -LiteralPath $SourceImagePath -PathType Leaf");
+        expect(script).toContain("$SourceReady = $CachedHash -eq $UbuntuImageSha256");
+        expect(script).toContain("Move-Item -LiteralPath $ImageDownloadPath -Destination $SourceImagePath");
+        expect(script.indexOf("Get-FileHash -LiteralPath $ImageDownloadPath"))
+            .toBeLessThan(script.indexOf("Move-Item -LiteralPath $ImageDownloadPath -Destination $SourceImagePath"));
+        expect(script).toContain("https://cloud-images.ubuntu.com/releases/noble/release-20260725/ubuntu-24.04-server-cloudimg-amd64.img");
+        expect(script).not.toContain("-azure.vhd.tar.gz");
+        expect(script).not.toContain("ubuntu-desktop-hyperv");
+        expect(script).toContain("d1940f7d69d343355e183dff1e08a59852d32e7309baa7a4bad8365b11b005ac");
+        expect(script).not.toContain("SHA256SUMS");
+        expect(script).toContain("$UbuntuMaxBytes = [long]5GB");
+        expect(script).toContain("DnsSafeHost.ToLowerInvariant() -eq 'cloud-images.ubuntu.com'");
+        expect(script).toContain("$SourceGuard = [IO.File]::Open($SourceImagePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)");
+        expect(script).toContain("hyper-v-base-image-checksum-mismatch");
+        expect(script).toContain("Android\\Sdk\\emulator\\qemu-img.exe");
+        expect(script).toContain("Get-AuthenticodeSignature -LiteralPath $QemuImg");
+        expect(script).toContain("O=Google LLC");
+        expect(script).toContain("$SourceInfo.format -ne 'qcow2'");
+        expect(script).toContain("convert -f qcow2 -O vpc -o subformat=fixed,force_size=on");
+        expect(script).not.toContain("-O vhdx");
+        expect(script).toContain("info -f vpc --output=json $QemuOutputPath");
+        expect(script).toContain("$ConvertedInfo.format -ne 'vpc'");
+        expect(script).toContain("$QemuOutputGuard.CopyTo($NormalizedOutput, 8388608)");
+        expect(script).toContain("$NormalizedOutput = [IO.File]::Open($NormalizedVhdPath");
+        expect(script).toContain("[IO.FileAttributes]::SparseFile");
+        expect(script).toContain("[IO.FileAttributes]::Compressed");
+        expect(script).toContain("[IO.FileAttributes]::Encrypted");
+        expect(script).toContain("hyper-v-base-image-filesystem-attributes-invalid");
+        expect(script).toContain("[string]$NormalizedVhd.VhdFormat -ne 'VHD'");
+        expect(script).toContain("[string]$NormalizedVhd.VhdType -ne 'Fixed'");
+        expect(script).toContain("$NormalizedVhdGuard = [IO.File]::Open($NormalizedVhdPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))");
+        expect(script).toContain("$GuardedNormalizedHashAfter = Get-CccGuardedSha256 $NormalizedVhdGuard");
+        expect(script).toContain("if ($GuardedNormalizedHashAfter -ne $GuardedNormalizedHash) { throw 'hyper-v-base-image-source-mutated' }");
+        expect(script).toContain("Convert-VHD -Path $NormalizedVhdPath -DestinationPath $PartialPath -VHDType Dynamic");
+        expect(script).toContain("Resize-VHD -Path $PartialPath -SizeBytes $UbuntuVirtualSizeBytes");
+        expect(script).toContain("[string]$ConvertedVhd.VhdFormat -ne 'VHDX'");
+        expect(script).toContain("Set-CccAcquireStage 'hyper-v-base-image-content-verify-failed'");
+        expect(script).toContain("convert|content-verify|partial-open");
+        expect(script).toContain("& $QemuImg compare -f vpc -F vhdx $NormalizedVhdPath $PartialPath");
+        expect(script).toContain("$CompareSourceGuard = [IO.File]::Open($NormalizedVhdPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)");
+        expect(script).toContain("$CompareTargetGuard = [IO.File]::Open($PartialPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)");
+        expect(script).toContain("$CompareSourceHashBefore = Get-CccGuardedSha256 $CompareSourceGuard");
+        expect(script).toContain("$CompareTargetHashBefore = Get-CccGuardedSha256 $CompareTargetGuard");
+        expect(script).toContain("if ($CompareSourceHashBefore -ne $GuardedNormalizedHashAfter) { throw 'hyper-v-base-image-source-mutated' }");
+        expect(script).toContain("$CompareExitCode = $LASTEXITCODE");
+        expect(script).toContain("if ($CompareExitCode -ne 0) { throw 'hyper-v-base-image-content-verify-failed' }");
+        expect(script).toContain("if ($CompareSourceHashAfter -ne $CompareSourceHashBefore) { throw 'hyper-v-base-image-source-mutated' }");
+        expect(script).toContain("if ($CompareTargetHashAfter -ne $CompareTargetHashBefore) { throw 'hyper-v-base-image-partial-mutated' }");
+        expect(script).toContain("$CompareTargetExpectedHash = $CompareTargetHashAfter");
+        expect(script).toContain("$PartialHashBefore = if ($CompareTargetGuard) { Get-CccGuardedSha256 $CompareTargetGuard }");
+        expect(script).toContain("if ($CompareTargetExpectedHash -and $PartialHashBefore -ne $CompareTargetExpectedHash) { throw 'hyper-v-base-image-partial-mutated' }");
+        expect(script).toContain("if ($CompareTargetExpectedHash -and $ValidatedPartialHash -ne $CompareTargetExpectedHash) { throw 'hyper-v-base-image-partial-mutated' }");
+        expect(script).toContain("$FinalGuard = [IO.File]::Open($ImagePath, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)");
+        expect(script).toContain("$CompareTargetGuard.CopyTo($FinalGuard, 8388608)");
+        expect(script).toContain("$PublishedWriteHash = Get-CccGuardedSha256 $FinalGuard");
+        expect(script).toContain("$FinalGuard.Dispose(); $FinalGuard = $null");
+        expect(script).toContain("$FinalGuard = [IO.File]::Open($ImagePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)");
+        expect(script).toContain("$PublishedReadHash = Get-CccGuardedSha256 $FinalGuard");
+        expect(script).toContain("if ($PublishedReadHash -ne $PublishedWriteHash) { throw 'hyper-v-base-image-final-hash-mismatch' }");
+        expect(script).toContain("$FinalHashBefore = if ($FinalGuard) { Get-CccGuardedSha256 $FinalGuard }");
+        expect(script).toContain("if ($CompareTargetExpectedHash -and $FinalHashBefore -ne $CompareTargetExpectedHash) { throw 'hyper-v-base-image-final-hash-mismatch' }");
+        expect(script).toContain("$QemuHashAfterCompare = Get-CccGuardedSha256 $QemuGuard");
+        expect(script.indexOf("$CompareSourceGuard = [IO.File]::Open($NormalizedVhdPath"))
+            .toBeLessThan(script.indexOf("$NormalizedVhdGuard.Dispose(); $NormalizedVhdGuard = $null"));
+        expect(script.indexOf("$CompareTargetGuard.CopyTo($FinalGuard, 8388608)"))
+            .toBeLessThan(script.indexOf("$FinalHashBefore = if ($FinalGuard)"));
+        expect(script.indexOf("if ($CompareTargetGuard) { $CompareTargetGuard.Dispose(); $CompareTargetGuard = $null }"))
+            .toBeGreaterThan(script.indexOf("Write-BaseObservation $Vhd $Generation $false $ValidatedPartialHash"));
+        expect(script.indexOf("if ($FinalGuard) { $FinalGuard.Dispose(); $FinalGuard = $null }"))
+            .toBeGreaterThan(script.indexOf("Write-BaseObservation $Vhd $Generation $false $ValidatedPartialHash"));
+        expect(script.indexOf("$QemuOutputGuard.CopyTo($NormalizedOutput"))
+            .toBeLessThan(script.indexOf("Convert-VHD -Path $NormalizedVhdPath"));
+        expect(script.indexOf("Convert-VHD -Path $NormalizedVhdPath"))
+            .toBeLessThan(script.indexOf("Resize-VHD -Path $PartialPath"));
+        expect(script.indexOf("Resize-VHD -Path $PartialPath"))
+            .toBeLessThan(script.indexOf("& $QemuImg compare -f vpc -F vhdx"));
+        expect(script.indexOf("& $QemuImg compare -f vpc -F vhdx"))
+            .toBeLessThan(script.indexOf("$Vhd = Assert-BaseVhd $PartialPath"));
+        expect(script).toContain("hyper-v-base-image-source-inspection-failed");
+        expect(script).toContain("hyper-v-base-image-convert-failed");
+        expect(script).toContain("hyper-v-base-image-partial-inspection-failed");
+        expect(script).toContain("hyper-v-base-image-final-move-failed");
+        expect(script).toContain("hyper-v-base-image-final-inspection-failed");
+        expect(script).toContain("hyper-v-base-image-final-observation-failed");
+        expect(script).toContain("[IO.FileAttributes]::ReparsePoint");
+        expect(script).toContain("$SourceHashBefore = Get-CccGuardedSha256 $SourceGuard");
+        expect(script).toContain("$SourceHashAfter = Get-CccGuardedSha256 $SourceGuard");
+        expect(script).toContain("if ($SourceHashAfter -ne $SourceHashBefore) { throw 'hyper-v-base-image-source-mutated' }");
+        expect(script).toContain("if ($QemuHashAfter -ne $QemuHashBefore) { throw 'hyper-v-qemu-img-mutated' }");
+        expect(script).toContain("$Vhd = Assert-BaseVhd $ImagePath");
+        expect(script).toContain("$Generation = $ExpectedGeneration");
+        expect(script).not.toContain("function Get-CccVhdGeneration");
+        expect(script).not.toContain("Mount-VHD -Path $Path");
+        expect(script).toContain("$ValidatedPartialHash = if ($CompareTargetGuard) { Get-CccGuardedSha256 $CompareTargetGuard } else { (Get-FileHash -LiteralPath $PartialPath");
+        expect(script).toContain("if (-not $CompareTargetGuard) { $PartialGuard = [IO.File]::Open($PartialPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)) }");
+        expect(script).toContain("$PartialHashBefore = if ($CompareTargetGuard) { Get-CccGuardedSha256 $CompareTargetGuard } else { (Get-FileHash -LiteralPath $PartialPath");
+        expect(script).toContain("if ($ValidatedPartialHash -ne $PartialHashBefore) { throw 'hyper-v-base-image-partial-mutated' }");
+        expect(script).not.toContain("$PartialGuard = [IO.File]::Open($PartialPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)");
+        expect(script.indexOf("$SourceHashBefore = Get-CccGuardedSha256 $SourceGuard"))
+            .toBeLessThan(script.indexOf("Convert-VHD -Path $NormalizedVhdPath"));
+        expect(script).toContain("if ($QemuGuard) { $QemuGuard.Dispose(); $QemuGuard = $null }");
+        expect(script.indexOf("$PartialHashBefore = if ($CompareTargetGuard)"))
+            .toBeLessThan(script.indexOf("$Vhd = Assert-BaseVhd $PartialPath"));
+        const partialGuardDispose = script.indexOf("} finally { if ($PartialGuard) { $PartialGuard.Dispose(); $PartialGuard = $null } }");
+        const catalogGeneration = script.indexOf("$Generation = $ExpectedGeneration");
+        const reopenedPartialGuard = script.indexOf("$PartialGuard = [IO.File]::Open($PartialPath", catalogGeneration);
+        expect(partialGuardDispose).toBeGreaterThan(script.indexOf("$Vhd = Assert-BaseVhd $PartialPath"));
+        expect(partialGuardDispose).toBeLessThan(catalogGeneration);
+        expect(reopenedPartialGuard).toBeGreaterThan(catalogGeneration);
+        expect(reopenedPartialGuard).toBeLessThan(script.indexOf("$ValidatedPartialHash = if ($CompareTargetGuard)"));
+        expect(script).toContain("if ($ExpectedHash -and $Hash -ne $ExpectedHash) { throw 'hyper-v-base-image-final-hash-mismatch' }");
+        expect(script).toContain("if ($FinalHashBefore -ne $ValidatedPartialHash) { throw 'hyper-v-base-image-final-hash-mismatch' }");
+        expect(script.indexOf("$FinalHashBefore = if ($FinalGuard)"))
+            .toBeLessThan(script.indexOf("$Vhd = Assert-BaseVhd $ImagePath"));
+        expect(script.indexOf("Move-Item -LiteralPath $PartialPath -Destination $ImagePath"))
+            .toBeLessThan(script.indexOf("Protect-CccImageDirectory $ProfileRoot", script.indexOf("Move-Item -LiteralPath $PartialPath -Destination $ImagePath")));
+        expect(script).toContain("Write-BaseObservation $Vhd $Generation $false $ValidatedPartialHash");
+        expect(script).toContain("$ExpectedGeneration = 2");
+        expect(script).toContain("$Generation = $ExpectedGeneration");
+        expect(script).not.toContain("hyper-v-base-image-generation-mismatch");
+        expect(script).toContain("Write-BaseObservation $Vhd $Generation $false");
+        expect(script).not.toContain("Mount-VHD -Path $ImagePath");
+        expect(script).toContain("if (Test-Path -LiteralPath $WorkPath) { throw 'hyper-v-base-image-work-path-not-clean' }");
+        expect(script).not.toContain("Remove-Item -LiteralPath $WorkPath -Recurse -Force -ErrorAction Stop");
+        expect(script).toContain("if ($FailureMessage -match '^hyper-v-[a-z0-9-]{3,128}$') { throw $FailureMessage }");
+        expect(script).toContain("[Console]::Out.WriteLine(('CCC_HYPER_V_STAGE:' + $script:CccAcquireStage))");
+        expect(script).toContain("throw $script:CccAcquireStage");
+    });
+
+    it.skipIf(process.platform !== "win32")("parses the generated cloud-image acquisition program with Windows PowerShell", () => {
+        const command = hyperVAcquireBaseImageCommand({
+            executable: "powershell.exe",
+            profile: "ubuntu-lts",
+            imageRoot: "C:\\ccc-hyper-v-parser-probe",
+            expectedGeneration: 2,
+        });
+        const result = parseWithWindowsPowerShell(scriptOf(command));
+
+        expect(result.status, result.stderr || result.error?.message).toBe(0);
+    });
+
+    it("rejects non-automatic acquisition profiles and unsafe image roots", () => {
+        expect(() => hyperVAcquireBaseImageCommand({
+            executable: "powershell.exe",
+            profile: "windows-11" as "windows-server",
+            imageRoot: "/state/images/hyper-v",
+            expectedGeneration: 2,
+        })).toThrow("hyper-v-base-image-profile-not-automatic");
+        expect(() => hyperVAcquireBaseImageCommand({
+            executable: "powershell.exe",
+            profile: "ubuntu-lts",
+            imageRoot: "relative/images",
+            expectedGeneration: 2,
+        })).toThrow("hyper-v-base-image-root-invalid");
+        expect(() => hyperVAcquireBaseImageCommand({
+            executable: "powershell.exe",
+            profile: "ubuntu-lts",
+            imageRoot: "/state/images/hyper-v",
+            expectedGeneration: 3 as 2,
+        })).toThrow("hyper-v-base-image-generation-invalid");
+        expect(() => hyperVAcquireBaseImageCommand({
+            executable: "powershell.exe",
+            profile: "ubuntu-lts",
+            imageRoot: "/state/images/hyper-v",
+            expectedGeneration: 1,
+        })).toThrow("hyper-v-base-image-generation-mismatch");
+        expect(() => hyperVAcquireBaseImageCommand({
+            executable: "powershell.exe",
+            profile: "windows-server",
+            imageRoot: "/state/images/hyper-v",
+            expectedGeneration: 1,
+        })).toThrow("hyper-v-base-image-generation-mismatch");
+    });
+
+    it("creates an owner-scoped VM matching the boot disk generation with rollback and secure defaults", () => {
+        const vmName = hyperVVmName(ownerId, deviceId, incarnationId);
+        expect(vmName).toBe(`ccc-${ownerId}-${deviceId}-${incarnationId}`);
+        const command = hyperVCreateCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            baseImagePath: "/state/images/hyper-v/windows-11.vhdx",
+            baseImageSha256,
+            baseImageGeneration: 2,
+            baseImageRoot: "/state/images/hyper-v",
+            deviceRoot: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01",
+            diskPath: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01/disks/root.vhdx",
+            diskMaxBytes: 64 * 1024 * 1024 * 1024,
+            memoryMb: 4096,
+            cpus: 4,
+            switchName: "Default Switch",
+            macAddress: "02:11:22:33:44:55",
+        });
+
+        expect(command).toMatchObject({ mode: "exec", provider: "hyper-v", executable: "powershell.exe" });
+        const script = scriptOf(command);
+        expect(script).not.toContain("Mount-VHD -Path $DiskPath");
+        expect(script).not.toContain("$BootDisk.PartitionStyle");
+        expect(script).toContain("$VmGeneration = $ExpectedVmGeneration");
+        expect(script).toContain("$ExpectedVmGeneration = 2");
+        expect(script).toContain("Generation = $VmGeneration");
+        expect(script).not.toContain("New-VHD");
+        expect(script).toContain("[IO.FileMode]::CreateNew");
+        expect(script).toContain("[IO.FileAccess]::ReadWrite");
+        expect(script).toContain("[IO.FileShare]::None");
+        expect(script).toContain("[IO.FileShare]::Read");
+        expect(script).toContain("$Hasher.ComputeHash($BaseImageStream)");
+        const firstBaseImageOpen = script.indexOf("$BaseImageStream = [IO.File]::Open");
+        const firstBaseImageClose = script.indexOf("$BaseImageStream.Dispose()", firstBaseImageOpen);
+        const diskCopySourceOpen = script.indexOf("$DiskCopySource = [IO.File]::Open");
+        const diskCopyOutputOpen = script.indexOf("$DiskCopyOutput = [IO.File]::Open");
+        const diskCopy = script.indexOf("$DiskCopySource.CopyTo($DiskCopyOutput, 8MB)");
+        const diskCopyFlush = script.indexOf("$DiskCopyOutput.Flush($true)");
+        const diskCopyOutputClose = script.indexOf("$DiskCopyOutput.Dispose()", diskCopyFlush);
+        const diskCopySourceClose = script.indexOf("$DiskCopySource.Dispose()", diskCopyOutputClose);
+        const clonedDiskInspection = script.indexOf("$CreatedDisk = Get-VHD -Path $DiskPath");
+        const secondBaseImageOpen = script.indexOf("$BaseImageStream = [IO.File]::Open", firstBaseImageOpen + 1);
+        const secondBaseImageClose = script.indexOf("$BaseImageStream.Dispose()", secondBaseImageOpen);
+        const vmCreate = script.indexOf("$CreatedVm = New-VM");
+        for (const position of [firstBaseImageOpen, firstBaseImageClose, diskCopySourceOpen, diskCopyOutputOpen, diskCopy, diskCopyFlush, diskCopyOutputClose, diskCopySourceClose, clonedDiskInspection, secondBaseImageOpen, secondBaseImageClose, vmCreate]) {
+            expect(position).toBeGreaterThanOrEqual(0);
+        }
+        expect(firstBaseImageOpen).toBeLessThan(firstBaseImageClose);
+        expect(firstBaseImageClose).toBeLessThan(diskCopySourceOpen);
+        expect(diskCopySourceOpen).toBeLessThan(diskCopyOutputOpen);
+        expect(diskCopyOutputOpen).toBeLessThan(diskCopy);
+        expect(diskCopy).toBeLessThan(diskCopyFlush);
+        expect(diskCopyFlush).toBeLessThan(diskCopyOutputClose);
+        expect(diskCopyOutputClose).toBeLessThan(diskCopySourceClose);
+        expect(diskCopySourceClose).toBeLessThan(clonedDiskInspection);
+        expect(clonedDiskInspection).toBeLessThan(secondBaseImageOpen);
+        expect(secondBaseImageOpen).toBeLessThan(secondBaseImageClose);
+        expect(secondBaseImageClose).toBeLessThan(vmCreate);
+        expect(script).toContain("hyper-v-base-image-hash-mismatch");
+        expect(script).toContain("hyper-v-created-disk-hash-mismatch");
+        expect(script).toContain("hyper-v-created-disk-length-mismatch");
+        expect(script).toContain("hyper-v-created-disk-format-mismatch");
+        expect(script).toContain("Set-CccPrivateDirectoryAcl $DeviceRoot");
+        expect(script).toContain("New-Item -ItemType Directory -Path $DiskDirectory -Force");
+        expect(script).toContain("Set-CccPrivateDirectoryAcl $DiskDirectory");
+        expect(script).toContain("$Acl.SetAccessRuleProtection($true, $false)");
+        expect(script).toContain("if (-not $ObservedAcl.AreAccessRulesProtected)");
+        expect(script).toContain("if ($MatchingRules.Count -ne 1)");
+        expect(script).toContain("S-1-5-18");
+        expect(script).toContain("S-1-5-32-544");
+        expect(script).toContain("hyper-v-device-root-acl-failed");
+        expect(script).toContain("$PrimaryError = $_");
+        expect(script).toContain("try { if ($DiskCopyOutput) { $DiskCopyOutput.Dispose() } } catch { }");
+        expect(script).toContain("try { if ($DiskCopySource) { $DiskCopySource.Dispose() } } catch { }");
+        expect(script).toContain("try { if ($CreatedVm) { Remove-VM -VM $CreatedVm -Force -ErrorAction Stop } } catch { }");
+        expect(script).toContain("throw $PrimaryError");
+        expect(script.indexOf("if ($BaseImageHash -ne $ExpectedBaseImageHash)"))
+            .toBeLessThan(script.indexOf("$VmGeneration = $ExpectedVmGeneration"));
+        expect(script.indexOf("hyper-v-created-disk-format-mismatch"))
+            .toBeLessThan(script.indexOf("$VmGeneration = $ExpectedVmGeneration"));
+        expect(script.indexOf("$VmGeneration = $ExpectedVmGeneration"))
+            .toBeLessThan(script.indexOf("$CreatedVm = New-VM"));
+        const createStages = [
+            "CCC_HYPER_V_STAGE:hyper-v-vm-preflight-failed",
+            "Set-CccVmCreateStage 'hyper-v-host-capacity-inspection-failed'",
+            "Set-CccVmCreateStage 'hyper-v-host-storage-inspection-failed'",
+            "Set-CccVmCreateStage 'hyper-v-vm-path-inspection-failed'",
+            "Set-CccVmCreateStage 'hyper-v-vm-identity-inspection-failed'",
+            "Set-CccVmCreateStage 'hyper-v-network-switch-inspection-failed'",
+            "Set-CccVmCreateStage 'hyper-v-base-image-hash-failed'",
+            "Set-CccVmCreateStage 'hyper-v-base-image-inspection-failed'",
+            "Set-CccVmCreateStage 'hyper-v-vm-disk-create-failed'",
+            "Set-CccVmCreateStage 'hyper-v-vm-create-failed'",
+            "Set-CccVmCreateStage 'hyper-v-vm-configure-failed'",
+        ];
+        for (const stage of createStages) {
+            expect(script.indexOf(stage), `missing VM create stage: ${stage}`).toBeGreaterThanOrEqual(0);
+        }
+        for (let index = 1; index < createStages.length; index++) {
+            expect(script.indexOf(createStages[index - 1]))
+                .toBeLessThan(script.indexOf(createStages[index]));
+        }
+        expect(script.indexOf("CCC_HYPER_V_STAGE:hyper-v-vm-preflight-failed"))
+            .toBeLessThan(script.indexOf("Set-CccVmCreateStage 'hyper-v-host-capacity-inspection-failed'"));
+        expect(script).toContain("$env:CCC_HYPER_V_STAGE = $Stage");
+        expect(script.indexOf("Set-CccVmCreateStage 'hyper-v-host-capacity-inspection-failed'"))
+            .toBeLessThan(script.indexOf("$ComputerInfo = Get-CimInstance"));
+        expect(script.indexOf("Set-CccVmCreateStage 'hyper-v-host-storage-inspection-failed'"))
+            .toBeLessThan(script.indexOf("$DiskRoot = [IO.Path]::GetPathRoot($DiskPath)"));
+        expect(script.indexOf("Set-CccVmCreateStage 'hyper-v-vm-identity-inspection-failed'"))
+            .toBeLessThan(script.indexOf("if (Get-VM -Name $VmName"));
+        expect(script.indexOf("Set-CccVmCreateStage 'hyper-v-base-image-hash-failed'"))
+            .toBeLessThan(script.indexOf("$BaseImageStream = [IO.File]::Open"));
+        expect(script.indexOf("Set-CccVmCreateStage 'hyper-v-base-image-inspection-failed'"))
+            .toBeLessThan(script.indexOf("$BaseVhd = Get-VHD"));
+        expect(script).toContain(`ccc-device-lab:${ownerId}:${deviceId}:${incarnationId}`);
+        expect(script).toContain("AutomaticCheckpointsEnabled $false");
+        expect(script).toContain("CheckpointType ProductionOnly");
+        expect(script).toContain("EnableSecureBoot On");
+        expect(script).toContain("BootDevice = 'VHD'");
+        expect(script).toContain("Set-VMMemory -VM $CreatedVm -DynamicMemoryEnabled $false");
+        expect(script).toContain("-FirstBootDevice $CreatedOsDisks[0]");
+        expect(script).toContain("hyper-v-created-disk-boot-order-mismatch");
+        expect(script).toContain("Set-VMBios -VM $CreatedVm -StartupOrder @('IDE','CD','LegacyNetworkAdapter','Floppy')");
+        expect(script).toContain("Get-VMSwitch -Name $SwitchName");
+        expect(script).toContain("Set-VMNetworkAdapter -VMNetworkAdapter $ManagedAdapter -StaticMacAddress");
+        expect(script).toContain("02:11:22:33:44:55");
+        expect(script).toContain("hyper-v-network-switch-unavailable");
+        expect(script).toContain("$DiskReserveBytes = 10GB");
+        expect(script).toContain("$CopyBytes = [long]$DiskCopySource.Length");
+        expect(script).toContain("$DiskDrive.Free -lt ($CopyBytes + $DiskReserveBytes)");
+        expect(script).not.toContain("$DiskDrive.Free -lt ($DiskMaxBytes + $DiskReserveBytes)");
+        expect(script.indexOf("$CopyBytes = [long]$DiskCopySource.Length")).toBeGreaterThan(script.indexOf("Assert-NoReparsePath $BaseImage"));
+        expect(script.indexOf("$DiskDrive.Free -lt ($CopyBytes + $DiskReserveBytes)")).toBeLessThan(script.indexOf("$DiskCopyOutput = [IO.File]::Open"));
+        expect(script).toContain("hyper-v-host-disk-capacity-exceeded");
+        expect(script).toContain("Remove-VM -VM $CreatedVm -Force");
+        expect(script).toContain("Remove-Item -LiteralPath $DiskPath -Force");
+        expect(script).toContain("if (-not $DeviceRootExisted");
+        const explicitFailureCodes = [...new Set(
+            [...script.matchAll(/throw '(hyper-v-[a-z0-9-]+)'/g)]
+                .map((match) => match[1]),
+        )];
+        expect(explicitFailureCodes.length).toBeGreaterThan(10);
+        for (const code of explicitFailureCodes) {
+            expect(hyperVProviderDiagnosticCode({ stderr: code, stdout: "" }))
+                .toBe(code);
+        }
+        expect(hyperVProviderDiagnosticCode(
+            { stderr: "hyper-v-untrusted-runtime-detail", stdout: "" },
+            "hyper-v-provider-command-failed",
+        )).toBe("hyper-v-provider-command-failed");
+        expect(hyperVProviderDiagnosticCode({
+            stdout: "CCC_HYPER_V_STAGE:hyper-v-guest-provision-media-build-command-failed",
+            stderr: "hyper-v-powershell-execution-failed",
+        })).toBe("hyper-v-guest-provision-media-build-command-failed");
+        expect(hyperVProviderDiagnosticCode({
+            error: "hyper-v-powershell-execution-failed",
+            stdout: "",
+            stderr: "hyper-v-base-image-archive-check-failed",
+        })).toBe("hyper-v-base-image-archive-check-failed");
+        for (const code of [
+            "hyper-v-network-elevation-cancelled",
+            "hyper-v-network-elevation-failed",
+            "hyper-v-network-elevation-suppressed",
+            "hyper-v-network-pipe-handshake-timeout",
+            "hyper-v-network-subnet-conflict",
+            "hyper-v-network-gateway-conflict",
+            "hyper-v-network-nat-prefix-conflict",
+            "hyper-v-snapshot-policy-restore-failed",
+            "hyper-v-snapshot-policy-invalid",
+            "hyper-v-snapshot-policy-quarantine-failed",
+            "hyper-v-snapshot-standard-fallback-failed",
+        ]) {
+            expect(hyperVProviderDiagnosticCode({
+                error: "hyper-v-powershell-execution-failed",
+                stdout: "",
+                stderr: `${code}:bounded-detail`,
+            })).toBe(code);
+        }
+        expect(() => hyperVCreateCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            baseImagePath: "/state/images/hyper-v/windows-11.vhdx",
+            baseImageSha256,
+            baseImageGeneration: 2,
+            baseImageRoot: "/state/images/hyper-v",
+            deviceRoot: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01",
+            diskPath: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01/disks/root.vhdx",
+            diskMaxBytes: 64 * 1024 * 1024 * 1024,
+            memoryMb: 512,
+            cpus: 2,
+        })).toThrow("hyper-v-memory-mb-invalid");
+        expect(() => hyperVCreateCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            baseImagePath: "/state/images/hyper-v/windows-11.vhdx",
+            baseImageSha256,
+            baseImageGeneration: 1,
+            baseImageRoot: "/state/images/hyper-v",
+            deviceRoot: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01",
+            diskPath: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01/disks/root.vhdx",
+            diskMaxBytes: 64 * 1024 * 1024 * 1024,
+            memoryMb: 4096,
+            cpus: 2,
+        })).toThrow("hyper-v-secure-boot-generation-invalid");
+
+        expect(() => hyperVCreateCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            baseImagePath: "/state/images/hyper-v/windows-11.vhdx",
+            baseImageSha256,
+            baseImageGeneration: 2,
+            baseImageRoot: "/state/images/hyper-v",
+            deviceRoot: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01",
+            diskPath: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01/disks/root.vhdx",
+            diskMaxBytes: 64 * 1024 * 1024 * 1024,
+            memoryMb: 4096,
+            cpus: 2,
+            checkpointType: "Production; Remove-VM" as "ProductionOnly",
+        })).toThrow("hyper-v-checkpoint-type-invalid");
+
+        expect(() => hyperVCreateCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId: "linux-ci-01",
+            incarnationId,
+            vmName: hyperVVmName(ownerId, "linux-ci-01", incarnationId),
+            baseImagePath: "/state/images/hyper-v/ubuntu-lts.vhdx",
+            baseImageSha256,
+            baseImageGeneration: 2,
+            baseImageRoot: "/state/images/hyper-v",
+            deviceRoot: "/state/owners/0123456789abcdef/linux-vm/linux-ci-01",
+            diskPath: "/state/owners/0123456789abcdef/linux-vm/linux-ci-01/disks/root.vhdx",
+            diskMaxBytes: 64 * 1024 * 1024 * 1024,
+            memoryMb: 4096,
+            cpus: 2,
+            switchName: "CCC Device Lab",
+            bootstrapDhcp: true,
+            secureBootEnabled: false,
+        })).toThrow("hyper-v-bootstrap-mac-address-missing");
+
+        const linuxScript = scriptOf(hyperVCreateCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId: "linux-ci-01",
+            incarnationId,
+            vmName: hyperVVmName(ownerId, "linux-ci-01", incarnationId),
+            baseImagePath: "/state/images/hyper-v/ubuntu-lts.vhdx",
+            baseImageSha256,
+            baseImageGeneration: 2,
+            baseImageRoot: "/state/images/hyper-v",
+            deviceRoot: "/state/owners/0123456789abcdef/linux-vm/linux-ci-01",
+            diskPath: "/state/owners/0123456789abcdef/linux-vm/linux-ci-01/disks/root.vhdx",
+            diskMaxBytes: 64 * 1024 * 1024 * 1024,
+            memoryMb: 4096,
+            cpus: 2,
+            switchName: "CCC Device Lab",
+            macAddress: "02:11:22:33:44:66",
+            bootstrapDhcp: true,
+            checkpointType: "Production",
+            secureBootEnabled: false,
+            secureBootTemplate: "MicrosoftUEFICertificateAuthority",
+        }));
+        expect(linuxScript).toContain("$ExpectedVmGeneration = 2");
+        expect(linuxScript).toContain("CheckpointType Production");
+        expect(linuxScript).not.toContain("CheckpointType ProductionOnly");
+        expect(linuxScript).toContain("Generation = $VmGeneration");
+        expect(linuxScript).toContain("if ($VmGeneration -eq 2)");
+        expect(linuxScript).toContain("Set-VMBios -VM $CreatedVm -StartupOrder @('IDE','CD','LegacyNetworkAdapter','Floppy')");
+        expect(linuxScript).toContain("Get-VMSwitch -Name 'Default Switch'");
+        expect(linuxScript).toContain("hyper-v-bootstrap-dhcp-switch-unavailable");
+        expect(linuxScript).toContain("Rename-VMNetworkAdapter -VMNetworkAdapter $BootstrapAdapters[0] -NewName 'CCC Bootstrap DHCP'");
+        expect(linuxScript).toContain("$BootstrapMacAddress = '06:11:22:33:44:66'");
+        expect(linuxScript).toContain("Get-VMNetworkAdapter -All -ErrorAction Stop");
+        expect(linuxScript).toContain("hyper-v-bootstrap-mac-address-conflict");
+        expect(linuxScript).toContain("Set-VMNetworkAdapter -VMNetworkAdapter $BootstrapAdapters[0] -StaticMacAddress ($BootstrapMacAddress.Replace(':', ''))");
+        expect(linuxScript).toContain("$AssignedBootstrapMatches = @(Get-VMNetworkAdapter -All");
+        expect(linuxScript).toContain("[string]$AssignedBootstrapMatches[0].VMId -ne [string]$CreatedVm.Id");
+        expect(linuxScript).toContain("Add-VMNetworkAdapter -VM $CreatedVm -SwitchName $ResolvedSwitch.Name -Name 'CCC Device Network'");
+        expect(linuxScript).toContain("Set-VMNetworkAdapter -VMNetworkAdapter $ManagedAdapter -StaticMacAddress");
+        expect(linuxScript).toContain("Set-VMFirmware -VM $CreatedVm -EnableSecureBoot Off");
+        expect(linuxScript).not.toContain("SecureBootTemplate 'MicrosoftUEFICertificateAuthority'");
+    });
+
+    it.skipIf(process.platform !== "win32")("executes verified cloning and preserves failures while every rollback action is attempted", () => {
+        const root = mkdtempSync(join(tmpdir(), "ccc-hyper-v-clone-rollback-"));
+        const diskDirectory = join(root, "disks");
+        const diskPath = join(diskDirectory, "partial.vhdx");
+        const basePath = join(root, "base.vhdx");
+        const successfulDiskPath = join(diskDirectory, "successful.vhdx");
+        const basePayload = Buffer.from("ccc-independent-vhdx-clone-probe");
+        const expectedHash = createHash("sha256").update(basePayload).digest("hex");
+        try {
+            mkdirSync(diskDirectory);
+            writeFileSync(basePath, basePayload);
+            writeFileSync(diskPath, "partial-clone");
+            const generated = scriptOf(hyperVCreateCommand({
+                executable: "powershell.exe",
+                ownerId,
+                deviceId,
+                incarnationId,
+                vmName: hyperVVmName(ownerId, deviceId, incarnationId),
+                baseImagePath: basePath,
+                baseImageSha256,
+                baseImageGeneration: 2,
+                baseImageRoot: root,
+                deviceRoot: root,
+                diskPath,
+                diskMaxBytes: 64 * 1024 * 1024 * 1024,
+                memoryMb: 4096,
+                cpus: 2,
+                networking: false,
+            }));
+            const cloneStart = generated.indexOf("  $DiskCopyFailure = $null");
+            const cloneEndMarker = "  if ($DiskCopyFailure) { throw $DiskCopyFailure }";
+            const cloneEnd = generated.indexOf(cloneEndMarker, cloneStart) + cloneEndMarker.length;
+            const outerCatchStart = generated.lastIndexOf("} catch {\n  $PrimaryError = $_");
+            const outerCatchEnd = generated.lastIndexOf("\n}") + 2;
+            expect(Math.min(cloneStart, cloneEnd, outerCatchStart, outerCatchEnd)).toBeGreaterThanOrEqual(0);
+
+            const cloneBlock = generated.slice(cloneStart, cloneEnd);
+            const cloneTryStart = cloneBlock.indexOf("  try {");
+            const cloneCatchStart = cloneBlock.indexOf("\n  } catch {\n    $DiskCopyFailure = $_", cloneTryStart);
+            expect(Math.min(cloneTryStart, cloneCatchStart)).toBeGreaterThanOrEqual(0);
+            const faultedCloneBlock = [
+                cloneBlock.slice(0, cloneTryStart),
+                "  try {\n    throw 'injected-copy-failure'",
+                cloneBlock.slice(cloneCatchStart),
+            ].join("");
+            const outerCatchBlock = generated.slice(outerCatchStart, outerCatchEnd);
+            const aclStart = generated.indexOf("function Set-CccPrivateDirectoryAcl");
+            const aclEnd = generated.indexOf("\nSet-CccVmCreateStage 'hyper-v-host-capacity-inspection-failed'", aclStart);
+            expect(Math.min(aclStart, aclEnd)).toBeGreaterThanOrEqual(0);
+            const aclFunction = generated.slice(aclStart, aclEnd).replace(
+                "} catch { throw 'hyper-v-device-root-acl-failed' }",
+                "} catch { [Console]::Error.WriteLine($_.Exception.ToString()); throw 'hyper-v-device-root-acl-failed' }",
+            );
+            const quotedDiskPath = diskPath.replaceAll("'", "''");
+            const quotedRoot = root.replaceAll("'", "''");
+            const quotedDiskDirectory = diskDirectory.replaceAll("'", "''");
+            const quotedBasePath = basePath.replaceAll("'", "''");
+            const quotedSuccessfulDiskPath = successfulDiskPath.replaceAll("'", "''");
+            const probe = [
+                "$ErrorActionPreference = 'Stop'",
+                "$script:CleanupEvents = [Collections.Generic.List[string]]::new()",
+                "function Assert-NoReparsePath([string]$Path) { }",
+                aclFunction,
+                `Set-CccPrivateDirectoryAcl '${quotedRoot}'`,
+                `Set-CccPrivateDirectoryAcl '${quotedDiskDirectory}'`,
+                `$BaseImage = '${quotedBasePath}'`,
+                `$DiskPath = '${quotedSuccessfulDiskPath}'`,
+                "$DiskRoot = [IO.Path]::GetPathRoot($DiskPath)",
+                "$DiskDriveName = $DiskRoot.TrimEnd('\\').TrimEnd(':')",
+                "$DiskReserveBytes = 0", // Tiny fixture payload; real reserve boundary has dedicated coverage.
+                `$ExpectedBaseImageHash = '${expectedHash}'`,
+                "$DiskCopySource = $null",
+                "$DiskCopyOutput = $null",
+                cloneBlock,
+                "if (-not (Test-Path -LiteralPath $DiskPath -PathType Leaf)) { throw 'successful-clone-missing' }",
+                "function New-CccFailingDisposable([string]$Name) {",
+                "  $Value = [pscustomobject]@{ Name = $Name }",
+                "  $Value | Add-Member -MemberType ScriptMethod -Name Dispose -Value { [void]$script:CleanupEvents.Add($this.Name); throw ('injected-dispose-' + $this.Name) }",
+                "  return $Value",
+                "}",
+                "$DiskCopyOutput = New-CccFailingDisposable 'clone-output'",
+                "$DiskCopySource = New-CccFailingDisposable 'clone-source'",
+                "$ClonePrimaryPreserved = $false",
+                "try {",
+                faultedCloneBlock,
+                "} catch { if ([string]$_.Exception.Message -eq 'injected-copy-failure') { $ClonePrimaryPreserved = $true } else { throw } }",
+                "if (-not $ClonePrimaryPreserved) { throw 'clone-primary-not-preserved' }",
+                "$BaseImageStream = New-CccFailingDisposable 'base-image'",
+                "$DiskCopyOutput = New-CccFailingDisposable 'rollback-output'",
+                "$DiskCopySource = New-CccFailingDisposable 'rollback-source'",
+                "$CreatedVm = [pscustomobject]@{ Name = 'injected-vm' }",
+                `$DiskPath = '${quotedDiskPath}'`,
+                `$DeviceRoot = '${quotedRoot}'`,
+                "$DeviceRootExisted = $true",
+                "function Remove-VM { [CmdletBinding()] param([object]$VM, [switch]$Force); [void]$script:CleanupEvents.Add('remove-vm'); throw 'injected-remove-vm' }",
+                "$RollbackPrimaryPreserved = $false",
+                "try {",
+                "  try { throw 'injected-primary-failure'",
+                outerCatchBlock,
+                "} catch { if ([string]$_.Exception.Message -eq 'injected-primary-failure') { $RollbackPrimaryPreserved = $true } else { throw } }",
+                "if (-not $RollbackPrimaryPreserved) { throw 'rollback-primary-not-preserved' }",
+                "if (Test-Path -LiteralPath $DiskPath) { throw 'partial-disk-not-removed' }",
+                "$ExpectedEvents = @('clone-output','clone-source','base-image','rollback-output','rollback-source','remove-vm')",
+                "foreach ($ExpectedEvent in $ExpectedEvents) { if ($script:CleanupEvents -notcontains $ExpectedEvent) { throw ('cleanup-not-attempted:' + $ExpectedEvent) } }",
+                "[ordered]@{ ok = $true; events = @($script:CleanupEvents) } | ConvertTo-Json -Compress",
+            ].join("\n");
+            const result = spawnPowerShell([
+                "-WindowStyle",
+                "Hidden",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                Buffer.from(probe, "utf16le").toString("base64"),
+            ], {
+                encoding: "utf8",
+                timeout: 30_000,
+                maxBuffer: 1024 * 1024,
+                windowsHide: true,
+            });
+            expect(result.status, result.stderr || result.error?.message).toBe(0);
+            expect(result.stdout).toContain('"ok":true');
+            expect(result.stdout).toContain('"remove-vm"');
+            expect(readFileSync(successfulDiskPath)).toEqual(basePayload);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it("removes only the owner-fenced Default Switch bootstrap adapter", () => {
+        const cleanup = hyperVBootstrapNetworkCleanupCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId: "linux-ci-01",
+            incarnationId,
+            vmName: hyperVVmName(ownerId, "linux-ci-01", incarnationId),
+            vmId,
+            managedMacAddress: "02:11:22:33:44:66",
+        });
+        const script = scriptOf(cleanup);
+        expect(script).toContain("Get-VM -Id $ExpectedId");
+        expect(script).toContain(`$ExpectedMarker = 'ccc-device-lab:${ownerId}:linux-ci-01:${incarnationId}'`);
+        expect(script).toContain("$ExpectedBootstrapMac = '061122334466'");
+        expect(script).toContain("([string]$_.MacAddress).ToUpperInvariant() -eq $ExpectedBootstrapMac");
+        expect(script).toContain("[string]$BootstrapAdapters[0].SwitchName -ne 'Default Switch'");
+        expect(script).toContain("[string]$BootstrapAdapters[0].Name -cne 'CCC Bootstrap DHCP'");
+        expect(script).toContain("Remove-VMNetworkAdapter -VMNetworkAdapter $BootstrapAdapters[0]");
+        expect(script).toContain("$RemainingBootstrapAdapters = @(Get-VMNetworkAdapter -All");
+        expect(script).toContain("hyper-v-bootstrap-network-containment-failed");
+        expect(parseHyperVBootstrapNetworkCleanupObservation('{"ok":true,"removed":true,"alreadyMissing":false}')).toEqual({
+            ok: true,
+            removed: true,
+            alreadyMissing: false,
+        });
+        expect(parseHyperVBootstrapNetworkCleanupObservation('{"ok":true,"removed":false,"alreadyMissing":true}')).toEqual({
+            ok: true,
+            removed: false,
+            alreadyMissing: true,
+        });
+        expect(parseHyperVBootstrapNetworkCleanupObservation('{"ok":true,"removed":"yes","alreadyMissing":false}')).toBeNull();
+        expect(parseHyperVBootstrapNetworkCleanupObservation('{"ok":true,"removed":false,"alreadyMissing":false}')).toBeNull();
+        expect(parseHyperVBootstrapNetworkCleanupObservation('{"ok":true,"removed":true,"alreadyMissing":true}')).toBeNull();
+    });
+
+    it("provisions a fenced cloud-init seed and owner-scoped SSH transport for Linux guests", () => {
+        const linuxDeviceId = "linux-ci-01";
+        const vmName = hyperVVmName(ownerId, linuxDeviceId, incarnationId);
+        const deviceRoot = "/state/owners/0123456789abcdef/linux-vm/linux-ci-01";
+        const privateRoot = "/private/owners/0123456789abcdef/linux-vm/linux-ci-01";
+        const seedDiskPath = `${deviceRoot}/disks/cidata.iso`;
+        const sshPrivateKeyPath = `${privateRoot}/secrets/id_ed25519`;
+        const sshPublicKeyPath = `${sshPrivateKeyPath}.pub`;
+        const sshHostPrivateKeyPath = `${privateRoot}/secrets/ssh_host_ed25519_key`;
+        const sshHostPublicKeyPath = `${sshHostPrivateKeyPath}.pub`;
+        const knownHostsPath = `${privateRoot}/secrets/known_hosts`;
+        const seed = hyperVLinuxSeedCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId: linuxDeviceId,
+            incarnationId,
+            vmName,
+            vmId,
+            diskPath: `${deviceRoot}/disks/root.vhdx`,
+            deviceRoot,
+            privateRoot,
+            seedDiskPath,
+            sshPrivateKeyPath,
+            sshPublicKeyPath,
+            sshHostPrivateKeyPath,
+            sshHostPublicKeyPath,
+            knownHostsPath,
+            guestUsername: "ccc01234567",
+            networkAddress: "172.29.0.10",
+            networkGateway: "172.29.0.1",
+            networkPrefixLength: 24,
+            macAddress: "02:11:22:33:44:66",
+        });
+        const seedScript = scriptOf(seed);
+        expect(seedScript).toContain("IMAPI2FS.MsftFileSystemImage");
+        expect(seedScript).toContain("Write-CccIso $IsoFiles $SeedDisk 'cidata' $MediaSourceRoot");
+        expect(seedScript).not.toContain("Set-VMFirmware");
+        expect(seedScript).not.toContain("Set-VMBios");
+        expect(seedScript).toContain("$NormalizedVolumeName = ([string]$VolumeName).ToUpperInvariant()");
+        expect(seedScript).toContain("$Image.FileSystemsToCreate = 3");
+        expect(seedScript).not.toContain("$Image.FileSystemsToCreate = 7");
+        expect(seedScript).not.toContain("$Image.ChooseImageDefaultsForMediaType(1)");
+        expect(seedScript).toContain("$Image.VolumeName = $NormalizedVolumeName");
+        expect(seedScript).toContain("hyper-v-provisioning-media-filesystem-selection-failed");
+        expect(seedScript).toContain("hyper-v-provisioning-media-volume-name-failed");
+        expect(seedScript).toContain("configure-failed|filesystem-selection-failed|volume-name-invalid|volume-name-failed|source-entry-invalid");
+        expect(seedScript).toContain("[int]$ResultImage.BlockSize, [long]$ResultImage.TotalBlocks");
+        expect(seedScript).toContain("SHCreateStreamOnFileEx");
+        expect(seedScript).toContain("input.CopyTo(output, expectedBytes, readPointer, writtenPointer)");
+        expect(seedScript).toContain("readBytes != expectedBytes || writtenBytes != expectedBytes");
+        expect(seedScript).toContain("@($ImageStream, $ResultImage, $ImageRoot, $Image)");
+        expect(seedScript).toContain("FinalReleaseComObject($ComObject)");
+        expect(seedScript).toContain("[IO.File]::WriteAllBytes($EntryPath, $EntryBytes)");
+        expect(seedScript).toContain("$ImageRoot.AddTree($SourceRoot, $false)");
+        expect(seedScript).toContain("[Console]::Out.WriteLine('hyper-v-provisioning-media-add-tree-failed')");
+        expect(seedScript).toContain("[Console]::Out.WriteLine('hyper-v-provisioning-media-output-open-failed')");
+        expect(seedScript).toContain("[Console]::Out.WriteLine($CccIsoFailure)");
+        expect(seedScript).toContain("Assert-NoReparsePath $SourceRoot");
+        expect(seedScript).toContain("function Remove-CccIsoSourceRoot");
+        expect(seedScript).toContain("Get-ChildItem -LiteralPath $SourceRoot -Force");
+        expect(seedScript).toContain("$CurrentChild = Get-Item -LiteralPath $SourceChild.FullName");
+        expect(seedScript).toContain("$SourceAcl.SetAccessRuleProtection($true, $false)");
+        expect(seedScript).toContain("[Security.AccessControl.FileSystemAccessRule]::new(");
+        expect(seedScript).not.toContain("New-Object Security.AccessControl.FileSystemAccessRule(");
+        expect(seedScript).toContain("hyper-v-provisioning-media-source-cleanup-failed");
+        expect(seedScript.indexOf("if ($null -ne $CccIsoFailure) { [Console]::Out.WriteLine($CccIsoFailure); throw $CccIsoFailure }")).toBeGreaterThan(seedScript.indexOf("finally {"));
+        expect(seedScript).not.toContain("Remove-Item -LiteralPath $SourceRoot -Recurse");
+        expect(seedScript).not.toContain("ADODB.Stream");
+        expect(seedScript).not.toContain("$SourceStream.Close()");
+        expect(seedScript).not.toContain("CreateStreamOnHGlobal");
+        expect(seedScript).not.toContain("[CccIsoStreamWriter]::CreateSource");
+        expect(seedScript).not.toContain("$ImageRoot.AddFile(");
+        expect(seedScript).not.toContain("input.Read(");
+        expect(seedScript).toContain("network-config");
+        expect(seedScript).toContain("$BootstrapMac = '06:11:22:33:44:66'");
+        expect(seedScript).not.toContain("Get-VMNetworkAdapter");
+        expect(seedScript).not.toContain("Get-VMDvdDrive");
+        expect(seedScript).not.toContain("Get-VMHardDiskDrive");
+        expect(seedScript).toContain("'  bootstrap0:'");
+        expect(seedScript).toContain("'    set-name: bootstrap0'");
+        expect(seedScript).toContain("'    dhcp4: true'");
+        expect(seedScript).toContain("'    dhcp6: false'");
+        expect(seedScript).toContain("$NetworkBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($NetworkConfig))");
+        expect(seedScript).not.toContain("'  ccc0:'");
+        expect(seedScript).not.toContain("'    set-name: ccc0'");
+        expect(seedScript).not.toContain("ovf-env.xml");
+        expect(seedScript).not.toContain("windowsazure");
+        expect(seedScript).not.toContain("LinuxProvisioningConfigurationSet");
+        expect(seedScript).toContain("'meta-data' = [Convert]::FromBase64String($MetadataBase64)");
+        expect(seedScript).toContain("'network-config' = [Convert]::FromBase64String($NetworkBase64)");
+        expect(seedScript).toContain("'user-data' = [Convert]::FromBase64String($UserDataBase64)");
+        expect(seedScript).not.toContain("apply_network_config: false");
+        expect(seedScript).not.toContain("/etc/netplan/99-ccc-static.yaml");
+        expect(seedScript).not.toContain("'  - [netplan, apply]'");
+        expect(seedScript).toContain("$UserConfig = [ordered]@{");
+        expect(seedScript).toContain("package_update = $false");
+        expect(seedScript).toContain("users = @('default', [ordered]@{ name = $GuestUsername");
+        expect(seedScript).toContain("path = '/etc/ssh/ssh_host_ed25519_key'");
+        expect(seedScript).toContain("TrimEnd() -replace '\\r\\n?', \"`n\"");
+        expect(seedScript).toContain("GetBytes($HostPrivateKeyText + [char]10)");
+        expect(seedScript).toContain("GetBytes($HostPublicKeyText + [char]10)");
+        expect(seedScript).not.toContain("GetBytes($HostPrivateKeyText + [Environment]::NewLine)");
+        expect(seedScript).toContain("permissions = '0600'; encoding = 'b64'; content = $HostPrivateKeyBase64");
+        expect(seedScript).toContain("path = '/etc/ssh/ssh_host_ed25519_key.pub'");
+        expect(seedScript).toContain("permissions = '0644'; encoding = 'b64'; content = $HostPublicKeyBase64");
+        expect(seedScript).toContain("ssh_deletekeys = $false");
+        expect(seedScript).toContain("ssh_genkeytypes = @()");
+        expect(seedScript).not.toContain("ssh_keys = [ordered]@{");
+        expect(seedScript).toContain("ssh_authorized_keys = @($PublicKeyText)");
+        expect(seedScript).toContain("runcmd = @('systemctl enable ssh', '/usr/sbin/sshd -t && systemctl restart ssh')");
+        expect(seedScript).toContain("$UserConfig | ConvertTo-Json -Compress -Depth 8");
+        expect(seedScript).not.toContain("('user: ' + $GuestUsername)");
+        expect(seedScript).not.toContain("packages =");
+        expect(seedScript).toContain("ssh-keygen.exe");
+        expect(seedScript).toContain("function New-CccSshKey");
+        expect(seedScript).toContain("$StartInfo.Arguments = '-q -t ed25519 -N \"\"");
+        expect(seedScript).toContain("[Diagnostics.Process]::Start($StartInfo)");
+        expect(seedScript).not.toContain("& $SshKeygen.Source");
+        expect(seedScript).toContain("function Set-CccProvisionStage");
+        expect(seedScript).not.toContain("Set-CccProvisionStage 'vm-lookup'");
+        expect(seedScript).toContain("Set-CccProvisionStage 'user-keygen'");
+        expect(seedScript).toContain("Set-CccProvisionStage 'host-keygen'");
+        expect(seedScript).toContain("Set-CccProvisionStage 'known-hosts'");
+        expect(seedScript).not.toContain("Set-CccProvisionStage 'media-check'");
+        expect(seedScript).toContain("Set-CccProvisionStage 'media-build'");
+        expect(seedScript).not.toContain("Set-CccProvisionStage 'media-attach'");
+        expect(seedScript).toContain("[Console]::Out.WriteLine(('CCC_HYPER_V_STAGE:hyper-v-linux-seed-' + $Stage + '-command-failed'))");
+        expect(seedScript).toContain("hyper-v-linux-seed-' + $CccProvisionStage + '-command-failed");
+        expect(seedScript).toContain("ssh_host_ed25519_key");
+        expect(seedScript).toContain("ssh_deletekeys = $false");
+        expect(seedScript).toContain("write_files = @(");
+        expect(seedScript).not.toContain("$HostPrivateKeyYaml");
+        expect(seedScript).not.toContain("'  - path: /etc/ssh/ssh_host_ed25519_key'");
+        expect(seedScript).toContain("sshHostKeyFingerprint");
+        expect(seedScript).not.toContain("Add-VMDvdDrive");
+        expect(seedScript).not.toContain("$SeedSource");
+        expect(seedScript).not.toContain("Mount-VHD");
+        expect(seedScript).not.toContain("Initialize-Disk");
+        expect(seedScript).not.toContain("Get-VM -Id $ExpectedId");
+        expect(seedScript).not.toContain("cloud-init status --wait");
+
+        const ssh = { executable: "ssh.exe", deviceRoot, privateRoot, sshPrivateKeyPath, knownHostsPath, guestUsername: "ccc01234567", networkAddress: "172.29.0.10" };
+        expect(hyperVLinuxSshReadyCommand(ssh)).toMatchObject({ provider: "hyper-v-ssh", executable: "ssh.exe" });
+        expect(hyperVLinuxSshReadyCommand(ssh).args).toContain("StrictHostKeyChecking=yes");
+        expect(hyperVLinuxSshReadyCommand(ssh).args).toContain("HostKeyAlgorithms=ssh-ed25519");
+        expect(hyperVLinuxSshReadyCommand(ssh).args).not.toContain("-v");
+        expect(hyperVLinuxSshReadyCommand(ssh).args).not.toContain("CheckHostIP=no");
+        const bootstrapSshArgs = hyperVLinuxSshReadyCommand({ ...ssh, networkAddress: "172.20.1.8", hostKeyAlias: "172.29.0.10", verboseHostKeyDiagnostics: true }).args;
+        expect(bootstrapSshArgs).toContain("-v");
+        expect(bootstrapSshArgs).toContain("HostKeyAlias=172.29.0.10");
+        expect(bootstrapSshArgs).toContain("CheckHostIP=no");
+        const adoptionSshArgs = hyperVLinuxSshReadyCommand({
+            ...ssh,
+            networkAddress: "172.20.1.8",
+            hostKeyAlias: "172.29.0.10",
+            strictHostKeyChecking: "accept-new",
+        }).args;
+        expect(adoptionSshArgs).toContain("StrictHostKeyChecking=accept-new");
+        expect(adoptionSshArgs).not.toContain("StrictHostKeyChecking=yes");
+        const bootstrapNetwork = hyperVBootstrapNetworkCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId: linuxDeviceId,
+            incarnationId,
+            vmName,
+            vmId,
+        });
+        expect(bootstrapNetwork.args).toContain("-File");
+        expect(JSON.parse(bootstrapNetwork.input || "{}")).toEqual({
+            schemaVersion: 1,
+            vmId,
+            vmName,
+            ownershipMarker: `ccc-device-lab:${ownerId}:${linuxDeviceId}:${incarnationId}`,
+        });
+        expect(scriptOf(bootstrapNetwork)).toContain("Get-CccLinuxBootstrapNetworkResult $Vm");
+        expect(parseHyperVBootstrapNetworkObservation('{"ok":true,"addresses":["172.20.1.8"]}')).toEqual({
+            ok: true,
+            addresses: ["172.20.1.8"],
+        });
+        expect(parseHyperVBootstrapNetworkObservation('{"ok":true,"addresses":[],"diagnosticCode":"hyper-v-bootstrap-neighbor-inspection-failed"}')).toEqual({
+            ok: true,
+            addresses: [],
+            diagnosticCode: "hyper-v-bootstrap-neighbor-inspection-failed",
+        });
+        expect(parseHyperVBootstrapNetworkObservation('{"ok":true,"addresses":[],"diagnosticCode":"hyper-v-bootstrap-host-prefix-inspection-failed"}')).toEqual({
+            ok: true,
+            addresses: [],
+            diagnosticCode: "hyper-v-bootstrap-host-prefix-inspection-failed",
+        });
+        expect(parseHyperVBootstrapNetworkObservation('{"ok":true,"addresses":[],"diagnosticCode":"C:\\\\private"}')).toBeNull();
+        expect(parseHyperVBootstrapNetworkObservation('{"ok":true,"addresses":["169.254.1.8"]}')).toBeNull();
+        expect(scriptOf(bootstrapNetwork)).toContain("CCC_HYPER_V_STAGE:$DiagnosticCode");
+        const finalize = hyperVLinuxNetworkFinalizeCommand({
+            ...ssh,
+            networkAddress: "172.20.1.8",
+            hostKeyAlias: "172.29.0.10",
+            managedMacAddress: "02:11:22:33:44:66",
+            managedNetworkAddress: "172.29.0.10",
+            networkGateway: "172.29.0.1",
+            networkPrefixLength: 24,
+        });
+        expect(finalize.args).toContain("HostKeyAlias=172.29.0.10");
+        const finalizePayload = finalize.args.at(-1)?.match(/^printf %s ([A-Za-z0-9+/=]+) \| base64 -d \| bash$/)?.[1];
+        expect(finalizePayload).toBeTruthy();
+        const finalizeCommand = Buffer.from(finalizePayload || "", "base64").toString("utf8");
+        expect(finalizeCommand).toContain("sudo netplan generate");
+        expect(finalizeCommand).toContain("sudo sync");
+        expect(finalizeCommand.indexOf("sudo sync")).toBeLessThan(finalizeCommand.indexOf("netplan apply"));
+        expect(hyperVLinuxSshExecCommand({ ...ssh, guestCommand: "uname -a" }).args.at(-1)).toContain("base64 -d | bash");
+        expect(hyperVLinuxScpUploadCommand({ ...ssh, executable: "scp.exe", localPath: `${deviceRoot}/uploads/in.txt`, remotePath: "/tmp/in.txt" }).args.at(-1)).toBe("ccc01234567@172.29.0.10:/tmp/in.txt");
+        expect(hyperVLinuxScpDownloadCommand({ ...ssh, executable: "scp.exe", remotePath: "/tmp/out.txt", localPath: `${deviceRoot}/downloads/out.txt` }).args.at(-2)).toBe("ccc01234567@172.29.0.10:/tmp/out.txt");
+        expect(() => hyperVLinuxScpUploadCommand({ ...ssh, executable: "scp.exe", localPath: "relative.txt", remotePath: "/tmp/in.txt" })).toThrow("hyper-v-linux-upload-source-invalid");
+        expect(() => hyperVLinuxScpUploadCommand({ ...ssh, executable: "scp.exe", localPath: `${deviceRoot}/uploads/in.txt`, remotePath: "/tmp/out;whoami" })).toThrow("hyper-v-linux-guest-path-invalid");
+
+        const deleteScript = scriptOf(hyperVDeleteCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId: linuxDeviceId,
+            incarnationId,
+            vmName,
+            vmId,
+            diskPath: `${deviceRoot}/disks/root.vhdx`,
+            auxiliaryMediaPaths: [seedDiskPath],
+        }));
+        expect(deleteScript).toContain("$ExpectedDisks");
+        expect(deleteScript).toContain("$ExpectedDiskPaths -notcontains $_");
+        expect(deleteScript).toContain(resolve(seedDiskPath));
+        expect(deleteScript).toContain("Assert-NoReparsePath $OwnedPath");
+
+        const recoverScript = scriptOf(hyperVRecoverOrphanCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId: linuxDeviceId,
+            incarnationId,
+            vmName,
+            deviceRoot,
+            diskPath: `${deviceRoot}/disks/root.vhdx`,
+            auxiliaryMediaPaths: [seedDiskPath],
+        }));
+        expect(recoverScript).toContain("$ExpectedPaths -notcontains $_");
+        expect(recoverScript).not.toContain("$AttachedPaths.Count -ne $ExpectedPaths.Count");
+        expect(recoverScript).toContain("if ([string]$Vm.Notes -and [string]$Vm.Notes -cne $ExpectedMarker)");
+        expect(() => hyperVRecoverOrphanCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId: linuxDeviceId,
+            incarnationId,
+            vmName: hyperVVmName(ownerId, linuxDeviceId, "2".repeat(32)),
+            deviceRoot,
+            diskPath: `${deviceRoot}/disks/root.vhdx`,
+            auxiliaryMediaPaths: [seedDiskPath],
+        })).toThrow("hyper-v-vm-name-not-owner-scoped");
+    });
+
+    it("ensures the CCC internal switch and NAT with conflict fencing", () => {
+        const command = hyperVEnsureNetworkCommand({
+            executable: "powershell.exe",
+            switchName: "CCC Device Lab",
+            natName: "CCCDeviceLab",
+            marker: "ccc-device-lab:hyper-v-network:v1",
+            expectedSwitchId: vmId,
+            expectedNatInstanceId: "ccc-nat-instance-1",
+            allowExistingNat: true,
+            prefix: "172.29.0.0/24",
+            gateway: "172.29.0.1",
+            prefixLength: 24,
+        });
+        const script = scriptOf(command);
+        expect(script).toContain("Set-CccHyperVNetworkStage 'hyper-v-network-module-import-failed'");
+        expect(script).toContain("Set-CccHyperVNetworkStage 'hyper-v-network-switch-name-inspection-failed'");
+        expect(script).toContain("Set-CccHyperVNetworkStage 'hyper-v-network-switch-identity-inspection-failed'");
+        expect(script.indexOf("Set-CccHyperVNetworkStage 'hyper-v-network-switch-name-inspection-failed'"))
+            .toBeLessThan(script.indexOf("Get-VMSwitch -Name $SwitchName"));
+        expect(script.indexOf("Set-CccHyperVNetworkStage 'hyper-v-network-switch-identity-inspection-failed'"))
+            .toBeGreaterThan(script.indexOf("Get-VMSwitch -Name $SwitchName"));
+        expect(script).toContain("New-VMSwitch -Name $SwitchName -SwitchType Internal -Notes $Marker");
+        expect(script).not.toContain("Set-VMSwitch -VMSwitch $Switch -Notes $Marker");
+        expect(script).toContain("hyper-v-network-switch-ownership-conflict");
+        expect(script).toContain("hyper-v-network-switch-type-conflict");
+        expect(script).toContain("New-NetIPAddress");
+        expect(script).toContain("hyper-v-network-gateway-conflict");
+        expect(script).toContain("New-NetNat");
+        expect(script).toContain("hyper-v-network-nat-prefix-conflict");
+        expect(script).toContain("hyper-v-network-nat-ownership-conflict");
+        expect(script).toContain("$AllowExistingNat = $true");
+        expect(script).toContain("$AllowCccOwnedNetworkAdoption = $false");
+        expect(script).toContain("$AllowPersistedCccIdentityRepair = $false");
+        expect(script).toContain(`$ExpectedSwitchId = '${vmId}'`);
+        expect(script).not.toContain("Get-VMSwitch -Id ([Guid]$ExpectedSwitchId)");
+        expect(script).toContain("hyper-v-network-switch-identity-conflict");
+        expect(script).toContain("$ExpectedNatInstanceId = 'ccc-nat-instance-1'");
+        expect(script).toContain("if ($CreatedNat)");
+        expect(script).toContain("$CreatedNatInstanceId = [string]$Nat.InstanceID");
+        expect(script).toContain("[string]$RollbackNats[0].InstanceID -cne $CreatedNatInstanceId");
+        expect(script).toContain("hyper-v-network-nat-rollback-identity-conflict");
+        expect(script).toContain("Remove-NetNat -InputObject $RollbackNats[0]");
+        expect(script).toContain("if ($CreatedGateway -and $Adapter)");
+        expect(script).toContain("if ($CreatedSwitch -and $Switch)");
+        expect(script).toContain("hyper-v-network-subnet-conflict:nat");
+        expect(script).toContain("hyper-v-network-subnet-conflict:interface");
+        expect(script).toContain("$RequiresMutation = ($Switches.Count -eq 0) -or (-not $GatewayExists) -or ($Nats.Count -eq 0) -or $RepairPersistedSwitchMarker");
+        expect(script).toContain("hyper-v-network-elevation-required");
+        expect(script).toContain("[uint32]([uint32]::MaxValue - [uint32]([Math]::Pow(2, 32 - $Length) - 1))");
+        expect(script).not.toContain("[uint64]0xffffffff");
+        expect(parseHyperVNetworkObservation(`noise\n${JSON.stringify({
+            ok: true,
+            switchName: "CCC Device Lab",
+            switchId: vmId,
+            natName: "CCCDeviceLab",
+            marker: "ccc-device-lab:hyper-v-network:v1",
+            natInstanceId: "ccc-nat-instance-1",
+            prefix: "172.29.0.0/24",
+            gateway: "172.29.0.1",
+            interfaceIndex: 42,
+            createdSwitch: true,
+            createdNat: false,
+        })}`)).toMatchObject({ switchName: "CCC Device Lab", interfaceIndex: 42 });
+        expect(parseHyperVNetworkObservation('{"ok":true,"switchName":"CCC Device Lab"}')).toBeNull();
+
+        const adoptionScript = scriptOf(hyperVEnsureNetworkCommand({
+            executable: "powershell.exe",
+            switchName: "CCC Device Lab",
+            natName: "CCCDeviceLab",
+            marker: "ccc-device-lab:hyper-v-network:v1",
+            allowExistingNat: true,
+            allowCccOwnedNetworkAdoption: true,
+            prefix: "172.29.0.0/24",
+            gateway: "172.29.0.1",
+            prefixLength: 24,
+        }));
+        expect(adoptionScript).toContain("$AllowCccOwnedNetworkAdoption = $true");
+        expect(adoptionScript).toContain("$AllowPersistedCccIdentityRepair = $false");
+        expect(adoptionScript).toContain("[Convert]::ToString($ObservedNotes, [Globalization.CultureInfo]::InvariantCulture)");
+        expect(adoptionScript).toContain("-not [string]::IsNullOrEmpty($ObservedMarker)");
+        expect(adoptionScript).toContain("$ObservedTokenValue.ToCharArray()");
+        expect(adoptionScript).toContain("$ObservedCode -ge 97 -and $ObservedCode -le 102");
+        expect(adoptionScript).toContain("Set-CccHyperVNetworkStage 'hyper-v-network-switch-ownership-conflict'");
+        expect(adoptionScript).toContain("if (-not $ObservedMarkerRecognized -and -not $CanRepairPersistedMarker) { throw 'hyper-v-network-switch-ownership-conflict' }");
+        expect(adoptionScript).toContain("$NatName = 'CCCDeviceLab-' + $ObservedTokenValue");
+        expect(adoptionScript).toContain("else { throw 'hyper-v-network-switch-ownership-conflict' }");
+        expect(adoptionScript).not.toContain("Set-VMSwitch -VMSwitch $Switch -Notes $Marker");
+
+        const persistedIdentityAdoptionScript = scriptOf(hyperVEnsureNetworkCommand({
+            executable: "powershell.exe",
+            switchName: "CCC Device Lab",
+            natName: `CCCDeviceLab-${"a".repeat(24)}`,
+            marker: `ccc-device-lab:hyper-v-network:${"a".repeat(24)}`,
+            allowExistingNat: true,
+            allowPersistedCccIdentityRepair: true,
+            expectedSwitchId: vmId,
+            expectedNatInstanceId: "ccc-nat-instance-1",
+            prefix: "172.29.0.0/24",
+            gateway: "172.29.0.1",
+            prefixLength: 24,
+        }));
+        expect(persistedIdentityAdoptionScript).toContain("$AllowCccOwnedNetworkAdoption = $false");
+        expect(persistedIdentityAdoptionScript).toContain("$AllowPersistedCccIdentityRepair = $true");
+        expect(persistedIdentityAdoptionScript).toContain(`$ExpectedSwitchId = '${vmId}'`);
+        expect(persistedIdentityAdoptionScript).toContain("$ExpectedNatInstanceId = 'ccc-nat-instance-1'");
+        expect(persistedIdentityAdoptionScript).toContain("$ObservedMarker.Substring($MarkerPrefix.Length)");
+        expect(persistedIdentityAdoptionScript).toContain("$ExpectedStable = $false");
+        expect(persistedIdentityAdoptionScript).toContain("$ExpectedToken = $true");
+        expect(persistedIdentityAdoptionScript).toContain(`$ExpectedTokenValue = '${"a".repeat(24)}'`);
+        expect(persistedIdentityAdoptionScript).not.toContain("$Marker.Substring($MarkerPrefix.Length)");
+        expect(persistedIdentityAdoptionScript).not.toContain("$ObservedTokenValue = if (");
+        expect(persistedIdentityAdoptionScript).not.toContain("$ExpectedTokenValue = if (");
+        expect(persistedIdentityAdoptionScript).toContain("Set-CccHyperVNetworkStage 'hyper-v-network-marker-inspection-failed'");
+        expect(persistedIdentityAdoptionScript).toContain("Set-CccHyperVNetworkStage 'hyper-v-network-marker-classification-failed'");
+        expect(persistedIdentityAdoptionScript).toContain("Set-CccHyperVNetworkStage 'hyper-v-network-identity-evidence-inspection-failed'");
+        expect(persistedIdentityAdoptionScript).toContain("Set-CccHyperVNetworkStage 'hyper-v-network-identity-adoption-failed'");
+        expect(persistedIdentityAdoptionScript).toContain("$CanRepairPersistedMarker = $AllowPersistedCccIdentityRepair -and $ExpectedSwitchId -and $ExpectedNatInstanceId");
+        expect(persistedIdentityAdoptionScript).toContain("$RepairPersistedSwitchMarker = $true");
+        expect(persistedIdentityAdoptionScript).toContain("Set-CccHyperVNetworkStage 'hyper-v-network-persisted-marker-repair-failed'");
+        expect(persistedIdentityAdoptionScript).toContain("Set-VMSwitch -VMSwitch $Switch -Notes $Marker -ErrorAction Stop");
+        expect(persistedIdentityAdoptionScript).toContain("Get-VMSwitch -Id ([Guid]$ExpectedSwitchId) -ErrorAction Stop");
+        expect(persistedIdentityAdoptionScript).toContain("$RepairedSwitches[0].Id.ToString().ToLowerInvariant() -cne $ExpectedSwitchId");
+        expect(persistedIdentityAdoptionScript).toContain("[string]$RepairedSwitches[0].Notes -cne $Marker");
+        expect(persistedIdentityAdoptionScript).toContain("Set-CccHyperVNetworkStage 'hyper-v-network-persisted-marker-rollback-failed'");
+        expect(persistedIdentityAdoptionScript).toContain("hyper-v-network-persisted-marker-rollback-conflict");
+        expect(persistedIdentityAdoptionScript).toContain("Set-VMSwitch -VMSwitch $RollbackSwitches[0] -Notes $OriginalSwitchMarker -ErrorAction Stop");
+        expect(persistedIdentityAdoptionScript).toContain("$RestoredSwitches = @(Get-VMSwitch -Id ([Guid]$ExpectedSwitchId) -ErrorAction Stop)");
+        expect(persistedIdentityAdoptionScript).toContain("[string]$RestoredSwitches[0].Notes -cne $OriginalSwitchMarker");
+        expect(persistedIdentityAdoptionScript.indexOf("if ($ExpectedNatInstanceId -and $Nats.Count -ne 1)"))
+            .toBeLessThan(persistedIdentityAdoptionScript.indexOf("Set-VMSwitch -VMSwitch $Switch -Notes $Marker"));
+        expect(persistedIdentityAdoptionScript.indexOf("[string]$Nats[0].InstanceID -cne $ExpectedNatInstanceId"))
+            .toBeLessThan(persistedIdentityAdoptionScript.indexOf("Set-VMSwitch -VMSwitch $Switch -Notes $Marker"));
+        expect(persistedIdentityAdoptionScript.indexOf("[string]$Nats[0].InternalIPInterfaceAddressPrefix -ne $Prefix"))
+            .toBeLessThan(persistedIdentityAdoptionScript.indexOf("Set-VMSwitch -VMSwitch $Switch -Notes $Marker"));
+        expect(persistedIdentityAdoptionScript).not.toContain("[regex]::Match");
+        expect(persistedIdentityAdoptionScript).not.toContain(".Groups[1].Value");
+
+        const stableToLegacyRepairScript = scriptOf(hyperVEnsureNetworkCommand({
+            executable: "powershell.exe",
+            switchName: "CCC Device Lab",
+            natName: "CCCDeviceLab",
+            marker: "ccc-device-lab:hyper-v-network:v1",
+            allowExistingNat: true,
+            allowPersistedCccIdentityRepair: true,
+            expectedSwitchId: vmId,
+            expectedNatInstanceId: "ccc-nat-instance-1",
+            prefix: "172.29.0.0/24",
+            gateway: "172.29.0.1",
+            prefixLength: 24,
+        }));
+        expect(stableToLegacyRepairScript).toContain("$ExpectedStable = $true");
+        expect(stableToLegacyRepairScript).toContain("$ExpectedToken = $false");
+        expect(stableToLegacyRepairScript).toContain("$ExpectedTokenValue = ''");
+        expect(stableToLegacyRepairScript).toContain("$StableToToken = $ExpectedStable -and $NatName -ceq 'CCCDeviceLab' -and $ObservedToken");
+        expect(stableToLegacyRepairScript).toContain("-not $ExpectedSwitchId -or -not $ExpectedNatInstanceId");
+        const requiredNatIdentityCheck = "if ($ExpectedNatInstanceId -and $Nats.Count -ne 1) { throw 'hyper-v-network-nat-identity-conflict' }";
+        expect(stableToLegacyRepairScript).toContain(requiredNatIdentityCheck);
+        expect(stableToLegacyRepairScript.indexOf(requiredNatIdentityCheck))
+            .toBeLessThan(stableToLegacyRepairScript.indexOf("if ($Nats.Count -eq 0) { $Nat = New-NetNat"));
+        expect(stableToLegacyRepairScript).toContain("if ($ObservedStable) { $NatName = 'CCCDeviceLab' } else { $NatName = 'CCCDeviceLab-' + $ObservedTokenValue }");
+        expect(parseHyperVNetworkObservation(JSON.stringify({
+            ok: true,
+            switchName: "CCC Device Lab",
+            switchId: vmId,
+            marker: "foreign-marker",
+            natName: "CCCDeviceLab",
+            natInstanceId: "ccc-nat-instance-1",
+            prefix: "172.29.0.0/24",
+            gateway: "172.29.0.1",
+            interfaceIndex: 42,
+            createdSwitch: false,
+            createdNat: false,
+        }))).toBeNull();
+
+        const cleanup = hyperVCleanupNetworkCommand({
+            executable: "powershell.exe",
+            switchName: "CCC Device Lab",
+            natName: "CCCDeviceLab",
+            marker: "ccc-device-lab:hyper-v-network:v1",
+            prefix: "172.29.0.0/24",
+            gateway: "172.29.0.1",
+            prefixLength: 24,
+            removeNat: true,
+            expectedSwitchId: vmId,
+            expectedNatInstanceId: "ccc-nat-instance-1",
+        });
+        const cleanupScript = scriptOf(cleanup);
+        expect(cleanupScript).toContain("$RemoveNat = $true");
+        expect(cleanupScript).toContain("$RemoveSwitch = $true");
+        expect(cleanupScript).toContain("$RemoveGateway = $true");
+        expect(cleanupScript).toContain(`$ExpectedSwitchId = '${vmId}'`);
+        expect(cleanupScript).toContain("hyper-v-network-nat-identity-conflict");
+        expect(cleanupScript).toContain("hyper-v-network-switch-ownership-conflict");
+        // Teardown trusts the switch GUID (identity, verified above at $ExpectedSwitchId): the Notes marker
+        // legitimately drifts between recognized stable/token forms via setup adoption, so the exact-marker
+        // check is enforced only when no $ExpectedSwitchId is available.
+        expect(cleanupScript).toContain("if ([string]$Switch.SwitchType -ne 'Internal') { throw 'hyper-v-network-switch-ownership-conflict' }");
+        expect(cleanupScript).toContain("if (-not $ExpectedSwitchId -and [string]$Switch.Notes -cne $Marker) { throw 'hyper-v-network-switch-ownership-conflict' }");
+        expect(cleanupScript).toContain("$DeferredReason = 'hyper-v-network-switch-in-use'");
+        expect(cleanupScript).toContain("deferred = $true; reason = $DeferredReason");
+        expect(cleanupScript).toContain("Get-VMNetworkAdapter -All -ErrorAction Stop");
+        expect(cleanupScript).toContain("hyper-v-network-switch-attachment-inspection-failed");
+        expect(cleanupScript.match(/Get-VMNetworkAdapter -All -ErrorAction Stop/g)).toHaveLength(2);
+        expect(cleanupScript.indexOf("hyper-v-network-nat-identity-conflict"))
+            .toBeLessThan(cleanupScript.indexOf("Remove-VMSwitch -VMSwitch"));
+        expect(cleanupScript).toContain("Remove-NetNat");
+        expect(cleanupScript).toContain("Remove-VMSwitch");
+        expect(cleanupScript).toContain("$RequiresMutation = ($Switches.Count -eq 1 -and ($RemoveSwitch -or $RemoveGateway)) -or ($Nats.Count -eq 1 -and $RemoveNat)");
+        expect(cleanupScript).toContain("[string]$Switch.Notes -cne $Marker");
+        expect(cleanupScript).toContain("hyper-v-network-elevation-required");
+        expect(() => hyperVCleanupNetworkCommand({
+            executable: "powershell.exe",
+            switchName: "CCC Device Lab",
+            natName: "CCCDeviceLab",
+            marker: "ccc-device-lab:hyper-v-network:v1",
+            prefix: "172.29.0.0/24",
+            gateway: "172.29.0.1",
+            prefixLength: 24,
+            removeSwitch: true,
+        })).toThrow("hyper-v-network-switch-id-invalid");
+        expect(parseHyperVNetworkCleanupObservation(JSON.stringify({ ok: true, removedSwitch: true, removedNat: true, removedGateway: true, alreadyMissing: false }))).toEqual(expect.objectContaining({ removedSwitch: true }));
+        expect(parseHyperVNetworkCleanupObservation(JSON.stringify({ ok: true, removedSwitch: false, removedNat: false, removedGateway: false, alreadyMissing: false, deferred: true, reason: "hyper-v-network-switch-in-use" }))).toEqual(expect.objectContaining({ deferred: true, reason: "hyper-v-network-switch-in-use" }));
+        expect(parseHyperVNetworkCleanupObservation(JSON.stringify({ ok: true, removedSwitch: false, removedNat: false, removedGateway: false, alreadyMissing: false, deferred: true, reason: "other-error" }))).toBeNull();
+        expect(parseHyperVNetworkCleanupObservation('{"ok":true,"removedSwitch":true}')).toBeNull();
+
+        const preserveForeignNat = scriptOf(hyperVCleanupNetworkCommand({
+            executable: "powershell.exe",
+            switchName: "CCC Device Lab",
+            natName: "CCCDeviceLab",
+            marker: "ccc-device-lab:hyper-v-network:v1",
+            prefix: "172.29.0.0/24",
+            gateway: "172.29.0.1",
+            prefixLength: 24,
+            expectedSwitchId: vmId,
+        }));
+        expect(preserveForeignNat).toContain("$RemoveNat = $false");
+        expect(preserveForeignNat).toContain("$Nats.Count -eq 1 -and $RemoveNat");
+
+        const elevatedCommand = hyperVEnsureNetworkCommand({
+            executable: "powershell.exe",
+            switchName: "CCC Device Lab",
+            natName: "CCCDeviceLab",
+            marker: "ccc-device-lab:hyper-v-network:v1",
+            prefix: "172.29.0.0/24",
+            gateway: "172.29.0.1",
+            prefixLength: 24,
+            elevated: true,
+            elevatedDeadlineUnixMs: Date.now() + 180000,
+        });
+        const elevated = scriptOf(elevatedCommand);
+        expect(elevatedCommand.input).toMatch(/^[A-Za-z0-9+/=]+$/);
+        expect(elevatedCommand.args.join(" ").length).toBeLessThan(2048);
+        expect(elevated).toContain("Start-Process -FilePath $Executable -Verb RunAs");
+        expect(elevated).toContain("-WindowStyle Hidden -PassThru");
+        expect(elevated).toContain("GetNamedPipeClientProcessId");
+        expect(elevated).toContain("$ClientProcessId -ne [uint32]$Child.Id");
+        expect(elevated).toContain("$ChildStartTicks = $Child.StartTime.ToUniversalTime().Ticks");
+        expect(elevated).toContain("-not $OperationCompleted");
+        expect(elevated).toContain("$ObservedChild.StartTime.ToUniversalTime().Ticks -eq $ChildStartTicks");
+        expect(elevated).toContain("$Child.WaitForExit(5000)");
+        expect(elevated).toContain("hyper-v-network-elevated-child-termination-unconfirmed");
+        expect(elevated).toContain("S-1-5-32-544");
+        expect(elevated).toContain("hyper-v-network-pipe-handshake-timeout");
+        expect(elevated).toContain("hyper-v-network-elevation-cancelled");
+        expect(elevated).toContain("hyper-v-network-elevation-failed:' + $ElevationHResult");
+        const elevatedInnerEncoded = elevated.match(/\$InnerEncodedTemplate = '([^']+)'/)?.[1];
+        expect(elevatedInnerEncoded).toBeTruthy();
+        const elevatedInner = Buffer.from(elevatedInnerEncoded!, "base64").toString("utf16le");
+        expect(elevatedInner).toContain("$TrustedModuleRoot = Join-Path $PSHOME 'Modules'");
+        expect(elevatedInner).toContain("$env:PSModulePath = $TrustedModuleRoot");
+        expect(elevatedInner).toContain("$Stage = [string]$env:CCC_HYPER_V_STAGE");
+        expect(elevatedInner).toContain("elseif ($Stage -match '^hyper-v-[a-z0-9-]{3,128}$') { $Stage }");
+        expect(elevatedInner).toContain("[IO.Pipes.PipeDirection]::InOut");
+        expect(elevatedInner).toContain("$ProgramEncoded = $Reader.ReadLine()");
+        expect(elevatedInner).toContain("hyper-v-network-program-invalid");
+        expect(elevatedInner).not.toContain("New-NetIPAddress");
+        expect(elevatedInnerEncoded!.length).toBeLessThan(24_000);
+        expect(elevated).toContain("[IO.Pipes.PipeDirection]::InOut");
+        expect(elevated).toContain("$Writer.WriteLine($ProgramEncoded)");
+        expect(elevated).toContain("$Writer.Flush()");
+        expect(elevated.indexOf("$ClientProcessId -ne [uint32]$Child.Id")).toBeLessThan(elevated.indexOf("$Writer.WriteLine($ProgramEncoded)"));
+        expect(elevatedInner).toContain("$RemainingMs = $DeadlineUnixMs - [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()");
+        expect(elevatedInner).toContain("Start-Sleep -Milliseconds $WatchdogDelayMs");
+        expect(elevatedInner).toContain("hyper-v-network-operation-deadline-exceeded");
+        expect(elevatedInner).toContain("StartTime.ToUniversalTime().Ticks -eq $SelfStartTicks");
+        expect(elevatedInner).toContain("$ObservedWatchdog.StartTime.ToUniversalTime().Ticks -eq $WatchdogStartTicks");
+        expect(elevated).not.toContain("RedirectStandardOutput");
+        const networkDiagnosticCodes = [...new Set(
+            [script, cleanupScript, elevated, elevatedInner]
+                .flatMap((source) => [...source.matchAll(/\bhyper-v-network-[a-z0-9-]{3,128}\b/g)])
+                .map((match) => match[0]),
+        )];
+        expect(networkDiagnosticCodes.length).toBeGreaterThan(20);
+        for (const code of networkDiagnosticCodes) {
+            expect(hyperVProviderDiagnosticCode({ stderr: code, stdout: "" }))
+                .toBe(code);
+        }
+    });
+
+    it.skipIf(process.platform !== "win32")("computes IPv4 prefix masks on Windows PowerShell 5.1 without signed overflow", () => {
+        const result = spawnPowerShell([
+            "-WindowStyle",
+            "Hidden",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$Length = 24; $Mask = [uint32]([uint32]::MaxValue - [uint32]([Math]::Pow(2, 32 - $Length) - 1)); if ($Mask -ne [uint32]4294967040) { exit 1 }; Write-Output $Mask",
+        ], {
+            encoding: "utf8",
+            windowsHide: true,
+            timeout: 15_000,
+        });
+
+        expect(result.status, result.stderr || result.error?.message).toBe(0);
+        expect(result.stdout.trim()).toBe("4294967040");
+    });
+
+    it("rejects paths outside the owner device root and unsafe identities", () => {
+        const vmName = hyperVVmName(ownerId, deviceId, incarnationId);
+        expect(() => hyperVCreateCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            baseImagePath: "/state/images/hyper-v/windows-11.vhdx",
+            baseImageSha256,
+            baseImageGeneration: 2,
+            baseImageRoot: "/state/images/hyper-v",
+            deviceRoot: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01",
+            diskPath: "/state/owners/other/root.vhdx",
+            diskMaxBytes: 64 * 1024 * 1024 * 1024,
+            memoryMb: 4096,
+            cpus: 2,
+        })).toThrow("hyper-v-disk-path-outside-owner-root");
+        expect(() => hyperVCreateCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            baseImagePath: "/foreign/windows-11.vhdx",
+            baseImageSha256,
+            baseImageGeneration: 2,
+            baseImageRoot: "/state/images/hyper-v",
+            deviceRoot: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01",
+            diskPath: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01/disks/root.vhdx",
+            diskMaxBytes: 64 * 1024 * 1024 * 1024,
+            memoryMb: 4096,
+            cpus: 2,
+        })).toThrow("hyper-v-base-image-path-outside-owner-root");
+        expect(() => hyperVStatusCommand({ executable: "powershell.exe", ownerId, deviceId, incarnationId, vmName: "foreign-vm", vmId })).toThrow("hyper-v-vm-name-not-owner-scoped");
+        expect(() => hyperVVmName(ownerId, "../escape", incarnationId)).toThrow("hyper-v-device-id-invalid");
+    });
+
+    it("fences lifecycle commands by VM ID, owner marker, name, and disk", () => {
+        const vmName = hyperVVmName(ownerId, deviceId, incarnationId);
+        const options = { executable: "powershell.exe", ownerId, deviceId, incarnationId, vmName, vmId };
+        for (const command of [hyperVStatusCommand(options), hyperVStartCommand({ ...options, memoryMb: 4096, cpus: 2 }), hyperVStopCommand(options), hyperVRebootCommand({ ...options, force: true })]) {
+            const script = scriptOf(command);
+            expect(script).toContain("Get-VM -Id $ExpectedId");
+            expect(script).toContain("hyper-v-vm-ownership-mismatch");
+            expect(script).toContain(`ccc-device-lab:${ownerId}:${deviceId}:${incarnationId}`);
+        }
+        const startScript = scriptOf(hyperVStartCommand({ ...options, memoryMb: 4096, cpus: 2 }));
+        expect(startScript).toContain("FreePhysicalMemory");
+        expect(startScript).toContain("hyper-v-host-memory-capacity-exceeded");
+        expect(startScript).toContain("hyper-v-host-cpu-capacity-exceeded");
+        const rebootScript = scriptOf(hyperVRebootCommand({ ...options, force: true, startIfStopped: true }));
+        expect(rebootScript).toContain("Restart-VM -VM $Vm -Force -Confirm:$false");
+        expect(rebootScript).toContain("throw 'hyper-v-reboot-command-failed'");
+        expect(rebootScript).toContain("throw 'hyper-v-reboot-start-failed'");
+
+        for (const force of [undefined, false, true]) {
+            const noninteractiveReboot = scriptOf(hyperVRebootCommand({ ...options, force }));
+            expect(noninteractiveReboot).toContain("Restart-VM -VM $Vm -Force -Confirm:$false");
+            expect(noninteractiveReboot).not.toContain("$Force");
+            expect(noninteractiveReboot).not.toContain("Stop-VM");
+            expect(noninteractiveReboot.indexOf("hyper-v-vm-ownership-mismatch"))
+                .toBeLessThan(noninteractiveReboot.indexOf("Restart-VM -VM $Vm"));
+        }
+        expect(rebootScript).toContain("hyper-v-reboot-requires-running-vm");
+        expect(rebootScript).toContain("Start-VM -VM $Vm");
+        const deleteScript = scriptOf(hyperVDeleteCommand({
+            ...options,
+            diskPath: "/state/root.vhdx",
+            auxiliaryMediaPaths: ["/state/autounattend.iso"],
+        }));
+        expect(deleteScript).toContain("hyper-v-vm-disk-ownership-mismatch");
+        expect(deleteScript).toContain("hyper-v-vm-media-ownership-mismatch");
+        expect(deleteScript).toContain(`$ExpectedMedia = @('${resolve("/state/autounattend.iso")}')`);
+        // Disk/media ownership comparison must normalize both sides (mirrors hyperVRecoverOrphanCommand),
+        // otherwise a slash-format difference between the journal path and Get-VM*.Path throws a false mismatch.
+        expect(deleteScript).toContain("$ExpectedDiskPaths = @($ExpectedDisks | ForEach-Object { [IO.Path]::GetFullPath([string]$_) })");
+        expect(deleteScript).toContain("$ExpectedMediaPaths = @($ExpectedMedia | ForEach-Object { [IO.Path]::GetFullPath([string]$_) })");
+        // Disk guard is a SUBSET check (mirrors orphan-recovery line 231 and the media guard below):
+        // ownership is already proven by the Notes marker, and residue from a partial create may have
+        // fewer attached disks than expected — exact set-equality would falsely reject that residue.
+        // Disk guard tolerates checkpoint differencing disks (.avhdx) that Hyper-V places next to root.vhdx:
+        // ownership is proven by the Notes marker, and the owned disks directory is owner+device scoped,
+        // so any disk under it is ours. A disk attached from OUTSIDE that directory still trips the guard.
+        expect(deleteScript).toContain("$OwnedDiskDir = [IO.Path]::GetFullPath((Split-Path -Parent $ExpectedDisk))");
+        expect(deleteScript).toContain("if (@($Attached | Where-Object { $ExpectedDiskPaths -notcontains $_ -and -not $_.StartsWith($OwnedDiskDir, [StringComparison]::OrdinalIgnoreCase) }).Count -ne 0) { throw 'hyper-v-vm-disk-ownership-mismatch' }");
+        // Leftover checkpoint differencing disks are cleaned after Remove-VM.
+        expect(deleteScript).toContain("Get-ChildItem -LiteralPath $OwnedDiskDir -Filter *.avhdx -File");
+        expect(deleteScript).toContain("$ExpectedMediaPaths -notcontains $_");
+        expect(deleteScript).toMatch(/Get-VMHardDiskDrive -VM \$Vm[^\n]*\[IO\.Path\]::GetFullPath\(\[string\]\$_\.Path\)/);
+        // No exact-equality disk comparison — neither Compare-Object nor an $Attached.Count vs $ExpectedDiskPaths.Count gate.
+        expect(deleteScript).not.toContain("Compare-Object");
+        expect(deleteScript).not.toMatch(/\$Attached\.Count -ne \$ExpectedDiskPaths\.Count/);
+        expect(deleteScript).toContain("alreadyMissing = $true");
+        expect(deleteScript).toContain("hyper-v-vm-identity-conflict");
+        expect(deleteScript).toContain("Remove-VM -VM $Vm -Force");
+    });
+
+    it("bounded-retries the delete mutation against transient locks with zero configuration", () => {
+        const script = scriptOf(hyperVDeleteCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName: hyperVVmName(ownerId, deviceId, incarnationId),
+            vmId,
+            diskPath: "/state/root.vhdx",
+            auxiliaryMediaPaths: ["/state/autounattend.iso"],
+        }));
+        // AC-002: ownership/identity/disk/media verification stays before any mutation and is never retried.
+        const ownershipAt = script.indexOf("throw 'hyper-v-vm-ownership-mismatch'");
+        const stopLoopAt = script.indexOf("$StopAttempts");
+        expect(ownershipAt).toBeGreaterThan(-1);
+        expect(stopLoopAt).toBeGreaterThan(ownershipAt);
+        expect(script).toContain("throw 'hyper-v-vm-disk-ownership-mismatch'");
+        expect(script).toContain("throw 'hyper-v-vm-media-ownership-mismatch'");
+        // AC-001: bounded Stop-VM settle, Remove-VM retry, and artifact Remove-Item retry with Start-Sleep backoff.
+        expect(script).toContain("throw 'hyper-v-vm-delete-stop-timeout'");
+        expect(script).toContain("if ($StopAttempts -ge 20)");
+        expect(script).toContain("if ($RemoveAttempts -ge 10)");
+        expect(script).toContain("Remove-OwnedItemWithRetry");
+        expect(script).toContain("for ($ItemAttempts = 1; $ItemAttempts -le 10; $ItemAttempts++)");
+        expect(script).toContain("Start-Sleep -Milliseconds 500");
+        // AC-003: retry bounds are deterministic numeric literals (20/10/10) — no config surface drives them.
+        expect(script).not.toMatch(/RetryLimit|RetryCount|MaxAttempts|Get-Content|Import-Csv/);
+        // AC-005: idempotent already-missing branch and success observation contract are unchanged.
+        expect(script).toContain("alreadyMissing = $true");
+        expect(script).toContain("deleted = $true");
+    });
+
+    it("requires an exact VM incarnation marker and rejects stale generation scripts", () => {
+        const vmName = hyperVVmName(ownerId, deviceId, incarnationId);
+        const staleIncarnationId = "22222222222222222222222222222222";
+        const currentMarker = `ccc-device-lab:${ownerId}:${deviceId}:${incarnationId}`;
+        const staleMarker = `ccc-device-lab:${ownerId}:${deviceId}:${staleIncarnationId}`;
+        const currentScript = scriptOf(hyperVStatusCommand({ executable: "powershell.exe", ownerId, deviceId, incarnationId, vmName, vmId }));
+        const staleVmName = hyperVVmName(ownerId, deviceId, staleIncarnationId);
+        const staleScript = scriptOf(hyperVStatusCommand({ executable: "powershell.exe", ownerId, deviceId, incarnationId: staleIncarnationId, vmName: staleVmName, vmId }));
+
+        expect(currentScript).toContain(`$ExpectedMarker = '${currentMarker}'`);
+        expect(staleScript).toContain(`$ExpectedMarker = '${staleMarker}'`);
+        expect(currentScript).not.toContain(staleMarker);
+        expect(staleScript).not.toContain(currentMarker);
+        for (const script of [currentScript, staleScript]) {
+            expect(script).toContain("[string]$Vm.Notes -cne $ExpectedMarker");
+            expect(script).not.toContain("$Vm.Notes -notlike");
+        }
+
+        const recoveryScript = scriptOf(hyperVRecoverOrphanCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            deviceRoot: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01",
+            diskPath: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01/disks/root.vhdx",
+        }));
+        expect(recoveryScript).toContain("[string]$Vm.Notes -cne $ExpectedMarker");
+        expect(recoveryScript).not.toContain("$Vm.Notes -notlike");
+
+        expect(() => hyperVStatusCommand({ executable: "powershell.exe", ownerId, deviceId, incarnationId: "", vmName, vmId }))
+            .toThrow("hyper-v-incarnation-id-invalid");
+        expect(() => hyperVStatusCommand({ executable: "powershell.exe", ownerId, deviceId, incarnationId: `A${incarnationId.slice(1)}`, vmName, vmId }))
+            .toThrow("hyper-v-incarnation-id-invalid");
+    });
+
+    it("recovers only owner-marked orphan VMs and fenced disks", () => {
+        const vmName = hyperVVmName(ownerId, deviceId, incarnationId);
+        const command = hyperVRecoverOrphanCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            deviceRoot: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01",
+            diskPath: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01/disks/root.vhdx",
+            auxiliaryMediaPaths: ["/state/owners/0123456789abcdef/windows-vm/windows-ci-01/disks/autounattend.iso"],
+        });
+        const script = scriptOf(command);
+        expect(script).toContain("hyper-v-orphan-vm-ownership-mismatch");
+        expect(script).toContain("hyper-v-orphan-vm-disk-mismatch");
+        expect(script).toContain("hyper-v-orphan-vm-unmarked-disk-mismatch");
+        expect(script).toContain("hyper-v-orphan-vm-media-mismatch");
+        expect(script).toContain("$AttachedPaths.Count -ne 1");
+        expect(script).toContain("$AttachedPaths[0] -cne [IO.Path]::GetFullPath($DiskPath)");
+        expect(script).toContain("[IO.FileAttributes]::ReparsePoint");
+        expect(parseHyperVRecoveryObservation('noise\n{"ok":true,"recoveredVm":true,"removedDisk":true}')).toEqual({ ok: true, recoveredVm: true, removedDisk: true });
+        expect(parseHyperVRecoveryObservation('{"ok":true,"recoveredVm":true}')).toBeNull();
+        expect(() => hyperVRecoverOrphanCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            deviceRoot: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01",
+            diskPath: "/state/owners/0123456789abcdef/windows-vm/windows-ci-01/disks/root.vhdx",
+            auxiliaryMediaPaths: ["/state/owners/foreign/autounattend.iso"],
+        })).toThrow("hyper-v-auxiliary-media-path-outside-owner-root");
+    });
+
+    it("uses owner-scoped production checkpoints and exact snapshot identity fencing", () => {
+        const vmName = hyperVVmName(ownerId, deviceId, incarnationId);
+        const snapshotId = "87654321-4321-4321-4321-cba987654321";
+        const snapshotName = "before-install";
+        const options = { executable: "powershell.exe", ownerId, deviceId, incarnationId, vmName, vmId, snapshotName };
+        const snapshotModule = readFileSync(hyperVPowerShellAssetPath("snapshot-repair").replace(/Repair-SnapshotState\.ps1$/, "Ccc.HyperV.Snapshots.psm1"), "utf8");
+        // Owner-scoped naming stays a host-control concept even though create/delete/restore now run
+        // through the typed library; the adapter feeds this name to Checkpoint-VM.
+        expect(hyperVSnapshotName(ownerId, snapshotName)).toBe(`ccc-${ownerId}-${snapshotName}`);
+        expect(snapshotModule).toContain("Checkpoint-VM -VM $TargetVm");
+        expect(snapshotModule).toContain("hyper-v-snapshot-policy-quarantine-failed");
+        expect(snapshotModule).toContain("hyper-v-snapshot-reconciliation-failed");
+        expect(() => hyperVSnapshotName(ownerId, "../foreign")).toThrow("hyper-v-snapshot-name-invalid");
+        expect(JSON.parse(hyperVSnapshotRepairCommand(options, "Production").input!))
+            .toMatchObject({ snapshotName: `ccc-${ownerId}-${snapshotName}`, expectedCheckpointPolicy: "Production" });
+        expect(parseHyperVSnapshotRepairObservation(JSON.stringify({ ok: true, checkpointPolicy: "Production", candidateCount: 1 })))
+            .toEqual({ ok: true, checkpointPolicy: "Production", candidateCount: 1 });
+        expect(parseHyperVSnapshotRepairObservation(JSON.stringify({ ok: true, checkpointPolicy: "Standard", candidateCount: 1 }))).toBeNull();
+    });
+
+    it("uses owner-fenced PowerShell Direct sessions for guest exec and transfer", () => {
+        const vmName = hyperVVmName(ownerId, deviceId, incarnationId);
+        const deviceRoot = "/state/owners/0123456789abcdef/windows-vm/windows-ci-01";
+        const credentialPath = `${deviceRoot}/secrets/guest.credential.xml`;
+        const base = { executable: "powershell.exe", ownerId, deviceId, incarnationId, vmName, vmId, deviceRoot, credentialPath };
+        const execScript = scriptOf(hyperVGuestExecCommand({ ...base, guestCommand: "Write-Output ok" }));
+        expect(execScript).toContain("Get-VM -Id $ExpectedId");
+        expect(execScript).toContain("Import-Clixml -LiteralPath $CredentialPath");
+        expect(execScript).toContain("New-PSSession -VMId $ExpectedId -Credential $Credential");
+        expect(execScript).not.toContain("Write-Output ok");
+        expect(execScript).toContain("Start-Process -FilePath 'powershell.exe'");
+
+        const uploadScript = scriptOf(hyperVGuestUploadCommand({ ...base, localPath: "/project/in.txt", remotePath: "C:\\ccc\\in.txt" }));
+        const downloadScript = scriptOf(hyperVGuestDownloadCommand({ ...base, localPath: "/project/out.txt", remotePath: "C:\\ccc\\out.txt" }));
+        expect(uploadScript).toContain("-ToSession $Session");
+        expect(downloadScript).not.toContain("-FromSession $Session");
+        expect(downloadScript).toContain("[IO.File]::Open($Path");
+        expect(downloadScript).toContain("[IO.FileShare]::Read");
+        expect(downloadScript).toContain("if ($Stream.Length -gt $Limit)");
+        expect(downloadScript).toContain("if ($Stream.ReadByte() -ge 0)");
+        expect(downloadScript).toContain("[Convert]::FromBase64String");
+        expect(() => hyperVGuestUploadCommand({ ...base, localPath: "/project/in.txt", remotePath: "..\\escape" })).toThrow("hyper-v-guest-path-invalid");
+        expect(() => hyperVGuestExecCommand({ ...base, credentialPath: "/foreign/guest.xml", guestCommand: "whoami" })).toThrow("hyper-v-guest-credential-path-outside-owner-root");
+
+        expect(parseHyperVGuestExecObservation(JSON.stringify({ ok: true, status: 0, stdout: "ok\r\n", stderr: "" })))
+            .toEqual({ ok: true, status: 0, stdout: "ok\r\n", stderr: "" });
+        expect(parseHyperVGuestTransferObservation(JSON.stringify({ ok: true, localPath: "/project/in.txt", remotePath: "C:\\ccc\\in.txt", bytes: 7 })))
+            .toEqual({ ok: true, localPath: "/project/in.txt", remotePath: "C:\\ccc\\in.txt", bytes: 7 });
+    });
+
+    it("waits for an owner-fenced PowerShell Direct guest session", () => {
+        const vmName = hyperVVmName(ownerId, deviceId, incarnationId);
+        const deviceRoot = "/state/owners/0123456789abcdef/windows-vm/windows-ci-01";
+        const credentialPath = `${deviceRoot}/secrets/guest.credential.xml`;
+        const provisioningMediaPath = `${deviceRoot}/disks/autounattend.iso`;
+        const command = hyperVGuestReadyCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            vmId,
+            deviceRoot,
+            credentialPath,
+            provisioningMediaPath,
+            timeoutMs: 300000,
+        });
+        const script = scriptOf(command);
+        expect(script).toContain("[DateTime]::UtcNow.AddMilliseconds(300000)");
+        expect(script).toContain("Invoke-Command -VMId $ExpectedId -Credential $Credential");
+        expect(script).toContain("-AsJob -ErrorAction Stop");
+        expect(script).toContain("Wait-Job -Job $AttemptJob -Timeout 15");
+        expect(script).toContain("Receive-Job -Job $AttemptJob -ErrorAction Stop");
+        expect(script).toContain("Remove-Job -Job $AttemptJob -Force -ErrorAction SilentlyContinue");
+        expect(script).toContain("powershell-direct-attempt-timeout");
+        expect(script).toContain("$Candidate -eq 'powershell-direct-attempt-timeout'");
+        expect(script).toContain("$LastFailure = $Candidate");
+        expect(script).not.toContain("New-PSSession -VMId $ExpectedId");
+        expect(script).toContain("Remove-VMDvdDrive -VMDvdDrive $ProvisioningDrives[0]");
+        expect(script).toContain("Remove-Item -LiteralPath $ProvisioningMedia");
+        expect(script).toContain("hyper-v-guest-ready-timeout");
+        expect(script).toContain("powershell-direct-authentication-failed");
+        expect(script).toContain("$Failure | ConvertTo-Json");
+        expect(script).toContain("hyper-v-vm-ownership-mismatch");
+        // Every exit path emits the structured failure, including the preconditions that used to
+        // throw onto stderr where the broker could not read them.
+        expect(script).toContain("error = 'hyper-v-guest-ready-failed'");
+        expect(script).toContain("if ($Reason -notmatch '^hyper-v-[a-z0-9-]{3,120}$') { $Reason = 'hyper-v-guest-ready-precondition-failed' }");
+        expect(script.match(/\$Failure \| ConvertTo-Json/g)).toHaveLength(2);
+        expect(parseHyperVGuestReadyObservation(JSON.stringify({ ok: true, vmId: vmId.toUpperCase(), vmName, computerName: "CCC-WIN", attempts: 4 })))
+            .toEqual({ ok: true, vmId, vmName, computerName: "CCC-WIN", attempts: 4 });
+        expect(parseHyperVGuestReadyObservation(JSON.stringify({ ok: true, vmId, vmName, computerName: "", attempts: 0 }))).toBeNull();
+        expect(parseHyperVGuestReadyFailureObservation(JSON.stringify({ ok: false, error: "hyper-v-guest-ready-timeout", reason: "powershell-direct-session-unavailable", attempts: 150 })))
+            .toEqual({ ok: false, error: "hyper-v-guest-ready-timeout", reason: "powershell-direct-session-unavailable", attempts: 150, scrubConfirmed: false, mediaDetached: false });
+        expect(parseHyperVGuestReadyFailureObservation(JSON.stringify({ ok: false, error: "hyper-v-guest-ready-timeout", reason: "powershell-direct-attempt-timeout", attempts: 72 })))
+            .toEqual({ ok: false, error: "hyper-v-guest-ready-timeout", reason: "powershell-direct-attempt-timeout", attempts: 72, scrubConfirmed: false, mediaDetached: false });
+        // A precondition failure now round-trips its real reason instead of dying on stderr as an
+        // unparseable PowerShell exception, which is what collapsed every early exit to a bare
+        // powershell-direct-unavailable. Zero attempts is legitimate here and only here.
+        expect(parseHyperVGuestReadyFailureObservation(JSON.stringify({ ok: false, error: "hyper-v-guest-ready-failed", reason: "hyper-v-guest-credential-unavailable", attempts: 0 })))
+            .toEqual({ ok: false, error: "hyper-v-guest-ready-failed", reason: "hyper-v-guest-credential-unavailable", attempts: 0, scrubConfirmed: false, mediaDetached: false });
+        expect(parseHyperVGuestReadyFailureObservation(JSON.stringify({ ok: false, error: "hyper-v-guest-ready-failed", reason: "hyper-v-vm-ownership-mismatch", attempts: 3 })))
+            .toEqual({ ok: false, error: "hyper-v-guest-ready-failed", reason: "hyper-v-vm-ownership-mismatch", attempts: 3, scrubConfirmed: false, mediaDetached: false });
+        expect(parseHyperVGuestReadyFailureObservation(JSON.stringify({ ok: false, error: "hyper-v-guest-ready-timeout", reason: "powershell-direct-unavailable", attempts: 0 }))).toBeNull();
+        expect(parseHyperVGuestReadyFailureObservation(JSON.stringify({ ok: false, error: "hyper-v-guest-ready-elsewhere", reason: "hyper-v-guest-credential-unavailable", attempts: 1 }))).toBeNull();
+        expect(parseHyperVGuestReadyFailureObservation(JSON.stringify({ ok: false, error: "hyper-v-guest-ready-failed", reason: "C:\\secret", attempts: 0 }))).toBeNull();
+        expect(parseHyperVGuestReadyFailureObservation(JSON.stringify({ ok: false, error: "hyper-v-guest-ready-timeout", reason: "C:\\secret", attempts: 150 }))).toBeNull();
+        expect(parseHyperVGuestReadyFailureObservation(JSON.stringify({ ok: false, error: "hyper-v-guest-ready-timeout", reason: `hyper-v-${"x".repeat(121)}`, attempts: 150 }))).toBeNull();
+        const cappedCommand = hyperVGuestReadyCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            vmId,
+            deviceRoot,
+            credentialPath,
+            provisioningMediaPath,
+            timeoutMs: Number.MAX_SAFE_INTEGER,
+        });
+        expect(scriptOf(cappedCommand)).toContain("[DateTime]::UtcNow.AddMilliseconds(1200000)");
+        expect(() => hyperVGuestReadyCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            vmId,
+            deviceRoot,
+            credentialPath,
+            provisioningMediaPath: "/state/owners/foreign/autounattend.iso",
+            timeoutMs: 300000,
+        })).toThrow("hyper-v-guest-provisioning-media-path-outside-owner-root");
+    });
+
+    it("refuses to remove the provisioning media until the guest reports the secrets scrubbed", () => {
+        const vmName = hyperVVmName(ownerId, deviceId, incarnationId);
+        const deviceRoot = "/state/owners/0123456789abcdef/windows-vm/windows-ci-01";
+        const credentialPath = `${deviceRoot}/secrets/guest.credential.xml`;
+        const provisioningMediaPath = `${deviceRoot}/disks/autounattend.iso`;
+        // WITH an expectedNetworkAddress, which is the default (`networking !== false`). Building
+        // this without one tested the single configuration where the network check is compiled out,
+        // and that is precisely the check the scrub gates have to precede — so the omission made
+        // the ordering assertions below unable to catch the bug they exist for.
+        const script = scriptOf(hyperVGuestReadyCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            vmId,
+            deviceRoot,
+            credentialPath,
+            provisioningMediaPath,
+            expectedNetworkAddress: "192.168.100.50",
+            timeoutMs: 300000,
+        }));
+
+        // The whole predicate as one exact string, not three independent toContain calls. Pinning
+        // the terms individually leaves the composition free: flipping -or to -and keeps every
+        // substring present and passes, while the gate then opens unless ALL THREE secrets are
+        // still there — so a scrub that deleted the Panther files but failed to clear Winlogon
+        // (every step runs under SilentlyContinue) reads as scrubbed with the password still live.
+        // A term can also be neutered while keeping its substring, e.g. appending .NoSuchMember.
+        // Exact-matching the expression is what closes that family.
+        expect(script).toContain(
+            "provisioningSecretsPresent = [bool]((Test-Path -LiteralPath 'C:\\Windows\\Panther\\unattend.xml')"
+            + " -or (Test-Path -LiteralPath 'C:\\Windows\\Panther\\Unattend\\unattend.xml')"
+            + " -or ($null -ne (Get-ItemProperty -LiteralPath $Winlogon -Name 'DefaultPassword' -ErrorAction SilentlyContinue)))",
+        );
+        // The marker is the only signal that proves the first-logon program ran: Windows clears
+        // DefaultPassword/AutoAdminLogon itself once AutoLogonCount hits zero, and Setup redacts
+        // its own cached answer file, so all three absence signals above are reachable without us.
+        expect(script).toContain(
+            "firstLogonCompleted = [string](Get-ItemProperty -LiteralPath 'HKLM:\\SOFTWARE\\ccc'"
+            + " -Name 'FirstLogonCompleted' -ErrorAction SilentlyContinue).FirstLogonCompleted",
+        );
+        // Compared against this incarnation's own ownership marker — the same string the prelude
+        // checks against $Vm.Notes — so a marker baked into a captured base image belongs to a
+        // different incarnation and cannot satisfy the gate. An absent property stringifies to ""
+        // and fails, which is fail-closed without needing a type guard.
+        expect(script).toContain("$ExpectedMarker = 'ccc-device-lab:" + `${ownerId}:${deviceId}:${incarnationId}'`);
+
+        // Both gates fail closed. The naive `if ($Probe.x)` form is falsy for an absent property
+        // or a null $Probe, which would open the gate exactly when the guest's answer is least
+        // trustworthy; -isnot [bool] refuses anything that is not an actual answer.
+        expect(script).toContain("if ([string]$Probe.firstLogonCompleted -cne $ExpectedMarker) { throw 'hyper-v-guest-first-logon-incomplete' }");
+        const gate = script.indexOf("if ($Probe.provisioningSecretsPresent -isnot [bool] -or $Probe.provisioningSecretsPresent) { throw 'hyper-v-guest-provisioning-not-scrubbed' }");
+        // The FULL statement, not a prefix. A prefix lets a decoy carrying it sit at the right
+        // position while the real gate is re-emitted after the deletion — the exact race this test
+        // exists to pin, passing green because the ordering assertions measured the decoy.
+        const markerGate = script.indexOf("if ([string]$Probe.firstLogonCompleted -cne $ExpectedMarker) { throw 'hyper-v-guest-first-logon-incomplete' }");
+        expect(markerGate).toBeGreaterThan(-1);
+        const dvdRemoval = script.indexOf("Remove-VMDvdDrive -VMDvdDrive $ProvisioningDrives[0]");
+        const isoRemoval = script.indexOf("Remove-Item -LiteralPath $ProvisioningMedia");
+        expect(gate).toBeGreaterThan(-1);
+        expect(dvdRemoval).toBeGreaterThan(-1);
+        expect(isoRemoval).toBeGreaterThan(-1);
+        // Ordering is the whole point. Containment passes just as happily with the gate placed
+        // after the deletion, which is the race this closes: the media is what the first-logon
+        // program is loaded from, so removing it first makes the program exit 3 and the scrub
+        // silently never happen.
+        expect(gate).toBeLessThan(dvdRemoval);
+        expect(gate).toBeLessThan(isoRemoval);
+        expect(markerGate).toBeLessThan(dvdRemoval);
+        expect(markerGate).toBeLessThan(isoRemoval);
+        // Both scrub gates must precede the NETWORK check too, not just the media removal. The
+        // first-logon program assigns the static address itself as its first action, so the network
+        // check is causally downstream of the marker: a launcher that never ran leaves the guest on
+        // DHCP and throws network-not-ready on every attempt, so with the network check first these
+        // gates were unreachable and the broker never contained the guest that had actually failed.
+        const networkGate = script.indexOf("if ($ExpectedNetworkAddress -and $Probe.addresses -notcontains $ExpectedNetworkAddress) { throw 'hyper-v-guest-network-not-ready' }");
+        expect(networkGate).toBeGreaterThan(-1);
+        expect(markerGate).toBeLessThan(networkGate);
+        expect(gate).toBeLessThan(networkGate);
+        // The latch, and where it sits. It must come AFTER both scrub gates — latching earlier
+        // would certify a guest that never passed them — and BEFORE the media block, because every
+        // failure below it (a locked ISO, an ACL, a rejected reparse path) has to be reported as
+        // "scrubbed" so the host does not power off a clean VM for a cleanup it could not finish.
+        const latch = script.indexOf("$ScrubConfirmed = $true");
+        expect(latch).toBeGreaterThan(-1);
+        expect(latch).toBeGreaterThan(gate);
+        expect(latch).toBeGreaterThan(markerGate);
+        expect(latch).toBeLessThan(dvdRemoval);
+        expect(latch).toBeLessThan(networkGate);
+        // Initialised false, and reported on both failure payloads — the deadline one and the
+        // precondition one — or the host cannot tell "never scrubbed" from "scrubbed, cleanup
+        // failed" on whichever path it actually gets.
+        expect(script).toContain("$ScrubConfirmed = $false");
+        expect(script.match(/scrubConfirmed = \[bool\]\$ScrubConfirmed/g)).toHaveLength(2);
+        // mediaDetached is a SECOND latch, and it must sit after the drive is actually gone —
+        // strictly after Remove-VMDvdDrive and after the ambiguity throw. scrubConfirmed says the
+        // guest's registry and Panther are clean; it says nothing about an ISO still mounted in the
+        // guest, which carries the local Administrator password in plaintext for anything running
+        // there. Latching them together would stand containment down on exactly that guest.
+        const detachLatch = script.indexOf("$MediaDetached = $true");
+        expect(detachLatch).toBeGreaterThan(-1);
+        expect(script).toContain("$MediaDetached = $false");
+        expect(script.match(/mediaDetached = \[bool\]\$MediaDetached/g)).toHaveLength(2);
+        const ambiguityThrow = script.indexOf("hyper-v-guest-provisioning-media-attachment-ambiguous");
+        expect(ambiguityThrow).toBeGreaterThan(-1);
+        expect(script.indexOf("$MediaDetached = $true", ambiguityThrow), "the detach latch must follow the ambiguity throw").toBeGreaterThan(ambiguityThrow);
+        expect(script.indexOf("$MediaDetached = $true", dvdRemoval), "the detach latch must follow Remove-VMDvdDrive").toBeGreaterThan(dvdRemoval);
+        // And the no-media case counts as detached, or a device provisioned without media could
+        // never satisfy the veto and would be contained on every failure forever.
+        expect(script).toContain("if (-not $ProvisioningMedia) { $MediaDetached = $true }");
+        // The gate is its own statement, not a clause hanging off the network check, so it still
+        // runs when $ExpectedNetworkAddress is empty.
+        expect(script).toMatch(/\n\s*if \(\$Probe\.provisioningSecretsPresent -isnot \[bool\] -or \$Probe\.provisioningSecretsPresent\) \{ throw 'hyper-v-guest-provisioning-not-scrubbed' \}\n/);
+        expect(script).toMatch(/\n\s*if \(\[string\]\$Probe\.firstLogonCompleted -cne \$ExpectedMarker\) \{ throw 'hyper-v-guest-first-logon-incomplete' \}\n/);
+
+        // And the reason survives the failure sanitizer, so a guest stuck unscrubbed times out
+        // with a name the broker can read instead of collapsing to powershell-direct-unavailable.
+        expect(parseHyperVGuestReadyFailureObservation(JSON.stringify({
+            ok: false,
+            error: "hyper-v-guest-ready-timeout",
+            reason: "hyper-v-guest-provisioning-not-scrubbed",
+            attempts: 150,
+        }))).toEqual({
+            ok: false,
+            error: "hyper-v-guest-ready-timeout",
+            reason: "hyper-v-guest-provisioning-not-scrubbed",
+            attempts: 150,
+            scrubConfirmed: false,
+            mediaDetached: false,
+        });
+        // Both reasons, not just one: these two are what the broker's containment switches on, so
+        // a reason that failed to round-trip would silently stop a guest from being powered off.
+        expect(parseHyperVGuestReadyFailureObservation(JSON.stringify({
+            ok: false,
+            error: "hyper-v-guest-ready-timeout",
+            reason: "hyper-v-guest-first-logon-incomplete",
+            attempts: 150,
+        }))).toEqual({
+            ok: false,
+            error: "hyper-v-guest-ready-timeout",
+            reason: "hyper-v-guest-first-logon-incomplete",
+            attempts: 150,
+            scrubConfirmed: false,
+            mediaDetached: false,
+        });
+        // scrubConfirmed is what separates "never scrubbed" from "scrubbed, but the media removal
+        // below the gates failed". The latter surfaces under at least three different reason codes
+        // — a Remove-Item or Remove-VMDvdDrive failure carrying host text collapses to
+        // powershell-direct-unavailable, while Assert-NoReparsePath throws its own two named codes
+        // — so reason matching cannot recognise it and containment would power off a healthy VM.
+        expect(parseHyperVGuestReadyFailureObservation(JSON.stringify({
+            ok: false,
+            error: "hyper-v-guest-ready-timeout",
+            reason: "powershell-direct-unavailable",
+            attempts: 150,
+            scrubConfirmed: true,
+            mediaDetached: true,
+        }))).toEqual({
+            ok: false,
+            error: "hyper-v-guest-ready-timeout",
+            reason: "powershell-direct-unavailable",
+            attempts: 150,
+            scrubConfirmed: true,
+            mediaDetached: true,
+        });
+        // Only a literal true. An older broker omits the field, and anything else must read as
+        // not-confirmed, because unknown has to fall on the containing side.
+        for (const value of [undefined, "true", 1, null]) {
+            expect(parseHyperVGuestReadyFailureObservation(JSON.stringify({
+                ok: false,
+                error: "hyper-v-guest-ready-timeout",
+                reason: "hyper-v-path-reparse-point-rejected",
+                attempts: 150,
+                ...(value === undefined ? {} : { scrubConfirmed: value }),
+            }))?.scrubConfirmed, `scrubConfirmed must not be inferred from ${JSON.stringify(value)}`).toBe(false);
+        }
+    });
+
+    it("collects bounded owner-fenced Hyper-V boot diagnostics", () => {
+        const vmName = hyperVVmName(ownerId, deviceId, incarnationId);
+        const command = hyperVGuestBootDiagnosticCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            vmId,
+            diskPath: "/state/root.vhdx",
+        });
+        const script = scriptOf(command);
+        expect(command.args).toContain("-File");
+        expect(JSON.parse(command.input || "{}")).toEqual({
+            schemaVersion: 1,
+            vmId,
+            vmName,
+            ownershipMarker: `ccc-device-lab:${ownerId}:${deviceId}:${incarnationId}`,
+        });
+        expect(script).toContain("Get-CccGuestBootDiagnosticResult $Vm");
+        expect(parseHyperVGuestBootDiagnosticObservation(JSON.stringify({
+            ok: true,
+            vmId: vmId.toUpperCase(),
+            vmName,
+            state: "Running",
+            uptimeMs: 600123,
+            generation: 2,
+            secureBootEnabled: true,
+            heartbeatEnabled: true,
+            heartbeatPrimaryStatus: 2,
+            heartbeatSecondaryStatus: 0,
+            integrationServices: [{ name: "Heartbeat", enabled: true, primaryStatus: 2, secondaryStatus: 0 }],
+            hardDiskCount: 1,
+            dvdCount: 1,
+            hardDiskControllers: ["scsi"],
+            bootDeviceTypes: ["hard-disk", "dvd", "network"],
+            bootEntries: [{ bootType: "Drive", deviceType: "Vhd", controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0 }],
+            hardDisks: [{ controllerType: "scsi", controllerNumber: 0, controllerLocation: 0, vhdFormat: "VHDX", vhdType: "Dynamic", sizeBytes: 34359738368, fileSizeBytes: 4294967296, minimumSizeBytes: 3221225472, logicalSectorSize: 512, physicalSectorSize: 4096 }],
+            dvdDrives: [{ controllerType: "scsi", controllerNumber: 0, controllerLocation: 1, mediaAttached: true }],
+            diagnosticComplete: true,
+            diagnosticErrors: [],
+        }))).toEqual({
+            ok: true,
+            vmId,
+            vmName,
+            state: "Running",
+            uptimeMs: 600123,
+            generation: 2,
+            secureBootEnabled: true,
+            heartbeatEnabled: true,
+            heartbeatPrimaryStatus: 2,
+            heartbeatSecondaryStatus: 0,
+            integrationServices: [{ name: "Heartbeat", enabled: true, primaryStatus: 2, secondaryStatus: 0 }],
+            hardDiskCount: 1,
+            dvdCount: 1,
+            hardDiskControllers: ["scsi"],
+            bootDeviceTypes: ["hard-disk", "dvd", "network"],
+            bootEntries: [{ bootType: "Drive", deviceType: "Vhd", controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0 }],
+            hardDisks: [{ controllerType: "scsi", controllerNumber: 0, controllerLocation: 0, vhdFormat: "VHDX", vhdType: "Dynamic", sizeBytes: 34359738368, fileSizeBytes: 4294967296, minimumSizeBytes: 3221225472, logicalSectorSize: 512, physicalSectorSize: 4096 }],
+            dvdDrives: [{ controllerType: "scsi", controllerNumber: 0, controllerLocation: 1, mediaAttached: true }],
+            diagnosticComplete: true,
+            diagnosticErrors: [],
+        });
+        expect(parseHyperVGuestBootDiagnosticObservation(JSON.stringify({
+            ok: true,
+            vmId,
+            vmName,
+            state: "Running",
+            uptimeMs: 1,
+            generation: 2,
+            secureBootEnabled: true,
+            heartbeatEnabled: true,
+            heartbeatPrimaryStatus: 2,
+            heartbeatSecondaryStatus: 0,
+            integrationServices: [],
+            hardDiskCount: 1,
+            dvdCount: 1,
+            hardDiskControllers: ["scsi"],
+            bootDeviceTypes: ["C:\\secret"],
+            bootEntries: [], hardDisks: [], dvdDrives: [],
+            diagnosticComplete: true,
+            diagnosticErrors: [],
+        }))).toBeNull();
+        expect(parseHyperVGuestBootDiagnosticObservation(JSON.stringify({
+            ok: true,
+            vmId,
+            vmName,
+            state: "Running",
+            uptimeMs: 1,
+            generation: 1,
+            secureBootEnabled: null,
+            heartbeatEnabled: true,
+            heartbeatPrimaryStatus: 2,
+            heartbeatSecondaryStatus: 0,
+            integrationServices: [],
+            hardDiskCount: 1,
+            dvdCount: 1,
+            hardDiskControllers: ["ide"],
+            bootDeviceTypes: Array(9).fill("hard-disk"),
+            bootEntries: [], hardDisks: [], dvdDrives: [],
+            diagnosticComplete: true,
+            diagnosticErrors: [],
+        }))).toBeNull();
+        expect(parseHyperVGuestBootDiagnosticObservation(JSON.stringify({
+            ok: true,
+            vmId,
+            vmName,
+            state: "Unknown",
+            uptimeMs: 0,
+            generation: null,
+            secureBootEnabled: null,
+            heartbeatEnabled: null,
+            heartbeatPrimaryStatus: null,
+            heartbeatSecondaryStatus: null,
+            integrationServices: [],
+            hardDiskCount: 0,
+            dvdCount: 0,
+            hardDiskControllers: [],
+            bootDeviceTypes: [],
+            bootEntries: [], hardDisks: [], dvdDrives: [],
+            diagnosticComplete: false,
+            diagnosticErrors: ["hyper-v-diagnostic-vm-observation-incomplete"],
+        }))).toMatchObject({
+            generation: null,
+            diagnosticComplete: false,
+            diagnosticErrors: ["hyper-v-diagnostic-vm-observation-incomplete"],
+        });
+        expect(parseHyperVGuestBootDiagnosticObservation(JSON.stringify({
+            ok: true,
+            vmId,
+            vmName,
+            state: "Running",
+            uptimeMs: 0,
+            generation: 2,
+            secureBootEnabled: null,
+            heartbeatEnabled: null,
+            heartbeatPrimaryStatus: null,
+            heartbeatSecondaryStatus: null,
+            integrationServices: [],
+            hardDiskCount: 0,
+            dvdCount: 0,
+            hardDiskControllers: [],
+            bootDeviceTypes: [],
+            bootEntries: [], hardDisks: [], dvdDrives: [],
+            diagnosticComplete: false,
+            diagnosticErrors: ["private-path"],
+        }))).toBeNull();
+    });
+
+    it("delivers the first-logon program as an ISO file so the answer file stays within the 1024-character CommandLine limit", () => {
+        const vmName = hyperVVmName(ownerId, deviceId, incarnationId);
+        const deviceRoot = "/state/owners/0123456789abcdef/windows-vm/windows-ci-01";
+        const guestPassword = "Ccc!7this-is-a-long-disposable-password";
+        const command = hyperVGuestProvisionCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            vmId,
+            diskPath: `${deviceRoot}/disks/root.vhdx`,
+            deviceRoot,
+            credentialPath: `${deviceRoot}/secrets/guest.credential.xml`,
+            provisioningMediaPath: `${deviceRoot}/disks/autounattend.iso`,
+            guestUsername: "ccc01234567",
+            guestPassword,
+            networkAddress: "192.168.100.50",
+            networkGateway: "192.168.100.1",
+            networkPrefixLength: 24,
+        });
+        const script = scriptOf(command);
+
+        // The first-logon program is carried as its own ISO entry, not inline in the answer file.
+        const scriptBase64 = script.match(/\$FirstLogonScriptBase64 = '([A-Za-z0-9+/=]+)'/)?.[1];
+        expect(scriptBase64).toBeTruthy();
+        const firstLogonProgram = Buffer.from(scriptBase64!, "base64").toString("utf8");
+        expect(firstLogonProgram).toContain("New-NetIPAddress");
+        expect(firstLogonProgram).toContain("192.168.100.50");
+        expect(firstLogonProgram).toContain("C:\\Windows\\Panther\\unattend.xml");
+        expect(firstLogonProgram).toContain("AutoAdminLogon");
+        // The completion marker readiness gates on, and it has to be the LAST statement: it is what
+        // proves this program reached its end, so anything after it could be skipped while the
+        // marker still claimed a full run. Nothing above it can throw (SilentlyContinue throughout),
+        // so reaching the marker means every scrub statement executed.
+        // The whole marker argument rests on this preference: with SilentlyContinue nothing above
+        // the marker can throw, so reaching it means every statement was attempted. Flipping it to
+        // Stop was unpinned and passed, which left the premise of the invariant unguarded.
+        expect(firstLogonProgram.split("\r\n")[0]).toBe("$ErrorActionPreference = 'SilentlyContinue'");
+        // Pinned as the actual last LINE, not by a suffix. `endsWith("| Out-Null")` is satisfied by
+        // any Out-Null statement, so a scrub step appended after the marker passed it — the marker
+        // would then claim a full run while the appended step could still be skipped. Same gap as
+        // the predicate one: assert the invariant, not one symptom of it.
+        const programLines = firstLogonProgram.trimEnd().split("\r\n");
+        expect(programLines[programLines.length - 1]).toBe(
+            "New-ItemProperty -LiteralPath 'HKLM:\\SOFTWARE\\ccc' -Name 'FirstLogonCompleted'"
+            + ` -Value 'ccc-device-lab:${ownerId}:${deviceId}:${incarnationId}'`
+            + " -PropertyType String -Force -ErrorAction SilentlyContinue | Out-Null",
+        );
+        expect(programLines[programLines.length - 2]).toBe(
+            "New-Item -Path 'HKLM:\\SOFTWARE\\ccc' -ErrorAction SilentlyContinue | Out-Null",
+        );
+        // No -Force here: on the registry provider it deletes an existing key and its subkeys, and
+        // `ccc` under HKLM\SOFTWARE is unnamespaced and case-insensitive.
+        expect(firstLogonProgram).not.toContain("New-Item -Path 'HKLM:\\SOFTWARE\\ccc' -Force");
+        // The value is this incarnation's ownership marker, not a constant: a constant is satisfied
+        // by any stale copy of itself, and --source-image accepts a user-supplied VHDX that could
+        // carry one baked in from an earlier provision.
+        expect(firstLogonProgram).not.toContain("-Value 1 -PropertyType DWord");
+        // The self-delete is gone: it targeted read-only ISO media and could never succeed, so it
+        // read as a cleanup that was not happening. The host removes the media instead.
+        expect(firstLogonProgram).not.toContain("$PSCommandPath");
+
+        // Characterization of the defect this fix removes: the previous generator encoded the very
+        // same program as a UTF-16LE -EncodedCommand argument, which is far past the documented
+        // 1024-character maximum for a FirstLogonCommands CommandLine value.
+        const legacyCommandLine = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
+            + Buffer.from(firstLogonProgram, "utf16le").toString("base64");
+        expect(legacyCommandLine.length).toBeGreaterThan(HYPER_V_FIRST_LOGON_COMMAND_LINE_LIMIT);
+
+        // The replacement launcher is bounded and carries no encoded payload.
+        expect(HYPER_V_FIRST_LOGON_LAUNCHER.length).toBeLessThanOrEqual(HYPER_V_FIRST_LOGON_COMMAND_LINE_LIMIT);
+        expect(HYPER_V_FIRST_LOGON_LAUNCHER).not.toContain("-EncodedCommand");
+        expect(script).not.toContain("-EncodedCommand $FirstLogonEncoded");
+        expect(script).not.toContain("$FirstLogonEncoded");
+
+        // The launcher resolves the exact CCC_UNATTEND volume by label and fails closed on a missing
+        // or ambiguous match. It never assumes a drive letter.
+        expect(HYPER_V_FIRST_LOGON_LAUNCHER).toContain("Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=5'");
+        expect(HYPER_V_FIRST_LOGON_LAUNCHER).toContain("$_.VolumeName -eq 'CCC_UNATTEND'");
+        expect(HYPER_V_FIRST_LOGON_LAUNCHER).toContain("if ($m.Count -ne 1) { exit 3 }");
+        expect(HYPER_V_FIRST_LOGON_LAUNCHER).toContain("if (-not (Test-Path -LiteralPath $s -PathType Leaf)) { exit 4 }");
+        expect(HYPER_V_FIRST_LOGON_LAUNCHER).toContain(`'\\${HYPER_V_FIRST_LOGON_SCRIPT_NAME}'`);
+        expect(HYPER_V_FIRST_LOGON_LAUNCHER).not.toMatch(/[A-Z]:\\/);
+
+        // Process-scoped execution policy only; no machine-wide policy write.
+        expect(HYPER_V_FIRST_LOGON_LAUNCHER).toContain("-ExecutionPolicy Bypass");
+        expect(HYPER_V_FIRST_LOGON_LAUNCHER).not.toContain("Set-ExecutionPolicy");
+
+        // The launcher is XML-escaped through the same path as the account fields, and the ISO entry
+        // name matches the name the launcher looks for.
+        expect(script).toContain("$LauncherXml = [Security.SecurityElement]::Escape($FirstLogonLauncher)");
+        expect(script).toContain("<CommandLine>$LauncherXml</CommandLine>");
+        expect(script).toContain(`'${HYPER_V_FIRST_LOGON_SCRIPT_NAME}' = $FirstLogonBytes`);
+        expect(script).toContain("$FirstLogonBytes = [Convert]::FromBase64String($FirstLogonScriptBase64)");
+        expect(script).toContain("$FirstLogonBytes = $null");
+        // ISO entry names must satisfy the media writer's entry-name contract.
+        expect(HYPER_V_FIRST_LOGON_SCRIPT_NAME).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);
+
+        // No credential material reaches the external script or the launcher.
+        expect(firstLogonProgram).not.toContain(guestPassword);
+        expect(firstLogonProgram).not.toContain("ccc01234567");
+        expect(HYPER_V_FIRST_LOGON_LAUNCHER).not.toContain(guestPassword);
+        expect(HYPER_V_FIRST_LOGON_LAUNCHER).not.toContain("ccc01234567");
+        // The password still travels only as the $PasswordXml variable inside the answer file.
+        expect(script).not.toContain(guestPassword);
+        expect(script).toContain("<Value>$PasswordXml</Value>");
+    });
+
+    it("provisions a per-device Windows guest account without putting its password on the command line", () => {
+        const vmName = hyperVVmName(ownerId, deviceId, incarnationId);
+        const deviceRoot = "/state/owners/0123456789abcdef/windows-vm/windows-ci-01";
+        const credentialPath = `${deviceRoot}/secrets/guest.credential.xml`;
+        const provisioningMediaPath = `${deviceRoot}/disks/autounattend.iso`;
+        const guestPassword = "Ccc!7this-is-a-long-disposable-password";
+        const command = hyperVGuestProvisionCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            vmId,
+            diskPath: `${deviceRoot}/disks/root.vhdx`,
+            deviceRoot,
+            credentialPath,
+            provisioningMediaPath,
+            guestUsername: "ccc01234567",
+            guestPassword,
+        });
+        const script = scriptOf(command);
+        expect(script).toContain("IMAPI2FS.MsftFileSystemImage");
+        expect(script).toContain("Write-CccIso $IsoFiles $ProvisioningMedia 'CCC_UNATTEND' $MediaSourceRoot");
+        expect(script).toContain("$NormalizedVolumeName = ([string]$VolumeName).ToUpperInvariant()");
+        expect(script).toContain("$Image.FileSystemsToCreate = 7");
+        expect(script).toContain("$Image.ChooseImageDefaultsForMediaType(1)");
+        // The CCC account is created in the oobeSystem pass so provisioning works on the specialized
+        // Microsoft evaluation VHD (whose specialize pass never re-runs) as well as generalized VHDX.
+        expect(script).toContain("<settings pass=\"oobeSystem\">");
+        expect(script).not.toContain("<settings pass=\"specialize\">");
+        expect(script).not.toContain("Microsoft-Windows-Deployment");
+        expect(script).not.toContain("Create CCC PowerShell Direct account");
+        expect(script).toContain("<component name=\"Microsoft-Windows-International-Core\" processorArchitecture=\"amd64\" publicKeyToken=\"31bf3856ad364e35\" language=\"neutral\" versionScope=\"nonSxS\"><InputLocale>0409:00000409</InputLocale><SystemLocale>en-US</SystemLocale><UILanguage>en-US</UILanguage><UserLocale>en-US</UserLocale></component>");
+        expect(script).toContain("<UserAccounts><LocalAccounts><LocalAccount wcm:action=\"add\">");
+        expect(script).toContain("<Group>Administrators</Group>");
+        expect(script).toContain("<HideLocalAccountScreen>true</HideLocalAccountScreen>");
+        expect(script).toContain("<SynchronousCommand wcm:action=\"add\"><CommandLine>$LauncherXml</CommandLine><Description>Remove CCC bootstrap secrets</Description><Order>1</Order></SynchronousCommand>");
+        expect(script).toContain("$LauncherXml = [Security.SecurityElement]::Escape($FirstLogonLauncher)");
+        expect(script).not.toContain("<SynchronousCommand wcm:action=\"add\"><Order>1</Order><Description>Remove CCC bootstrap secrets</Description><CommandLine>");
+        expect(script).toContain("<OOBE><HideEULAPage>true</HideEULAPage><HideLocalAccountScreen>true</HideLocalAccountScreen><HideOnlineAccountScreens>true</HideOnlineAccountScreens><ProtectYourPC>3</ProtectYourPC></OOBE>");
+        expect(script).not.toContain("SkipMachineOOBE");
+        expect(script).not.toContain("SkipUserOOBE");
+        expect(script).toContain("$PasswordXml = [Security.SecurityElement]::Escape($PlainPassword)");
+        expect(script).toContain("$UsernameXml = [Security.SecurityElement]::Escape($ExpectedUsername)");
+        expect(script).toContain("<LocalAccount wcm:action=\"add\"><Password><Value>$PasswordXml</Value><PlainText>true</PlainText></Password><DisplayName>$UsernameXml</DisplayName><Group>Administrators</Group><Name>$UsernameXml</Name></LocalAccount>");
+        expect(script).not.toContain("<LocalAccount wcm:action=\"add\"><Name>$UsernameXml</Name><DisplayName>$UsernameXml</DisplayName><Group>Administrators</Group><Password>");
+        expect(script.indexOf("<AutoLogon>")).toBeLessThan(script.indexOf("<FirstLogonCommands>"));
+        expect(script.indexOf("<FirstLogonCommands>")).toBeLessThan(script.indexOf("<OOBE>"));
+        expect(script.indexOf("<OOBE>")).toBeLessThan(script.indexOf("<UserAccounts>"));
+        expect(script).toContain("$IsoFiles = [ordered]@{ 'Autounattend.xml' = $UnattendBytes; 'unattend.xml' = $UnattendBytes; 'ccc-first-logon.ps1' = $FirstLogonBytes }");
+        expect(script).toContain("try { $Image.ChooseImageDefaultsForMediaType(1) } catch");
+        expect(script).toContain("$Image.VolumeName = $NormalizedVolumeName");
+        expect(script).toContain("hyper-v-provisioning-media-filesystem-selection-failed");
+        expect(script).toContain("hyper-v-provisioning-media-volume-name-failed");
+        expect(script).toContain("configure-failed|filesystem-selection-failed|volume-name-invalid|volume-name-failed|source-entry-invalid");
+        expect(script).toContain("[int]$ResultImage.BlockSize, [long]$ResultImage.TotalBlocks");
+        expect(script).toContain("SHCreateStreamOnFileEx");
+        expect(script).toContain("input.CopyTo(output, expectedBytes, readPointer, writtenPointer)");
+        expect(script).toContain("hyper-v-provisioning-media-copy-incomplete");
+        expect(script).toContain("hyper-v-provisioning-media-result-image-failed");
+        expect(script).toContain("@($ImageStream, $ResultImage, $ImageRoot, $Image)");
+        expect(script).toContain("FinalReleaseComObject($ComObject)");
+        expect(script).toContain("[IO.File]::WriteAllBytes($EntryPath, $EntryBytes)");
+        expect(script).toContain("$ImageRoot.AddTree($SourceRoot, $false)");
+        expect(script).toContain("[Console]::Out.WriteLine('hyper-v-provisioning-media-add-tree-failed')");
+        expect(script).toContain("[Console]::Out.WriteLine('hyper-v-provisioning-media-output-open-failed')");
+        expect(script).toContain("[Console]::Out.WriteLine($CccIsoFailure)");
+        expect(script).toContain("Assert-NoReparsePath $SourceRoot");
+        expect(script).toContain("function Remove-CccIsoSourceRoot");
+        expect(script).toContain("Get-ChildItem -LiteralPath $SourceRoot -Force");
+        expect(script).toContain("$CurrentChild = Get-Item -LiteralPath $SourceChild.FullName");
+        expect(script).toContain("$SourceAcl.SetAccessRuleProtection($true, $false)");
+        expect(script).toContain("[Security.AccessControl.FileSystemAccessRule]::new(");
+        expect(script).not.toContain("New-Object Security.AccessControl.FileSystemAccessRule(");
+        expect(script).toContain("hyper-v-provisioning-media-source-cleanup-failed");
+        expect(script.indexOf("if ($null -ne $CccIsoFailure) { [Console]::Out.WriteLine($CccIsoFailure); throw $CccIsoFailure }")).toBeGreaterThan(script.indexOf("finally {"));
+        expect(script).not.toContain("Remove-Item -LiteralPath $SourceRoot -Recurse");
+        expect(script).not.toContain("ADODB.Stream");
+        expect(script).not.toContain("$SourceStream.Close()");
+        expect(script).not.toContain("CreateStreamOnHGlobal");
+        expect(script).not.toContain("[CccIsoStreamWriter]::CreateSource");
+        expect(script).not.toContain("$ImageRoot.AddFile(");
+        expect(script).toContain("Remove-Item -LiteralPath $IsoPath -Force -ErrorAction SilentlyContinue");
+        expect(script).not.toContain("input.Read(");
+        expect(script).toContain("Add-VMDvdDrive -VM $Vm -Path $ProvisioningMedia");
+        expect(script).not.toContain("$ProvisioningSource");
+        expect(script).toContain("Get-VMHardDiskDrive -VM $Vm");
+        expect(script).not.toContain("Mount-VHD -Path $DiskPath");
+        expect(script).not.toContain("Add-PartitionAccessPath");
+        expect(script).toContain("EnableSecureBoot On -SecureBootTemplate 'MicrosoftWindows'");
+        expect(script).toContain("hyper-v-guest-secure-boot-not-enabled");
+        expect(script).toContain("Enable-VMIntegrationService");
+        expect(script).toContain("hyper-v-guest-integration-services-not-enabled");
+        expect(script).not.toContain("$PantherDirectory");
+        expect(script).toContain("Microsoft-Windows-Shell-Setup");
+        expect(script).toContain("Export-Clixml -LiteralPath $CredentialPath");
+        expect(script).toContain("Remove CCC bootstrap secrets");
+        expect(script).toContain("function Set-CccProvisionStage");
+        expect(script).toContain("Set-CccProvisionStage 'vm-lookup'");
+        expect(script).toContain("Set-CccProvisionStage 'input-validation'");
+        expect(script).toContain("Set-CccProvisionStage 'credential'");
+        expect(script).toContain("Set-CccProvisionStage 'media-check'");
+        expect(script).toContain("Set-CccProvisionStage 'media-content'");
+        expect(script).toContain("Set-CccProvisionStage 'media-build'");
+        expect(script).toContain("Set-CccProvisionStage 'media-attach'");
+        expect(script).toContain("[Console]::Out.WriteLine(('CCC_HYPER_V_STAGE:hyper-v-guest-provision-' + $Stage + '-command-failed'))");
+        expect(script).toContain("hyper-v-guest-provision-' + $CccProvisionStage + '-command-failed");
+        expect(script).not.toContain(guestPassword);
+        expect(command.args.join(" ")).not.toContain(guestPassword);
+        const payloadBase64 = script.match(/\$CccCommandInputBase64 = '([A-Za-z0-9+/=]+)'/)?.[1];
+        expect(payloadBase64).toBeTruthy();
+        expect(JSON.parse(Buffer.from(payloadBase64!, "base64").toString("utf8")))
+            .toEqual({ username: "ccc01234567", password: guestPassword });
+        const loader = loaderOf(command);
+        expect(loader).toContain("hyper-v-powershell-parse-failed");
+        expect(loader).toContain("hyper-v-powershell-execution-failed");
+        expect(loader).toContain("$env:CCC_HYPER_V_STAGE=$null");
+        expect(loader).toContain("if($M-match'^hyper-v-[a-z0-9-]{3,128}$')");
+        expect(loader).toContain("$S=$env:CCC_HYPER_V_STAGE;if($S-match'^hyper-v-[a-z0-9-]{3,128}$'){throw $S}");
+        expect(loader).not.toContain(guestPassword);
+        expect(parseHyperVGuestProvisionObservation(JSON.stringify({ ok: true, vmId, vmName, guestUsername: "ccc01234567", credentialPath, unattendPath: provisioningMediaPath })))
+            .toEqual({ ok: true, vmId, vmName, guestUsername: "ccc01234567", credentialPath, unattendPath: provisioningMediaPath });
+        expect(() => hyperVGuestProvisionCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            vmId,
+            diskPath: `${deviceRoot}/disks/root.vhdx`,
+            deviceRoot,
+            credentialPath,
+            provisioningMediaPath: "/state/owners/foreign/autounattend.iso",
+            guestUsername: "ccc01234567",
+            guestPassword,
+        })).toThrow("hyper-v-guest-provisioning-media-path-outside-owner-root");
+    });
+
+    it("frames credentials inside streamed PowerShell when the provisioning script is too long to encode", () => {
+        const vmName = hyperVVmName(ownerId, deviceId, incarnationId);
+        const longTail = Array.from({ length: 320 }, (_, index) => `segment-${index}`).join("/");
+        const deviceRoot = `/state/owners/${ownerId}/windows-vm/${deviceId}/${longTail}`;
+        const credentialRoot = `/private/owners/${ownerId}/windows-vm/${deviceId}/${longTail}`;
+        const guestPassword = "Ccc!7streamed-disposable-password";
+        const command = hyperVGuestProvisionCommand({
+            executable: "powershell.exe",
+            ownerId,
+            deviceId,
+            incarnationId,
+            vmName,
+            vmId,
+            diskPath: `${deviceRoot}/disks/root.vhdx`,
+            deviceRoot,
+            privateRoot: credentialRoot,
+            credentialPath: `${credentialRoot}/secrets/guest.credential.xml`,
+            provisioningMediaPath: `${deviceRoot}/disks/autounattend.iso`,
+            guestUsername: "ccc01234567",
+            guestPassword,
+        });
+        expect(command.args).toContain("-EncodedCommand");
+        expect(command.args).not.toContain("-");
+        expect(command.args.join(" ")).not.toContain(guestPassword);
+        expect(command.input).not.toContain(guestPassword);
+        const streamedScript = scriptOf(command);
+        expect(streamedScript).toContain("$RawInput = $CccCommandInput");
+        const payloadBase64 = streamedScript.match(/\$CccCommandInputBase64 = '([A-Za-z0-9+/=]+)'/)?.[1];
+        expect(payloadBase64).toBeTruthy();
+        expect(JSON.parse(Buffer.from(payloadBase64!, "base64").toString("utf8"))).toEqual({ username: "ccc01234567", password: guestPassword });
+    });
+
+    it("parses bounded readiness and VM observations from the final JSON line", () => {
+        const readinessScript = scriptOf(hyperVReadinessCommand("powershell.exe"));
+        expect(readinessScript).toContain("Get-Service -Name vmms");
+        expect(readinessScript).toContain("Get-VM -ErrorAction Stop");
+        expect(readinessScript).toContain("hyper-v-management-permission");
+        expect(readinessScript).toContain("hyper-v-qemu-img-unavailable");
+        expect(readinessScript).toContain("hyper-v-qemu-img-untrusted");
+        expect(readinessScript).toContain("Get-AuthenticodeSignature -LiteralPath $QemuImg");
+        expect(readinessScript).toContain("[IO.FileAttributes]::ReparsePoint");
+        expect(parseHyperVReadiness(`noise\n${JSON.stringify({ ok: true, available: true, platform: "win32", moduleAvailable: true, hypervisorPresent: true, vmmsRunning: true, rebootPending: false, totalMemoryMb: 65536, freeMemoryMb: 32768, logicalProcessors: 16, missing: [], qemuImgAvailable: true, qemuImgTrusted: true, linuxImageMissing: [] })}\n`))
+            .toEqual({ ok: true, available: true, platform: "win32", moduleAvailable: true, hypervisorPresent: true, vmmsRunning: true, rebootPending: false, totalMemoryMb: 65536, freeMemoryMb: 32768, logicalProcessors: 16, missing: [], qemuImgAvailable: true, qemuImgTrusted: true, linuxImageMissing: [] });
+        expect(parseHyperVReadiness(JSON.stringify({ ok: true, available: true, missing: [] }))).toBeNull();
+        const readinessBase = { ok: true, available: true, platform: "win32", moduleAvailable: true, hypervisorPresent: true, vmmsRunning: true, rebootPending: false, totalMemoryMb: 65536, freeMemoryMb: 32768, logicalProcessors: 16, missing: [], qemuImgAvailable: true, qemuImgTrusted: false, linuxImageMissing: ["hyper-v-qemu-img-untrusted"] };
+        for (const status of HYPER_V_QEMU_IMG_SIGNATURE_STATUSES) {
+            expect(parseHyperVReadiness(JSON.stringify({ ...readinessBase, qemuImgSignatureStatus: status }))?.qemuImgSignatureStatus).toBe(status);
+        }
+        for (const status of [null, "", "valid", "Exception calling \"GetSignature\": access denied", 3, ["Valid"]]) {
+            const parsed = parseHyperVReadiness(JSON.stringify({ ...readinessBase, qemuImgSignatureStatus: status }));
+            expect(parsed).toEqual(readinessBase);
+            expect(parsed).not.toHaveProperty("qemuImgSignatureStatus");
+        }
+        expect(parseHyperVVmObservation(JSON.stringify({ ok: true, vmId: vmId.toUpperCase(), vmName: hyperVVmName(ownerId, deviceId, incarnationId), state: "Running", status: "Operating normally", uptimeMs: 42 })))
+            .toMatchObject({ ok: true, vmId, state: "Running", uptimeMs: 42 });
+        expect(parseHyperVVmObservation('{"ok":true,"vmId":"not-a-guid","vmName":"x"}')).toBeNull();
+        expect(parseHyperVDeleteObservation(JSON.stringify({ ok: true, vmId, vmName: hyperVVmName(ownerId, deviceId, incarnationId), deleted: true, diskPath: "/state/root.vhdx" })))
+            .toMatchObject({ ok: true, vmId, deleted: true, diskPath: "/state/root.vhdx" });
+        expect(parseHyperVDeleteObservation(JSON.stringify({ ok: true, vmId, vmName: hyperVVmName(ownerId, deviceId, incarnationId), deleted: false }))).toBeNull();
+        expect(parseHyperVDeleteObservation(JSON.stringify({ ok: true, vmId, vmName: hyperVVmName(ownerId, deviceId, incarnationId) }))).toBeNull();
+    });
+
+    it("checks the qemu-img signature through the trusted Security module and reports a closed status", () => {
+        const command = hyperVReadinessCommand("powershell.exe");
+        // Streaming would run the probe under the loader's Stop preference and change its semantics.
+        expect(command.input).toBeUndefined();
+        const script = scriptOf(command);
+        const lines = script.split("\n");
+        const importIndex = lines.findIndex((line) => line.includes("Import-Module -Name $SecurityModuleManifest"));
+        const signatureIndex = lines.findIndex((line) => line.includes("Get-AuthenticodeSignature"));
+
+        expect(script).toContain("$SecurityModuleManifest = Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1'");
+        expect(lines[importIndex]?.trim()).toBe("Microsoft.PowerShell.Core\\Import-Module -Name $SecurityModuleManifest -ErrorAction Stop");
+        expect(lines[signatureIndex]?.trim()).toBe("$QemuSignature = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $QemuImg -ErrorAction Stop");
+        expect(importIndex).toBeGreaterThan(0);
+        expect(signatureIndex).toBeGreaterThan(importIndex);
+        expect(script.match(/Get-AuthenticodeSignature/g)).toHaveLength(1);
+        // The inherited module path stays, so Hyper-V discovery still works under the pwsh fallback.
+        expect(script).not.toMatch(/\$env:PSModulePath\s*=/);
+
+        // The trust predicate and the fixed location are unchanged.
+        expect(script).toContain("$QemuImg = if ($LocalAppData) { Join-Path $LocalAppData 'Android\\Sdk\\emulator\\qemu-img.exe' } else { $null }");
+        expect(script).toContain("$QemuImgTrusted = [string]$QemuSignature.Status -eq 'Valid' -and $QemuSignature.SignerCertificate -and [string]$QemuSignature.SignerCertificate.Subject -match '(^|, )O=Google LLC(,|$)'");
+        expect(script).not.toMatch(/\$env:PATH|Get-Command|where\.exe|scoop|mise|chocolatey|\bchoco\b/i);
+
+        // Every path component is checked for a reparse point before the file is trusted as available.
+        expect(script).toContain("function Test-CccNoReparsePath([string]$Path) {");
+        expect(script).toContain("foreach ($Segment in @($FullPath.Substring($PathRoot.Length) -split '[\\\\/]' | Where-Object { $_ })) {");
+        expect(script).toContain("if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }");
+        expect(script).toContain("if ($QemuImg -and (Test-CccNoReparsePath $QemuImg) -and (Test-Path -LiteralPath $QemuImg -PathType Leaf)) {");
+
+        // The reported status is one of the contract's names; a throw becomes check-failed, never its message.
+        const reported = new Set<string>([
+            ...Array.from(script.matchAll(/\$QemuImgSignatureStatus = '([A-Za-z-]+)'/g), (match) => match[1]!),
+            ...Array.from(script.matchAll(/\{ '([A-Za-z-]+)' \}/g), (match) => match[1]!),
+            ...(/\$QemuSignatureStatusNames = @\(([^)]*)\)/.exec(script)?.[1] ?? "").split(",").map((name) => name.trim().replace(/^'|'$/g, "")),
+        ]);
+        expect([...reported].sort()).toEqual([...HYPER_V_QEMU_IMG_SIGNATURE_STATUSES].sort());
+        expect(script).toContain("} catch { $QemuImgTrusted = $false; $QemuImgSignatureStatus = 'check-failed' }");
+        expect(script).toContain("elseif ($QemuSignatureStatusName -ceq 'Valid') { 'signer-mismatch' }");
+        expect(script).toContain("qemuImgSignatureStatus = $QemuImgSignatureStatus;");
+        expect(script).not.toMatch(/Exception\.Message|\$_\.Exception|StatusMessage/);
+        expect(script).not.toMatch(WINDOWS_POWERSHELL_UNSUPPORTED_ACCELERATOR);
+    });
+
+    // String checks cannot see an unbalanced brace or a 5.1-only parse error in the readiness probe,
+    // which the smoke, device_backends and the setup diagnostic all run under Windows PowerShell.
+    it.skipIf(process.platform !== "win32")("parses the generated readiness probe with Windows PowerShell", () => {
+        const result = parseWithWindowsPowerShell(scriptOf(hyperVReadinessCommand("powershell.exe")));
+
+        expect(result.status, result.stderr || result.error?.message).toBe(0);
+    });
+});
+
+
+const aclPowerShell = process.platform === "win32" ? "powershell.exe" : "pwsh";
+const hasAclPowerShell = spawnSync(aclPowerShell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "exit 0"], { timeout: 5000 }).status === 0;
+
+describe("Hyper-V ACL principal selection", () => {
+    const options = { executable: "powershell.exe", profile: "windows-server", imageRoot: "/state/images/hyper-v", expectedGeneration: 2 } as const;
+    const programs = [
+        ["combined image acquisition", scriptOf(hyperVAcquireBaseImageCommand(options))],
+        ["image preparation", scriptOf(hyperVAcquireBaseImagePrepareCommand(options))],
+        ["image finalization", scriptOf(hyperVAcquireBaseImageFinalizeCommand({ ...options, expectedPartialSha256: baseImageSha256, expectedPartialFileId: "123", expectedVirtualSizeBytes: 64 * 1024 ** 3, expectedVhdType: "Dynamic" }))],
+        ["legacy VM creation", scriptOf(hyperVCreateCommand({
+            executable: "powershell.exe", ownerId, deviceId, incarnationId,
+            vmName: hyperVVmName(ownerId, deviceId, incarnationId),
+            baseImageRoot: "/state/images/hyper-v", baseImagePath: "/state/images/hyper-v/base.vhdx",
+            baseImageSha256, baseImageGeneration: 2,
+            deviceRoot: "/state/owners/device", diskPath: "/state/owners/device/root.vhdx",
+            diskMaxBytes: 64 * 1024 ** 3, memoryMb: 4096, cpus: 4,
+        }))],
+    ];
+    for (const [label, script] of programs) {
+        it.skipIf(!hasAclPowerShell).each(["S-1-5-18", "S-1-5-32-544", "S-1-5-21-111-222-333-1001"])(`${label} installs and validates distinct principals for %s`, (currentSid) => {
+            // SID constructors are Windows-only. Mock only those immutable value objects;
+            // execute the generated PowerShell selection, installation enumeration and count check.
+            const assignments = script.split("\n").filter((line) => /^\s*\$AllowedSid(?:Objects|s) =/.test(line)).join("\n")
+                .replace(/\[Security\.Principal\.SecurityIdentifier\]::new\('([^']+)'\)/g, "([pscustomobject]@{Value='$1'})");
+            const loop = script.match(/foreach \(\$Sid in (\$AllowedSidObjects|\$AllowedSids)\)/)?.[0];
+            const countCheck = script.split("\n").find((line) => line.includes("if ($ObservedRules.Count -ne $AllowedSids.Count)"));
+            expect(assignments).not.toBe("");
+            expect(loop).toBeDefined();
+            expect(countCheck).toBeDefined();
+            const program = [
+                "$ErrorActionPreference = 'Stop'",
+                `$CurrentSid = [pscustomobject]@{Value='${currentSid}'}`,
+                "$SystemSid = [pscustomobject]@{Value='S-1-5-18'}",
+                "$AdministratorsSid = [pscustomobject]@{Value='S-1-5-32-544'}",
+                assignments,
+                `$Installed = @(${loop} { $Sid.Value })`,
+                "$ObservedRules = @($Installed | Sort-Object -Unique)",
+                countCheck,
+                "$RejectedExtra = $false; $ObservedRules += 'S-1-1-0'",
+                `try { ${countCheck} } catch { $RejectedExtra = $true }`,
+                "@{ installed=$Installed; rejectedExtra=$RejectedExtra } | ConvertTo-Json -Compress",
+            ].join("\n");
+            const result = spawnSync(aclPowerShell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(program, "utf16le").toString("base64")], { encoding: "utf8", timeout: 10000 });
+            expect(result.status, result.stderr).toBe(0);
+            const observation = JSON.parse(result.stdout);
+            expect(observation.installed).toEqual([...new Set([currentSid, "S-1-5-18", "S-1-5-32-544"])].sort());
+            expect(observation.rejectedExtra).toBe(true);
+        });
+    }
+});

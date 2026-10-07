@@ -1,3 +1,5 @@
+import { directorySymlink } from "./helpers/file-symlink-fixture.js";
+import { isolateDeviceLabTestEnvironment } from "./helpers/device-lab-test-environment.js";
 import {
     lstatSync,
     mkdirSync,
@@ -14,21 +16,20 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
     materializeMacosSshAskpass,
     writeMacosGuestHelper,
-} from "../../device-lab-mcp/src/backends/macos-vm.mjs";
+} from "@ccc/device-lab/providers/backends/macos-vm.mjs";
 
 describe("device-lab MCP direct macOS executable artifacts", () => {
     let home: string;
-    let originalHome: string | undefined;
+    let originalHomeRestore: (() => void) | undefined;
 
     beforeEach(() => {
-        originalHome = process.env.HOME;
+
         home = mkdtempSync(join(tmpdir(), "ccc-macos-artifacts-"));
-        process.env.HOME = home;
+        originalHomeRestore = isolateDeviceLabTestEnvironment(home);
     });
 
     afterEach(() => {
-        if (originalHome === undefined) delete process.env.HOME;
-        else process.env.HOME = originalHome;
+        originalHomeRestore?.();
         rmSync(home, { recursive: true, force: true });
     });
 
@@ -68,7 +69,7 @@ describe("device-lab MCP direct macOS executable artifacts", () => {
         const marker = join(external, "preserve.txt");
         mkdirSync(external);
         writeFileSync(marker, "preserve");
-        symlinkSync(external, join(home, ".ccc"));
+        directorySymlink(external, join(home, ".ccc"));
 
         expect(() => materializeMacosSshAskpass({ id: "macos-test" })).toThrow("macos-workspace-directory-invalid");
         expect(readdirSync(external)).toEqual(["preserve.txt"]);

@@ -3,12 +3,20 @@
 import { existsSync, lstatSync, mkdirSync, unlinkSync, writeFileSync, chmodSync, cpSync, rmSync, readFileSync, readdirSync } from "fs";
 import { createHash } from "crypto";
 import { dirname, join, resolve } from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { execSync, execFileSync, spawnSync } from "child_process";
 import { homedir } from "os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..");
+// Source installs run before compilation; installed distributions use the embedded
+// provider package. Neither form depends on a workspace symlink in node_modules.
+const powershellModule = [
+    join(projectRoot, "packages", "device-lab", "providers", "state", "windows-system-powershell.mjs"),
+    join(projectRoot, "dist", "packages", "device-lab", "providers", "state", "windows-system-powershell.mjs"),
+].find(path => existsSync(path));
+if (!powershellModule) throw new Error("CCC provider runtime is missing; reinstall the complete package.");
+const { canonicalWindowsPowerShellPath, hiddenWindowsPowerShellArgs } = await import(pathToFileURL(powershellModule).href);
 const distFile = join(projectRoot, "dist", "index.js");
 const isWindows = process.platform === "win32";
 
@@ -38,7 +46,7 @@ function getContentHash() {
     for (const f of files) {
         hash.update(readFileSync(join(projectRoot, f)));
     }
-    for (const dir of ["src", "scripts", "x11-mcp", "device-lab-mcp"]) {
+    for (const dir of ["src", "scripts", "packages", "device-lab-mcp"]) {
         hashDirectory(hash, join(projectRoot, dir));
     }
     return hash.digest("hex").substring(0, 12);
@@ -48,6 +56,7 @@ function hashDirectory(hash, dir) {
     const entries = readdirSync(dir, { withFileTypes: true })
         .sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
+        if (["node_modules", "dist", ".git"].includes(entry.name)) continue;
         const fullPath = join(dir, entry.name);
         hash.update(fullPath);
         if (entry.isDirectory()) {
@@ -141,21 +150,27 @@ function buildImage() {
 
 const PATH_LIMIT = 32767;
 
+function trustedWindowsPowerShell() {
+    const powershell = canonicalWindowsPowerShellPath();
+    if (!powershell) throw new Error("Trusted Windows PowerShell is unavailable");
+    return powershell;
+}
+
 function readUserPath() {
-    const out = execFileSync("powershell.exe", [
+    const out = execFileSync(trustedWindowsPowerShell(), hiddenWindowsPowerShellArgs([
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-Command", `[Environment]::GetEnvironmentVariable("Path","User")`,
-    ], { encoding: "utf8", windowsHide: true });
+    ]), { encoding: "utf8", windowsHide: true });
     return out.replace(/\r?\n$/, "");
 }
 
 function writeUserPath(value) {
-    execFileSync("powershell.exe", [
+    execFileSync(trustedWindowsPowerShell(), hiddenWindowsPowerShellArgs([
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-Command", `[Environment]::SetEnvironmentVariable("Path", $env:__CCC_NEW_PATH, "User")`,
-    ], {
+    ]), {
         encoding: "utf8",
         windowsHide: true,
         env: { ...process.env, __CCC_NEW_PATH: value },
@@ -228,6 +243,30 @@ function tryRemoveInstallDirFromUserPath(installDir) {
     }
 }
 
+export function materializeUnixInstallPayload(sourceRoot, targetDir) {
+    const resolvedSourceRoot = resolve(sourceRoot);
+    const resolvedTargetDir = resolve(targetDir);
+    if (resolvedTargetDir === dirname(resolvedTargetDir) || resolvedTargetDir === resolvedSourceRoot) {
+        throw new Error(`Refusing unsafe global install payload target: ${resolvedTargetDir}`);
+    }
+
+    rmSync(resolvedTargetDir, { recursive: true, force: true });
+    mkdirSync(resolvedTargetDir, { recursive: true });
+    cpSync(join(resolvedSourceRoot, "dist"), join(resolvedTargetDir, "dist"), { recursive: true });
+    cpSync(join(resolvedSourceRoot, "Dockerfile"), join(resolvedTargetDir, "Dockerfile"));
+    cpSync(join(resolvedSourceRoot, "Containerfile"), join(resolvedTargetDir, "Containerfile"));
+    cpSync(join(resolvedSourceRoot, "scripts"), join(resolvedTargetDir, "scripts"), { recursive: true });
+
+    const sourcePackage = JSON.parse(readFileSync(join(resolvedSourceRoot, "package.json"), "utf-8"));
+    const packageContent = JSON.stringify({ type: "module", version: sourcePackage.version, imports: sourcePackage.imports }, null, 2);
+    writeFileSync(join(resolvedTargetDir, "package.json"), packageContent);
+}
+
+export function unixWrapperContent(targetDir) {
+    const entryPoint = join(resolve(targetDir), "dist", "index.js");
+    return `#!/usr/bin/env node\nimport(${JSON.stringify(pathToFileURL(entryPoint).href)});\n`;
+}
+
 function linkBinary() {
     const installDir = getInstallDir();
 
@@ -252,20 +291,8 @@ function linkBinary() {
             if (e.code !== "ENOENT") throw e;
         }
 
-        if (existsSync(targetDir)) rmSync(targetDir, { recursive: true });
-        cpSync(join(projectRoot, "dist"), targetDir, { recursive: true });
-        cpSync(join(projectRoot, "Dockerfile"), join(targetDir, "Dockerfile"));
-        cpSync(join(projectRoot, "Containerfile"), join(targetDir, "Containerfile"));
-        cpSync(join(projectRoot, "scripts"), join(targetDir, "scripts"), { recursive: true });
-
-        const srcPkg = JSON.parse(readFileSync(join(projectRoot, "package.json"), "utf-8"));
-        const pkgContent = JSON.stringify({ type: "module", version: srcPkg.version }, null, 2);
-        writeFileSync(join(targetDir, "package.json"), pkgContent);
-
-        const wrapperContent = `#!/usr/bin/env node
-import("${targetDir}/index.js");
-`;
-        writeFileSync(targetBin, wrapperContent);
+        materializeUnixInstallPayload(projectRoot, targetDir);
+        writeFileSync(targetBin, unixWrapperContent(targetDir));
         chmodSync(targetBin, 0o755);
         console.log(`Installed: ${targetBin}`);
     } catch (e) {
@@ -343,11 +370,15 @@ function uninstall() {
     }
 }
 
-const args = process.argv.slice(2);
-if (args.includes("--uninstall") || args.includes("-u")) {
-    uninstall();
-} else if (args.includes("--postinstall")) {
-    postinstall();
-} else {
-    install();
+const invokedPath = process.argv[1] ? resolve(process.argv[1]) : null;
+const modulePath = fileURLToPath(import.meta.url);
+if (invokedPath && (isWindows ? invokedPath.toLowerCase() === modulePath.toLowerCase() : invokedPath === modulePath)) {
+    const args = process.argv.slice(2);
+    if (args.includes("--uninstall") || args.includes("-u")) {
+        uninstall();
+    } else if (args.includes("--postinstall")) {
+        postinstall();
+    } else {
+        install();
+    }
 }

@@ -57,9 +57,37 @@ describe("injectCodexClipboardImageArgs", () => {
         const args = ["codex", "exec", "prompt"];
         expect(injectCodexClipboardImageArgs(args, "new.png")).toEqual(args);
     });
+
+    it.each([
+        ["codex", "migrate-rollouts", "--apply", "--thread", "session-id", "--json"],
+        ["codex", "doctor", "--summary"],
+        ["codex", "-c", 'model="example"', "doctor", "--json"],
+    ])("does not attach clipboard images to recovery commands: %j", (...args) => {
+        expect(injectCodexClipboardImageArgs(args, "new.png")).toEqual(args);
+    });
 });
 
 describe("maybeAttachCodexClipboardImage", () => {
+    it.each([
+        ["codex", "migrate-rollouts", "--apply", "--thread", "session-id", "--json"],
+        ["codex", "doctor", "--summary"],
+        ["codex", "resume", "session-id"],
+        ["codex", "--image", "existing.png", "prompt"],
+    ])("does not read or save unused clipboard contents: %j", async (...args) => {
+        const projectPath = mkdtempSync(join(tmpdir(), "ccc-codex-clipboard-"));
+        tempDirs.push(projectPath);
+        let reads = 0;
+        const result = await maybeAttachCodexClipboardImage(projectPath, args, {
+            enabled: true,
+            clipboardUrl: "http://127.0.0.1:4321",
+            clipboardToken: "token",
+            readImage: async () => { reads += 1; throw new Error("unused clipboard must not be read"); },
+        });
+        expect(result).toEqual({ args });
+        expect(reads).toBe(0);
+        expect(existsSync(join(projectPath, ".omx"))).toBe(false);
+    });
+
     it("writes the clipboard image into the project and injects codex args", async () => {
         const projectPath = mkdtempSync(join(tmpdir(), "ccc-codex-clipboard-"));
         tempDirs.push(projectPath);

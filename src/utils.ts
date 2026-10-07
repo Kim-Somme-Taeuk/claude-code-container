@@ -1,55 +1,52 @@
 // src/utils.ts - Shared utilities for ccc
 
-import {createHash, randomBytes} from "crypto";
 import {createInterface} from "readline";
-import {writeFileSync} from "fs";
-import {homedir, tmpdir} from "os";
-import {basename, join, resolve} from "path";
+import {homedir} from "os";
+import {join} from "path";
+import {normalizeProfile, profileClaudeDir, profileClaudeJsonFile, profileCodexDir} from "./home-layout.js";
+import {writeNativeEnvFile, writeOwnedNativeEnvFile} from "./adapters/session-env-file.js";
 
 // === CLI Version (injected at build time) ===
 export const CLI_VERSION: string = "__CLI_VERSION__";
 
 // === Shared Constants ===
 export const DATA_DIR = join(homedir(), ".ccc");
-export const CLAUDE_DIR = join(DATA_DIR, "claude");
-export const CLAUDE_JSON_FILE = join(DATA_DIR, "claude.json"); // ~/.claude.json in container (onboarding state)
-export const CODEX_DIR = join(DATA_DIR, "codex");
-export const CODEX_CONFIG_FILE = join(CODEX_DIR, "config.toml");
-export const CLIPBOARD_FILES_DIR = join(DATA_DIR, "clipboard-files");
 export const CLIPBOARD_FILES_CONTAINER_DIR = "/run/ccc/clipboard-files";
-export const REMOTE_CONFIG_DIR = join(DATA_DIR, "remote");
-export const PROFILES_DIR = join(DATA_DIR, "profiles");
 
 function useMountedCredentialPaths(): boolean {
     return process.env.container === CONTAINER_ENV_VALUE
         && !Object.keys(process.env).some((key) => key === "VITEST" || key.startsWith("VITEST_"));
 }
 
+// Host paths come from home-layout.ts (doc/common/REQ__ccc-home-layout.md).
+// Inside a ccc container the credentials are the mounted ~/.claude and ~/.codex.
 export function getClaudeDir(profile?: string): string {
-    if (!profile && useMountedCredentialPaths()) return join(homedir(), ".claude");
-    if (!profile) return CLAUDE_DIR;
-    return join(PROFILES_DIR, profile, "claude");
+    if (!normalizeProfile(profile) && useMountedCredentialPaths()) return join(homedir(), ".claude");
+    return profileClaudeDir(profile);
 }
 
 export function getClaudeJsonFile(profile?: string): string {
-    if (!profile && useMountedCredentialPaths()) return join(homedir(), ".claude.json");
-    if (!profile) return CLAUDE_JSON_FILE;
-    return join(PROFILES_DIR, profile, "claude.json");
+    if (!normalizeProfile(profile) && useMountedCredentialPaths()) return join(homedir(), ".claude.json");
+    return profileClaudeJsonFile(profile);
 }
 
-export function getCodexDir(): string {
+export function getCodexDir(profile?: string): string {
     if (useMountedCredentialPaths()) return join(homedir(), ".codex");
-    return CODEX_DIR;
+    return profileCodexDir(profile);
 }
 
-export function getCodexConfigFile(): string {
-    if (useMountedCredentialPaths()) return join(getCodexDir(), "config.toml");
-    return CODEX_CONFIG_FILE;
+export function getCodexConfigFile(profile?: string): string {
+    return join(getCodexDir(profile), "config.toml");
 }
 export const IMAGE_NAME = "ccc";
 export const DOCKER_REGISTRY_IMAGE = process.env.CCC_REGISTRY || "luxusio/claude-code-container";
 export const CONTAINER_PID_LIMIT = "-1"; // -1 = unlimited (same as host)
 export const MISE_VOLUME_NAME = "ccc-mise-cache";
+// Codex installs its app-server daemon under $CODEX_HOME/packages. Keeping that
+// subtree on a named volume avoids a rename that Windows-backed bind mounts
+// reject right after a binary inside it ran (doc/common/REQ__codex-daemon-packages-volume.md).
+export const CODEX_PACKAGES_VOLUME_NAME = "ccc-codex-packages";
+export const CODEX_PACKAGES_CONTAINER_DIR = "/home/ccc/.codex/packages";
 export const LAB_RUNNER_PROFILE_NAME = "lab-runner";
 export const LAB_RUNNER_STATE_CONTAINER_DIR = "/home/ccc/.ccc/labs";
 export const DEFAULT_ENV_FORWARD_BYTE_LIMIT = 64 * 1024;
@@ -63,21 +60,7 @@ export const COMMON_IGNORE_DIRS = [
 export const CONTAINER_ENV_KEY = "container";
 export const CONTAINER_ENV_VALUE = "docker";
 
-/**
- * Generate a 12-character SHA256 hash of a path
- */
-export function hashPath(path: string): string {
-    return createHash("sha256").update(path).digest("hex").slice(0, 12);
-}
-
-/**
- * Generate project ID in format: name-hash
- */
-export function getProjectId(projectPath: string): string {
-    const name = basename(resolve(projectPath)).toLowerCase().replace(/[^a-z0-9-]/g, "-");
-    const hash = hashPath(resolve(projectPath));
-    return `${name}-${hash}`;
-}
+export {hashPath, canonicalProjectPath, projectPathsEquivalent, projectIdentityPath, getProjectId} from "@ccc/device-lab/project-identity.js";
 
 /**
  * Environment variables to exclude when forwarding to container
@@ -204,14 +187,12 @@ export function collectForwardedEnv(
  * The caller is responsible for deleting the returned path after use.
  */
 export function writeEnvFile(entries: Array<[string, string]>): string {
-    const tmpFile = join(tmpdir(), `ccc-env-${randomBytes(6).toString("hex")}`);
-    const lines: string[] = [];
-    for (const [key, value] of entries) {
-        if (value.includes("\n") || value.includes("\r") || value.includes("\0")) continue;
-        lines.push(`${key}=${value}`);
-    }
-    writeFileSync(tmpFile, lines.join("\n") + "\n", { mode: 0o600 });
-    return tmpFile;
+    return writeNativeEnvFile(entries);
+}
+
+/** Write an environment file owned until explicit disposal or process exit. */
+export function writeOwnedEnvFile(entries: Array<[string, string]>): { path: string; dispose(): void } {
+    return writeOwnedNativeEnvFile(entries);
 }
 
 /**

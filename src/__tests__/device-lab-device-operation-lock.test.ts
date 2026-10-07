@@ -1,15 +1,25 @@
+import { isolateDeviceLabTestEnvironment } from "./helpers/device-lab-test-environment.js";
 import { randomUUID } from "crypto";
-import { rmdirSync, rmSync } from "fs";
-import { dirname } from "path";
-import { afterEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmdirSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { dirname, join } from "path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
     ownerStateDir,
     withOwnerDeviceOperation,
     withOwnerDeviceOperations,
-} from "../../device-lab-mcp/src/state/device-store.mjs";
+} from "@ccc/device-lab/providers/state/device-store.mjs";
 
 describe("owner device operation lock", () => {
     const backends: string[] = [];
+    let originalHomeRestore: (() => void) | undefined;
+    let testHome: string;
+
+    beforeEach(() => {
+
+        testHome = mkdtempSync(join(tmpdir(), "ccc-operation-lock-home-"));
+        originalHomeRestore = isolateDeviceLabTestEnvironment(testHome);
+    });
 
     afterEach(() => {
         for (const backend of backends.splice(0)) {
@@ -21,6 +31,8 @@ describe("owner device operation lock", () => {
                 current = dirname(current);
             }
         }
+        rmSync(testHome, { recursive: true, force: true });
+        originalHomeRestore?.();
     });
 
     function target() {

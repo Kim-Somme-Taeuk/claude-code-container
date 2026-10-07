@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeTargetStatus, withTargetStatus } from "../../device-lab-mcp/src/status.mjs";
+import { normalizeTargetStatus, withTargetStatus } from "@ccc/device-lab/providers/status.mjs";
 
 describe("device-lab target status normalizer", () => {
     it("normalizes virtual, physical, and current-display targets with stable defaults", () => {

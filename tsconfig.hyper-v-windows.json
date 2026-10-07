@@ -1,0 +1,7 @@
+{
+  "extends": "./packages/hyper-v/tsconfig.json",
+  "include": [
+    "packages/hyper-v/src/**/*.ts"
+  ],
+  "exclude": []
+}

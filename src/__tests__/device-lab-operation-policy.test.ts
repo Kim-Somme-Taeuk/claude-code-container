@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
     ownerDeviceOperationTools,
     requiresOwnerDeviceOperation,
-} from "../../device-lab-mcp/src/state/device-operation-policy.mjs";
+} from "@ccc/device-lab/providers/state/device-operation-policy.mjs";
 
 describe("direct device operation policy", () => {
     it.each([

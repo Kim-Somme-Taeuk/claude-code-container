@@ -50,6 +50,7 @@ describe("container-runtime", () => {
         _resetSelinuxCacheForTest();
         // Scrub env of any pollution from other suites or the shell.
         delete process.env.CCC_RUNTIME;
+        delete process.env.DOCKER_HOST;
         delete process.env.CCC_SELINUX_RELABEL;
         delete process.env.CCC_PODMAN_CGROUPS;
         delete process.env.container;
@@ -320,11 +321,75 @@ describe("container-runtime", () => {
             spawnSyncMock
                 .mockReturnValueOnce(result(0, "Docker version 27.1.1\n"))
                 .mockReturnValueOnce(result(0, "Docker Desktop\n"))
+                .mockReturnValueOnce(result(0, "npipe:////./pipe/dockerDesktopLinuxEngine\n"))
                 .mockReturnValue(result(1, ""));
 
             const info = getRuntimeInfo();
             expect(info.remote).toBe(true);
             expect(info.flavor).toBe("docker-desktop");
+            expect(info.dockerDesktop).toBe(true);
+        });
+
+        it("detects native Windows Docker Desktop from its exact local Linux-engine npipe when docker info is unavailable", () => {
+            vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+            process.env.CCC_RUNTIME = "docker";
+            spawnSyncMock
+                .mockReturnValueOnce(result(0, "Docker version 27.1.1\n"))
+                .mockReturnValueOnce(result(1, ""))
+                .mockReturnValueOnce(result(0, "npipe:////./pipe/dockerDesktopLinuxEngine\n"))
+                .mockReturnValue(result(1, ""));
+
+            const info = getRuntimeInfo();
+            expect(info.remote).toBe(true);
+            expect(info.flavor).toBe("docker-desktop");
+            expect(info.dockerDesktop).toBe(true);
+        });
+
+        it("does not infer Docker Desktop from a generic local Windows npipe", () => {
+            vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+            process.env.CCC_RUNTIME = "docker";
+            spawnSyncMock
+                .mockReturnValueOnce(result(0, "Docker version 27.1.1\n"))
+                .mockReturnValueOnce(result(1, ""))
+                .mockReturnValueOnce(result(0, "npipe:////./pipe/docker_engine\n"))
+                .mockReturnValue(result(1, ""));
+
+            expect(getRuntimeInfo().dockerDesktop).toBe(false);
+        });
+
+        it("does not let the Desktop npipe override a successful non-Desktop daemon identity", () => {
+            vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+            process.env.CCC_RUNTIME = "docker";
+            process.env.DOCKER_HOST = "npipe:////./pipe/dockerDesktopLinuxEngine";
+            spawnSyncMock
+                .mockReturnValueOnce(result(0, "Docker version 27.1.1\n"))
+                .mockReturnValueOnce(result(0, "Windows Server 2025\n"))
+                .mockReturnValue(result(1, ""));
+
+            expect(getRuntimeInfo().dockerDesktop).toBe(false);
+            expect(spawnSyncMock).not.toHaveBeenCalledWith(
+                "docker",
+                ["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"],
+                expect.any(Object),
+            );
+        });
+
+        it.each([
+            ["SSH context", undefined, "ssh://builder@example.test"],
+            ["TCP DOCKER_HOST", "tcp://example.test:2376", undefined],
+        ])("does not grant Docker Desktop capability through a remote %s", (_name, dockerHost, contextEndpoint) => {
+            process.env.CCC_RUNTIME = "docker";
+            if (dockerHost) process.env.DOCKER_HOST = dockerHost;
+            spawnSyncMock
+                .mockReturnValueOnce(result(0, "Docker version 27.1.1\n"))
+                .mockReturnValueOnce(result(0, "Docker Desktop\n"));
+            if (contextEndpoint) {
+                spawnSyncMock.mockReturnValueOnce(result(0, `${contextEndpoint}\n`));
+            }
+            spawnSyncMock.mockReturnValue(result(1, ""));
+
+            const info = getRuntimeInfo();
+            expect(info.dockerDesktop).toBe(false);
         });
 
         it("WSL2 NAT mode (no loopback0) is treated as remote", () => {
@@ -338,6 +403,7 @@ describe("container-runtime", () => {
 
             const info = getRuntimeInfo();
             expect(info.remote).toBe(true);
+            expect(info.dockerDesktop).toBe(false);
             delete process.env.WSL_DISTRO_NAME;
         });
 
@@ -353,6 +419,7 @@ describe("container-runtime", () => {
             const info = getRuntimeInfo();
             expect(info.remote).toBe(false);
             expect(info.flavor).toBe("docker-native");
+            expect(info.dockerDesktop).toBe(false);
             delete process.env.WSL_DISTRO_NAME;
         });
     });

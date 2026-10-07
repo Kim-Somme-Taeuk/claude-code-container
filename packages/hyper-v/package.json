@@ -1,0 +1,41 @@
+{
+  "name": "@ccc/hyper-v",
+  "version": "1.1.90",
+  "type": "module",
+  "description": "Typed Hyper-V operations and lifecycle reconciliation",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./low-level": {
+      "types": "./dist/low-level/index.d.ts",
+      "import": "./dist/low-level/index.js"
+    },
+    "./lifecycle": {
+      "types": "./dist/lifecycle/index.d.ts",
+      "import": "./dist/lifecycle/index.js"
+    },
+    "./*.js": {
+      "types": "./dist/*.d.ts",
+      "import": "./dist/*.js"
+    },
+    "./powershell/Invoke-HyperVWindowsOperation.ps1": "./powershell/Invoke-HyperVWindowsOperation.ps1"
+  },
+  "files": [
+    "dist/",
+    "powershell/"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/package.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}

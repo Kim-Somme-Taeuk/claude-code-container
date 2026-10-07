@@ -1,0 +1,2027 @@
+import { hyperVMemoryFailureReason } from "./hyper-v-memory-diagnostic.ts";
+import { afterEach, describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { homedir, tmpdir } from "os";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
+import { assertHyperVLinuxCreateContract, HYPER_V_LINUX_E2E_DELETE_OPTIONS, HYPER_V_LINUX_PRE_REBOOT_COMMAND, hyperVLinuxBrokerArgs, hyperVLinuxToolPayload, hyperVLinuxVmE2ECapability, prepareHyperVLinuxDownloadDestination, writeHyperVLinuxFailureDiagnostic } from "./hyper-v-linux-vm-e2e.ts";
+import {
+    assertHyperVWindowsDeleted,
+    assertHyperVWindowsNetwork,
+    cleanupPrevious,
+    createPackagedCccCandidate,
+    ensureHyperVWindowsDownloadDestination,
+    HYPER_V_WINDOWS_CONSOLE_TIMELINE_DELAYS_MS,
+    HYPER_V_WINDOWS_E2E_DELETE_OPTIONS,
+    HYPER_V_WINDOWS_E2E_REBOOT_OPTIONS,
+    hyperVWindowsFailureReason,
+    hyperVWindowsToolPayload,
+    hyperVWindowsVmE2ECapability,
+    resolveNpmCliPath,
+    scheduleHyperVWindowsConsoleTimeline,
+    selectHyperVWindowsProfile,
+} from "./hyper-v-windows-vm-e2e.ts";
+import { captureHyperVWindowsSetupDiagnostics } from "./hyper-v-windows-setup-diagnostics.ts";
+import { brokerRollbackSummary, brokerToolFailureEvidence, formatBrokerToolFailure } from "./device-lab-mcp-client.ts";
+import { repoRoot } from "./helpers.ts";
+import { ownerId as mcpOwnerId } from "#device-lab/providers/context.mjs";
+import {
+    HYPER_V_WINDOWS_EVALUATION_LICENSE_ID,
+    HYPER_V_WINDOWS_EVALUATION_LICENSE_URL,
+    HYPER_V_WINDOWS_SOURCE_TRUST_ID,
+    HYPER_V_WINDOWS_SOURCE_URL,
+} from "#device-lab/device-lab/hyper-v-image-contracts.js";
+
+const readiness = JSON.stringify({
+    available: true,
+    moduleAvailable: true,
+    hypervisorPresent: true,
+    vmmsRunning: true,
+    rebootPending: false,
+    totalMemoryMb: 32768,
+    freeMemoryMb: 16384,
+    logicalProcessors: 8,
+    missing: [],
+});
+
+function spawnReady(_command: string, args: string[]) {
+    if (args[0] === "ssh.exe" || args[0] === "scp.exe") return { status: 0, stdout: `${args[0]}\n` };
+    return { status: 0, stdout: readiness };
+}
+
+// The MCP view of a typed New-VM failure whose create-residue rollback could not release the
+// network allocation, as the broker's device_create 502 reports it.
+function hyperVCreateFailureWithRollback(): any {
+    return {
+        ok: false,
+        method: "device_create",
+        error: "provider-command-failed",
+        status: 502,
+        body: {
+            ok: false,
+            error: "provider-command-failed",
+            detail: "hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-newvm",
+            operation: "New-VM",
+            rollback: {
+                ok: false,
+                status: 502,
+                error: "hyper-v-recovery-cleanup-failed",
+                stage: "network-release",
+                detail: "hyper-v-network-elevation-cancelled",
+            },
+        },
+    };
+}
+
+afterEach(() => {
+    delete process.env.CCC_REAL_HYPER_V_WINDOWS_SOURCE_IMAGE;
+    delete process.env.CCC_REAL_HYPER_V_LINUX_SOURCE_IMAGE;
+});
+
+describe("Hyper-V E2E zero-config image selection", () => {
+    it("uses an explicit forced reboot for the disposable Windows fixture", () => {
+        expect(HYPER_V_WINDOWS_E2E_REBOOT_OPTIONS).toEqual({
+            force: true,
+            waitForBoot: true,
+            bootTimeoutMs: 1200000,
+        });
+    });
+
+    it("releases fixture allocations while preserving the shared Hyper-V fabric", () => {
+        expect(HYPER_V_LINUX_E2E_DELETE_OPTIONS).toEqual(HYPER_V_WINDOWS_E2E_DELETE_OPTIONS);
+        expect(HYPER_V_WINDOWS_E2E_DELETE_OPTIONS).toEqual({
+            force: true,
+            confirmDestructive: true,
+            preserveNetwork: true,
+        });
+    });
+
+    it("precreates and resets exact nested Windows download destinations", () => {
+        const root = mkdtempSync(join(tmpdir(), "ccc-hyper-v-download-destination-"));
+        const nested = join(root, "nested");
+        const destination = join(nested, "download.txt");
+        mkdirSync(nested);
+        try {
+            ensureHyperVWindowsDownloadDestination(root, destination);
+            expect(readFileSync(destination, "utf8")).toBe("");
+            writeFileSync(destination, "existing-evidence");
+            ensureHyperVWindowsDownloadDestination(root, destination);
+            expect(readFileSync(destination, "utf8")).toBe("");
+            expect(() => ensureHyperVWindowsDownloadDestination(root, nested))
+                .toThrow("hyper-v-windows-e2e-download-destination-invalid");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it("rejects a linked Windows download parent without changing the external file", () => {
+        const root = mkdtempSync(join(tmpdir(), "ccc-hyper-v-download-root-"));
+        const outside = mkdtempSync(join(tmpdir(), "ccc-hyper-v-download-outside-"));
+        const linkedParent = join(root, "linked");
+        const external = join(outside, "download.txt");
+        writeFileSync(external, "prior-evidence");
+        try {
+            symlinkSync(outside, linkedParent, process.platform === "win32" ? "junction" : "dir");
+            expect(() => ensureHyperVWindowsDownloadDestination(root, join(linkedParent, "download.txt")))
+                .toThrow("hyper-v-windows-e2e-download-destination-invalid");
+            expect(readFileSync(external, "utf8")).toBe("prior-evidence");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+            rmSync(outside, { recursive: true, force: true });
+        }
+    });
+
+    it("finds the npm CLI beside the active Windows Node installation during direct invocation", () => {
+        const nodeRoot = mkdtempSync(join(tmpdir(), "ccc-hyper-v-node-install-"));
+        const npmExecPath = join(nodeRoot, "node_modules", "npm", "bin", "npm-cli.js");
+        mkdirSync(join(nodeRoot, "node_modules", "npm", "bin"), { recursive: true });
+        writeFileSync(npmExecPath, "// test npm cli");
+        try {
+            expect(resolveNpmCliPath({
+                nodePath: join(nodeRoot, "node.exe"),
+            })).toBe(npmExecPath);
+            expect(resolveNpmCliPath({
+                env: { npm_execpath: join(nodeRoot, "attacker.js") },
+                nodePath: join(nodeRoot, "node.exe"),
+            })).toBe(npmExecPath);
+        } finally {
+            rmSync(nodeRoot, { recursive: true, force: true });
+        }
+    });
+
+    it("builds the guest probe from an npm package artifact without invoking package scripts", () => {
+        const outputDir = mkdtempSync(join(tmpdir(), "ccc-hyper-v-package-test-"));
+        const npmExecPath = join(outputDir, "node_modules", "npm", "bin", "npm-cli.js");
+        mkdirSync(dirname(npmExecPath), { recursive: true });
+        writeFileSync(npmExecPath, "// test npm cli");
+        try {
+            const candidate = createPackagedCccCandidate(outputDir, {
+                nodePath: join(outputDir, "node.exe"),
+                spawnSyncImpl: (command: string, args: string[]) => {
+                    expect(command).toBe(join(outputDir, "node.exe"));
+                    expect(args).toEqual(expect.arrayContaining([npmExecPath, "pack", "--json", "--ignore-scripts", "--pack-destination", outputDir]));
+                    writeFileSync(join(outputDir, "claude-code-container-test.tgz"), "package");
+                    return { status: 0, stdout: JSON.stringify([{ filename: "claude-code-container-test.tgz" }]), stderr: "" };
+                },
+            });
+            expect(candidate.packagePath).toBe(join(outputDir, "claude-code-container-test.tgz"));
+            expect(candidate.version).toMatch(/^\d+\.\d+\.\d+$/);
+        } finally {
+            rmSync(outputDir, { recursive: true, force: true });
+        }
+    });
+
+    it("resolves the pack artifact when npm --json returns an object (Windows) via the deterministic tarball name", () => {
+        const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+        const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
+        const sanitizedName = String(pkg.name).replace(/^@/, "").replace(/\//g, "-");
+        const expectedFilename = `${sanitizedName}-${pkg.version}.tgz`;
+        const outputDir = mkdtempSync(join(tmpdir(), "ccc-hyper-v-package-object-test-"));
+        const npmExecPath = join(outputDir, "node_modules", "npm", "bin", "npm-cli.js");
+        mkdirSync(dirname(npmExecPath), { recursive: true });
+        writeFileSync(npmExecPath, "// test npm cli");
+        try {
+            const candidate = createPackagedCccCandidate(outputDir, {
+                nodePath: join(outputDir, "node.exe"),
+                spawnSyncImpl: () => {
+                    // Windows npm emits `--json` as an object (no top-level filename) and still
+                    // writes the tarball to --pack-destination under the deterministic name.
+                    writeFileSync(join(outputDir, expectedFilename), "package");
+                    return { status: 0, stdout: "{}", stderr: "" };
+                },
+            });
+            expect(candidate.packagePath).toBe(join(outputDir, expectedFilename));
+            expect(candidate.version).toBe(String(pkg.version));
+        } finally {
+            rmSync(outputDir, { recursive: true, force: true });
+        }
+    });
+
+    it("rejects package artifact paths reported outside the pack destination", () => {
+        const outputDir = mkdtempSync(join(tmpdir(), "ccc-hyper-v-package-path-test-"));
+        const npmExecPath = join(outputDir, "node_modules", "npm", "bin", "npm-cli.js");
+        mkdirSync(dirname(npmExecPath), { recursive: true });
+        writeFileSync(npmExecPath, "// test npm cli");
+        try {
+            expect(() => createPackagedCccCandidate(outputDir, {
+                nodePath: join(outputDir, "node.exe"),
+                spawnSyncImpl: () => ({
+                    status: 0,
+                    stdout: JSON.stringify([{ filename: "../outside.tgz" }]),
+                    stderr: "",
+                }),
+            })).toThrow(/unsafe package artifact filename/);
+        } finally {
+            rmSync(outputDir, { recursive: true, force: true });
+        }
+    });
+
+    it("rejects a reported package artifact that is not a regular file", () => {
+        const outputDir = mkdtempSync(join(tmpdir(), "ccc-hyper-v-package-type-test-"));
+        const npmExecPath = join(outputDir, "node_modules", "npm", "bin", "npm-cli.js");
+        mkdirSync(dirname(npmExecPath), { recursive: true });
+        writeFileSync(npmExecPath, "// test npm cli");
+        mkdirSync(join(outputDir, "not-a-package.tgz"));
+        try {
+            expect(() => createPackagedCccCandidate(outputDir, {
+                nodePath: join(outputDir, "node.exe"),
+                spawnSyncImpl: () => ({
+                    status: 0,
+                    stdout: JSON.stringify([{ filename: "not-a-package.tgz" }]),
+                    stderr: "",
+                }),
+            })).toThrow(/regular package artifact/);
+        } finally {
+            rmSync(outputDir, { recursive: true, force: true });
+        }
+    });
+
+    it("selects the official Windows Server profile when no override or Windows 11 cache exists", () => {
+        expect(selectHyperVWindowsProfile({ existsSyncImpl: () => false })).toBe("windows-server");
+        expect(hyperVWindowsVmE2ECapability({
+            platform: "win32",
+            powershell: "powershell.exe",
+            spawnSyncImpl: spawnReady,
+            existsSyncImpl: () => false,
+            readEvaluationReceiptImpl: () => ({ acceptedAt: "2026-01-01T00:00:00.000Z" }),
+        })).toMatchObject({ available: true, sourceImage: "", profile: "windows-server" });
+    });
+
+    it("reports the one-time Windows evaluation acceptance as a prerequisite", () => {
+        expect(hyperVWindowsVmE2ECapability({
+            platform: "win32",
+            powershell: "powershell.exe",
+            spawnSyncImpl: spawnReady,
+            existsSyncImpl: () => false,
+            readEvaluationReceiptImpl: () => null,
+        })).toEqual({
+            available: false,
+            reason: "Windows evaluation license acceptance not recorded; run ccc devices setup hyper-v --confirm --accept-windows-evaluation-license",
+        });
+    });
+
+    it("accepts the version 2 receipt written by Hyper-V setup", () => {
+        const setupRoot = mkdtempSync(join(tmpdir(), "ccc-hyper-v-setup-test-"));
+        try {
+            writeFileSync(join(setupRoot, "hyper-v-windows-evaluation-license.json"), JSON.stringify({
+                version: 2,
+                licenseId: HYPER_V_WINDOWS_EVALUATION_LICENSE_ID,
+                licenseUrl: HYPER_V_WINDOWS_EVALUATION_LICENSE_URL,
+                sourceTrustId: HYPER_V_WINDOWS_SOURCE_TRUST_ID,
+                sourceUrl: HYPER_V_WINDOWS_SOURCE_URL,
+                acceptedAt: "2026-01-01T00:00:00.000Z",
+            }));
+            expect(hyperVWindowsVmE2ECapability({
+                platform: "win32",
+                powershell: "powershell.exe",
+                spawnSyncImpl: spawnReady,
+                existsSyncImpl: () => false,
+                setupRoot,
+            })).toMatchObject({ available: true, profile: "windows-server" });
+        } finally {
+            rmSync(setupRoot, { recursive: true, force: true });
+        }
+    });
+
+    it("selects Windows 11 for an explicit source override", () => {
+        process.env.CCC_REAL_HYPER_V_WINDOWS_SOURCE_IMAGE = "C:\\images\\windows-11.vhdx";
+        expect(selectHyperVWindowsProfile({ existsSyncImpl: () => false })).toBe("windows-11");
+    });
+
+    it("selects Windows 11 when its cached manifest exists", () => {
+        expect(selectHyperVWindowsProfile({
+            existsSyncImpl: () => true,
+            readFileSyncImpl: () => JSON.stringify({ version: 3, profile: "windows-11", imagePath: "C:\\cache\\base.vhdx" }),
+        })).toBe("windows-11");
+        expect(selectHyperVWindowsProfile({
+            existsSyncImpl: () => true,
+            readFileSyncImpl: () => JSON.stringify({ version: 2, profile: "windows-11", imagePath: "C:\\cache\\base.vhdx" }),
+        })).toBe("windows-server");
+    });
+
+    it("checks the owner-scoped Windows 11 cache before the shared catalog cache", () => {
+        const checked: string[] = [];
+        const ownerId = "0123456789abcdef";
+        expect(selectHyperVWindowsProfile({
+            ownerId,
+            existsSyncImpl: (path: string) => { checked.push(path); return true; },
+            readFileSyncImpl: () => JSON.stringify({ version: 3, profile: "windows-11", imagePath: "C:\\cache\\base.vhdx" }),
+        })).toBe("windows-11");
+        expect(checked[0]).toBe(join(homedir(), ".ccc", "device-broker-private", "owners", ownerId, "images", "hyper-v", "windows-11", "manifest.json"));
+        expect(checked).not.toContain(join(homedir(), ".ccc", "devices", "owners", ownerId, "images", "hyper-v", "windows-11", "manifest.json"));
+    });
+
+    it("falls back to the private shared Windows 11 catalog cache", () => {
+        const ownerId = "0123456789abcdef";
+        const ownerManifest = join(homedir(), ".ccc", "device-broker-private", "owners", ownerId, "images", "hyper-v", "windows-11", "manifest.json");
+        const sharedManifest = join(homedir(), ".ccc", "device-broker-private", "images", "hyper-v", "windows-11", "manifest.json");
+        const imagePath = "C:\\cache\\base.vhdx";
+        const checked: string[] = [];
+        expect(selectHyperVWindowsProfile({
+            ownerId,
+            existsSyncImpl: (path: string) => {
+                checked.push(path);
+                return path === sharedManifest || path === imagePath;
+            },
+            readFileSyncImpl: () => JSON.stringify({ version: 3, profile: "windows-11", imagePath }),
+        })).toBe("windows-11");
+        expect(checked.slice(0, 2)).toEqual([ownerManifest, sharedManifest]);
+    });
+
+    it("keeps Linux E2E available without a source override so the broker can auto-acquire Ubuntu", () => {
+        expect(hyperVLinuxVmE2ECapability({
+            platform: "win32",
+            powershell: "powershell.exe",
+            ssh: "ssh.exe",
+            scp: "scp.exe",
+            spawnSyncImpl: spawnReady,
+            inspectImageCache: () => ({ state: "acquisition-required" }),
+        })).toMatchObject({ available: true, sourceImage: "" });
+    });
+
+    describe("Linux E2E image gate", () => {
+        const untrustedReadiness = JSON.stringify({
+            ...JSON.parse(readiness),
+            qemuImgAvailable: true,
+            qemuImgTrusted: false,
+            qemuImgSignatureStatus: "NotTrusted",
+            linuxImageMissing: ["hyper-v-qemu-img-untrusted"],
+        });
+        const spawnUntrusted = (_command: string, args: string[]) => (
+            args[0] === "ssh.exe" || args[0] === "scp.exe" ? { status: 0, stdout: `${args[0]}\n` } : { status: 0, stdout: untrustedReadiness }
+        );
+        const capability = (inspectImageCache: (privateRoot: string, ownerId: string) => unknown, extra: Record<string, unknown> = {}) => hyperVLinuxVmE2ECapability({
+            platform: "win32",
+            powershell: "powershell.exe",
+            ssh: "ssh.exe",
+            scp: "scp.exe",
+            spawnSyncImpl: spawnUntrusted,
+            inspectImageCache,
+            ...extra,
+        });
+
+        it("runs on a cached ubuntu-lts image even though qemu-img is untrusted", () => {
+            expect(capability(() => ({ state: "valid", source: "global" }))).toMatchObject({ available: true, sourceImage: "" });
+        });
+
+        it("skips with the categorized qemu-img reason when the image would have to be acquired", () => {
+            expect(capability(() => ({ state: "acquisition-required" }))).toEqual({
+                available: false,
+                reason: "missing hyper-v-qemu-img-untrusted (qemu-img signature NotTrusted)",
+            });
+        });
+
+        it("skips with the conflict code so validation leaves it for the operator", () => {
+            expect(capability(() => ({ state: "conflict", code: "hyper-v-base-image-unmanaged-existing" }))).toEqual({
+                available: false,
+                reason: "missing hyper-v-base-image-unmanaged-existing",
+            });
+        });
+
+        it("reads the broker's private root for the owner the MCP session resolves", () => {
+            const calls: Array<[string, string]> = [];
+            capability((root, owner) => { calls.push([root, owner]); return { state: "valid", source: "global" }; });
+            expect(calls).toEqual([[join(homedir(), ".ccc", "device-broker-private"), mcpOwnerId(process.env, repoRoot)]]);
+        });
+
+        it("does not consult the cache for an imported source image, which never runs qemu-img", () => {
+            const inspect = () => { throw new Error("cache inspected"); };
+            expect(capability(inspect, { sourceImage: "C:\\images\\ubuntu.vhdx" })).toMatchObject({ available: true, sourceImage: "C:\\images\\ubuntu.vhdx" });
+        });
+    });
+
+    it("pre-creates the Linux E2E download destination without replacing an existing path", () => {
+        const root = mkdtempSync(join(tmpdir(), "ccc-hyper-v-linux-download-"));
+        const nested = join(root, "results", "device-lab-real");
+        const destination = join(nested, "download.txt");
+        mkdirSync(nested, { recursive: true });
+        try {
+            prepareHyperVLinuxDownloadDestination(destination);
+            expect(readFileSync(destination, "utf8")).toBe("");
+            expect(() => prepareHyperVLinuxDownloadDestination(destination)).toThrow();
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it("flushes the validated managed network before the destructive reboot probe", () => {
+        expect(HYPER_V_LINUX_PRE_REBOOT_COMMAND).toContain("sudo test -s /etc/netplan/99-ccc-static.yaml");
+        expect(HYPER_V_LINUX_PRE_REBOOT_COMMAND).toContain("sudo netplan generate");
+        expect(HYPER_V_LINUX_PRE_REBOOT_COMMAND).toContain("sudo sync");
+    });
+
+    it("reports the exact missing Hyper-V Linux create response field", () => {
+        const device = {
+            deviceId: "linux-hyper-v-real-e2e-contract",
+            guestTransport: "ssh",
+            switchName: "CCC Device Lab",
+            networkAddress: "172.29.0.10",
+        };
+        expect(() => assertHyperVLinuxCreateContract(device, device.deviceId)).toThrow(
+            "hyper-v-linux-create-response-invalid: guestProvisioned expected true, received missing",
+        );
+    });
+
+    it("accepts the complete sanitized Hyper-V Linux create response", () => {
+        const device = {
+            deviceId: "linux-hyper-v-real-e2e-contract",
+            guestProvisioned: true,
+            guestTransport: "ssh",
+            switchName: "CCC Device Lab",
+            networkAddress: "172.29.0.10",
+        };
+        expect(() => assertHyperVLinuxCreateContract(device, device.deviceId)).not.toThrow();
+    });
+
+    it("forces every Hyper-V Linux E2E operation through the broker", () => {
+        expect(hyperVLinuxBrokerArgs("create_linux_vm", {
+            provider: "container-qemu",
+            viaBroker: false,
+        })).toEqual({
+            provider: "hyper-v",
+            viaBroker: true,
+        });
+        expect(hyperVLinuxBrokerArgs("status", {
+            deviceId: "owned-linux",
+            viaBroker: false,
+        })).toEqual({
+            deviceId: "owned-linux",
+            viaBroker: true,
+        });
+    });
+
+    it("bounds Hyper-V Linux create response diagnostics", () => {
+        const hugeField = "x".repeat(10_000);
+        let diagnostic = "";
+        try {
+            assertHyperVLinuxCreateContract({ [hugeField]: true }, "linux-hyper-v-real-e2e-contract");
+        } catch (error) {
+            diagnostic = error instanceof Error ? error.message : String(error);
+        }
+        expect(diagnostic).toContain("hyper-v-linux-create-response-invalid");
+        expect(diagnostic.length).toBeLessThan(1_500);
+        expect(diagnostic).not.toContain("x".repeat(65));
+    });
+
+    it("keeps broker transport timeout fields out of public device_create calls", () => {
+        for (const file of ["hyper-v-windows-vm-e2e.ts", "hyper-v-linux-vm-e2e.ts"]) {
+            const source = readFileSync(new URL(file, import.meta.url), "utf8");
+            expect(source).not.toContain("rpcTimeoutMs:");
+        }
+    });
+
+    it("reports nested broker provisioning diagnostics without dumping unbounded output", () => {
+        const message = formatBrokerToolFailure({
+            ok: false,
+            error: "broker-operation-failed",
+            transportRecovery: {
+                attempted: true,
+                recovered: false,
+                initial: { endpoint: "https://token@host/C:\\Users\\Luxus\\private" },
+                retry: { stderr: "token=secret" },
+            },
+            body: {
+                error: "hyper-v-linux-seed-failed",
+                provisioning: {
+                    status: 1,
+                    diagnosticCode: "hyper-v-provisioning-media-stream-invalid",
+                    signal: "token=secret C:\\Users\\Luxus\\private",
+                    error: "token=secret C:\\Users\\Luxus\\private",
+                    stdout: `prefix-${"x".repeat(2000)}`,
+                    stderr: `prefix-${"y".repeat(3000)}`,
+                },
+            },
+        }, "fallback");
+        expect(message).toContain("broker-operation-failed");
+        expect(message).toContain("hyper-v-linux-seed-failed");
+        expect(message).toContain("hyper-v-provisioning-media-stream-invalid");
+        expect(message).not.toContain("prefix-");
+        expect(message).not.toContain("token=secret");
+        expect(message).not.toContain("C:\\Users");
+        expect(message.length).toBeLessThan(512);
+    });
+
+    it("preserves structured evidence from MCP isError responses", () => {
+        const brokerPayload = {
+            ok: false,
+            error: "broker-operation-failed",
+            body: {
+                error: "hyper-v-guest-not-ready",
+                result: {
+                    boot: {
+                        provider: "hyper-v-ssh",
+                        error: "ssh-connection-timeout",
+                    },
+                },
+            },
+        };
+        let failure: any;
+        try {
+            hyperVLinuxToolPayload({
+                isError: true,
+                content: [{ type: "text", text: JSON.stringify(brokerPayload) }],
+            });
+        } catch (error) {
+            failure = error;
+        }
+        expect(failure).toBeInstanceOf(Error);
+        expect(failure.brokerPayload).toEqual(brokerPayload);
+        expect(failure.message).toContain("hyper-v-guest-not-ready");
+        expect(failure.message).toContain("ssh-connection-timeout");
+    });
+
+    it("reports redacted Hyper-V network execution diagnostics", () => {
+        const message = formatBrokerToolFailure({
+            ok: false,
+            error: "hyper-v-network-setup-failed",
+            body: {
+                error: "hyper-v-network-setup-failed",
+                detail: "hyper-v-network-pipe-handshake-timeout",
+                execution: {
+                    mode: "exec",
+                    provider: "hyper-v",
+                    status: 1,
+                    stdoutPresent: true,
+                    stderrPresent: true,
+                    outputRedacted: true,
+                    diagnosticCode: "hyper-v-network-pipe-handshake-timeout",
+                    error: "token=secret-error",
+                    stdout: "token=secret-stdout",
+                    stderr: "token=secret-stderr",
+                },
+            },
+            attempts: [{
+                port: 17373,
+                status: 502,
+                durationMs: 35120,
+                timeoutMs: 21615000,
+            }],
+        }, "fallback");
+        expect(message).toContain("hyper-v-network-setup-failed");
+        expect(message).toContain("hyper-v-network-pipe-handshake-timeout");
+        expect(message).toContain('"diagnosticCode":"hyper-v-network-pipe-handshake-timeout"');
+        expect(message).not.toContain("stdoutPresent");
+        expect(message).not.toContain("stderrPresent");
+        expect(message).not.toContain("token=secret");
+        expect(message.length).toBeLessThan(1024);
+    });
+
+    it("ignores unredacted network execution objects", () => {
+        const message = formatBrokerToolFailure({
+            ok: false,
+            error: "hyper-v-network-setup-failed",
+            body: {
+                execution: {
+                    outputRedacted: false,
+                    diagnosticCode: "hyper-v-network-pipe-handshake-timeout",
+                    stdout: "token=secret-stdout",
+                    stderr: "token=secret-stderr",
+                },
+            },
+        }, "fallback");
+        expect(message).toBe("hyper-v-network-setup-failed");
+        expect(message).not.toContain("diagnosticCode");
+        expect(message).not.toContain("token=secret");
+    });
+
+    it("reports the bounded final broker transport attempt without exposing endpoints or bodies", () => {
+        const message = formatBrokerToolFailure({
+            ok: false,
+            error: "broker-rpc-unavailable",
+            attempts: [
+                {
+                    host: "https://token@host/C:\\Users\\Luxus/private/home/secret",
+                    port: 17373,
+                    endpoint: "http://127.0.0.1:17373/v1/owners/secret/rpc",
+                    body: { ownerToken: "secret" },
+                    error: `fetch failed token=secret C:\\Users\\Luxus\\private ${"x".repeat(1000)}`,
+                    durationMs: 630010,
+                    timeoutMs: 630000,
+                },
+            ],
+        }, "fallback");
+        expect(message).toContain("broker-rpc-unavailable");
+        expect(message).toContain('"error":"fetch-failed"');
+        expect(message).toContain('"durationMs":630010');
+        expect(message).toContain('"timeoutMs":630000');
+        expect(message).not.toContain("/v1/owners");
+        expect(message).not.toContain("ownerToken");
+        expect(message).not.toContain("token=secret");
+        expect(message).not.toContain("token@host");
+        expect(message).not.toContain("C:\\Users");
+        expect(message).not.toContain("/home/");
+        expect(message.length).toBeLessThan(1024);
+    });
+
+    it("reports bounded Hyper-V transport recovery without exposing raw transport details", () => {
+        const message = formatBrokerToolFailure({
+            ok: false,
+            error: "broker-rpc-unavailable",
+            transportRecovery: {
+                attempted: true,
+                recovered: false,
+                initial: {
+                    port: 17373,
+                    error: "connection-reset",
+                    brokerPid: 29744,
+                    brokerDiagnostics: ["hyper-v-network-setup-failed"],
+                },
+                retry: {
+                    port: 17373,
+                    error: "connection-refused",
+                    brokerDiagnostics: [],
+                },
+            },
+            attempts: [{
+                port: 17373,
+                transportCode: "connection-refused",
+                error: "socket detail token=secret C:\\Users\\Luxus\\private",
+                durationMs: 4426,
+                timeoutMs: 21615000,
+            }],
+        }, "fallback");
+
+        expect(message).toContain('"attempted":true');
+        expect(message).toContain('"recovered":false');
+        expect(message).toContain('"error":"connection-reset"');
+        expect(message).toContain("hyper-v-network-setup-failed");
+        expect(message).not.toContain("brokerPid");
+        expect(message).not.toContain("token=secret");
+        expect(message).not.toContain("C:\\Users");
+    });
+
+    it("reports bounded broker process verification diagnostics", () => {
+        const message = formatBrokerToolFailure({
+            ok: false,
+            error: "broker-runtime-process-unverified",
+            host: "https://token@host/C:\\Users\\Luxus\\private\\secret",
+            port: 17373,
+            runtime: {
+                pid: 4321,
+                command: "C:\\private\\node.exe",
+                args: ["C:\\private\\dist\\index.js"],
+            },
+            attempts: [{
+                reason: "broker-reuse-process-unverified",
+                processVerification: { ok: false, source: "unverified-broker-port-process" },
+            }],
+        }, "fallback");
+
+        expect(message).toContain("broker-runtime-process-unverified");
+        expect(message).toContain('"reason":"broker-reuse-process-unverified"');
+        expect(message).toContain('"source":"unverified-broker-port-process"');
+        expect(message).not.toContain('"runtimePid"');
+        expect(message).not.toContain("token@host");
+        expect(message).not.toContain("C:\\private");
+        expect(message).not.toContain("C:\\Users");
+    });
+
+    it("reports bounded Hyper-V guest readiness diagnostics without exposing command output", () => {
+        const message = formatBrokerToolFailure({
+            ok: false,
+            error: "broker-operation-failed",
+            body: {
+                error: "hyper-v-guest-not-ready",
+                result: {
+                    boot: {
+                        ready: false,
+                        provider: "hyper-v-ssh",
+                        error: "ssh-readiness-marker-missing",
+                        readiness: {
+                            managedSshAttempts: 3,
+                            bootstrapProbeAttempts: 2,
+                            bootstrapProbeSuccesses: 2,
+                            bootstrapAddressCount: 1,
+                            bootstrapSshAttempts: 2,
+                            bootstrapSshLastStatus: 0,
+                            bootstrapSshLastError: "ssh-readiness-marker-missing",
+                            bootstrapHostKeyObserved: true,
+                            bootstrapHostKeyMatchesExpected: false,
+                            networkFinalizeAttempts: 0,
+                            networkFinalizeSucceeded: false,
+                            guestSignalObserved: true,
+                            elapsedMs: 12345,
+                            privateAddress: "172.16.0.2",
+                        },
+                        diagnosticAvailable: false,
+                        diagnosticError: "hyper-v-guest-boot-diagnostic-command-failed",
+                    },
+                    execution: {
+                        command: {
+                            hyperVGuestReady: {
+                                stderr: "token=secret C:\\Users\\Luxus\\private",
+                            },
+                        },
+                    },
+                },
+            },
+        }, "fallback");
+        expect(message).toContain("hyper-v-guest-not-ready");
+        expect(message).toContain('"error":"ssh-readiness-marker-missing"');
+        expect(message).toContain('"bootstrapSshLastStatus":0');
+        expect(message).toContain('"bootstrapSshLastError":"ssh-readiness-marker-missing"');
+        expect(message).toContain('"bootstrapHostKeyObserved":true');
+        expect(message).toContain('"bootstrapHostKeyMatchesExpected":false');
+        expect(message).toContain('"bootstrapAddressCount":1');
+        expect(message).not.toContain("private-vm-name");
+        expect(message).not.toContain("172.16.0.2");
+        expect(message).not.toContain("diskPath");
+        expect(message).not.toContain("token=secret");
+        expect(message).not.toContain("C:\\Users");
+        expect(message).not.toContain("172.16.0.2");
+        expect(message.length).toBeLessThan(600);
+    });
+
+    it("does not invent missing Hyper-V readiness booleans", () => {
+        const evidence = brokerToolFailureEvidence({
+            body: {
+                result: {
+                    boot: {
+                        provider: "hyper-v-ssh",
+                        error: "ssh-unavailable",
+                        readiness: {
+                            managedSshAttempts: 1,
+                            bootstrapProbeLastStatus: -1,
+                            bootstrapProbeLastError: "C:\\Users\\private token=secret",
+                            bootstrapSshLastStatus: -1,
+                            bootstrapSshLastError: "C:\\Users\\private token=secret",
+                            bootstrapHostKeyObserved: "yes",
+                            bootstrapHostKeyMatchesExpected: "no",
+                        },
+                    },
+                },
+            },
+        }) as any;
+        expect(evidence.boot.readiness).toEqual(expect.objectContaining({ managedSshAttempts: 1 }));
+        expect(evidence.boot.readiness.bootstrapProbeLastStatus).toBeUndefined();
+        expect(evidence.boot.readiness.bootstrapProbeLastError).toBeUndefined();
+        expect(evidence.boot.readiness.bootstrapSshLastStatus).toBeUndefined();
+        expect(evidence.boot.readiness.bootstrapSshLastError).toBeUndefined();
+        expect(evidence.boot.readiness.bootstrapHostKeyObserved).toBeUndefined();
+        expect(evidence.boot.readiness.bootstrapHostKeyMatchesExpected).toBeUndefined();
+        expect(JSON.stringify(evidence)).not.toContain("bootstrapProbeLastStatus");
+        expect(JSON.stringify(evidence)).not.toContain("bootstrapProbeLastError");
+        expect(evidence.boot.readiness).not.toHaveProperty("networkFinalizeSucceeded");
+        expect(evidence.boot.readiness).not.toHaveProperty("guestSignalObserved");
+    });
+
+    it("surfaces the bounded broker detail code so masked reconciliation failures stay distinguishable", () => {
+        const evidence = brokerToolFailureEvidence({
+            error: "hyper-v-delete-reconciliation-failed",
+            body: {
+                error: "hyper-v-delete-reconciliation-failed",
+                detail: "hyper-v-vm-identity-conflict",
+            },
+        }) as any;
+        expect(evidence.error).toBe("hyper-v-delete-reconciliation-failed");
+        expect(evidence.bodyError).toBe("hyper-v-delete-reconciliation-failed");
+        expect(evidence.detail).toBe("hyper-v-vm-identity-conflict");
+    });
+
+    it("omits broker detail that is not a bounded diagnostic code", () => {
+        const evidence = brokerToolFailureEvidence({
+            error: "hyper-v-delete-reconciliation-failed",
+            body: {
+                error: "hyper-v-delete-reconciliation-failed",
+                detail: "C:\\Users\\private token=secret",
+            },
+        }) as any;
+        expect(evidence).not.toHaveProperty("detail");
+        expect(JSON.stringify(evidence)).not.toContain("C:\\Users");
+    });
+
+    it("reports a failed create's rollback right after the detail and ahead of the bulky diagnostics", () => {
+        const failure = hyperVCreateFailureWithRollback();
+        expect(formatBrokerToolFailure(failure, "fallback")).toBe(
+            "provider-command-failed: hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-newvm: operation=New-VM: "
+            + "rollback=hyper-v-recovery-cleanup-failed/hyper-v-network-elevation-cancelled",
+        );
+
+        const crowded = formatBrokerToolFailure({
+            ...failure,
+            transportRecovery: {
+                attempted: true,
+                recovered: false,
+                initial: { port: 17373, error: "connection-reset", brokerDiagnostics: Array.from({ length: 8 }, (_, index) => `hyper-v-network-diagnostic-code-number-${index}`) },
+                retry: { port: 17373, error: "connection-refused", brokerDiagnostics: Array.from({ length: 8 }, (_, index) => `hyper-v-network-retry-code-number-${index}`) },
+            },
+            body: {
+                ...failure.body,
+                provisioning: { status: 1, error: "hyper-v-guest-provision-failed", diagnosticCode: "hyper-v-provisioning-media-stream-invalid" },
+            },
+            attempts: [{ port: 17373, status: 502, durationMs: 35120, timeoutMs: 21615000 }],
+        }, "fallback");
+        expect(crowded.length).toBe(511);
+        expect(crowded).toContain(": rollback=hyper-v-recovery-cleanup-failed/hyper-v-network-elevation-cancelled: ");
+    });
+
+    it("reports the create failure behind a failed wrapper compensation by code alone", () => {
+        const failure = {
+            ok: false,
+            method: "device_create",
+            error: "hyper-v-create-allocation-cleanup-failed",
+            status: 502,
+            body: {
+                ok: false,
+                error: "hyper-v-create-allocation-cleanup-failed",
+                detail: "hyper-v-network-elevation-cancelled",
+                stage: "network-release",
+                lifecycleFailure: {
+                    ok: false,
+                    error: "provider-command-failed",
+                    detail: "hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-newvm",
+                    operation: "New-VM",
+                    stderr: "New-VM : C:\\Users\\private token=secret",
+                },
+            },
+        };
+        expect(formatBrokerToolFailure(failure, "fallback")).toBe(
+            "hyper-v-create-allocation-cleanup-failed: hyper-v-network-elevation-cancelled: "
+            + "lifecycle=provider-command-failed/hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-newvm: "
+            + "operation=New-VM",
+        );
+        const evidence = brokerToolFailureEvidence(failure) as any;
+        expect(evidence.lifecycleFailure).toEqual({
+            error: "provider-command-failed",
+            detail: "hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-newvm",
+            operation: "New-VM",
+        });
+        expect(JSON.stringify(evidence)).not.toContain("secret");
+
+        const unsafe = { ...failure, body: { ...failure.body, lifecycleFailure: { error: "C:\\Users\\private", detail: "token=secret" } } };
+        expect(formatBrokerToolFailure(unsafe, "fallback")).not.toContain("lifecycle=");
+        expect(brokerToolFailureEvidence(unsafe)).not.toHaveProperty("lifecycleFailure");
+    });
+
+    it("summarizes each broker rollback shape by code alone", () => {
+        const summary = (rollback: unknown) => brokerRollbackSummary({ ok: false, error: "provider-command-failed", body: { rollback } });
+        // The create-residue reconcile.
+        expect(summary({ ok: true, recoveredVm: true, removedDisk: true, releasedAddress: true })).toBe("rollback=ok");
+        expect(summary({ ok: false, status: 502, error: "hyper-v-recovery-failed", detail: "hyper-v-ps-removeitemioerror-microsoft-powershell-commands-removeitemcommand" }))
+            .toBe("rollback=hyper-v-recovery-failed/hyper-v-ps-removeitemioerror-microsoft-powershell-commands-removeitemcommand");
+        // The post-create rollback: a failed release leaves the artifacts unattempted and names its own code.
+        expect(summary({
+            attempted: true,
+            ok: false,
+            stage: "network-release",
+            result: { mode: "exec", provider: "hyper-v", status: 0, outputRedacted: true },
+            artifacts: { ok: false, attempted: false, removed: false },
+            allocation: { ok: false, released: false, error: "hyper-v-network-elevation-cancelled" },
+        })).toBe("rollback=failed/hyper-v-network-elevation-cancelled");
+        expect(summary({
+            attempted: true,
+            ok: false,
+            artifacts: { ok: false, removed: false, error: "hyper-v-artifact-cleanup-failed" },
+            allocation: { ok: true, released: true },
+        })).toBe("rollback=failed/hyper-v-artifact-cleanup-failed");
+        expect(summary({
+            attempted: true,
+            ok: false,
+            reason: "hyper-v-rollback-command-failed",
+            result: { mode: "exec", provider: "hyper-v", status: 1, diagnosticCode: "hyper-v-windows-transport-executor-failed" },
+        })).toBe("rollback=hyper-v-rollback-command-failed/hyper-v-windows-transport-executor-failed");
+        expect(summary({
+            attempted: true,
+            ok: false,
+            reason: "hyper-v-rollback-command-failed",
+            result: { mode: "exec", provider: "hyper-v", status: 1, diagnosticCode: "hyper-v-rollback-command-failed" },
+        })).toBe("rollback=hyper-v-rollback-command-failed");
+        expect(summary({ attempted: false, ok: false, reason: "created-hyper-v-vm-identity-missing" })).toBe("rollback=created-hyper-v-vm-identity-missing");
+        expect(summary({ attempted: true, ok: true, observation: { recoveredVm: true, removedDisk: true } })).toBe("rollback=ok");
+        // Host text never becomes part of the summary.
+        expect(summary({ ok: false, error: "C:\\Users\\private token=secret", detail: "token=secret" })).toBe("rollback=failed");
+        expect(summary({ ok: false, error: "hyper-v-recovery-failed", detail: "Remove-Item C:\\Users\\private" })).toBe("rollback=hyper-v-recovery-failed");
+        // No verdict, no summary.
+        expect(summary({ error: "hyper-v-recovery-failed" })).toBe("");
+        expect(summary(["hyper-v-recovery-failed"])).toBe("");
+        expect(summary(null)).toBe("");
+        expect(brokerRollbackSummary({ ok: false, rollback: { ok: true } })).toBe("rollback=ok");
+    });
+
+    it("records a failed create's rollback and operation in the Linux diagnostic without host text", () => {
+        const outputRoot = mkdtempSync(join(tmpdir(), "ccc-hyper-v-rollback-diagnostic-"));
+        const failure = hyperVCreateFailureWithRollback();
+        failure.body.rollback = {
+            ...failure.body.rollback,
+            path: "C:\\Users\\Luxus\\private\\hyper-v.json",
+            result: { stdout: "token=secret" },
+        };
+        const error = new Error("provider-command-failed");
+        Object.defineProperty(error, "brokerPayload", { value: failure });
+        try {
+            const paths = writeHyperVLinuxFailureDiagnostic({ outputRoot, step: "create VM", created: false, error });
+            const content = readFileSync(paths.latestPath, "utf8");
+            const record = JSON.parse(content);
+            expect(record.failure.detail).toBe("hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-newvm");
+            expect(record.failure.operation).toBe("New-VM");
+            expect(record.failure.rollback).toEqual({
+                ok: false,
+                status: 502,
+                error: "hyper-v-recovery-cleanup-failed",
+                detail: "hyper-v-network-elevation-cancelled",
+                stage: "network-release",
+            });
+            expect(content).not.toContain("token=secret");
+            expect(content).not.toContain("C:\\Users");
+
+            const unsafe = hyperVCreateFailureWithRollback();
+            unsafe.body.operation = "New-VM C:\\Users\\private";
+            unsafe.body.rollback = { ok: false, error: "token=secret", stage: "C:\\Users\\private" };
+            const unsafeError = new Error("provider-command-failed");
+            Object.defineProperty(unsafeError, "brokerPayload", { value: unsafe });
+            const unsafeRecord = JSON.parse(readFileSync(writeHyperVLinuxFailureDiagnostic({ outputRoot, step: "create VM", created: false, error: unsafeError }).latestPath, "utf8"));
+            expect(unsafeRecord.failure).not.toHaveProperty("operation");
+            expect(unsafeRecord.failure.rollback).toEqual({ ok: false });
+
+            const none = hyperVCreateFailureWithRollback();
+            delete none.body.rollback;
+            const noneError = new Error("provider-command-failed");
+            Object.defineProperty(noneError, "brokerPayload", { value: none });
+            const noneRecord = JSON.parse(readFileSync(writeHyperVLinuxFailureDiagnostic({ outputRoot, step: "create VM", created: false, error: noneError }).latestPath, "utf8"));
+            expect(noneRecord.failure).not.toHaveProperty("rollback");
+        } finally {
+            rmSync(outputRoot, { recursive: true, force: true });
+        }
+    });
+
+    it("keeps Hyper-V boot diagnostics ahead of long nested wrapper details", () => {
+        const message = formatBrokerToolFailure({
+            error: "broker-operation-failed",
+            detail: `hyper-v-guest-not-ready: ${"outer".repeat(200)}`,
+            body: {
+                error: "hyper-v-guest-not-ready",
+                detail: `powershell-direct-session-unavailable: ${"inner".repeat(200)}`,
+                result: {
+                    boot: {
+                        provider: "hyper-v-powershell-direct",
+                        error: "powershell-direct-session-unavailable",
+                        diagnosticAvailable: true,
+                        diagnostic: {
+                            state: "Running",
+                            uptimeMs: 600123,
+                            generation: 1,
+                            secureBootEnabled: null,
+                            heartbeatEnabled: true,
+                            heartbeatPrimaryStatus: 2,
+                            heartbeatSecondaryStatus: 0,
+                            integrationServices: [{ name: "Heartbeat", enabled: true, primaryStatus: 2, secondaryStatus: 0 }],
+                            hardDiskCount: 1,
+                            dvdCount: 1,
+                            hardDiskControllers: ["ide"],
+                            bootDeviceTypes: ["hard-disk", "dvd", "network", "unknown", "hard-disk", "dvd", "network", "unknown"],
+                            diagnosticComplete: false,
+                            diagnosticErrors: ["hyper-v-diagnostic-integration-services-unavailable"],
+                        },
+                    },
+                },
+            },
+        }, "fallback");
+        expect(message.slice(0, 600)).toContain('boot={"provider":"hyper-v-powershell-direct"');
+        expect(message.slice(0, 600)).toContain('"heartbeat":true');
+        expect(message.slice(0, 600)).toContain('"diagnosticComplete":false');
+        expect(message.slice(0, 600)).toContain('"diagnosticErrors":["hyper-v-diagnostic-integration-services-unavailable"]');
+        expect(message.slice(0, 600)).toContain('"boot":["hard-disk","dvd","network"]');
+        expect(message).not.toContain("outerouter");
+        expect(message).not.toContain("innerinner");
+        expect(message.length).toBeLessThan(600);
+    });
+
+    it("keeps guest-readiness diagnosticErrors within the 511-char cap for a large boot observation", () => {
+        const services = Array.from({ length: 8 }, (_, index) => ({
+            name: `Integration Service Number ${index} With A Fairly Long Name`,
+            enabled: index % 2 === 0,
+            primaryStatus: 2,
+            secondaryStatus: 0,
+        }));
+        const message = formatBrokerToolFailure({
+            error: "broker-operation-failed",
+            body: {
+                error: "hyper-v-guest-not-ready",
+                result: {
+                    boot: {
+                        provider: "hyper-v-powershell-direct",
+                        error: "powershell-direct-session-unavailable",
+                        diagnostic: {
+                            state: "Running",
+                            uptimeMs: 1202182,
+                            generation: 2,
+                            secureBootEnabled: true,
+                            heartbeatEnabled: false,
+                            heartbeatPrimaryStatus: null,
+                            heartbeatSecondaryStatus: null,
+                            integrationServices: services,
+                            hardDiskCount: 1,
+                            dvdCount: 1,
+                            hardDiskControllers: ["scsi", "ide", "scsi"],
+                            bootDeviceTypes: ["hard-disk", "dvd", "network", "unknown", "hard-disk", "dvd", "network", "unknown"],
+                            diagnosticComplete: false,
+                            diagnosticErrors: ["hyper-v-diagnostic-integration-services-unavailable"],
+                        },
+                    },
+                },
+            },
+        }, "fallback");
+        // With a large topology payload the actionable guest-readiness codes must still survive the cap.
+        expect(message.slice(0, 511)).toContain('"diagnosticComplete":false');
+        expect(message.slice(0, 511)).toContain('"diagnosticErrors":["hyper-v-diagnostic-integration-services-unavailable"]');
+    });
+
+    it("preserves full safe Hyper-V boot topology in a durable failure diagnostic", () => {
+        const outputRoot = mkdtempSync(join(tmpdir(), "ccc-hyper-v-diagnostic-"));
+        const failure = {
+            error: "broker-operation-failed",
+            endpoint: "http://127.0.0.1/private?token=secret",
+            body: {
+                error: "hyper-v-guest-not-ready",
+                result: {
+                    boot: {
+                        provider: "hyper-v-ssh",
+                        error: "ssh-connection-timeout",
+                        readiness: {
+                            managedSshAttempts: 4,
+                            bootstrapProbeAttempts: 4,
+                            bootstrapProbeSuccesses: 4,
+                            bootstrapProbeLastStatus: 0,
+                            bootstrapProbeLastError: "hyper-v-bootstrap-neighbor-inspection-failed",
+                            bootstrapAddressCount: 1,
+                            bootstrapSshAttempts: 4,
+                            bootstrapSshLastStatus: 255,
+                            bootstrapSshLastError: "ssh-connection-timeout",
+                            bootstrapHostKeyObserved: true,
+                            bootstrapHostKeyMatchesExpected: false,
+                            networkFinalizeAttempts: 0,
+                            networkFinalizeSucceeded: false,
+                            guestSignalObserved: true,
+                            elapsedMs: 300000,
+                            privateAddress: "172.16.0.2",
+                        },
+                        diagnosticAvailable: true,
+                        diagnostic: {
+                            state: "Running",
+                            uptimeMs: 1200000,
+                            generation: 2,
+                            secureBootEnabled: false,
+                            heartbeatEnabled: null,
+                            heartbeatPrimaryStatus: null,
+                            heartbeatSecondaryStatus: null,
+                            integrationServices: [{ name: "Heartbeat", enabled: true, primaryStatus: 2, secondaryStatus: 0 }],
+                            hardDiskCount: 1,
+                            dvdCount: 1,
+                            hardDiskControllers: ["scsi"],
+                            bootDeviceTypes: ["hard-disk", "dvd", "network", "unknown"],
+                            bootEntries: [{ bootType: "Drive", deviceType: "HardDiskDrive", controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0, diskPath: "C:\\Users\\Luxus\\private.vhdx" }],
+                            hardDisks: [{ controllerType: "scsi", controllerNumber: 0, controllerLocation: 0, vhdFormat: "VHDX", vhdType: "Dynamic", sizeBytes: 34359738368, fileSizeBytes: 4294967296, minimumSizeBytes: 3221225472, logicalSectorSize: 512, physicalSectorSize: 4096, path: "C:\\Users\\Luxus\\private.vhdx" }],
+                            dvdDrives: [{ controllerType: "scsi", controllerNumber: 0, controllerLocation: 1, mediaAttached: true, path: "C:\\Users\\Luxus\\seed.iso" }],
+                            diagnosticComplete: true,
+                            diagnosticErrors: [],
+                        },
+                    },
+                },
+            },
+        };
+        const error = new Error("unsafe C:\\Users\\Luxus\\private token=secret");
+        Object.defineProperty(error, "brokerPayload", { value: failure });
+        try {
+            const paths = writeHyperVLinuxFailureDiagnostic({ outputRoot, step: "start and wait for SSH", created: true, error });
+            const content = readFileSync(paths.latestPath, "utf8");
+            const record = JSON.parse(content);
+            expect(record.failure.boot.readiness).toEqual({
+                managedSshAttempts: 4,
+                bootstrapProbeAttempts: 4,
+                bootstrapProbeSuccesses: 4,
+                bootstrapProbeLastStatus: 0,
+                bootstrapProbeLastError: "hyper-v-bootstrap-neighbor-inspection-failed",
+                bootstrapAddressCount: 1,
+                bootstrapSshAttempts: 4,
+                bootstrapSshLastStatus: 255,
+                bootstrapSshLastError: "ssh-connection-timeout",
+                bootstrapHostKeyObserved: true,
+                bootstrapHostKeyMatchesExpected: false,
+                networkFinalizeAttempts: 0,
+                networkFinalizeSucceeded: false,
+                guestSignalObserved: true,
+                elapsedMs: 300000,
+            });
+            expect(record.failure.boot.diagnostic.bootEntries).toHaveLength(1);
+            expect(record.failure.boot.diagnostic.hardDisks[0]).toEqual(expect.objectContaining({ vhdFormat: "VHDX", logicalSectorSize: 512, physicalSectorSize: 4096 }));
+            expect(record.failure.boot.diagnostic.dvdDrives[0]).toEqual(expect.objectContaining({ mediaAttached: true }));
+            expect(content).not.toContain("token=secret");
+            expect(content).not.toContain("C:\\Users");
+            expect(content).not.toContain("172.16.0.2");
+            expect(content).not.toContain('"endpoint":');
+            expect(content).not.toContain("diskPath");
+            expect(content).not.toContain("deviceId");
+            expect(readFileSync(paths.timestampedPath, "utf8")).toBe(content);
+            const generic = writeHyperVLinuxFailureDiagnostic({ outputRoot, step: "assert contract", created: false, error: new Error("authentication failed token=secret") });
+            const genericContent = readFileSync(generic.latestPath, "utf8");
+            expect(genericContent).toContain("failure-message-redacted");
+            expect(genericContent).not.toContain("token=secret");
+            const gui = writeHyperVLinuxFailureDiagnostic({ outputRoot, step: "prove Linux GUI screenshot and computer input", created: true, error: new Error("hyper-v-gui-device-scroll-failed") });
+            expect(JSON.parse(readFileSync(gui.latestPath, "utf8")).failure).toEqual({ message: "hyper-v-gui-device-scroll-failed" });
+        } finally {
+            rmSync(outputRoot, { recursive: true, force: true });
+        }
+    });
+
+    it("keeps the Windows E2E receipt contract free of product file-I/O imports", () => {
+        const source = readFileSync(new URL("hyper-v-windows-vm-e2e.ts", import.meta.url), "utf8");
+        expect(source).toContain("#device-lab/device-lab/hyper-v-image-contracts.js");
+        expect(source).not.toMatch(/hyper-v-images\.(?:ts|js)/);
+    });
+
+    it("records checkpoint inventory conflict counts without snapshot names or ids", () => {
+        const evidence = brokerToolFailureEvidence({
+            error: "hyper-v-snapshot-inventory-conflict",
+            body: {
+                error: "hyper-v-snapshot-inventory-conflict",
+                observedOwnerSnapshotCount: 0,
+                untracked: [{ id: "secret-id", providerName: "ccc-secret-owner-checkpoint" }],
+                missing: [{ id: "tracked-secret-id", name: "secret-checkpoint" }],
+            },
+        });
+        expect(evidence.snapshotInventory).toEqual({ untrackedCount: 1, missingCount: 1, observedOwnerSnapshotCount: 0 });
+        expect(JSON.stringify(evidence)).not.toContain("secret");
+    });
+
+    it("reports host memory refusal without unrelated guest diagnostics or duplicated broker payloads", async () => {
+        const calls: string[] = [];
+        let error: unknown;
+        try {
+            hyperVWindowsToolPayload({ content: [{ type: "text", text: JSON.stringify({
+                ok: false, error: "provider-command-failed", detail: "hyper-v-host-memory-capacity-exceeded",
+                result: { device: { id: "private-device" } }, attempts: [{ token: "PRIVATE" }],
+            }) }] });
+        } catch (caught) { error = caught; }
+        expect(error).toBeInstanceOf(Error);
+        const unexpected = (() => { calls.push("guest diagnostic"); throw new Error("unexpected"); }) as any;
+        const reason = await hyperVWindowsFailureReason({
+            profile: "windows-server", step: "start and wait for PowerShell Direct", error,
+            created: true, deviceId: "private-device", incarnationId: "a".repeat(32),
+            captureImpl: unexpected, setupDiagnosticsImpl: unexpected, elevateSetupDiagnosticsImpl: unexpected,
+            publishSetupDiagnosticsImpl: unexpected, allowSetupDiagnosticsElevation: true,
+        });
+        expect(reason).toBe("profile=windows-server; start and wait for PowerShell Direct: hyper-v-host-memory-capacity-exceeded. Free host RAM by closing unused VMs or applications, then retry.");
+        expect(calls).toEqual([]);
+        expect(reason).not.toContain("PRIVATE");
+        expect(reason).not.toContain("private-device");
+    });
+
+    it("captures the Windows guest console before cleanup while preserving the original failure", async () => {
+        const calls: any[] = [];
+        const base = {
+            profile: "windows-server",
+            step: "start and wait for PowerShell Direct",
+            error: new Error("hyper-v-guest-not-ready: diagnosticErrors=integration-services-incomplete"),
+            created: true,
+            deviceId: "windows-vm-real-e2e-123",
+            incarnationId: "0123456789abcdef0123456789abcdef",
+            vmId: "12345678-1234-4123-8123-123456789abc",
+            powershell: "powershell.exe",
+            ownerId: "0123456789abcdef",
+            platform: "win32",
+        };
+        const success = await hyperVWindowsFailureReason({
+            ...base,
+            captureImpl: (input: any) => {
+                calls.push(input);
+                return {
+                    ok: true,
+                    latestRelativePath: "results/device-lab-real/hyper-v-windows-console-latest.png",
+                    latestPath: "ignored",
+                    timestampedPath: "ignored",
+                };
+            },
+            setupDiagnosticsImpl: () => ({
+                ok: true,
+                latestRelativePath: "results/device-lab-real/hyper-v-windows-setup-diagnostics-latest.json",
+                latestPath: "ignored",
+                timestampedPath: "ignored",
+                logs: [],
+            }),
+        });
+        expect(calls).toEqual([expect.objectContaining({
+            ownerId: "0123456789abcdef",
+            deviceId: "windows-vm-real-e2e-123",
+            incarnationId: "0123456789abcdef0123456789abcdef",
+            powershell: "powershell.exe",
+            platform: "win32",
+        })]);
+        expect(success).toBe("profile=windows-server; guestConsole=results/device-lab-real/hyper-v-windows-console-latest.png; guestSetupDiagnostics=results/device-lab-real/hyper-v-windows-setup-diagnostics-latest.json; start and wait for PowerShell Direct: hyper-v-guest-not-ready: diagnosticErrors=integration-services-incomplete");
+
+        const unavailable = await hyperVWindowsFailureReason({
+            ...base,
+            sourceImage: "C:\\images\\windows.vhdx",
+            captureImpl: () => ({ ok: false, code: "hyper-v-console-wmi-access-denied" }),
+            setupDiagnosticsImpl: () => ({ ok: false, code: "hyper-v-setup-diagnostics-mount-failed" }),
+        });
+        expect(unavailable).toContain("profile=windows-server sourceImage=set; guestConsole=unavailable(hyper-v-console-wmi-access-denied);");
+        expect(unavailable).toContain("guestSetupDiagnostics=unavailable(hyper-v-setup-diagnostics-mount-failed);");
+        expect(unavailable).toContain("hyper-v-guest-not-ready: diagnosticErrors=integration-services-incomplete");
+
+        const unexpected = await hyperVWindowsFailureReason({
+            ...base,
+            captureImpl: () => { throw new Error("C:\\Users\\private token=secret"); },
+            setupDiagnosticsImpl: () => { throw new Error("C:\\Users\\private token=secret"); },
+        });
+        expect(unexpected).toContain("guestConsole=unavailable(hyper-v-console-unexpected-failure)");
+        expect(unexpected).toContain("guestSetupDiagnostics=unavailable(hyper-v-setup-diagnostics-unexpected-failure)");
+        expect(unexpected).not.toContain("token=secret");
+        expect(unexpected).toContain("hyper-v-guest-not-ready");
+    });
+
+    it("captures bounded, redacted Windows Setup diagnostics from an exact read-only VHD mount", () => {
+        const outputRoot = mkdtempSync(join(tmpdir(), "ccc-hyper-v-windows-setup-diagnostics-"));
+        const decodedPrograms: string[] = [];
+        let calls = 0;
+        try {
+            const captured = captureHyperVWindowsSetupDiagnostics({
+                ownerId: "0123456789abcdef",
+                deviceId: "windows-vm-real-e2e-123",
+                incarnationId: "0123456789abcdef0123456789abcdef",
+                vmId: "12345678-1234-4123-8123-123456789abc",
+                powershell: "powershell.exe",
+                platform: "win32",
+                outputRoot,
+                now: () => new Date("2026-08-30T00:00:00.000Z"),
+                spawnSyncImpl: (_command, args) => {
+                    decodedPrograms.push(Buffer.from(args.at(-1) || "", "base64").toString("utf16le"));
+                    calls += 1;
+                    if (calls === 1) {
+                        return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx", controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0 }) };
+                    }
+                    return {
+                        status: 0,
+                        stdout: JSON.stringify({
+                            ok: true,
+                            logs: [{
+                                path: "Windows\\Panther\\UnattendGC\\setuperr.log",
+                                lines: [
+                                    "Error processing <Value>SuperSecret!</Value> password=AnotherSecret C:\\Users\\Luxus\\private",
+                                    "Error password=\"my secret phrase\" token=still-secret HRESULT=0x1",
+                                    "Error reading C:\\Users\\Luxus\\private\\unattend.xml",
+                                    "Shell-Setup oobeSystem rejected setting 0x8007000d",
+                                ],
+                            }],
+                        }),
+                    };
+                },
+            });
+            expect(captured).toMatchObject({
+                ok: true,
+                latestRelativePath: "results/device-lab-real/hyper-v-windows-setup-diagnostics-latest.json",
+            });
+            expect(decodedPrograms).toHaveLength(2);
+            const [preflightProgram, diagnosticProgram] = decodedPrograms;
+            expect(preflightProgram).toContain("Get-VM -Id $ExpectedId -ErrorAction Stop");
+            expect(preflightProgram).toContain("$Drives.Count -ne 1");
+            expect(preflightProgram).toContain("[string]::IsNullOrWhiteSpace([string]$Drives[0].Path)");
+            expect(preflightProgram).toContain("controllerType = $ControllerType; controllerNumber = $ControllerNumber; controllerLocation = $ControllerLocation");
+            expect(preflightProgram).not.toContain("Where-Object");
+            expect(preflightProgram).not.toContain("Stop-VM");
+            expect(preflightProgram).not.toContain("Remove-VMHardDiskDrive");
+            expect(diagnosticProgram).toContain("Get-VM -Id $ExpectedId -ErrorAction Stop");
+            expect(diagnosticProgram).toContain("$Vm.Name -cne $VmName");
+            expect(diagnosticProgram).toContain("[string]$Vm.Notes -cne $ExpectedMarker");
+            expect(diagnosticProgram).toContain("ccc-device-lab:0123456789abcdef:windows-vm-real-e2e-123:0123456789abcdef0123456789abcdef");
+            expect(diagnosticProgram).toContain("$ExpectedDisk = 'C:\\state\\root.vhdx'");
+            expect(diagnosticProgram).toContain("$ExpectedControllerType = 'SCSI'");
+            expect(diagnosticProgram).toContain("$Drives.Count -ne 1");
+            expect(diagnosticProgram).toContain("Stop-VM -VM $Vm -TurnOff -Force");
+            expect(diagnosticProgram).toContain("Remove-VMHardDiskDrive -VMHardDiskDrive $Drives[0] -ErrorAction Stop");
+            expect(diagnosticProgram).toContain("$RemainingDrives.Count -ne 0");
+            expect(diagnosticProgram).toContain("Mount-VHD -Path $DiskPath -ReadOnly -PassThru");
+            expect(diagnosticProgram).toContain("for ($Attempt = 1; $Attempt -le 10; $Attempt++)");
+            // Backoff to a 15 s ceiling: a flat 1 s gave the detached VHD handle only 10 s to be
+            // released, which a real host exhausted on every attempt.
+            expect(diagnosticProgram).toContain("$MountSleep = [Math]::Min(15000, 1000 * [Math]::Pow(2, $Attempt - 1))");
+            // The sleep is inside the comparison, so the budget is 60 s, not 60 s plus one ceiling.
+            expect(diagnosticProgram).toContain("if ($Attempt -lt 10 -and [DateTime]::UtcNow.AddMilliseconds($MountSleep) -lt $MountDeadline) { Start-Sleep -Milliseconds $MountSleep }");
+            // The retry budget must stay a known share of the process budget, or overrunning kills
+            // the process and the mount detail is never read at all.
+            expect(diagnosticProgram).toContain("$MountDeadline = [DateTime]::UtcNow.AddMilliseconds(60000)");
+            expect(diagnosticProgram).toContain("elseif ($Attempt -lt 10) { break }");
+            expect(diagnosticProgram).toContain("$MountMessage = [string]$_.Exception.Message");
+            // Redaction happens on the reading side only. A guest-side user-profile rule split
+            // `C:\Users\<name with space>\...` at the first space, so the reader's whole-path rule
+            // saw a fragment with no drive letter and the name survived beside a marker that read
+            // as complete. This also keeps the fixtures below honest: they feed the reader exactly
+            // what the guest emits, so a passing assertion describes the real pipeline.
+            // Pins the class, not one spelling: `-replace`, `[Regex]::` (PowerShell is
+            // case-insensitive) and a spacing variant all slipped past a literal string check.
+            expect(diagnosticProgram.match(/\$MountMessage\s*=[^\n]*/g)).toEqual([
+                "$MountMessage = $null",
+                "$MountMessage = [string]$_.Exception.Message",
+            ]);
+            expect(diagnosticProgram).toContain("hresult = $MountHResult; message = $MountMessage; privilege = $MountPrivilege");
+            expect(diagnosticProgram).toContain("if (-not $Mounted) { throw 'hyper-v-setup-diagnostics-mount-failed' }");
+            // The privilege half of this diagnostic lives entirely in the emitted program, and the
+            // reader tests below cannot see it — they stub the spawn and hand mountFailureCode a
+            // JSON object directly. Deleting both producer lines left those 45 green, so this is
+            // the only surface that pins them. Every other mount line above is asserted here for
+            // the same reason.
+            expect(diagnosticProgram).toContain("if ($MountMessage -match '0x80070522') { $MountPrivilege = 'code'; break }");
+            expect(diagnosticProgram).toContain("if (-not $MountElevated) { $MountPrivilege = 'unelevated'; break }");
+            // Probed once before the loop and wrapped: these are .NET calls, which -ErrorAction
+            // does not cover, so an unguarded throw under $ErrorActionPreference='Stop' escapes to
+            // the outer catch and takes the whole mount bracket with it.
+            expect(diagnosticProgram).toContain("try { $MountElevated = (New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { $MountElevated = $true }");
+            expect(diagnosticProgram.match(/WindowsIdentity\]::GetCurrent/g), "probed once, not per retry").toHaveLength(1);
+            // indexOf returns -1 when absent, and -1 is less than everything, so an ordering
+            // assertion alone PASSES on a deleted probe. Each operand is asserted found first.
+            const probeIndex = diagnosticProgram.indexOf("$MountElevated = (New-Object");
+            // Anchored on the whole line. `"\ntry {"` matches the probe itself, which also begins
+            // with `try {` — my first attempt at this assertion failed for exactly that reason, and
+            // a looser anchor would have passed while comparing the probe against itself.
+            const outerTryIndex = diagnosticProgram.indexOf("\ntry {\n");
+            expect(probeIndex).toBeGreaterThanOrEqual(0);
+            expect(outerTryIndex).toBeGreaterThanOrEqual(0);
+            // Above the OUTER try, not merely above the retry loop. That position is what makes the
+            // guard load-bearing: unguarded here a throw kills the script and no JSON reaches the
+            // reader at all, where inside the try it would only cost the mount bracket. Moving the
+            // probe inside the try is silently harmless today and silently changes the blast radius
+            // of ever dropping the guard, so the position is the thing to pin.
+            expect(probeIndex).toBeLessThan(outerTryIndex);
+            // Declared with its four siblings. Unassigned it resolves to $null and [bool]$null is
+            // $false, so it works — until someone adds Set-StrictMode, at which point the catch
+            // throws on an undefined variable and the whole a=/c=/h=/m= bracket collapses to a bare
+            // code. It is the one variable that can lose the thing this change delivers.
+            expect(diagnosticProgram).toContain("$MountPrivilege = $null");
+            // Ordering, not just presence: the privilege check must precede the backoff sleep, or
+            // an unelevated host pays the full retry budget before concluding what it already knew.
+            // That is the wasted-wall-clock half of the original defect (a=7 with exponential
+            // backoff), and a reorder would restore it while every presence assertion still passed.
+            const privilegeBreakIndex = diagnosticProgram.indexOf("$MountPrivilege = 'code'; break");
+            const backoffIndex = diagnosticProgram.indexOf("$MountSleep = [Math]::Min");
+            expect(privilegeBreakIndex).toBeGreaterThanOrEqual(0);
+            expect(backoffIndex).toBeGreaterThanOrEqual(0);
+            expect(privilegeBreakIndex).toBeLessThan(backoffIndex);
+            // And the two derivations are ordered relative to EACH OTHER, which nothing pinned:
+            // swapping the adjacent lines left the whole suite green while turning every `p=code`
+            // on an unelevated host into `p=unelevated`, erasing the exact distinction the field
+            // was added to carry. Windows naming the code is the stronger signal and must be
+            // consulted first; the probe is the fallback, not the other way round.
+            const unelevatedBreakIndex = diagnosticProgram.indexOf("$MountPrivilege = 'unelevated'; break");
+            expect(unelevatedBreakIndex).toBeGreaterThanOrEqual(0);
+            expect(privilegeBreakIndex, "the code check is the stronger signal and goes first").toBeLessThan(unelevatedBreakIndex);
+            // The third ordering in this catch block, and the only one that decides whether p=code
+            // can fire at all. The two above cost wall clock and a mislabelled derivation; this one
+            // costs AC-003 outright. Moving the assignment below the two privilege ifs left the
+            // whole suite green while making $MountMessage $null on attempt 1 — so the match never
+            // fires — and the PREVIOUS attempt's message on 2..10. Every p=code on a real host
+            // becomes p=unelevated, or on an elevated host the full ten-attempt retry loop: the
+            // original defect restored, silently. The regex above pins that the two assignments
+            // exist and are the only two; it says nothing about where they sit relative to the
+            // match that consumes them.
+            const messageIndex = diagnosticProgram.indexOf("$MountMessage = [string]$_.Exception.Message");
+            expect(messageIndex).toBeGreaterThanOrEqual(0);
+            expect(messageIndex, "the match must read the message captured on THIS attempt").toBeLessThan(privilegeBreakIndex);
+            // Generalized, because pinning that ordering BY NAME is exactly what let the next three
+            // through. $MountCategory, $MountHResult and $MountAttempts carry the identical hazard
+            // and each costs MORE than the one above: moved below the privilege ifs they are $null
+            // on the attempt-1 break, `mountFailureCode` returns null, and the reader falls to
+            // `failure("")` — not in SAFE_CODES — so the operator gets
+            // `hyper-v-setup-diagnostics-output-invalid`. No bracket, no `p=`, and a code that
+            // sends them after a malformed-output bug instead of a mount failure. ($MountAttempts
+            // is worse still: the outer `-gt 0` guard then drops the mount object entirely.)
+            //
+            // So every capture assignment is asserted rather than the ones someone remembered, and
+            // a field added later is covered without anyone coming back for it. Only the two that
+            // legitimately sit at or after the break are excluded, by name and for a stated reason:
+            // $MountPrivilege IS the break, and $MountSleep is the backoff the break skips.
+            const captureAssignments = [...diagnosticProgram.matchAll(/\$Mount[A-Za-z]* = [^\n]*/g)]
+                .filter((match) => !match[0].startsWith("$MountPrivilege =") && !match[0].startsWith("$MountSleep ="));
+            expect(captureAssignments.length, "the regex must be finding the assignments, not nothing").toBeGreaterThanOrEqual(12);
+            for (const match of captureAssignments) {
+                expect(match.index, `${match[0].slice(0, 40)} must be captured before the privilege break reads it`).toBeLessThan(privilegeBreakIndex);
+            }
+            expect(diagnosticProgram.match(/Mount-VHD -Path/g)).toHaveLength(1);
+            const stopCommandIndex = diagnosticProgram.indexOf("Stop-VM -VM $Vm -TurnOff -Force");
+            const stopVerificationIndex = diagnosticProgram.indexOf("$Vm.State -ne 'Off'", stopCommandIndex);
+            const detachTimeQueryIndex = diagnosticProgram.indexOf("$Drives = @(Get-VMHardDiskDrive", stopVerificationIndex);
+            const detachIndex = diagnosticProgram.indexOf("Remove-VMHardDiskDrive");
+            const detachPathIndex = diagnosticProgram.indexOf("$DetachPath = [IO.Path]::GetFullPath", detachTimeQueryIndex);
+            const detachPathComparisonIndex = diagnosticProgram.indexOf("[string]::Equals($DetachPath", detachTimeQueryIndex);
+            expect(stopVerificationIndex).toBeGreaterThan(stopCommandIndex);
+            expect(detachTimeQueryIndex).toBeGreaterThan(stopVerificationIndex);
+            expect(detachPathIndex).toBeGreaterThan(detachTimeQueryIndex);
+            expect(detachPathComparisonIndex).toBeGreaterThan(detachPathIndex);
+            expect(detachPathComparisonIndex).toBeLessThan(detachIndex);
+            expect(detachTimeQueryIndex).toBeLessThan(detachIndex);
+            expect(diagnosticProgram.indexOf("Remove-VMHardDiskDrive")).toBeLessThan(diagnosticProgram.indexOf("Mount-VHD"));
+            expect(diagnosticProgram.indexOf("$Mounted = $true")).toBeLessThan(diagnosticProgram.indexOf("Get-Disk -ErrorAction Stop"));
+            expect(diagnosticProgram).toContain("Dismount-VHD -Path $DiskPath -ErrorAction Stop");
+            expect(diagnosticProgram.indexOf("Dismount-VHD")).toBeLessThan(diagnosticProgram.indexOf("$Result | ConvertTo-Json"));
+            expect(diagnosticProgram).toContain("Add-VMHardDiskDrive -VM $RestoreVm -ControllerType $ExpectedControllerType");
+            expect(diagnosticProgram).toContain("$RestoreDrives.Count -ne 1");
+            expect(diagnosticProgram).toContain("$RestoreVm.State -ne 'Off'");
+            expect(diagnosticProgram.indexOf("Dismount-VHD")).toBeLessThan(diagnosticProgram.indexOf("Add-VMHardDiskDrive"));
+            expect(diagnosticProgram.indexOf("Add-VMHardDiskDrive")).toBeLessThan(diagnosticProgram.indexOf("$Result | ConvertTo-Json"));
+            expect(diagnosticProgram).not.toMatch(/Get-VMHardDiskDrive[^\n]*Where-Object/);
+            // Pinned to the injected root, not merely readable. Dropping `outputRoot` from what
+            // capture hands to publish left every assertion below green — because this test reads
+            // back whatever path the result names, so it followed the mutant to the DEFAULT root and
+            // the suite silently wrote into the repository's real results/ directory. "The content
+            // is right" says nothing about where the content went, which is the whole subject of
+            // this task's blocking defect.
+            expect((captured as any).latestPath.startsWith(outputRoot), "the artifact must land in the root it was given").toBe(true);
+            expect((captured as any).timestampedPath.startsWith(outputRoot)).toBe(true);
+            const content = readFileSync((captured as any).latestPath, "utf8");
+            expect(content).toContain("Shell-Setup oobeSystem rejected setting 0x8007000d");
+            expect(content).toContain("<Value>[redacted]</Value>");
+            expect(content).toContain("password=[redacted]");
+            expect(content).toContain("[user-profile]");
+            expect(content).not.toContain("SuperSecret");
+            expect(content).not.toContain("AnotherSecret");
+            expect(content).not.toContain("my secret phrase");
+            expect(content).not.toContain("still-secret");
+            expect(content).not.toContain("Luxus");
+        } finally {
+            rmSync(outputRoot, { recursive: true, force: true });
+        }
+    });
+
+    it("contains Windows Setup diagnostic failures and rejects unrestricted log paths", () => {
+        const base = {
+            ownerId: "0123456789abcdef",
+            deviceId: "windows-vm-real-e2e-123",
+            incarnationId: "0123456789abcdef0123456789abcdef",
+            vmId: "12345678-1234-4123-8123-123456789abc",
+            powershell: "powershell.exe",
+            platform: "win32",
+        };
+        const run = (mainResult: object) => {
+            let calls = 0;
+            const result = captureHyperVWindowsSetupDiagnostics({
+                ...base,
+                spawnSyncImpl: () => {
+                    calls += 1;
+                    if (calls === 1) return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx", controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0 }) };
+                    if (calls === 2) return { status: 0, stdout: JSON.stringify(mainResult) };
+                    return { status: 0, stdout: JSON.stringify({ ok: true, detached: true }) };
+                },
+            });
+            expect(calls).toBe(3);
+            return result;
+        };
+        expect(run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: { attempts: 10, category: "ResourceBusy", hresult: 2147024891 },
+        })).toEqual({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed[a=10,c=ResourceBusy,h=2147024891]",
+        });
+        // A privilege failure is the one mount failure with a fixed remedy, so it gets its own code
+        // and says so. Shape taken from the real host that prompted it: ERROR_PRIVILEGE_NOT_HELD,
+        // with the generic HResult the comment below describes and the true cause only inside the
+        // message. attempts=1 because the PowerShell loop now stops on this instead of retrying an
+        // error that waiting cannot fix — the host burned 7 attempts with backoff to re-learn it.
+        expect(run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: {
+                attempts: 1,
+                category: "NotSpecified",
+                hresult: 2146233088,
+                message: "The system failed to mount (0x80070522).",
+                privilege: "code",
+            },
+        })).toEqual({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-privilege-required[elevate,p=code,a=1,c=NotSpecified,h=2146233088,m=The system failed to mount (0x80070522).]",
+        });
+        // The combination the program actually emits on an unelevated host, which nothing covered:
+        // a transient category AND privilege true, because the elevation probe fires for any mount
+        // failure when we are not elevated. It reads as a contradiction and is not one — unelevated,
+        // Mount-VHD cannot succeed whatever else is wrong, so `elevate` is the actionable half and
+        // the busy category is reported beside it rather than suppressed. Pinned so the pairing is a
+        // decision on the record instead of a surprise in the field.
+        expect(run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: {
+                attempts: 1,
+                category: "ResourceBusy",
+                hresult: 2147024891,
+                message: "The process cannot access the file because it is being used by another process.",
+                privilege: "unelevated",
+            },
+        })).toEqual({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-privilege-required[elevate,p=unelevated,a=1,c=ResourceBusy,h=2147024891,m=The process cannot access the file because it is being used by another process.]",
+        });
+        // Redaction on the privilege branch, measured rather than argued. It is structurally the
+        // same path — `message` and `detail` are computed before the privilege test and both
+        // returns interpolate the same string — but "structurally the same" is the claim this
+        // series has had to retract more than once, and no case paired privilege:true with a
+        // secret-bearing message. Same host path and password as the redaction cases below, so a
+        // divergence would show as a different bracket rather than as a subtle one.
+        expect(run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: {
+                attempts: 1,
+                category: "NotSpecified",
+                hresult: 2146233088,
+                message: "denied for C:\\Users\\Luxus\\disk.vhdx\npassword: hunter2",
+                privilege: "code",
+            },
+        })).toEqual({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-privilege-required[elevate,p=code,a=1,c=NotSpecified,h=2146233088,m=denied for (host-path) password=(redacted)]",
+        });
+        // Strict membership, which the reader's comment claims ("under-report, never over-report")
+        // and nothing tested: relaxing `privilege === "code" || privilege === "unelevated"` to a
+        // null check left the whole suite green. A value from outside the pair is a producer this
+        // reader does not understand, and guessing `elevate` for it would tell an operator to fix
+        // something no signal said was wrong.
+        // `["code"]` earns its place: it is the only one of these that separates `===` from `==`
+        // (`["code"] == "code"` is true through Array#toString), and `mount` arrives through
+        // JSON.parse, so an array is exactly as producible as a string. Without it a loosened
+        // comparison keeps the suite green while a producer sending an array gets the privilege
+        // code — the one over-report the comment promises cannot happen.
+        for (const bogus of ["yes", "true", "1", "", "Code", 1, true, {}, ["code"]] as unknown[]) {
+            expect(run({
+                ok: false,
+                code: "hyper-v-setup-diagnostics-mount-failed",
+                mount: { attempts: 1, category: "NotSpecified", hresult: 2146233088, privilege: bogus },
+            }), `privilege=${JSON.stringify(bogus)} must not be read as a privilege failure`).toEqual({
+                ok: false,
+                code: "hyper-v-setup-diagnostics-mount-failed[a=1,c=NotSpecified,h=2146233088]",
+            });
+        }
+        // And the negative that still matters: an ELEVATED host hitting a busy mount is genuinely
+        // transient, keeps its retries, and must not be relabelled. Same bracket, same code as
+        // before this distinction existed.
+        expect(run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: { attempts: 10, category: "ResourceBusy", hresult: 2147024891 },
+        })).toEqual({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed[a=10,c=ResourceBusy,h=2147024891]",
+        });
+        // The message is the only field that ever names the cause: a real host reported
+        // NotSpecified/0x80131500, which says nothing. It is appended, and it is redacted.
+        expect(run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: { attempts: 10, category: "ResourceBusy", hresult: 2147024891, message: "The process cannot access the file" },
+        })).toEqual({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed[a=10,c=ResourceBusy,h=2147024891,m=The process cannot access the file]",
+        });
+        // Both orderings: the secret rule is anchored at end-of-input with no multiline flag, so
+        // redacting before collapsing newlines would only ever catch a secret on the last line.
+        // `a=8` rather than 10 because the retry deadline trips first when mounts fail fast, which
+        // is what a real host reports.
+        expect(run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: { attempts: 8, category: "ResourceBusy", hresult: 2147024891, message: "denied for C:\\Users\\Luxus\\disk.vhdx\npassword: hunter2" },
+        })).toEqual({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed[a=8,c=ResourceBusy,h=2147024891,m=denied for (host-path) password=(redacted)]",
+        });
+        expect(run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: { attempts: 8, category: "ResourceBusy", hresult: 2147024891, message: "password: hunter2\ndenied for C:\\Users\\Luxus\\disk.vhdx" },
+        })).toEqual({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed[a=8,c=ResourceBusy,h=2147024891,m=password=(redacted)]",
+        });
+        // The likeliest real message names the disk by absolute path, which is not under Users and
+        // so was invisible to the user-profile rule alone.
+        expect(run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: { attempts: 8, category: "ResourceBusy", hresult: 2147024891, message: "The process cannot access the file 'D:\\device-lab\\owner-9f2\\disk.vhdx' because it is being used." },
+        })).toEqual({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed[a=8,c=ResourceBusy,h=2147024891,m=The process cannot access the file '(host-path)' because it is being used.]",
+        });
+        // A path with a space, and a UNC path. Stopping at the first space left a fragment — here a
+        // surname — beside a marker that read as though redaction had completed.
+        expect(run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: { attempts: 8, category: "ResourceBusy", hresult: 2147024891, message: "cannot open C:\\Users\\Kyeong Jae\\device-lab\\disk.vhdx now" },
+        })).toEqual({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed[a=8,c=ResourceBusy,h=2147024891,m=cannot open (host-path) now]",
+        });
+        expect(run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: { attempts: 8, category: "ResourceBusy", hresult: 2147024891, message: "cannot open \\\\fileserver\\share\\device-lab\\disk.vhdx; retry later" },
+        })).toEqual({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed[a=8,c=ResourceBusy,h=2147024891,m=cannot open (host-path), retry later]",
+        });
+        // The default Hyper-V VHD location has two space-bearing components. Looking ahead only one
+        // segment stopped at "Virtual" and left "Hard Disks\..." exposed.
+        expect(run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: { attempts: 8, category: "ResourceBusy", hresult: 2147024891, message: "cannot open C:\\Program Files\\Virtual Hard Disks\\disk.vhdx now" },
+        })).toEqual({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed[a=8,c=ResourceBusy,h=2147024891,m=cannot open (host-path) now]",
+        });
+        // Runs longer than any plausible segment cap. A count-bounded look-ahead makes the count a
+        // leak boundary and publishes the tail — here a personal name — under a marker asserting
+        // redaction completed.
+        expect(run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: { attempts: 8, category: "ResourceBusy", hresult: 2147024891, message: "C:\\Users\\Jean Luc Marie de Vries\\vm.vhdx is busy" },
+        })).toEqual({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed[a=8,c=ResourceBusy,h=2147024891,m=(host-path) is busy]",
+        });
+        expect(run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: { attempts: 8, category: "ResourceBusy", hresult: 2147024891, message: "C:\\Program Files\\Common Shared Virtual Hard Disks\\disk.vhdx failed" },
+        })).toEqual({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed[a=8,c=ResourceBusy,h=2147024891,m=(host-path) failed]",
+        });
+        // The accepted cost of leaving the look-ahead unbounded: prose between two paths is pulled
+        // into the match. Over-redaction loses diagnosis and leaks nothing, which is the way this
+        // trade is meant to fall.
+        expect(run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: { attempts: 8, category: "ResourceBusy", hresult: 2147024891, message: "copy C:\\a\\b.vhdx to D:\\c\\d.vhdx now" },
+        })).toEqual({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed[a=8,c=ResourceBusy,h=2147024891,m=copy (host-path) now]",
+        });
+        // Longer than the cap, with the path straddling where a guest-side Substring used to cut.
+        // Truncating before redacting left the tail of a name behind; the reader truncates after.
+        const straddling = `${"X".repeat(180)} C:\\Users\\Kyeong Jae\\device-lab\\disk.vhdx failed`;
+        const straddlingResult = run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: { attempts: 8, category: "ResourceBusy", hresult: 2147024891, message: straddling },
+        }) as { ok: false; code: string };
+        expect(straddlingResult.code).toContain("(host-path)");
+        expect(straddlingResult.code).not.toContain("Jae");
+        expect(straddlingResult.code).not.toContain("Kyeong");
+        expect(run({ ok: false, code: "hyper-v-setup-diagnostics-mount-failed" }))
+            .toEqual({ ok: false, code: "hyper-v-setup-diagnostics-output-invalid" });
+        expect(run({
+            ok: false,
+            code: "hyper-v-setup-diagnostics-mount-failed",
+            mount: { attempts: 11, category: "Private C:\\Users\\Luxus", hresult: -1 },
+        })).toEqual({ ok: false, code: "hyper-v-setup-diagnostics-output-invalid" });
+        expect(run({ ok: true, logs: [{ path: "Windows\\System32\\config\\SAM", lines: ["secret"] }] }))
+            .toEqual({ ok: false, code: "hyper-v-setup-diagnostics-output-invalid" });
+    });
+
+    it("does not mutate the VM when the Windows Setup diagnostic preflight cannot prove one exact VHD", () => {
+        const programs: string[] = [];
+        let calls = 0;
+        const result = captureHyperVWindowsSetupDiagnostics({
+            ownerId: "0123456789abcdef",
+            deviceId: "windows-vm-real-e2e-123",
+            incarnationId: "0123456789abcdef0123456789abcdef",
+            vmId: "12345678-1234-4123-8123-123456789abc",
+            powershell: "powershell.exe",
+            platform: "win32",
+            spawnSyncImpl: (_command, args) => {
+                calls += 1;
+                programs.push(Buffer.from(args.at(-1) || "", "base64").toString("utf16le"));
+                return { status: 0, stdout: JSON.stringify({ ok: false, code: "hyper-v-setup-diagnostics-disk-not-exact" }) };
+            },
+        });
+        expect(result).toEqual({ ok: false, code: "hyper-v-setup-diagnostics-disk-not-exact" });
+        expect(calls).toBe(1);
+        expect(programs[0]).not.toContain("Stop-VM");
+        expect(programs[0]).not.toContain("Remove-VMHardDiskDrive");
+        expect(programs[0]).not.toContain("Mount-VHD");
+    });
+
+    it("runs an exact-identity bounded dismount recovery after a diagnostic process timeout", () => {
+        const programs: string[] = [];
+        let calls = 0;
+        const result = captureHyperVWindowsSetupDiagnostics({
+            ownerId: "0123456789abcdef",
+            deviceId: "windows-vm-real-e2e-123",
+            incarnationId: "0123456789abcdef0123456789abcdef",
+            vmId: "12345678-1234-4123-8123-123456789abc",
+            powershell: "powershell.exe",
+            platform: "win32",
+            spawnSyncImpl: (_command, args, options) => {
+                programs.push(Buffer.from(args.at(-1) || "", "base64").toString("utf16le"));
+                calls += 1;
+                if (calls === 1) {
+                    expect(options.timeout).toBe(30000);
+                    return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx", controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0 }) };
+                }
+                if (calls === 2) {
+                    // Raised from 120 s: the mount retry budget alone is 60 s, and the rest of the
+                    // program has to fit alongside it — a Stop-VM on the hung VM being diagnosed
+                    // most of all. Overrunning kills the process and discards the mount detail.
+                    expect(options.timeout).toBe(180000);
+                    return { status: null, error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }) };
+                }
+                expect(options.timeout).toBe(30000);
+                return { status: 0, stdout: JSON.stringify({ ok: true, detached: true }) };
+            },
+        });
+        expect(result).toEqual({ ok: false, code: "hyper-v-setup-diagnostics-process-timeout" });
+        expect(programs).toHaveLength(3);
+        expect(programs[2]).toContain("Get-VM -Id $ExpectedId -ErrorAction Stop");
+        expect(programs[2]).toContain("[string]$Vm.Notes -cne $ExpectedMarker");
+        expect(programs[2]).toContain("$ExpectedDisk = 'C:\\state\\root.vhdx'");
+        expect(programs[2]).toContain("if ($Drives.Count -eq 1)");
+        expect(programs[2]).toContain("exit 0");
+        expect(programs[2]).toContain("Get-DiskImage -ImagePath $ExpectedDisk -ErrorAction Stop");
+        expect(programs[2]).toContain("$DiskImages.Count -ne 1");
+        expect(programs[2]).toContain("Dismount-VHD -Path $ExpectedDisk -ErrorAction Stop");
+        expect(programs[2]).toContain("$VerifiedImages.Count -ne 1 -or [bool]$VerifiedImages[0].Attached");
+        expect(programs[2]).not.toContain("Get-DiskImage -ImagePath $ExpectedDisk -ErrorAction SilentlyContinue");
+        expect(programs[2]).not.toContain("Stop-VM");
+        expect(programs[2]).toContain("Add-VMHardDiskDrive -VM $Vm -ControllerType $ExpectedControllerType");
+        expect(programs[2]).toContain("$RestoredDrives.Count -ne 1");
+        expect(programs[2]).not.toMatch(/Get-VMHardDiskDrive[^\n]*Where-Object/);
+    });
+
+    it("fails closed when timeout recovery cannot confirm the owned VHD is dismounted", () => {
+        let calls = 0;
+        const result = captureHyperVWindowsSetupDiagnostics({
+            ownerId: "0123456789abcdef",
+            deviceId: "windows-vm-real-e2e-123",
+            incarnationId: "0123456789abcdef0123456789abcdef",
+            vmId: "12345678-1234-4123-8123-123456789abc",
+            powershell: "powershell.exe",
+            platform: "win32",
+            spawnSyncImpl: () => {
+                calls += 1;
+                if (calls === 1) return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx", controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0 }) };
+                return calls === 2
+                    ? { status: null, error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }) }
+                    : { status: 1, stderr: "private failure detail" };
+            },
+        });
+        expect(result).toEqual({ ok: false, code: "hyper-v-setup-diagnostics-cleanup-failed" });
+    });
+
+    it("reconciles an in-process dismount failure before returning its bounded code", () => {
+        let calls = 0;
+        const result = captureHyperVWindowsSetupDiagnostics({
+            ownerId: "0123456789abcdef",
+            deviceId: "windows-vm-real-e2e-123",
+            incarnationId: "0123456789abcdef0123456789abcdef",
+            vmId: "12345678-1234-4123-8123-123456789abc",
+            powershell: "powershell.exe",
+            platform: "win32",
+            spawnSyncImpl: () => {
+                calls += 1;
+                if (calls === 1) return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx", controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0 }) };
+                return calls === 2
+                    ? { status: 0, stdout: JSON.stringify({ ok: false, code: "hyper-v-setup-diagnostics-dismount-failed" }) }
+                    : { status: 0, stdout: JSON.stringify({ ok: true, detached: true }) };
+            },
+        });
+        expect(calls).toBe(3);
+        expect(result).toEqual({ ok: false, code: "hyper-v-setup-diagnostics-dismount-failed" });
+    });
+
+    it("fails closed when in-process dismount recovery cannot prove detachment", () => {
+        let calls = 0;
+        const result = captureHyperVWindowsSetupDiagnostics({
+            ownerId: "0123456789abcdef",
+            deviceId: "windows-vm-real-e2e-123",
+            incarnationId: "0123456789abcdef0123456789abcdef",
+            vmId: "12345678-1234-4123-8123-123456789abc",
+            powershell: "powershell.exe",
+            platform: "win32",
+            spawnSyncImpl: () => {
+                calls += 1;
+                if (calls === 1) return { status: 0, stdout: JSON.stringify({ ok: true, diskPath: "C:\\state\\root.vhdx", controllerType: "SCSI", controllerNumber: 0, controllerLocation: 0 }) };
+                return calls === 2
+                    ? { status: 0, stdout: JSON.stringify({ ok: false, code: "hyper-v-setup-diagnostics-dismount-failed" }) }
+                    : { status: 0, stdout: JSON.stringify({ ok: false, code: "hyper-v-setup-diagnostics-cleanup-failed" }) };
+            },
+        });
+        expect(calls).toBe(3);
+        expect(result).toEqual({ ok: false, code: "hyper-v-setup-diagnostics-cleanup-failed" });
+    });
+
+    it("schedules bounded Windows boot timeline captures and clears every timer", () => {
+        const scheduled: Array<{ callback: () => void; delayMs: number; handle: object }> = [];
+        const cleared: object[] = [];
+        const captures: any[] = [];
+        const captureInput = {
+            ownerId: "0123456789abcdef",
+            deviceId: "windows-vm-real-e2e-123",
+            incarnationId: "0123456789abcdef0123456789abcdef",
+            powershell: "powershell.exe",
+            platform: "win32",
+        };
+        const cancel = scheduleHyperVWindowsConsoleTimeline({
+            captureInput,
+            captureImpl: (input: any) => {
+                captures.push(input);
+                if (captures.length === 1) throw new Error("contained timeline capture failure");
+                return { ok: false, code: "hyper-v-console-wmi-unavailable" };
+            },
+            setTimeoutImpl: (callback, delayMs) => {
+                const handle = { delayMs };
+                scheduled.push({ callback, delayMs, handle });
+                return handle;
+            },
+            clearTimeoutImpl: (handle) => { cleared.push(handle as object); },
+        });
+
+        expect(HYPER_V_WINDOWS_CONSOLE_TIMELINE_DELAYS_MS).toEqual([120000, 300000, 600000, 900000]);
+        expect(scheduled.map((entry) => entry.delayMs)).toEqual(HYPER_V_WINDOWS_CONSOLE_TIMELINE_DELAYS_MS);
+        expect(() => scheduled.forEach((entry) => entry.callback())).not.toThrow();
+        expect(captures).toEqual(Array.from({ length: 4 }, () => captureInput));
+        cancel();
+        cancel();
+        expect(cleared).toEqual(scheduled.map((entry) => entry.handle));
+    });
+
+    it("skips console capture before Windows VM creation and keeps catch-before-finally ordering", async () => {
+        let invoked = false;
+        const reason = await hyperVWindowsFailureReason({
+            profile: "windows-server",
+            step: "create VM",
+            error: new Error("hyper-v-create-failed"),
+            created: false,
+            deviceId: "windows-vm-real-e2e-123",
+            captureImpl: () => {
+                invoked = true;
+                return { ok: false, code: "hyper-v-console-process-failed" };
+            },
+            setupDiagnosticsImpl: () => {
+                invoked = true;
+                return { ok: false, code: "hyper-v-setup-diagnostics-process-failed" };
+            },
+        });
+        expect(invoked).toBe(false);
+        expect(reason).toBe("profile=windows-server; create VM: hyper-v-create-failed");
+
+        const source = readFileSync(new URL("hyper-v-windows-vm-e2e.ts", import.meta.url), "utf8");
+        const functionIndex = source.indexOf("export async function runHyperVWindowsVmE2E");
+        const functionSource = source.slice(functionIndex);
+        expect(functionSource).toContain("scheduleHyperVWindowsConsoleTimeline");
+        expect(functionSource).toContain("stopConsoleTimeline");
+        const catchIndex = functionSource.indexOf("} catch (error: any) {");
+        const captureIndex = functionSource.indexOf("reason: await hyperVWindowsFailureReason", catchIndex);
+        const finallyIndex = functionSource.indexOf("} finally {", captureIndex);
+        const stopIndex = functionSource.indexOf('callTool("stop"', finallyIndex);
+        expect(functionIndex).toBeGreaterThan(-1);
+        expect(catchIndex).toBeGreaterThan(-1);
+        expect(captureIndex).toBeGreaterThan(catchIndex);
+        expect(finallyIndex).toBeGreaterThan(captureIndex);
+        expect(stopIndex).toBeGreaterThan(finallyIndex);
+    });
+
+    it("keeps a failed create's rollback in the Windows FAIL reason even though nothing was created", async () => {
+        const brokerPayload = hyperVCreateFailureWithRollback();
+        let failure: any;
+        try {
+            hyperVWindowsToolPayload({ content: [{ type: "text", text: JSON.stringify(brokerPayload) }] });
+        } catch (error) {
+            failure = error;
+        }
+        expect(failure).toBeInstanceOf(Error);
+        expect(failure.brokerPayload).toEqual(brokerPayload);
+        const createReason = await hyperVWindowsFailureReason({
+            profile: "windows-server",
+            step: "create VM",
+            error: failure,
+            created: false,
+            deviceId: "windows-vm-real-e2e-123",
+        });
+        expect(createReason).toBe(
+            "profile=windows-server; create VM: provider-command-failed: hyper-v-ps-invalidparameter-microsoft-hyperv-powershell-commands-newvm: "
+            + "operation=New-VM: rollback=hyper-v-recovery-cleanup-failed/hyper-v-network-elevation-cancelled",
+        );
+        // A message that lost the rollback (cut at the formatter's cap) gets it back from the payload.
+        const cut = new Error("provider-command-failed: hyper-v-ps-invalidparameter");
+        Object.defineProperty(cut, "brokerPayload", { value: brokerPayload });
+        expect(await hyperVWindowsFailureReason({
+            profile: "windows-server",
+            step: "create VM",
+            error: cut,
+            created: false,
+            deviceId: "windows-vm-real-e2e-123",
+        })).toBe("profile=windows-server; create VM: provider-command-failed: hyper-v-ps-invalidparameter; rollback=hyper-v-recovery-cleanup-failed/hyper-v-network-elevation-cancelled");
+    });
+});
+
+describe("Windows public deletion observation", () => {
+    const id = "windows-vm-real-e2e-deleted";
+    const response = (value: unknown, isError = false) => ({ isError, content: [{ type: "text", text: JSON.stringify(value) }] });
+    const missing = response({ ok: false, error: "device-not-found", deviceId: id }, true);
+    it("marks coverage as expected only after successful absence verification", () => {
+        const observed = { ...missing, __cccToolCallRecord: { expectedError: false } };
+        expect(() => assertHyperVWindowsDeleted(response({ devices: [{ deviceId: id }] }), observed, id)).toThrow();
+        expect(observed.__cccToolCallRecord.expectedError).toBe(false);
+        assertHyperVWindowsDeleted(response({ devices: [] }), observed, id);
+        expect(observed.__cccToolCallRecord.expectedError).toBe(true);
+    });
+    it("accepts absence and the deviceId-only missing-device response", () => {
+        expect(() => assertHyperVWindowsDeleted(response({ devices: [{ deviceId: "other" }] }), missing, id)).not.toThrow();
+    });
+    it("rejects a VM still present or an unavailable inventory", () => {
+        for (const inventory of [{ devices: [{ deviceId: id }] }, { devices: [{ id }] }, {}, { ok: false, error: "host-broker-unavailable" }]) {
+            expect(() => assertHyperVWindowsDeleted(response(inventory), missing, id)).toThrow();
+        }
+    });
+    it("does not accept unrelated errors, another device, or a successful duplicate deletion", () => {
+        for (const value of [
+            { ok: false, error: "host-broker-unavailable", deviceId: id },
+            { ok: false, error: "device-not-found", deviceId: "other" },
+            { ok: true, idempotent: true, alreadyMissing: true },
+        ]) expect(() => assertHyperVWindowsDeleted(response({ devices: [] }), response(value), id)).toThrow();
+    });
+});
+
+
+describe("Windows E2E configured Hyper-V subnet", () => {
+    for (const octet of [29, 30]) {
+        const expected = { prefix: `172.${octet}.0.0/24`, gateway: `172.${octet}.0.1` };
+        const device = { networkPrefix: expected.prefix, networkGateway: expected.gateway, networkAddress: `172.${octet}.0.141` };
+        it(`accepts configured subnet ${octet}`, () => {
+            expect(assertHyperVWindowsNetwork(device, expected)).toBe(device.networkAddress);
+        });
+        it(`rejects invalid or mismatched addresses on subnet ${octet}`, () => {
+            for (const address of [`172.${octet === 29 ? 30 : 29}.0.141`, expected.gateway,
+                `172.${octet}.0.0`, `172.${octet}.0.251`, `172.${octet}.0.255`,
+                `172.${octet}.0.014`, `172.${octet}.0.141'`, "", "garbage"]) {
+                expect(() => assertHyperVWindowsNetwork({ ...device, networkAddress: address }, expected)).toThrow();
+            }
+            expect(() => assertHyperVWindowsNetwork({ ...device, networkPrefix: "172.31.0.0/24" }, expected)).toThrow();
+            expect(() => assertHyperVWindowsNetwork({ ...device, networkGateway: "172.31.0.1" }, expected)).toThrow();
+        });
+    }
+});
+
+
+describe("previous Windows E2E residue cleanup", () => {
+    const device = { deviceId: "windows-vm-real-e2e-previous", incarnationId: "a".repeat(32) };
+    const reply = (value: unknown, isError = false) => ({ isError, content: [{ type: "text", text: JSON.stringify(value) }] });
+    const missing = { ok: false, error: "device-not-found", deviceId: device.deviceId };
+    it("accepts a disappeared VM only after fresh inventory confirms absence", async () => {
+        const calls: Array<{ tool: string; args: any }> = [];
+        let inventoryCalls = 0;
+        await cleanupPrevious(async (tool, args) => {
+            calls.push({ tool, args });
+            if (tool === "devices") return reply({ devices: ++inventoryCalls === 1 ? [device, { deviceId: "unrelated" }] : [] });
+            if (tool === "stop") throw new Error("already disappeared");
+            return reply(missing, true);
+        });
+        expect(calls.map(call => call.tool)).toEqual(["devices", "stop", "delete", "devices"]);
+        for (const call of calls.filter(call => call.tool !== "devices")) {
+            expect(call.args.deviceId).toBe(device.deviceId);
+            expect(call.args.incarnationId).toBe(device.incarnationId);
+        }
+    });
+    it("fails if the device remains, reappears, or inventory cannot confirm absence", async () => {
+        for (const fresh of [{ devices: [device] }, { devices: [{ ...device, incarnationId: "b".repeat(32) }] }, {}, { ok: false, error: "host-broker-unavailable" }]) {
+            let n = 0;
+            await expect(cleanupPrevious(async tool => {
+                if (tool === "devices") return reply(++n === 1 ? { devices: [device] } : fresh);
+                return reply(tool === "delete" ? missing : { ok: true }, tool === "delete");
+            })).rejects.toThrow();
+        }
+    });
+    it("rejects other deletion failures, wrong missing IDs, and malformed initial inventory", async () => {
+        for (const deletion of [{ ok: false, error: "provider-command-failed" }, { ...missing, deviceId: "other" }]) {
+            await expect(cleanupPrevious(async tool => reply(tool === "devices" ? { devices: [device] } : tool === "delete" ? deletion : { ok: true }))).rejects.toThrow();
+        }
+        await expect(cleanupPrevious(async () => reply({}))).rejects.toThrow("cleanup inventory");
+    });
+    it("retains the normal successful cleanup path", async () => {
+        const calls: string[] = [];
+        await cleanupPrevious(async tool => {
+            calls.push(tool);
+            return reply(tool === "devices" ? { devices: [device] } : { ok: true });
+        });
+        expect(calls).toEqual(["devices", "stop", "delete"]);
+    });
+});
+
+
+describe("bounded Hyper-V memory diagnostic", () => {
+    const code = "hyper-v-host-memory-capacity-exceeded";
+    const capacity = { requestedMb: 4096, availableMb: 6000, reserveMb: 6553, shortfallMb: 4649, token: "PRIVATE" };
+    it.each(["root", "body", "selected"])("renders %s broker evidence without envelope secrets", (location) => {
+        const record = { detail: code, result: { execution: { command: { diagnosticCode: code, capacity } } } };
+        const value = location === "body" ? { body: record } : location === "selected" ? { selected: { body: record } } : record;
+        expect(hyperVMemoryFailureReason(value)).toBe(`${code} Requested 4096 MiB; available 6000 MiB; host reserve 6553 MiB; shortfall 4649 MiB. Free host RAM by closing unused VMs or applications, then retry.`);
+    });
+    it("falls back when metrics are malformed and ignores unrelated failures", () => {
+        expect(hyperVMemoryFailureReason({ detail: code, result: { execution: { command: { capacity: { ...capacity, requestedMb: "secret" } } } } }))
+            .toBe(`${code}. Free host RAM by closing unused VMs or applications, then retry.`);
+        expect(hyperVMemoryFailureReason({ detail: "hyper-v-other", result: { execution: { command: { capacity } } } })).toBeUndefined();
+    });
+});

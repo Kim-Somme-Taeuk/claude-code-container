@@ -6,7 +6,7 @@ import {
     runtimeGenerationMatches,
     transitionAppiumGeneration,
     transitionRecordingGeneration,
-} from "../../device-lab-mcp/src/state/runtime-generation.mjs";
+} from "@ccc/device-lab/providers/state/runtime-generation.mjs";
 
 describe("device runtime generation fencing", () => {
     it("uses runtime ids instead of reusable process identities", () => {

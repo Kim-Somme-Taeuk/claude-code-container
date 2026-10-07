@@ -11,12 +11,14 @@ vi.mock("child_process", async (importOriginal) => {
 // Mock fs
 const mockExistsSync = vi.fn().mockReturnValue(false);
 const mockReaddirSync = vi.fn<() => string[]>().mockReturnValue([]);
+const mockUnlinkSync = vi.fn();
 vi.mock("fs", async (importOriginal) => {
     const actual = (await importOriginal()) as Record<string, unknown>;
     return {
         ...actual,
         existsSync: (...args: unknown[]) => mockExistsSync(...args),
         readdirSync: (...args: unknown[]) => mockReaddirSync(...args),
+        unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
     };
 });
 
@@ -38,9 +40,12 @@ vi.mock("../docker.js", () => ({
 
 // Mock session.js
 const mockGetActiveSessionsForProject = vi.fn<() => string[]>().mockReturnValue([]);
+const mockObserveActiveSessionsForContainer = vi.fn<() => string[]>().mockReturnValue([]);
 vi.mock("../session.js", () => ({
     getActiveSessionsForProject: (...args: unknown[]) =>
         mockGetActiveSessionsForProject(...args),
+    observeActiveSessionsForContainer: (...args: unknown[]) =>
+        mockObserveActiveSessionsForContainer(...args),
 }));
 
 // Mock utils.js
@@ -66,13 +71,15 @@ describe("runDoctor", () => {
         spawnSyncMock.mockReset();
         mockExistsSync.mockReset().mockReturnValue(false);
         mockReaddirSync.mockReset().mockReturnValue([]);
+        mockUnlinkSync.mockReset();
         mockIsDockerRunning.mockReturnValue(true);
         mockIsImageExists.mockReturnValue(true);
         mockGetImageLabel.mockReturnValue(null);
         mockIsContainerRunning.mockReturnValue(true);
         mockIsContainerExists.mockReturnValue(true);
         mockGetContainerName.mockReturnValue("ccc-myproject-abc123");
-        mockGetActiveSessionsForProject.mockReturnValue([]);
+        mockGetActiveSessionsForProject.mockReset().mockImplementation(() => { throw new Error("Doctor must not prune ownership receipts"); });
+        mockObserveActiveSessionsForContainer.mockReset().mockReturnValue([]);
         vi.spyOn(console, "log").mockImplementation(() => {});
         vi.spyOn(console, "error").mockImplementation(() => {});
     });
@@ -92,6 +99,39 @@ describe("runDoctor", () => {
         const result = runDoctor("/project/myproject");
 
         expect(result).toBe(true);
+    });
+
+    it("does not let a name out of the container repaint what it prints", () => {
+        // The launcher line carries a path read out of a volume any container
+        // on the host can write, so it reaches the terminal as data. It is
+        // sanitized where a check is printed rather than where each is built:
+        // one rule at one place, not eighteen call sites and a nineteenth that
+        // forgets.
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, "27.3.1\n"));
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, "/var/lib/docker/volumes/ccc-mise-cache/_data\n"));
+        spawnSyncMock.mockReturnValueOnce(makeResult(0,
+            "2.1.261 (Claude Code) (updatable, -> /vol/versions/2.1.261\u001b[2K\u200fX)\n"));
+
+        runDoctor("/project/myproject");
+
+        const printed = (console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls
+            .map(call => String(call[0])).join("\n");
+        expect(printed).toContain("-> /vol/versions/2.1.261?[2K?X");
+        expect(printed).not.toContain("\u001b");
+        expect(printed).not.toContain("\u200f");
+    });
+
+    it("sanitizes the not-updatable line too, which is the one a user reads twice", () => {
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, "27.3.1\n"));
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, "/var/lib/docker/volumes/ccc-mise-cache/_data\n"));
+        spawnSyncMock.mockReturnValueOnce(makeResult(2,
+            "2.1.241 (Claude Code) (NOT updatable: \u202eDESREVER)\n"));
+
+        runDoctor("/project/myproject");
+
+        const printed = (console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls
+            .map(call => String(call[0])).join("\n");
+        expect(printed).toContain("(NOT updatable: ?DESREVER)");
     });
 
     it("returns false when Docker is not running", () => {
@@ -153,7 +193,7 @@ describe("runDoctor", () => {
 
     it("shows warning when stale lock files are detected", () => {
         // 2 total lock files on disk, 1 active session → 1 stale
-        mockGetActiveSessionsForProject.mockReturnValue(["myproject-abc123-session1.lock"]);
+        mockObserveActiveSessionsForContainer.mockReturnValue(["myproject-abc123-session1.lock"]);
         mockExistsSync.mockReturnValue(true); // locksDir exists
         mockReaddirSync.mockReturnValue([
             "myproject-abc123-session1.lock",
@@ -177,6 +217,9 @@ describe("runDoctor", () => {
             .join("\n");
         expect(logCalls).toContain("Stale locks");
         expect(logCalls).toContain("1 stale lock file(s)");
+        expect(mockObserveActiveSessionsForContainer).toHaveBeenCalledExactlyOnceWith("myproject-abc123");
+        expect(mockGetActiveSessionsForProject).not.toHaveBeenCalled();
+        expect(mockUnlinkSync).not.toHaveBeenCalled();
     });
 
     it("handles mix of ok/warn/error: image missing (error) and container stopped (warn)", () => {
@@ -283,7 +326,7 @@ describe("runDoctor", () => {
     });
 
     it("shows active session count when sessions exist", () => {
-        mockGetActiveSessionsForProject.mockReturnValue([
+        mockObserveActiveSessionsForContainer.mockReturnValue([
             "myproject-abc123-aaa.lock",
             "myproject-abc123-bbb.lock",
         ]);
@@ -312,7 +355,7 @@ describe("runDoctor", () => {
 
     it("recognizes new -- separator lock file format", () => {
         // 2 lock files with new format (--), 1 active → 1 stale
-        mockGetActiveSessionsForProject.mockReturnValue(["myproject-abc123--session1.lock"]);
+        mockObserveActiveSessionsForContainer.mockReturnValue(["myproject-abc123--session1.lock"]);
         mockExistsSync.mockReturnValue(true);
         mockReaddirSync.mockReturnValue([
             "myproject-abc123--session1.lock",
@@ -334,7 +377,7 @@ describe("runDoctor", () => {
 
     it("recognizes profile lock file format (projectId--p--profile--sessionId.lock)", () => {
         // 1 profile lock file, 0 active → 1 stale
-        mockGetActiveSessionsForProject.mockReturnValue([]);
+        mockObserveActiveSessionsForContainer.mockReturnValue([]);
         mockExistsSync.mockReturnValue(true);
         mockReaddirSync.mockReturnValue([
             "myproject-abc123--p--work--session1.lock",
@@ -354,7 +397,7 @@ describe("runDoctor", () => {
     });
 
     it("does not count lock files from different projects", () => {
-        mockGetActiveSessionsForProject.mockReturnValue([]);
+        mockObserveActiveSessionsForContainer.mockReturnValue([]);
         mockExistsSync.mockReturnValue(true);
         mockReaddirSync.mockReturnValue([
             "otherproject-xyz789--session1.lock",  // different project

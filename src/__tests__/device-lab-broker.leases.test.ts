@@ -1,24 +1,26 @@
+import { directorySymlink } from "./helpers/file-symlink-fixture.js";
+import { isolateDeviceLabTestEnvironment } from "./helpers/device-lab-test-environment.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { dirname, join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDeviceBrokerServer, DEVICE_BROKER_PHYSICAL_LEASE_DIRECTORY_ENTRY_LIMIT, deviceBrokerOwnerToken, registerDeviceBrokerOwner } from "../device-lab-broker.js";
-import { deviceLabOwnerId } from "../device-lab-owner.js";
+import { createDeviceBrokerServer, DEVICE_BROKER_PHYSICAL_LEASE_DIRECTORY_ENTRY_LIMIT, deviceBrokerOwnerToken, registerDeviceBrokerOwner } from "@ccc/device-lab/device-lab-broker.js";
+import { deviceLabOwnerId } from "@ccc/device-lab/device-lab-owner.js";
 import { close, listen } from "./helpers/host-broker-test-fixture.js";
 
 describe("device-lab host broker physical leases", () => {
-    let originalHome: string | undefined;
+    let originalHomeRestore: (() => void) | undefined;
+    let fixtureHome: string | undefined;
 
     beforeEach(() => {
-        originalHome = process.env.HOME;
-        process.env.HOME = mkdtempSync(join(tmpdir(), "ccc-device-broker-test-home-"));
+        fixtureHome = mkdtempSync(join(tmpdir(), "ccc-device-broker-test-home-"));
+        originalHomeRestore = isolateDeviceLabTestEnvironment(fixtureHome);
     });
 
     afterEach(() => {
         vi.restoreAllMocks();
-        if (process.env.HOME) rmSync(process.env.HOME, { recursive: true, force: true });
-        if (originalHome === undefined) delete process.env.HOME;
-        else process.env.HOME = originalHome;
+        if (fixtureHome) rmSync(fixtureHome, { recursive: true, force: true });
+        originalHomeRestore?.();
     });
 
     it("claims, lists, reuses, and releases owner-scoped physical leases", async () => {
@@ -193,7 +195,7 @@ describe("device-lab host broker physical leases", () => {
         const backendRoot = join(homedir(), ".ccc/devices/physical-leases/android-device");
         const external = mkdtempSync(join(tmpdir(), "ccc-external-lease-locks-"));
         mkdirSync(backendRoot, { recursive: true });
-        symlinkSync(external, join(backendRoot, "locks"));
+        directorySymlink(external, join(backendRoot, "locks"));
         const server = createDeviceBrokerServer({ cwd: "/project/broker-linked-lease-directory-test", host: "127.0.0.1", port: 0 });
         const baseUrl = await listen(server);
         try {

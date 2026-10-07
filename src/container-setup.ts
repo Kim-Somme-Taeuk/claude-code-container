@@ -3,116 +3,838 @@
 // Extracted from index.ts for separation of concerns.
 // Contains: claude binary caching, npm tools installation, mise shim detection.
 
-import { spawnSync, type SpawnSyncReturns } from "child_process";
+import { spawnSync } from "child_process";
 import { getNpmTools, getToolByName, type ToolDefinition } from "./tool-registry.js";
 import { runtimeCli } from "./container-runtime.js";
+import { CLAUDE_BIN_PATH } from "./domain/tool-layout.js";
+import { createRequestedToolSetup } from "./application/requested-tool-setup.js";
 
-// Claude binary persist path inside the mise volume
-export const CLAUDE_PERSIST_DIR = "/home/ccc/.local/share/mise/.claude-bin";
+// Claude's native install layout inside the container.
+//
+// The native updater manages ~/.local/bin/claude ONLY when it is a symlink into
+// <data-dir>/versions/. ccc used to `cp` the binary to that path instead, and
+// the consequence was silent: `claude update` installed the new version under
+// versions/, printed "Successfully updated", declined to touch the launcher it
+// had not created, and every later run executed the same stale copy. Measured
+// on this project's own container — launcher 2.1.241 while versions/2.1.261 sat
+// unreferenced, the volume cache byte-identical to the stale launcher.
+//
+// So ccc persists the native install DIRECTORY rather than a single binary:
+//
+//   <volume>/.claude-data                      persistent, shared across projects
+//   ~/.local/share/claude -> <volume>/.claude-data      container fs, recreated
+//   ~/.local/bin/claude   -> ~/.local/share/claude/versions/<v>
+//
+// An in-container `claude update` then lands directly in the volume, and the
+// updater's own version cleanup resumes — it is disabled precisely because the
+// launcher is not a symlink.
+export const CLAUDE_DATA_VOLUME_DIR = "/home/ccc/.local/share/mise/.claude-data";
+export const CLAUDE_DATA_DIR = "/home/ccc/.local/share/claude";
+// Pre-symlink layout: one binary cached as a plain file. Volumes created before
+// this change still hold it, so it is a migration donor, never a launcher source.
+export const CLAUDE_LEGACY_CACHE_FILE = "/home/ccc/.local/share/mise/.claude-bin/claude";
 export const CLAUDE_EXECUTABLE = "claude";
-export const CLAUDE_BIN_PATH = "/home/ccc/.local/bin/claude";
+export { CLAUDE_BIN_PATH };
+export const CONTAINER_TOOL_PROBE_TIMEOUT_MS = 15_000;
+export const CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS = 15_000;
+export const CONTAINER_TOOL_MUTATION_TIMEOUT_MS = 5 * 60_000;
+const CONTAINER_TOOL_MUTATION_INNER_TIMEOUT_SECONDS = 285;
 
-export function isClaudeVersionLine(line: string): boolean {
-    const trimmed = line.trim();
-    return /^(claude(\s+code)?\s+v?\d+\.\d+\.\d+|v?\d+\.\d+\.\d+(\s|$)|v?\d+\.\d+\.\d+.*\bclaude(\s+code)?\b)/i.test(trimmed);
+function shellQuote(value: string): string {
+    return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-/**
- * Check if a file in the container is a mise shim (shell script referencing mise)
- * rather than a real native binary.
- */
-export function isMiseShim(containerName: string, path: string): boolean {
-    const result = spawnSync(
-        runtimeCli(),
-        ["exec", containerName, "sh", "-c", `head -c 500 '${path.replace(/'/g, "'\\''")}' 2>/dev/null | grep -q mise`],
-        { encoding: "utf-8" },
-    );
-    return result.status === 0;
+function boundedContainerMutation(
+    command: string,
+    timeoutSeconds = CONTAINER_TOOL_MUTATION_INNER_TIMEOUT_SECONDS,
+    killAfterSeconds = 5,
+): string {
+    return `timeout -k ${killAfterSeconds}s ${timeoutSeconds}s sh -c ${shellQuote(command)}`;
 }
 
-/**
- * Verify the binary at the given path is actually claude by checking --version output.
- * Guards against bun or other binaries accidentally cached at the claude path.
- */
-export function isValidClaudeBinary(containerName: string, path: string): boolean {
-    const escapedPath = path.replace(/'/g, "'\\''");
-    const result = spawnSync(
-        runtimeCli(),
-        [
-            "exec", containerName, "sh", "-c",
-            `first_line="$('${escapedPath}' --version 2>/dev/null | head -n 1 || true)"; printf '%s\\n' "$first_line" | grep -Eiq '^(claude([[:space:]]+code)?[[:space:]]+v?[0-9]+[.][0-9]+[.][0-9]+|v?[0-9]+[.][0-9]+[.][0-9]+([[:space:]]|$)|v?[0-9]+[.][0-9]+[.][0-9]+.*\\bclaude([[:space:]]+code)?\\b)'`,
-        ],
-        { encoding: "utf-8", timeout: 10000 },
-    );
-    return result.status === 0;
+function boundedShortContainerMutation(command: string): string {
+    return boundedContainerMutation(command, 8, 2);
 }
 
+function assertMutationSucceeded(
+    result: ReturnType<typeof spawnSync>,
+    operation: string,
+): void {
+    const timedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT"
+        || result.status === 124
+        || result.status === 137;
+    if (timedOut) throw new Error(`${operation} timed out`);
+    if (result.error || result.status !== 0) throw new Error(`${operation} failed`);
+}
+
+export interface ClaudeLayoutPaths {
+    /** PATH entry the launcher symlink lives at. */
+    bin: string;
+    /** XDG data dir the native installer writes to; becomes a symlink to `volumeDataDir`. */
+    dataDir: string;
+    /** Directory inside the persistent named volume that backs `dataDir`. */
+    volumeDataDir: string;
+    /** Pre-symlink single-file cache, used only as a migration donor. */
+    legacyCacheFile: string;
+}
+
+export const CLAUDE_LAYOUT_PATHS: ClaudeLayoutPaths = {
+    bin: CLAUDE_BIN_PATH,
+    dataDir: CLAUDE_DATA_DIR,
+    volumeDataDir: CLAUDE_DATA_VOLUME_DIR,
+    legacyCacheFile: CLAUDE_LEGACY_CACHE_FILE,
+};
+
+// A single `--version` may cold-read a ~215MB binary off a Docker named volume,
+// and one probe can do that up to ten times: once per candidate version, plus
+// twice per migration donor. That spawn count — not the migration copy, which
+// measures 0.15s for the real 215MB file on one filesystem — is what the raised
+// budget is for. Each individual call is capped separately so a binary that
+// hangs cannot spend the whole budget in silence: the probe's stdio is captured,
+// so a stall here is 150 seconds of no output at all.
+const CLAUDE_VERSION_CALL_TIMEOUT_SECONDS = 10;
+const CLAUDE_PROBE_INNER_TIMEOUT_SECONDS = 120;
+export const CLAUDE_PROBE_TIMEOUT_MS = 150_000;
+
 /**
- * Ensure claude binary is available in the container.
- * 1. If real claude binary exists at known path → do nothing
- * 2. If claude exists elsewhere on PATH → copy it into the fixed path + cache
- * 3. If volume has a valid cached copy → restore it to the fixed path
- * 4. Otherwise → fresh install, then copy into fixed path + cache
+ * Build the in-container script that puts the native layout in place and
+ * reports what it did: VALID (already correct), RESTORED (launcher re-pointed
+ * at a version already in the volume, including a migrated legacy cache), or
+ * INSTALL (nothing usable — caller must run the installer).
  *
- * Uses a single docker exec to probe both paths, reducing round-trips
- * from 3-5 to 1 for the common happy path.
+ * Pure and path-parameterized so tests can execute it under `sh` against a
+ * temp directory. That matters here: the predecessor was asserted only by
+ * substring match on the generated text, which is exactly why a script that
+ * did the wrong thing passed its tests for the life of this bug.
+ *
+ * POSIX sh only — /bin/sh is dash in this image.
+ */
+export function buildClaudeProbeScript(paths: ClaudeLayoutPaths): string {
+    return `
+BIN=${shellQuote(paths.bin)}
+DATA=${shellQuote(paths.dataDir)}
+VOL=${shellQuote(paths.volumeDataDir)}
+LEGACY=${shellQuote(paths.legacyCacheFile)}
+VERSION_CALL_TIMEOUT=${CLAUDE_VERSION_CALL_TIMEOUT_SECONDS}s
+
+is_shim() { head -c 500 "$1" 2>/dev/null | grep -q mise; }
+claude_version_line() {
+  timeout "$VERSION_CALL_TIMEOUT" "$1" --version 2>/dev/null </dev/null | head -n 1 || true
+}
+is_claude() {
+  first_line="$(claude_version_line "$1")"
+  printf '%s\n' "$first_line" | grep -Eiq '^(claude([[:space:]]+code)?[[:space:]]+v?[0-9]+[.][0-9]+[.][0-9]+|v?[0-9]+[.][0-9]+[.][0-9]+([[:space:]]|$)|v?[0-9]+[.][0-9]+[.][0-9]+.*\\bclaude([[:space:]]+code)?\\b)'
+}
+
+# The data dir must resolve into the named volume, or an in-container update is
+# lost the moment the container is recreated.
+mkdir -p "$VOL" || exit 1
+# rm -rf across a mount boundary empties the OTHER side of the mount. ccc never
+# puts one here, but a user can, and gutting a host directory to save a symlink
+# is not a trade worth making.
+#
+# Read the kernel's own mount table rather than comparing device numbers with
+# the parent: that comparison misses a bind mount made within one filesystem,
+# which is a real mount rm -rf would empty through, and it fails OPEN on exactly
+# that case. /proc is mounted in any container that can run at all, so this
+# needs no tool probe and has a single code path. (mountinfo octal-escapes
+# space, tab, newline and backslash in field 5. That is irrelevant for the data
+# dir and the launcher, whose paths are fixed, but a version name is not fixed:
+# one holding whitespace would miss the match and the clear would go through the
+# mount. A name holding a newline is worse still and never reaches this check:
+# find -print and read -r break the record on it, so the loop acts on two
+# fragments instead. That is the known edge of this check.)
+# A glob cannot say "digits", so this is where the shape is decided. Exactly
+# what the installer writes and nothing else: three dot-separated numbers, or
+# one of those with its staging suffix. Allowing any suffix let 2.1.261.backup
+# and 1.0.0-my-notes through, and what is on the other side of this test is a
+# recursive delete in a volume every project shares.
+#
+# A dot-dated name like 2026.09.05 IS three dot-separated numbers. Something
+# could separate it — a bound on the first component, say — but that is a rule
+# about what claude versions look like, maintained here, wrong the day it is
+# not. Treating it as a version is the choice; the REQ records the cost.
+VERSION_RE='^[0-9]+[.][0-9]+[.][0-9]+([.]tmp[.][0-9]+[.][0-9]+[.][0-9]+)?$'
+is_version_name() {
+  # grep matches per line, so a name holding a newline passes whenever ANY of
+  # its lines is version-shaped — the whole name is not the thing tested. Count
+  # first: wc -l is 0 only when there is no newline at all.
+  #
+  # No caller can reach this with a multi-line name today: all three take names
+  # through read -r, which has already split one. It is here so the rule is the
+  # rule wherever it is asked, not because a case is known to arrive.
+  [ "$(printf '%s' "$1" | wc -l)" -eq 0 ] || return 1
+  printf '%s' "$1" | grep -qE "$VERSION_RE"
+}
+
+is_mountpoint() {
+  [ -d "$1" ] || return 1
+  p="$(readlink -f "$1" 2>/dev/null)" || return 1
+  [ -n "$p" ] || return 1
+  awk -v want="$p" '$5 == want { found=1 } END { exit !found }' /proc/self/mountinfo
+}
+# Copy an existing install into the volume before replacing it. Applies to a
+# real directory AND to a symlink aimed somewhere other than the volume —
+# repointing that one silently used to cost a fresh 215MB download while the
+# install it abandoned sat untouched on disk.
+adopt_into_volume() {
+  [ -d "$DATA" ] || return 0
+  # Container-local, not in the volume. This is intra-container signalling, and
+  # putting it in the shared volume made the one failure it exists to report —
+  # the volume being unwritable — the one it could not record, while leaving an
+  # invisible dotfile behind in a volume nobody thinks to inspect.
+  #
+  # Assigned HERE, in the parent, before the pipe below. The loop body runs in a
+  # subshell, so it can only signal failure through a file — and only through a
+  # name the parent already knows. With a deterministic name the placement was
+  # incidental; with mktemp it is load-bearing, because a name computed inside
+  # the subshell would leave the parent checking a path that never existed and
+  # reporting success on every failure.
+  #
+  # The "|| return 1" is what makes an unusable temp directory a refusal, not
+  # a silent success. The caller deletes the original on success, so dropping
+  # it destroys working installs; a test pins it.
+  adopt_failed="$(mktemp)" || return 1
+  rm -f "$adopt_failed"
+  # -L, so a name our side presents as a symlink to a directory is enumerated as
+  # the directory it points at. Without it such a name is a LEAF, and the one
+  # that matters is versions/ itself: the volume's shared versions directory
+  # then lands under $target, where clearing it wipes every version every
+  # project on the host runs, and publishing it puts a symlink to a
+  # container-local path into a volume every other container reads.
+  ( cd "$DATA" && find -L . -mindepth 1 -print ) | while IFS= read -r rel; do
+    relpath="\${rel#./}"
+    target="$VOL/$relpath"
+    if [ -d "$DATA/$rel" ]; then
+      # A directory directly under versions/ is not a version. Mirroring one
+      # into the shared volume takes that name out of circulation for every
+      # project on the host — pick_best skips it, seed_from refuses it, adopt
+      # skips it — while each container keeps deleting its own good copy.
+      case "$relpath" in
+        versions/*/*)
+          # Refusing the version directory and then creating it here is how the
+          # announced refusal used to be undone: the volume ended up holding
+          # exactly the state the message said was refused.
+          echo "refusing to publish $relpath: it is inside a name that cannot be a version" >&2
+          : > "$adopt_failed"
+          continue
+          ;;
+        versions/*)
+          echo "refusing to publish $relpath: a directory cannot be a version" >&2
+          : > "$adopt_failed"
+          continue
+          ;;
+      esac
+      mkdir -p "$target" || : > "$adopt_failed"
+      continue
+    fi
+    # Reaching here with relpath "versions" means our side has that name as
+    # something other than a directory. Publishing it wedges every container on
+    # the host permanently: once the data dir is the symlink, this loop is never
+    # entered again, so nothing can ever undo it — and it is the one name whose
+    # contents belong to every other project.
+    if [ "$relpath" = "versions" ]; then
+      echo "refusing to publish versions: it must be a directory" >&2
+      : > "$adopt_failed"
+      continue
+    fi
+    # Existence is not adoption. The volume is shared by every project on the
+    # host, so a version already there may be the binary another container is
+    # executing — forcing over it fails with ETXTBSY and takes down a working
+    # project, and version files are named by their content, so a matching
+    # regular file needs no replacing. That case is a skip, and stays one.
+    if [ -f "$target" ] && [ ! -L "$target" ] && [ -f "$DATA/$rel" ]; then
+      continue
+    fi
+    # Asked before staging so a container with a mount at that name is spared a
+    # full 215MB copy on every start before the same refusal. It only reads, so
+    # asking early costs nothing — but it is not the guarantee: the copy sits
+    # between here and the delete, so the check is repeated there. Named like the data-dir and launcher
+    # guards, because without it this refusal is indistinguishable from the
+    # ordinary "could not be removed" one — and the difference is whether the
+    # user's mounted data still exists.
+    case "$relpath" in
+      versions/*/*) ;;
+      versions/*)
+        # Only where the clear this guards would actually run, so the refusal
+        # cannot claim a delete that would never have happened.
+        #
+        # Not through a link, same as the guard after staging: is_mountpoint
+        # follows, so a symlink whose target is a mount read as a mount and
+        # refused here — first, before the other guard could be reached — and
+        # every start failed permanently on a message that was false, since
+        # unlinking a link empties nothing.
+        if is_version_name "\${relpath#versions/}" \\
+          && [ ! -L "$target" ] && is_mountpoint "$target"; then
+          echo "cannot adopt $relpath: it is a mount point in the volume, and clearing it would empty the other side" >&2
+          : > "$adopt_failed"
+          continue
+        fi
+        ;;
+    esac
+    # Copy to a staging name, then link it into place. Copying straight to the
+    # final name publishes a truncated but still-executable file if the process
+    # dies mid-copy, and nothing ever replaces it because copies skip what
+    # exists — the migration path would manufacture the poisoned version it is
+    # supposed to avoid. 215MB is long enough for that to happen. ln fails
+    # EEXIST in the kernel, so two containers cannot both win the same name.
+    #
+    # -L on the copy as well: the volume must hold regular files and directories
+    # and nothing else, since a symlink published there points at a path that
+    # exists only in the container that wrote it.
+    stage="$(mktemp "$VOL/.seed.XXXXXX")" || { echo "cannot stage $relpath into $VOL" >&2; : > "$adopt_failed"; continue; }
+    if cp -aL "$DATA/$rel" "$stage"; then
+      # Clear a name held by something unusable, here rather than before the
+      # copy: between the two is 215MB of copying, and a name cleared that early
+      # is a name absent from a shared volume for the whole of it — measured at
+      # 1.05s for a 200MB payload. Doing it in the instant before ln also lets
+      # a file that appeared meanwhile win, instead of being deleted by us.
+      if [ -e "$target" ] || [ -L "$target" ]; then
+        if [ -f "$target" ] && [ ! -L "$target" ]; then
+          rm -f "$stage"
+          continue
+        fi
+        clear_why=""
+        case "$relpath" in
+          versions/*/*) ;;
+          versions/*)
+            # Version-shaped names only, the same licence the other clear uses:
+            # what allows a recursive delete here is that we are about to write
+            # this exact name, and we only ever write versions.
+            #
+            # A directory at versions/<v> is junk by construction: the mirror
+            # branch refuses to create one, pick_best skips it and seed_from
+            # refuses it, so nothing anyone runs lives inside. Leaving it there
+            # wedges this container on every future start with no way back.
+            #
+            # Asked again here, not only in the arm before staging. That one
+            # exists to refuse before copying 215MB; this one is the guarantee,
+            # and between them lies the whole copy. A mount that appears in that
+            # window would otherwise be deleted through.
+            # Not through a link: is_mountpoint follows, so a symlink whose
+            # target is a mount read as a mount here and refused permanently —
+            # unlinking a link empties nothing.
+            if ! is_version_name "\${relpath#versions/}"; then
+              # Not a name we would write. Fall through to the cautious rule
+              # below, which takes only something holding nothing.
+              :
+            elif [ ! -L "$target" ] && is_mountpoint "$target"; then
+              echo "cannot adopt $relpath: it is a mount point in the volume, and clearing it would empty the other side" >&2
+              rm -f "$stage"
+              : > "$adopt_failed"
+              continue
+            else
+            # rm never follows a symlink argument, -r included, so one call
+            # serves both. What differs is that a link has to be announced: it
+            # can be what another container's launcher resolves through, so a
+            # start that takes it away says so, in the same words as the other
+            # path that removes one.
+            was_link=no
+            [ -L "$target" ] && was_link=yes
+            # From rm's own status, not from re-testing the path: under a race
+            # another container can publish a real file at the name between the
+            # two, and the removal would go unreported. The other path that
+            # removes a link decides the same way.
+            if clear_why="$(rm -rf "$target" 2>&1)"; then cleared=yes; else cleared=no; fi
+            if [ "$cleared" = yes ]; then
+              # Both kinds, not only the link. A directory here can be an export
+              # named for a date wearing a version's shape, and destroying it
+              # silently is the thing the other path stopped doing.
+              if [ "$was_link" = yes ]; then
+                echo "removed \${relpath#versions/}: a version must be a real file, not a symlink" >&2
+              else
+                echo "removed \${relpath#versions/}: a version must be a regular file" >&2
+              fi
+            fi
+            fi
+            ;;
+        esac
+        if [ -e "$target" ] || [ -L "$target" ]; then
+          # Every other name gets the cautious treatment: only something that
+          # holds nothing can go, because we cannot tell its contents from what
+          # other projects are using.
+          if [ -d "$target" ] && [ ! -L "$target" ]; then
+            clear_why="$(rmdir "$target" 2>&1)"
+          else
+            # A link removed here is a link removed, whatever the name. The
+            # version arm above announces one and this branch did not, so
+            # narrowing that arm silently took the announcement away from every
+            # other name — the one thing the two paths must agree on.
+            cautious_was_link=no
+            [ -L "$target" ] && cautious_was_link=yes
+            if clear_why="$(rm -f "$target" 2>&1)"; then
+              # This branch reaches every name, not only versions/, so the
+              # version sentence is only true for some of them. Saying it about
+              # settings.json was announcing the right removal with the wrong
+              # reason.
+              if [ "$cautious_was_link" = no ]; then
+                :
+              else
+                case "$relpath" in
+                  versions/*/*) echo "removed $relpath: a link cannot be published into a volume other containers read" >&2 ;;
+                  versions/*) echo "removed \${relpath#versions/}: a version must be a real file, not a symlink" >&2 ;;
+                  *) echo "removed $relpath: a link cannot be published into a volume other containers read" >&2 ;;
+                esac
+              fi
+            fi
+          fi
+        fi
+        if [ -e "$target" ] || [ -L "$target" ]; then
+          # The reason matters: a permanently refused start otherwise cannot be
+          # told apart from a read-only volume.
+          if [ -n "$clear_why" ]; then
+            echo "cannot adopt $relpath: the volume holds something else at that name and it could not be removed: $clear_why" >&2
+          else
+            echo "cannot adopt $relpath: the volume holds something else at that name and it could not be removed" >&2
+          fi
+          rm -f "$stage"
+          : > "$adopt_failed"
+          continue
+        fi
+      fi
+      # A losing race is fine — the winner published the same content under a
+      # content-named path. Any other ln failure means the file was NOT adopted,
+      # and the caller deletes the original on success, so it has to be recorded.
+      if ! ln "$stage" "$target" 2>/dev/null && [ ! -e "$target" ]; then
+        echo "cannot publish $relpath into $VOL" >&2
+        : > "$adopt_failed"
+      fi
+    else
+      echo "cannot copy $relpath out of $DATA" >&2
+      : > "$adopt_failed"
+    fi
+    rm -f "$stage"
+  done
+  if [ -e "$adopt_failed" ]; then
+    rm -f "$adopt_failed"
+    return 1
+  fi
+  return 0
+}
+if [ -L "$DATA" ] && [ "$(readlink "$DATA")" = "$VOL" ]; then
+  :
+elif [ -L "$DATA" ]; then
+  adopt_into_volume && rm -f "$DATA" && ln -s "$VOL" "$DATA"
+elif [ -d "$DATA" ]; then
+  # Copy first, so a failed copy cannot lose the original. Note the weaker
+  # guarantee once rm -rf starts: it removes entries before it can fail on the
+  # directory itself, so a failure here can leave $DATA empty. The contents are
+  # already in the volume by then, and the check below fails the probe loudly.
+  if is_mountpoint "$DATA"; then
+    echo "refusing to replace $DATA: it is a mount point, and rm -rf would empty the other side" >&2
+    exit 1
+  fi
+  adopt_into_volume && rm -rf "$DATA" && ln -s "$VOL" "$DATA"
+else
+  rm -f "$DATA" 2>/dev/null || true
+  mkdir -p "$(dirname "$DATA")" && ln -s "$VOL" "$DATA"
+fi
+if [ ! -L "$DATA" ] || [ "$(readlink "$DATA")" != "$VOL" ]; then
+  echo "$DATA is not backed by $VOL; an update here would not survive the container" >&2
+  exit 1
+fi
+
+# Staging files are removed on every path that creates them, but a killed
+# process leaves one behind — up to 215MB, dot-prefixed, in a volume shared by
+# every project, so the symptom is "the cache is mysteriously full" with nothing
+# pointing at the cause. The age guard is what makes this safe: another
+# container's live staging file is minutes younger than the probe's own budget.
+# Two roots, two rules. At the volume root a stale stage is the only thing that
+# name can be, so anything wearing it goes — except a directory holding
+# something, which -delete rmdirs and cannot remove. Nothing ccc writes there is
+# a directory, so that is a gap in the claim rather than in the cleanup. Under versions/ the name is also a
+# version name: a link there is a link like any other, and deleting it here took
+# it away with nothing said — the one path that removed one in silence. Left
+# alone, free_unusable_versions takes it and reports it.
+find "$VOL" -maxdepth 1 -name '.seed.*' -mmin +10 -delete 2>/dev/null || true
+find "$DATA/versions" -maxdepth 1 -name '.seed.*' -type f -mmin +10 -delete 2>/dev/null || true
+# The native installer's own staging name. A killed install leaves one behind —
+# up to 215MB, in a volume every project shares — and nothing else collects it:
+# the clear takes only what is not a regular file, and the selection skips it.
+# Age-gated like the rest, so an install in flight is never touched. The
+# protection is the size of the window, not mtime: the installer moves an
+# already-downloaded file into the staging name and renames it away within
+# seconds, so ten minutes is not a race it can lose.
+#
+# Shape-gated too, by the same pattern the clears use rather than a glob of its
+# own: a bare *.tmp.* took my.tmp.notes, and a glob cannot say "digits", so it
+# would have taken 2a.1b.3c.tmp.x as well. One pattern, every site.
+# -exec, not a read loop. Reading records back gave up the one property
+# find -delete had for free — that only a path find matched can be removed —
+# because a name holding a newline splits, and a fragment was a real version:
+# a working 215MB binary deleted out of the volume every project shares. In
+# argv the path arrives whole. The pattern travels as $0, and the newline check
+# is repeated here, so this reads the same rule is_version_name does without
+# being able to call it.
+#
+# The status is uninformative by construction: sh -c returns whatever the last
+# path did, so find exits 1 only when the last entry in a batch is single-line
+# and not version-shaped — 0 when it was reaped, and 0 when a multi-line name
+# was skipped, since continue succeeds. Nothing reads it, and || true says so.
+find "$DATA/versions" -maxdepth 1 -name '*.tmp.*' -type f -mmin +10 \\
+  -exec sh -c 'for p do n="\${p##*/}"; [ "$(printf "%s" "$n" | wc -l)" -eq 0 ] || continue; printf "%s" "$n" | grep -qE "$0" && rm -f "$p"; done' "$VERSION_RE" {} + 2>/dev/null || true
+
+# Newest-first, first valid wins: normally one --version spawn. An earlier
+# version stopped after the five newest, which turned a versions/ holding five
+# broken entries into a fresh 215MB download for every project on the host even
+# though a working version sat just below the cut. Measured, the updater does
+# NOT prune what it replaces — 2.1.259 was still there after updating to
+# 2.1.261, and after a second update and a reinstall — so the directory grows;
+# bounding each call, not the number of candidates, is the protection wanted.
+BEST=""
+pick_best() {
+  BEST=""
+  # BEST has to survive the loop, so this cannot pipe into while — that body
+  # runs in a subshell. IFS to newline and set -f instead, which is what the
+  # $(ls) form needed all along: without them a version name holding a space is
+  # split into two nonexistent candidates and one holding * is expanded against
+  # the working directory.
+  old_ifs="$IFS"
+  old_flags="$-"
+  IFS="$(printf '\\n_')"; IFS="\${IFS%_}"
+  set -f
+  # Not -A. Hidden links are already removed by free_unusable_versions, which
+  # enumerates with find, so -A bought nothing there — and it made a seed_from
+  # staging file left behind by a killed start selectable: complete, executable,
+  # claude-shaped, reported as a version and called updatable, until the reaper
+  # deletes it out from under whoever is running it.
+  for cand in $(ls "$DATA/versions" 2>/dev/null | sort -Vr); do
+    f="$DATA/versions/$cand"
+    # -f follows links, so a symlink here used to be selected and blessed: the
+    # probe reported success on a layout ccc doctor calls NOT updatable, which
+    # is the exact shape this whole change exists to remove. ccc never publishes
+    # one, but a hand-made or foreign entry in a shared volume can be one.
+    # The installer stages as versions/<v>.tmp.<pid>.<ts>.<n>, and a complete
+    # one left by a killed install sorts ABOVE the version it was becoming — so
+    # it was selected, and the probe reported a launcher on a name the next
+    # install overwrites.
+    case "$cand" in
+      *.tmp.*) continue ;;
+    esac
+    # A last guard. free_unusable_versions has normally already removed these;
+    # this catches the one it could not, on a volume it cannot write to, where
+    # running the link would be worse than not starting.
+    [ ! -L "$f" ] || continue
+    [ -f "$f" ] && [ -x "$f" ] || continue
+    if is_shim "$f"; then continue; fi
+    if is_claude "$f"; then BEST="$f"; restore_scan_flags; return 0; fi
+  done
+  restore_scan_flags
+  return 1
+}
+
+# Only ever called from pick_best, which sets both globals before it can run.
+# Nothing can pin it: docker exec gives an empty $- either way, so this is
+# defensive, and standalone it would set IFS empty and disable field splitting
+# for the rest of the script.
+restore_scan_flags() {
+  case "$old_flags" in
+    *f*) ;;
+    *) set +f ;;
+  esac
+  IFS="$old_ifs"
+}
+
+# Seed versions/<v> from a plain binary left by an older ccc, a hand install, or
+# whatever is on PATH — so upgrading ccc does not force a re-download.
+seed_from() {
+  src="$1"
+  [ -n "$src" ] && [ -f "$src" ] && [ -x "$src" ] || return 1
+  is_shim "$src" && return 1
+  is_claude "$src" || return 1
+  v="$(claude_version_line "$src" | grep -oE '[0-9]+[.][0-9]+[.][0-9]+' | head -n 1)"
+  [ -n "$v" ] || return 1
+  mkdir -p "$DATA/versions" || return 1
+  # Never publish over a version name that already exists. mv -f onto a
+  # directory deposits the file INSIDE it and leaves the name unusable; mv -f
+  # onto a file succeeds even while another container executes it, silently
+  # swapping that container's binary for a donor copy on its next resolve. The
+  # name is the content, so anything already there is already right.
+  { [ -e "$DATA/versions/$v" ] || [ -L "$DATA/versions/$v" ]; } && return 1
+  # Not "$$": the PID is container-local, containers start at low PIDs, and this
+  # directory is a volume shared by every project on the host — two of them
+  # seeding at once would interleave 215MB writes into one file and publish the
+  # result under a real version name.
+  #
+  # -e alone is false for a dangling link, and this early guard exists to refuse
+  # before the copy rather than after it — the late one below is the guarantee.
+  seed="$(mktemp "$DATA/versions/.seed.XXXXXX")" || return 1
+  if ! cp -L "$src" "$seed"; then rm -f "$seed"; return 1; fi
+  if ! chmod +x "$seed"; then rm -f "$seed"; return 1; fi
+  # -e alone is false for a dangling link, and mv -f would then replace the link
+  # itself — silently, since nothing here announces a removal.
+  if [ -e "$DATA/versions/$v" ] || [ -L "$DATA/versions/$v" ]; then rm -f "$seed"; return 1; fi
+  if ! mv -f "$seed" "$DATA/versions/$v"; then rm -f "$seed"; return 1; fi
+}
+
+free_unusable_versions() {
+  [ -d "$DATA/versions" ] || return 0
+  # find + read -r, not $(ls): word splitting drops a name holding whitespace
+  # and glob expansion turns one holding * into something else entirely, so
+  # those names were silently left behind. A name holding a NEWLINE still is —
+  # read -r breaks the record on it — and none of these can collide with an
+  # X.Y.Z installer target, so this is consistency rather than a second wedge.
+  #
+  # Between the test and the unlink another container could publish a real file
+  # at this name. The window is microseconds, POSIX sh has no unlink-if-symlink,
+  # and a process already running that file keeps its inode.
+  ( cd "$DATA/versions" && find . -mindepth 1 -maxdepth 1 -print ) 2>/dev/null | while IFS= read -r ent; do
+    cand="\${ent#./}"
+    f="$DATA/versions/$cand"
+    # Both tests are true of a path that does not exist — a fragment of a split
+    # name, or an entry another container removed between find and here — and
+    # then rm -rf "succeeds" on nothing and the clear announces a destruction
+    # that never happened.
+    { [ -e "$f" ] || [ -L "$f" ]; } || continue
+    if [ ! -L "$f" ] && [ ! -f "$f" ]; then
+      # Only a name that could be a version, and only here — not for links.
+      # Unlinking a link destroys no bytes; a recursive delete destroys whatever
+      # is inside, on every start, in a volume every project on the host shares.
+      # The licence for it is that the entry is holding a name the installer
+      # needs, and the installer writes versions — three dot-separated numbers,
+      # and its own staging names underneath them. Anything else — somebody's
+      # notes, somebody's export, a hidden state directory — is holding nothing
+      # anyone is waiting for, so there is no reason to reach into it. A leading
+      # digit alone was not enough: 2026-notes starts with one.
+      is_version_name "$cand" || continue
+      # Anything that is not a regular file and not a link — a directory, a
+      # fifo, a socket — is junk by construction: ccc publishes only regular
+      # files here, the selection takes only regular files, seeding refuses
+      # anything else. It also holds a name the installer needs, and the
+      # installer declines a name that exists: measured, a container with
+      # nothing of its own to adopt downloaded 215MB and failed with EISDIR on
+      # every start, forever, because the only code that cleared this ran inside
+      # adoption and adoption needs a local install to adopt.
+      #
+      # Announced, including when it succeeds. The argument for silence was
+      # that nothing anyone runs lives inside a junk directory — true of one at
+      # a real version name, and precisely wrong for a dot-dated export, which
+      # is that shape and cannot be told apart. Something that destroys bytes
+      # in a shared volume should not be the one thing said quietly.
+      if is_mountpoint "$f"; then
+        echo "cannot remove $cand: it is a mount point in the volume, and clearing it would empty the other side" >&2
+      elif clear_err="$(rm -rf "$f" 2>&1)"; then
+        echo "removed $cand: a version must be a regular file" >&2
+      else
+        # Trim after, not in the pipeline: a pipe reports the LAST command's
+        # status, so head would have swallowed rm's failure and the refusal
+        # would never have been printed at all.
+        clear_why="$(printf '%s\\n' "$clear_err" | head -1)"
+        # The reason, not the rule: a read-only volume, a permission problem and
+        # an I/O error are otherwise the same sentence. One line of it, because
+        # the reporter reads lines and would forward only the first anyway; and
+        # only when there is one, because a bare trailing colon reads as a
+        # message that got lost.
+        if [ -n "$clear_why" ]; then
+          echo "cannot remove $cand: a version must be a regular file: $clear_why" >&2
+        else
+          echo "cannot remove $cand: a version must be a regular file" >&2
+        fi
+      fi
+      continue
+    fi
+    [ -L "$f" ] || continue
+    # A version has to be a real file: a symlink resolves to a binary outside
+    # the directory the updater manages, which is the bug this whole change
+    # removes. Declining to RUN it is not enough, because it also holds a name
+    # the installer needs — and the installer declines a name that exists. That
+    # combination wedged every start: download, refuse, no change, forever.
+    #
+    # So free the name. Nothing ccc publishes here is a link, and unlink is safe
+    # for a name in use — it unbinds the name while a process already running
+    # the target keeps its inode.
+    if rm -f "$f"; then
+      echo "removed $cand: a version must be a real file, not a symlink" >&2
+    else
+      echo "cannot remove $cand: a version must be a real file, not a symlink" >&2
+    fi
+  done
+}
+
+free_unusable_versions
+if ! pick_best; then
+  for donor in "$BIN" "$(command -v ${CLAUDE_EXECUTABLE} 2>/dev/null || true)" "$LEGACY"; do
+    if seed_from "$donor"; then break; fi
+  done
+  pick_best || { echo INSTALL; exit 0; }
+fi
+
+if [ -L "$BIN" ] && [ "$(readlink "$BIN")" = "$BEST" ]; then
+  echo VALID
+  exit 0
+fi
+mkdir -p "$(dirname "$BIN")" || exit 1
+# A directory here is pathological but has to go; anything else is replaced in
+# one step, so a concurrent probe never sees the launcher missing.
+if [ -d "$BIN" ] && [ ! -L "$BIN" ]; then
+  if is_mountpoint "$BIN"; then
+    echo "refusing to replace $BIN: it is a mount point, and rm -rf would empty the other side" >&2
+    exit 1
+  fi
+  rm -rf "$BIN"
+  # The data dir has a post-check and this did not, so a removal that failed
+  # — a read-only parent, or a mount the guard above did not recognise — let
+  # ln write the launcher INSIDE the surviving directory, where nothing runs
+  # it, and the probe still printed RESTORED and exited 0.
+  if [ -e "$BIN" ] || [ -L "$BIN" ]; then
+    echo "cannot replace $BIN: it could not be removed" >&2
+    exit 1
+  fi
+fi
+ln -sfn "$BEST" "$BIN" || exit 1
+echo "RESTORED $(basename "$BEST")"`.trim();
+}
+
+// The probe writes nothing to stdout when it fails, so without its stderr the
+// user gets a bare "probe failed" and no way to tell a full disk from a
+// read-only volume from a bind mount in the way. Same failure the e2e helper
+// had: the assertion read stdout while the reason was on stderr.
+/**
+ * Print what a SUCCESSFUL probe had to say. Only lines that describe a change
+ * to shared state or a version passed over — the probe's other stderr is noise
+ * from tools it calls, and a start that worked should not read like a failure.
+ */
+function reportProbeNotes(stderr: string | undefined, seen: Set<string>): void {
+    for (const line of (stderr ?? "").split(/\r?\n/)) {
+        const text = line.trim();
+        if (!text.startsWith("removed ") && !text.startsWith("cannot remove ")) continue;
+        // The name comes from a volume every project on the host can write, so
+        // it reaches the terminal as data: control bytes out, or a filename
+        // can repaint the line it is reported on.
+        const safe = sanitizeForTerminal(text);
+        // A note that survives into the confirm probe — an entry that could not
+        // be removed — would otherwise be reported twice for one start.
+        if (seen.has(safe)) continue;
+        seen.add(safe);
+        console.log(safe);
+    }
+}
+
+/**
+ * Names read out of the shared volume reach a terminal as data. Control bytes
+ * can repaint the line they are reported on and bidi overrides can reverse it,
+ * so both go before anything prints — on the failure channel too, where the
+ * same name travels inside an Error message.
+ */
+export function sanitizeForTerminal(text: string): string {
+    return text.replace(/[\u0000-\u001f\u007f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "?");
+}
+
+function probeDiagnostic(stderr: string | undefined): string {
+    const text = (stderr ?? "").trim();
+    if (!text) return "";
+    const lastLines = text.split(/\r?\n/).slice(-3).join("; ");
+    return `: ${sanitizeForTerminal(lastLines)}`;
+}
+
+/**
+ * Build the command `ccc doctor` uses to describe the claude launcher.
+ *
+ * Reports the launcher's SHAPE, not only its version. A regular file at that
+ * path is the state in which `claude update` prints success and changes
+ * nothing, because the native updater declines to manage a launcher it did not
+ * create. Nothing surfaced that, which is why it went unnoticed across every
+ * project on the host until two version numbers were compared by hand.
+ *
+ * Separate and parameterized for the same reason `buildClaudeProbeScript` is:
+ * so a test can run it instead of matching substrings in it.
+ */
+export function buildClaudeLauncherReportCommand(
+    binPath: string,
+    dataDir: string = CLAUDE_DATA_DIR,
+): string {
+    const bin = shellQuote(binPath);
+    const versionsDir = shellQuote(`${dataDir}/versions`);
+    return [
+        `v="$(test -x ${bin} && ${bin} --version 2>&1 | head -1)"`,
+        `[ -n "$v" ] || exit 1`,
+        // Being a symlink is not the requirement — the updater manages the
+        // launcher only when it resolves INTO versions/. A symlink pointing
+        // anywhere else is just as unmanaged as a plain file, so reporting it
+        // as updatable would hide exactly the state this check exists to find.
+        `target="$(readlink -f ${bin} 2>/dev/null || true)"`,
+        // Both sides get resolved. The data dir is itself a symlink into the
+        // volume, so comparing a fully-resolved launcher against the literal
+        // path reports every healthy container as broken — measured, not
+        // guessed: the first version of this check did exactly that.
+        `expected="$(readlink -f ${versionsDir} 2>/dev/null || true)"`,
+        // `case` with a quoted pattern, not `${target#$expected/}`: in that
+        // expansion the pattern is a glob, so a path holding `*`, `?` or `[`
+        // silently matches the wrong thing. Quoting inside a case pattern makes
+        // those characters literal.
+        // What to print, versus what to match on. The sentinel exists so an
+        // absent versions dir matches nothing; printing it would tell the user
+        // about a directory that does not exist.
+        `shown="$expected"`,
+        `[ -n "$expected" ] || { expected="__no_versions_dir__"; shown=${versionsDir}; }`,
+        `case "$target" in`,
+        `  "$expected"/*) printf '%s (updatable, -> %s)\\n' "$v" "$target" ;;`,
+        // Exit 2, not 0. A caller that keys off "the command succeeded" would
+        // render this as a passing check — which is what ccc doctor did, showing
+        // a green tick and "All checks passed" for the exact state this exists
+        // to surface.
+        // Report the resolved directory here too. Printing the literal path on
+        // one branch and the resolved one on the other told a user about two
+        // different directories for the same place.
+        `  *) printf '%s (NOT updatable: launcher does not resolve into %s, so claude update cannot replace it. Usually an ordinary ccc start repairs it)\\n' "$v" "$shown"; exit 2 ;;`,
+        `esac`,
+    ].join("\n");
+}
+
+/**
+ * Ensure claude is available in the container, in the shape the native updater
+ * will keep managing: launcher symlink → versions/<v> inside the shared volume.
+ *
+ * One docker exec on the happy path; a second only on first install, to prove
+ * the installer actually produced a usable launcher instead of trusting it.
  */
 export function ensureClaudeInContainer(containerName: string): void {
-    // Single docker exec: check main path, fall through to cache, handle cleanup
-    const probeScript = `
-BIN="${CLAUDE_BIN_PATH}"
-CACHE="${CLAUDE_PERSIST_DIR}/claude"
-FOUND="$(command -v ${CLAUDE_EXECUTABLE} 2>/dev/null || true)"
-is_shim() { head -c 500 "$1" 2>/dev/null | grep -q mise; }
-is_claude() {
-  first_line="$("$1" --version 2>/dev/null | head -n 1 || true)"
-  printf '%s\n' "$first_line" | grep -Eiq '^(claude([[:space:]]+code)?[[:space:]]+v?[0-9]+[.][0-9]+[.][0-9]+|v?[0-9]+[.][0-9]+[.][0-9]+([[:space:]]|$)|v?[0-9]+[.][0-9]+[.][0-9]+.*\bclaude([[:space:]]+code)?\b)'
-}
-
-if [ -x "$BIN" ]; then
-  if is_shim "$BIN"; then
-    rm -f "$BIN"
-  elif is_claude "$BIN"; then
-    echo VALID; exit 0
-  else
-    rm -f "$BIN"
-  fi
-fi
-if [ -n "$FOUND" ] && [ -x "$FOUND" ]; then
-  if is_shim "$FOUND"; then
-    :
-  elif is_claude "$FOUND"; then
-    mkdir -p "$(dirname "$BIN")" "$(dirname "$CACHE")" && cp -L "$FOUND" "$CACHE" && cp -L "$CACHE" "$BIN"
-    echo VALID; exit 0
-  fi
-fi
-if [ -x "$CACHE" ]; then
-  if is_shim "$CACHE"; then
-    rm -f "$CACHE"
-  elif is_claude "$CACHE"; then
-    mkdir -p "$(dirname "$BIN")" && cp -L "$CACHE" "$BIN"
-    echo RESTORED; exit 0
-  else
-    rm -f "$CACHE"
-  fi
-fi
-echo INSTALL`.trim();
+    const probeScript = buildClaudeProbeScript(CLAUDE_LAYOUT_PATHS);
 
     const result = spawnSync(
         runtimeCli(),
-        ["exec", containerName, "sh", "-c", probeScript],
-        { encoding: "utf-8", timeout: 15000 },
+        ["exec", containerName, "sh", "-c", boundedContainerMutation(probeScript, CLAUDE_PROBE_INNER_TIMEOUT_SECONDS)],
+        { encoding: "utf-8", timeout: CLAUDE_PROBE_TIMEOUT_MS },
     );
+    if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT"
+        || result.status === 124
+        || result.status === 137) {
+        throw new Error("Claude readiness probe timed out");
+    }
+    if (result.error || result.status !== 0) {
+        throw new Error(`Claude readiness probe failed${probeDiagnostic(result.stderr)}`);
+    }
     const status = (result.stdout ?? "").trim();
+    // One set for the whole start: an entry that could not be removed appears
+    // in the confirm probe's stderr as well, and one start should report it
+    // once.
+    const reported = new Set<string>();
+    // Every success path, not only RESTORED. VALID is the common path for a
+    // container that is simply restarting, and INSTALL is the path where the
+    // removal that unblocked the install actually happened — reporting on
+    // neither meant the repair this exists for was the one thing never said.
+    reportProbeNotes(result.stderr, reported);
 
     if (status === "VALID") return;
 
-    if (status === "RESTORED") {
-        console.log("Restored claude from cache.");
+    if (status.startsWith("RESTORED")) {
+        // Nothing is copied out of a cache any more — the launcher is pointed at
+        // a version already in the shared volume. Name it, because "why am I on
+        // an old claude" is the question this line exists to answer.
+        const version = sanitizeForTerminal(status.slice("RESTORED".length).trim());
+        console.log(version
+            ? `Reusing claude ${version} from the shared volume.`
+            : "Reusing claude from the shared volume.");
         return;
     }
 
-    // Fresh install and save to volume
+    if (status !== "INSTALL") {
+        throw new Error("Claude readiness probe returned an invalid result");
+    }
+
+    // The data dir is already a symlink into the volume by the time the probe
+    // returns INSTALL, so the installer writes versions/ straight into the
+    // volume and creates the launcher symlink itself. Nothing to copy after.
     console.log("Installing claude (first run)...");
     const installResult = spawnSync(
         runtimeCli(),
@@ -121,147 +843,198 @@ echo INSTALL`.trim();
             containerName,
             "sh",
             "-c",
-            `${getToolByName("claude")!.installCommand} && ACTUAL="$(command -v ${CLAUDE_EXECUTABLE} 2>/dev/null || true)" && [ -n "$ACTUAL" ] && [ -x "$ACTUAL" ] && mkdir -p ${CLAUDE_PERSIST_DIR} "$(dirname ${CLAUDE_BIN_PATH})" && cp -L "$ACTUAL" ${CLAUDE_PERSIST_DIR}/claude && cp -L ${CLAUDE_PERSIST_DIR}/claude ${CLAUDE_BIN_PATH}`,
+            boundedContainerMutation(getToolByName("claude")!.installCommand),
         ],
-        { stdio: "inherit" },
+        { stdio: "inherit", timeout: CONTAINER_TOOL_MUTATION_TIMEOUT_MS },
     );
-    if (installResult.status !== 0) {
-        throw new Error("Failed to install claude in container");
+    assertMutationSucceeded(installResult, "Claude installation");
+
+    // Re-probe rather than trust the installer: a `curl | bash` that exits 0
+    // without leaving a usable launcher would otherwise surface much later, as
+    // an unexplained "tool is unavailable after setup".
+    const confirm = spawnSync(
+        runtimeCli(),
+        ["exec", containerName, "sh", "-c", boundedContainerMutation(probeScript, CLAUDE_PROBE_INNER_TIMEOUT_SECONDS)],
+        { encoding: "utf-8", timeout: CLAUDE_PROBE_TIMEOUT_MS },
+    );
+    const confirmStatus = (confirm.stdout ?? "").trim();
+    if (confirm.error || confirm.status !== 0
+        || (confirmStatus !== "VALID" && !confirmStatus.startsWith("RESTORED"))) {
+        throw new Error(`Claude installation left no usable launcher${probeDiagnostic(confirm.stderr)}`);
     }
+    reportProbeNotes(confirm.stderr, reported);
 }
 
 /**
- * Ensure all required tools are installed in the container.
+ * Ensure the requested tool is installed in the container.
  * - Claude: curl install + volume caching (only when activeTool is claude)
- * - npm tools (gemini, codex, opencode): npm install -g from registry
+ * - npm tools: lazily install only the active tool
  */
-export function ensureTools(
-    containerName: string,
-    activeTool: ToolDefinition,
-    options: { activeOnly?: boolean } = {},
-): void {
-    if (activeTool.name === "claude") {
-        ensureClaudeInContainer(containerName);
-    }
-    ensureNpmTools(containerName, activeTool, options.activeOnly ?? false);
+export function ensureTools(containerName: string, activeTool: ToolDefinition): void {
+    createRequestedToolSetup({
+        ensureClaudeLauncher: ensureClaudeInContainer,
+        ensureNpmTool,
+        probeLauncher: (target, path) => spawnSync(
+            runtimeCli(),
+            ["exec", target, "test", "-x", path],
+            { stdio: "ignore", timeout: CONTAINER_TOOL_PROBE_TIMEOUT_MS },
+        ),
+        ensureCodexSandbox: ensureCodexBubblewrap,
+    }).ensure(containerName, activeTool);
 }
 
-function npmSetupFailureReason(result: SpawnSyncReturns<string | Buffer>): string {
-    return result.error?.message
-        || result.stderr?.toString().trim()
-        || (result.signal ? `terminated by ${result.signal}` : `exit code ${result.status ?? "unknown"}`);
+function ensureCodexBubblewrap(containerName: string): void {
+    const cli = runtimeCli();
+    const probe = () => spawnSync(cli, [
+        "exec", containerName, "timeout", "-k", "2s", "8s", "sh", "-c",
+        // Distinguish a missing dependency from runtime/probe failures. Run as
+        // the same unprivileged container user that starts Codex.
+        "command -v bwrap >/dev/null 2>&1 || exit 42; exec bwrap --version",
+    ], { stdio: "ignore", timeout: CONTAINER_TOOL_PROBE_TIMEOUT_MS });
+    const existing = probe();
+    if (existing.error || existing.status !== 42) {
+        assertMutationSucceeded(existing, "Codex bubblewrap readiness probe");
+        return;
+    }
+
+    console.log("Installing bubblewrap for Codex...");
+    const update = spawnSync(cli, [
+        "exec", "-u", "root", containerName,
+        "timeout", "-k", "5s", `${CONTAINER_TOOL_MUTATION_INNER_TIMEOUT_SECONDS}s`,
+        "apt-get", "-o", "APT::Update::Error-Mode=any", "update",
+    ], { stdio: "inherit", timeout: CONTAINER_TOOL_MUTATION_TIMEOUT_MS });
+    assertMutationSucceeded(update, "Codex bubblewrap package index update");
+    const install = spawnSync(cli, [
+        "exec", "-u", "root", containerName,
+        "timeout", "-k", "5s", `${CONTAINER_TOOL_MUTATION_INNER_TIMEOUT_SECONDS}s`,
+        "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "--no-install-recommends", "bubblewrap",
+    ], { stdio: "inherit", timeout: CONTAINER_TOOL_MUTATION_TIMEOUT_MS });
+    assertMutationSucceeded(install, "Codex bubblewrap installation");
+    assertMutationSucceeded(probe(), "Codex bubblewrap readiness check after installation");
 }
 
 /**
- * Ensure npm-based tools from registry are installed independently.
+ * Ensure one npm-based tool from the registry is installed.
  */
-function ensureNpmTools(containerName: string, activeTool: ToolDefinition, activeOnly: boolean): void {
-    const tools = getNpmTools().filter((tool) => !activeOnly || tool.cmd === activeTool.name);
-    if (tools.length === 0) return;
+function ensureNpmTool(containerName: string, activeTool: ToolDefinition): void {
+    const configuredBinary = activeTool.binary || activeTool.name;
+    const tool = getNpmTools().find((candidate) =>
+        candidate.cmd === activeTool.name || candidate.cmd === configuredBinary,
+    );
+    if (!tool) {
+        throw new Error(`Requested tool ${activeTool.name} has no npm installation definition`);
+    }
 
-    // Single docker exec to check all relevant tools at once.
     const checkResult = spawnSync(
         runtimeCli(),
         ["exec", containerName, "sh", "-c",
-         tools.map((t) => `[ -x /home/ccc/.local/bin/${t.cmd} ] || echo ${t.cmd}`).join("; ")],
-        { encoding: "utf-8" },
+         `[ -x /home/ccc/.local/bin/${tool.cmd} ] || echo ${tool.cmd}`],
+        { encoding: "utf-8", timeout: CONTAINER_TOOL_PROBE_TIMEOUT_MS },
     );
+    if ((checkResult.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") {
+        throw new Error("Container npm tool probe timed out");
+    }
     if (checkResult.error || checkResult.status !== 0) {
-        throw new Error(`Failed to check npm tool readiness for ${activeTool.name} in container: ${npmSetupFailureReason(checkResult)}`);
+        throw new Error("Container npm tool probe failed");
     }
-    const missingCmds = new Set((checkResult.stdout ?? "").trim().split("\n").filter(Boolean));
-    const missing = tools.filter((t) => missingCmds.has(t.cmd));
-
-    if (missing.length === 0) {
+    if ((checkResult.stdout ?? "").trim() !== tool.cmd) {
         return;
     }
 
-    console.log(`Installing ${missing.map((t) => t.cmd).join(", ")}...`);
+    // A persisted npm binary can survive a recreated container without its wrapper.
+    // Probe the actual Node install offline, bypassing stale mise/PATH shims.
+    const cached = spawnSync(runtimeCli(), [
+        "exec", "-w", "/home/ccc", containerName, "sh", "-c",
+        `if [ ! -x /usr/bin/timeout ]; then echo "Tool verification requires timeout" >&2; exit 1; fi
+[ -x ~/.local/bin/mise ] || { echo "mise is unavailable for tool verification" >&2; exit 1; }
+node_installed=false
+for node_binary in "\${MISE_DATA_DIR:-$HOME/.local/share/mise}"/installs/node/22.*/bin/node; do
+    if [ -x "$node_binary" ]; then node_installed=true; break; fi
+done
+if [ "$node_installed" = false ]; then echo MISSING; exit 0; fi
+node_dir=$(MISE_OFFLINE=1 /usr/bin/timeout -k 1s 3s ~/.local/bin/mise where node@22) || exit $?
+[ -x "$node_dir/bin/node" ] || { echo "Installed Node 22 binary is unavailable" >&2; exit 1; }
+if [ ! -x "$node_dir/bin/${tool.cmd}" ]; then echo MISSING; exit 0; fi
+PATH="$node_dir/bin:$PATH" /usr/bin/timeout -k 1s 10s "$node_dir/bin/${tool.cmd}" --version >/dev/null
+status=$?
+case "$status" in
+    0) echo READY ;;
+    124) echo "Timed out verifying persisted ${tool.cmd}" >&2; exit "$status" ;;
+    137) echo "Verification of persisted ${tool.cmd} was killed (exit 137)" >&2; exit "$status" ;;
+    *) echo "Verification of persisted ${tool.cmd} failed (exit $status)" >&2; exit "$status" ;;
+esac`,
+    ], { encoding: "utf-8", timeout: 20_000 });
+    assertMutationSucceeded(cached, `Container ${tool.cmd} cached executable probe`);
+    const cachedState = cached.stdout.trim();
+    if (cachedState !== "READY" && cachedState !== "MISSING") {
+        throw new Error(`Container ${tool.cmd} cached executable probe returned an invalid result`);
+    }
+    if (cachedState === "MISSING") {
+        console.log(`Installing ${tool.cmd}...`);
 
-    const run = (script: string, stdio: "ignore" | "inherit" | "pipe") => spawnSync(
-        runtimeCli(),
-        ["exec", "-w", "/home/ccc", containerName, "sh", "-c", script],
-        { stdio },
-    );
+        const name = tool.pkg.split("/").pop();
+        const scope = tool.pkg.includes("/") ? tool.pkg.split("/")[0] + "/" : "";
+        const cleanupPattern = `"$gdir/${scope}.${name}-"*`;
 
-    const cleanupPatterns = missing.map((t) => {
-        const name = t.pkg.split("/").pop();
-        const scope = t.pkg.includes("/") ? t.pkg.split("/")[0] + "/" : "";
-        return `"$gdir/${scope}.${name}-"*`;
-    }).join(" ");
+        const cleanupResult = spawnSync(
+            runtimeCli(),
+            [
+                "exec", "-w", "/home/ccc", containerName, "sh", "-c",
+                boundedShortContainerMutation(`gdir=$(~/.local/bin/mise exec node@22 -- npm root -g 2>/dev/null) && rm -rf ${cleanupPattern} 2>/dev/null`),
+            ],
+            { stdio: "ignore", timeout: CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS },
+        );
+        assertMutationSucceeded(cleanupResult, `Container ${tool.cmd} cleanup`);
 
-    run(
-        `gdir=$(~/.local/bin/mise exec node@22 -- npm root -g 2>/dev/null) && rm -rf ${cleanupPatterns} 2>/dev/null; true`,
-        "ignore",
-    );
+        // Drop any stale mise shims for the missing tools BEFORE install. If the
+        // mise volume persisted a shim from an earlier install whose underlying
+        // package no longer matches, the shim throws "not a valid shim" — and PATH
+        // would hit it if the wrapper at /home/ccc/.local/bin/<cmd> is gone.
+        const shimCleanupResult = spawnSync(
+            runtimeCli(),
+            ["exec", "-w", "/home/ccc", containerName, "sh", "-c", boundedShortContainerMutation(`rm -f ~/.local/share/mise/shims/${tool.cmd}`)],
+            { stdio: "ignore", timeout: CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS },
+        );
+        assertMutationSucceeded(shimCleanupResult, `Container ${tool.cmd} shim cleanup`);
 
-    // Drop any stale mise shims for the missing tools BEFORE install. If the
-    // mise volume persisted a shim from an earlier install whose underlying
-    // package no longer matches, the shim throws "not a valid shim" — and PATH
-    // would hit it if the wrapper at /home/ccc/.local/bin/<cmd> is gone.
-    const shimNuke = missing.map((t) => `rm -f ~/.local/share/mise/shims/${t.cmd}`).join("; ");
-    run(`${shimNuke}; true`, "ignore");
+        const installResult = spawnSync(
+            runtimeCli(),
+            [
+                "exec", "-w", "/home/ccc", containerName, "sh", "-c",
+                boundedContainerMutation(`~/.local/bin/mise exec node@22 -- npm install -g ${tool.pkg}`),
+            ],
+            { stdio: "inherit", timeout: CONTAINER_TOOL_MUTATION_TIMEOUT_MS },
+        );
+        assertMutationSucceeded(installResult, `Container ${tool.cmd} installation`);
 
-    let activeFailure: Error | undefined;
-    let installedAny = false;
-    for (const t of missing) {
-        const installResult = run(`~/.local/bin/mise exec node@22 -- npm install -g ${t.pkg}`, "inherit");
-        let failure: Error | undefined;
-        if (installResult.error || installResult.status !== 0) {
-            failure = new Error(`Failed to install ${t.cmd} (${t.pkg}) in container: ${npmSetupFailureReason(installResult)}`);
-        } else {
-            installedAny = true;
-            // A failed write or chmod must not leave an executable broken wrapper.
-            const wrapperResult = run(
-                `if cat > /home/ccc/.local/bin/${t.cmd} << 'WRAPPER'\n#!/bin/sh\nexec ~/.local/bin/mise exec node@22 -- ${t.cmd} "$@"\nWRAPPER\nthen\n    chmod +x /home/ccc/.local/bin/${t.cmd} && exit 0\nfi\nrm -f /home/ccc/.local/bin/${t.cmd}\nexit 1`,
-                "pipe",
-            );
-            if (wrapperResult.error || wrapperResult.status !== 0) {
-                failure = new Error(`Failed to create wrapper for ${t.cmd} (${t.pkg}) in container: ${npmSetupFailureReason(wrapperResult)}`);
-            }
-        }
-        if (failure) {
-            if (t.cmd === activeTool.name) activeFailure = failure;
-            else console.warn(`Warning: ${failure.message} (optional tool)`);
-        }
+        // Regenerate mise shims so they reflect the freshly-installed binaries.
+        // Without this, an outdated shim from a prior install can shadow the new
+        // binary on PATH lookups that bypass the wrapper at /home/ccc/.local/bin.
+        const reshimResult = spawnSync(
+            runtimeCli(),
+            ["exec", "-w", "/home/ccc", containerName, "sh", "-c", boundedShortContainerMutation("~/.local/bin/mise reshim")],
+            { stdio: "ignore", timeout: CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS },
+        );
+        assertMutationSucceeded(reshimResult, `Container ${tool.cmd} reshim`);
     }
 
-    // Refresh shims for every successful package, even if another tool failed.
-    if (installedAny) {
-        run("~/.local/bin/mise reshim 2>/dev/null; true", "ignore");
-    }
-    if (activeFailure) throw activeFailure;
-}
-
-/**
- * Save claude binary back to volume and refresh the fixed install path.
- */
-export function saveClaudeBinaryToVolume(containerName: string): void {
-    const resolveResult = spawnSync(
-        runtimeCli(),
-        ["exec", containerName, "sh", "-c", `command -v ${CLAUDE_EXECUTABLE} 2>/dev/null || true`],
-        { encoding: "utf-8", timeout: 10000 },
-    );
-    const actualPath = (resolveResult.stdout ?? "").trim() || CLAUDE_BIN_PATH;
-
-    if (isMiseShim(containerName, actualPath)) {
-        return;
-    }
-    if (!isValidClaudeBinary(containerName, actualPath)) {
-        return;
-    }
-    spawnSync(
+    const wrapperResult = spawnSync(
         runtimeCli(),
         [
-            "exec",
-            containerName,
-            "sh",
-            "-c",
-            `mkdir -p ${CLAUDE_PERSIST_DIR} "$(dirname ${CLAUDE_BIN_PATH})" && [ -x '${actualPath.replace(/'/g, "'\\''")}' ] && cp -L '${actualPath.replace(/'/g, "'\\''")}' ${CLAUDE_PERSIST_DIR}/claude && cp -L ${CLAUDE_PERSIST_DIR}/claude ${CLAUDE_BIN_PATH} || true`,
+            "exec", "-w", "/home/ccc", containerName, "sh", "-c",
+            boundedShortContainerMutation(`if cat > /home/ccc/.local/bin/${tool.cmd} << 'WRAPPER'\n#!/bin/sh\nexec ~/.local/bin/mise exec node@22 -- ${tool.cmd} "$@"\nWRAPPER\nthen\n    chmod +x /home/ccc/.local/bin/${tool.cmd} && exit 0\nfi\nrm -f /home/ccc/.local/bin/${tool.cmd}\nexit 1`),
         ],
-        { stdio: "ignore" },
+        { stdio: "pipe", timeout: CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS },
     );
+    assertMutationSucceeded(wrapperResult, `Container ${tool.cmd} wrapper creation`);
 }
+
+// saveClaudeBinaryToVolume() used to run on every session exit: it copied
+// `command -v claude` into the volume and then copied that back over the
+// launcher. Both halves are gone. The launcher is now a symlink and that second
+// copy was what flattened it back into a regular file; the first is redundant
+// because versions/ already lives in the volume. Removing it also drops a
+// ~200MB copy from the shutdown path of every session.
 
 /**
  * Ensure uv is available globally in the container via mise.
@@ -273,17 +1046,24 @@ export function ensureUvAvailable(containerName: string): void {
         runtimeCli(),
         ["exec", containerName, "sh", "-c",
          "~/.local/bin/mise ls --global 2>/dev/null | grep -q '^uv '"],
-        { encoding: "utf-8" },
+        { encoding: "utf-8", timeout: CONTAINER_TOOL_PROBE_TIMEOUT_MS },
     );
+    if ((checkResult.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") {
+        throw new Error("Container uv probe timed out");
+    }
+    if (checkResult.error || (checkResult.status !== 0 && checkResult.status !== 1)) {
+        throw new Error("Container uv probe failed");
+    }
     if (checkResult.status === 0) return;
 
     process.stderr.write("\x1b[2m▸ Installing uv (one-time, ~30-60s)...\x1b[0m\n");
     // MISE_VERBOSE=1 forces mise to stream download/build progress so the user
     // sees activity instead of a silent stall during the install.
-    spawnSync(
+    const installResult = spawnSync(
         runtimeCli(),
         ["exec", "-e", "MISE_VERBOSE=1", containerName, "sh", "-c",
-         "~/.local/bin/mise use -g uv@latest"],
-        { stdio: "inherit" },
+         boundedContainerMutation("~/.local/bin/mise use -g uv@latest")],
+        { stdio: "inherit", timeout: CONTAINER_TOOL_MUTATION_TIMEOUT_MS },
     );
+    assertMutationSucceeded(installResult, "Container uv installation");
 }

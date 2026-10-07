@@ -1,0 +1,70 @@
+export {
+    HYPER_V_NETWORK_GATEWAY,
+    HYPER_V_NETWORK_MARKER,
+    HYPER_V_NETWORK_NAT,
+    HYPER_V_NETWORK_PREFIX,
+    HYPER_V_NETWORK_PREFIX_LENGTH,
+    HYPER_V_NETWORK_SWITCH,
+    isHyperVCccNetworkIdentity,
+    type HyperVAcquireBaseImageOptions,
+    type HyperVAutomaticBaseImageProfile,
+    type HyperVBaseImageObservation,
+    type HyperVBootstrapNetworkCleanupObservation,
+    type HyperVBootstrapNetworkObservation,
+    type HyperVDeleteObservation,
+    type HyperVGuestBootDiagnosticObservation,
+    type HyperVGuestExecObservation,
+    type HyperVGuestProvisionObservation,
+    type HyperVGuestReadyFailureObservation,
+    type HyperVGuestReadyObservation,
+    type HyperVGuestTransferObservation,
+    type HyperVNetworkCleanupObservation,
+    type HyperVNetworkAllocationIdentity,
+    type HyperVNetworkAllocationObservation,
+    type HyperVNetworkAllocationsObservation,
+    type HyperVNetworkAllocationsOptions,
+    type HyperVNetworkObservation,
+    type HyperVNetworkOptions,
+    type HyperVProviderCommand,
+    type HyperVReadiness,
+    type HyperVRecoveryObservation,
+    type HyperVSetupObservation,
+    type HyperVSnapshotDeleteObservation,
+    type HyperVSnapshotObservation,
+    type HyperVVmObservation,
+    type HyperVSnapshotRepairObservation,
+} from "./contracts.js";
+// The typed bootstrap path proves VM ownership with the same marker the generated PowerShell
+// embedded. It has to be this function and not a second copy of the format: two copies can
+// drift, and a drifted marker makes the ownership check fail -- or, worse, pass wrongly.
+export { hyperVSnapshotName, hyperVVmName, ownershipMarker } from "./core.js";
+export { hyperVReadinessCommand, hyperVRebootCommand, hyperVSetupCommand, hyperVEnsureNetworkCommand, hyperVCleanupNetworkCommand } from "./host.js";
+export { hyperVInspectNetworkAllocationsCommand } from "./network-allocations.js";
+export { hyperVCreateCommand } from "./vm-create.js";
+export { hyperVCreatePrologueCommand, hyperVCreateCompensationCommand, parseHyperVCreatePrologueFailure, type HyperVCreatePrologueOptions } from "./vm-create-prologue.js";
+export { hyperVInspectCreateVhdCommand, parseHyperVCreateVhdInspection, type HyperVCreateVhdInspectionOptions, type HyperVCreateVhdInspection } from "./vm-create-inspect.js";
+export { hyperVLinuxSeedCommand, hyperVLinuxSshReadyCommand, hyperVLinuxGuiPrepareCommand, hyperVLinuxGuiReadyCommand, hyperVLinuxGuiTypeGuestCommand, hyperVLinuxGuiScrollGuestCommand, hyperVBootstrapNetworkCommand, hyperVLinuxNetworkFinalizeCommand, hyperVBootstrapNetworkCleanupCommand, hyperVLinuxSshExecCommand, hyperVLinuxScpUploadCommand, hyperVLinuxScpDownloadCommand } from "./linux-guest.js";
+export {
+    hyperVPrepareBaseImageCommand,
+    hyperVAcquireBaseImageCommand,
+    hyperVAcquireBaseImagePrepareCommand,
+    hyperVAcquireBaseImageFinalizeCommand,
+    parseHyperVAcquireBaseImagePrepareObservation,
+    type HyperVAcquireBaseImagePrepareObservation,
+    type HyperVAcquireBaseImageFinalizeOptions,
+} from "./images.js";
+export { hyperVImportedImageStorageCommand, parseHyperVImportedImageStorage } from "./image-storage.js";
+export { hyperVStatusCommand, hyperVStartCommand, hyperVGuestReadyCommand, hyperVGuestBootDiagnosticCommand, hyperVStopCommand, hyperVDeleteCommand, hyperVRecoverOrphanCommand } from "./lifecycle.js";
+export { hyperVSnapshotRepairCommand } from "./snapshots.js";
+export {
+    hyperVGuestExecCommand,
+    hyperVGuestProvisionCommand,
+    hyperVGuestProvisionMediaCommand,
+    hyperVGuestUploadCommand,
+    hyperVGuestDownloadCommand,
+    HYPER_V_FIRST_LOGON_LAUNCHER,
+    HYPER_V_FIRST_LOGON_SCRIPT_NAME,
+    HYPER_V_FIRST_LOGON_COMMAND_LINE_LIMIT,
+} from "./windows-guest.js";
+export { HYPER_V_UBUNTU_IMAGE_CATALOG_ID, HYPER_V_UBUNTU_IMAGE_SHA256, HYPER_V_UBUNTU_IMAGE_URL, HYPER_V_UBUNTU_VIRTUAL_SIZE_BYTES } from "./ubuntu-image.js";
+export * from "./observations.js";

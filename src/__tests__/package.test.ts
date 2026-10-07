@@ -1,9 +1,10 @@
 import { execFileSync, spawn } from "child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { pathToFileURL } from "url";
 import { describe, expect, it } from "vitest";
+import { materializeUnixInstallPayload, unixWrapperContent } from "../../scripts/install.js";
 
 const repoRoot = join(__dirname, "../..");
 const HIDDEN_LEGACY_TRANSPORT_KEYS = new Set([
@@ -21,15 +22,42 @@ const HIDDEN_LEGACY_TRANSPORT_KEYS = new Set([
 ]);
 
 function schemaProperties(inputSchema: unknown): Record<string, unknown> {
-    return ((inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties || {}) as Record<string, unknown>;
+    const schema = inputSchema as { properties?: Record<string, unknown>; oneOf?: unknown[] } | undefined;
+    return Object.assign({}, schema?.properties, ...(schema?.oneOf || []).map(schemaProperties));
 }
 
 describe("npm package contents", () => {
+    it("materializes a self-contained Unix global install payload", async () => {
+        const installRoot = mkdtempSync(join(tmpdir(), "ccc-global-install-"));
+        const packageRoot = join(installRoot, "ccc-dist");
+        try {
+            materializeUnixInstallPayload(repoRoot, packageRoot);
+
+            const brokerPath = join(packageRoot, "dist", "packages", "device-lab", "dist", "device-lab-broker.js");
+            const androidStoragePath = join(packageRoot, "dist", "packages", "device-lab", "providers", "state", "android-avd-storage.mjs");
+            expect(existsSync(brokerPath)).toBe(true);
+            expect(existsSync(androidStoragePath)).toBe(true);
+            expect(existsSync(join(packageRoot, "dist", "device-lab-mcp", "server.mjs"))).toBe(true);
+            expect(existsSync(join(packageRoot, "dist", "packages", "device-lab", "providers", "display", "x11.mjs"))).toBe(true);
+            expect(existsSync(join(packageRoot, "x11-mcp"))).toBe(false);
+            expect(existsSync(join(packageRoot, "dist", "x11-mcp"))).toBe(false);
+            expect(unixWrapperContent(packageRoot)).toContain(pathToFileURL(join(packageRoot, "dist", "index.js")).href);
+            await expect(import(`${pathToFileURL(brokerPath).href}?installed=${Date.now()}`)).resolves.toBeDefined();
+
+            writeFileSync(join(packageRoot, "stale-install-marker"), "stale");
+            materializeUnixInstallPayload(repoRoot, packageRoot);
+            expect(existsSync(join(packageRoot, "stale-install-marker"))).toBe(false);
+            expect(existsSync(androidStoragePath)).toBe(true);
+        } finally {
+            rmSync(installRoot, { recursive: true, force: true });
+        }
+    });
+
     it("locks a reproducible, patched Appium broker runtime", () => {
-        const manifest = JSON.parse(readFileSync(join(repoRoot, "device-lab-mcp", "package.json"), "utf-8")) as {
+        const manifest = JSON.parse(readFileSync(join(repoRoot, "packages", "device-lab", "appium-runtime", "package.json"), "utf-8")) as {
             dependencies?: Record<string, string>;
         };
-        const lock = JSON.parse(readFileSync(join(repoRoot, "device-lab-mcp", "package-lock.json"), "utf-8")) as {
+        const lock = JSON.parse(readFileSync(join(repoRoot, "packages", "device-lab", "appium-runtime", "package-lock.json"), "utf-8")) as {
             packages?: Record<string, { version?: string; dependencies?: Record<string, string>; optionalDependencies?: Record<string, string> }>;
         };
         const packages = lock.packages || {};
@@ -78,60 +106,58 @@ describe("npm package contents", () => {
 
         expect(files).toContain("scripts/install.js");
         expect(files).toContain("dist/index.js");
-        expect(files).toContain("dist/x11-mcp/server.mjs");
+        expect([...files].some((file) => file.startsWith("dist/x11-mcp/"))).toBe(false);
         expect(files).toContain("dist/device-lab-mcp/server.mjs");
-        expect(files).toContain("dist/lab-mcp/server.mjs");
+        expect(files).not.toContain("dist/lab-mcp/server.mjs");
         expect(files).toContain("Dockerfile");
         expect(files).toContain("Containerfile");
-        expect(files).toContain("x11-mcp/package.json");
-        expect(files).toContain("x11-mcp/package-lock.json");
-        expect(files).toContain("x11-mcp/server.mjs");
+        expect([...files].some((file) => file.startsWith("x11-mcp/"))).toBe(false);
         expect(files).toContain("device-lab-mcp/package.json");
-        expect(files).toContain("device-lab-mcp/package-lock.json");
+        expect(files).toContain("dist/packages/device-lab/appium-runtime/package.json");
+        expect(files).toContain("dist/packages/device-lab/appium-runtime/package-lock.json");
+        expect(files).toContain("dist/packages/device-lab/dist/broker-entry.js");
+        expect(files).toContain("dist/packages/hyper-v/powershell/Invoke-HyperVWindowsOperation.ps1");
         expect(files).toContain("device-lab-mcp/server.mjs");
+        expect(files).toContain("device-lab-mcp/scripts/build.mjs");
         expect(files).toContain("device-lab-mcp/src/server.mjs");
         expect(files).toContain("device-lab-mcp/src/tools.mjs");
-        expect(files).toContain("device-lab-mcp/src/backends/android.mjs");
-        expect(files).toContain("device-lab-mcp/src/backends/android-device.mjs");
-        expect(files).toContain("device-lab-mcp/src/backends/ios-simulator.mjs");
-        expect(files).toContain("device-lab-mcp/src/backends/ios-device.mjs");
-        expect(files).toContain("device-lab-mcp/src/backends/windows-sandbox.mjs");
-        expect(files).toContain("device-lab-mcp/src/backends/macos-vm.mjs");
-        expect(files).toContain("device-lab-mcp/src/state/ios-state.mjs");
-        expect(files).toContain("device-lab-mcp/src/state/macos-state.mjs");
-        expect(files).toContain("device-lab-mcp/src/state/ios-device-state.mjs");
-        expect(files).toContain("device-lab-mcp/src/state/physical-lease-store.mjs");
-        expect(files).toContain("device-lab-mcp/src/display/x11.mjs");
+        expect(files).toContain("dist/packages/device-lab/providers/backends/android.mjs");
+        expect(files).toContain("dist/packages/device-lab/providers/backends/android-device.mjs");
+        expect(files).toContain("dist/packages/device-lab/providers/backends/ios-simulator.mjs");
+        expect(files).toContain("dist/packages/device-lab/providers/backends/ios-device.mjs");
+        expect(files).toContain("dist/packages/device-lab/providers/backends/windows-sandbox.mjs");
+        expect(files).toContain("dist/packages/device-lab/providers/backends/macos-vm.mjs");
+        expect(files).toContain("dist/packages/device-lab/providers/backends/linux-vm.mjs");
+        expect(files).toContain("dist/packages/device-lab/providers/state/ios-state.mjs");
+        expect(files).toContain("dist/packages/device-lab/providers/state/macos-state.mjs");
+        expect(files).toContain("dist/packages/device-lab/providers/state/ios-device-state.mjs");
+        expect(files).toContain("dist/packages/device-lab/providers/state/physical-lease-store.mjs");
+        expect(files).toContain("dist/packages/device-lab/providers/display/x11.mjs");
         expect(files).toContain("scripts/test-level.js");
         expect(files).toContain("scripts/run-vitest.mjs");
-        expect(files).toContain("scripts/real-tests/run.mjs");
-        expect(files).toContain("scripts/real-tests/assert-json.mjs");
-        expect(files).toContain("scripts/real-tests/summarize-json.mjs");
-        expect(files).toContain("scripts/real-tests/installed-mcp-smoke.mjs");
-        expect(files).toContain("scripts/real-tests/helpers.mjs");
+        expect(files).toContain("scripts/real-tests/run.ts");
+        expect(files).toContain("scripts/real-tests/assert-json.ts");
+        expect(files).toContain("scripts/real-tests/summarize-json.ts");
+        expect(files).toContain("scripts/real-tests/installed-mcp-smoke.ts");
+        expect(files).toContain("scripts/real-tests/helpers.ts");
         expect(files).toContain("scripts/real-tests/hidden-child-processes.cjs");
-        expect(files).toContain("scripts/real-tests/device-lab-mcp-client.mjs");
-        expect(files).toContain("scripts/real-tests/android-emulator-e2e.mjs");
-        expect(files).toContain("scripts/real-tests/ios-e2e.mjs");
-        expect(files).toContain("scripts/real-tests/macos-vm-e2e.mjs");
-        expect(files).toContain("scripts/real-tests/windows-sandbox-e2e.mjs");
-        expect(files).toContain("scripts/real-tests/level0-package-smoke.mjs");
-        expect(files).toContain("scripts/real-tests/level1-real-provider-readiness.mjs");
-        expect(files).toContain("scripts/real-tests/level2-host-integration-slots.mjs");
-        expect(files).toContain("scripts/real-tests/level2-ios-e2e.mjs");
-        expect(files).toContain("scripts/real-tests/level2-android-emulator-e2e.mjs");
-        expect(files).toContain("scripts/real-tests/android-device-e2e.mjs");
-        expect(files).toContain("scripts/real-tests/level2-android-device-e2e.mjs");
-        expect(files).toContain("scripts/real-tests/level2-macos-vm-e2e.mjs");
-        expect(files).toContain("scripts/real-tests/level2-windows-sandbox.mjs");
-        expect(files).toContain("scripts/real-tests/level2-real-linux-vm.mjs");
-        expect(files).toContain("scripts/real-tests/level3-real-destructive.mjs");
-        expect(files).toContain("lab-mcp/package.json");
-        expect(files).toContain("lab-mcp/package-lock.json");
-        expect(files).toContain("lab-mcp/server.mjs");
-        expect(files).toContain("lab-mcp/src/server.mjs");
-        expect(files).toContain("lab-mcp/src/provider.mjs");
-        expect(files).toContain("lab-mcp/src/tools.mjs");
+        expect(files).toContain("scripts/real-tests/device-lab-mcp-client.ts");
+        expect(files).toContain("scripts/real-tests/android-emulator-e2e.ts");
+        expect(files).toContain("scripts/real-tests/ios-e2e.ts");
+        expect(files).toContain("scripts/real-tests/macos-vm-e2e.ts");
+        expect(files).toContain("scripts/real-tests/windows-sandbox-e2e.ts");
+        expect(files).toContain("scripts/real-tests/level0-package-smoke.ts");
+        expect(files).toContain("scripts/real-tests/level1-real-provider-readiness.ts");
+        expect(files).toContain("scripts/real-tests/level2-host-integration-slots.ts");
+        expect(files).toContain("scripts/real-tests/level2-ios-e2e.ts");
+        expect(files).toContain("scripts/real-tests/level2-android-emulator-e2e.ts");
+        expect(files).toContain("scripts/real-tests/android-device-e2e.ts");
+        expect(files).toContain("scripts/real-tests/level2-android-device-e2e.ts");
+        expect(files).toContain("scripts/real-tests/level2-macos-vm-e2e.ts");
+        expect(files).toContain("scripts/real-tests/level2-windows-sandbox.ts");
+        expect(files).toContain("scripts/real-tests/level2-real-linux-vm.ts");
+        expect(files).toContain("scripts/real-tests/level3-real-destructive.ts");
+        expect([...files].some((file) => file.startsWith("lab-mcp/"))).toBe(false);
     });
 
     it("runs packaged informational CLI commands without creating runtime state", () => {
@@ -168,7 +194,7 @@ describe("npm package contents", () => {
         const homeDir = mkdtempSync(join(tmpdir(), "ccc-packaged-auth-race-"));
         const barrier = join(homeDir, "start");
         const ownerId = "1234567890abcdef";
-        const moduleUrl = pathToFileURL(join(repoRoot, "dist", "device-lab-broker.js")).href;
+        const moduleUrl = pathToFileURL(join(repoRoot, "dist", "packages", "device-lab", "dist", "device-lab-broker.js")).href;
         const script = [
             `import { existsSync } from ${JSON.stringify("fs")};`,
             `import { deviceBrokerOwnerSecret } from ${JSON.stringify(moduleUrl)};`,
@@ -228,7 +254,7 @@ describe("npm package contents", () => {
     it("keeps owner device state valid across concurrent provider processes", async () => {
         const homeDir = mkdtempSync(join(tmpdir(), "ccc-packaged-device-state-race-"));
         const barrier = join(homeDir, "start");
-        const moduleUrl = pathToFileURL(join(repoRoot, "device-lab-mcp", "src", "state", "device-store.mjs")).href;
+        const moduleUrl = pathToFileURL(join(repoRoot, "dist", "packages", "device-lab", "providers", "state", "device-store.mjs")).href;
         const env = Object.fromEntries(
             Object.entries(process.env).filter(([key, value]) => value !== undefined && key !== "VITEST" && !key.startsWith("VITEST_")),
         ) as NodeJS.ProcessEnv;
@@ -290,7 +316,7 @@ describe("npm package contents", () => {
     it("preserves every concurrent owner device mutation across provider processes", async () => {
         const homeDir = mkdtempSync(join(tmpdir(), "ccc-packaged-device-mutation-race-"));
         const barrier = join(homeDir, "start");
-        const moduleUrl = pathToFileURL(join(repoRoot, "device-lab-mcp", "src", "state", "device-store.mjs")).href;
+        const moduleUrl = pathToFileURL(join(repoRoot, "dist", "packages", "device-lab", "providers", "state", "device-store.mjs")).href;
         const env = Object.fromEntries(
             Object.entries(process.env).filter(([key, value]) => value !== undefined && key !== "VITEST" && !key.startsWith("VITEST_")),
         ) as NodeJS.ProcessEnv;
@@ -351,7 +377,7 @@ describe("npm package contents", () => {
     it("allows exactly one concurrent claim for the same owner device identity", async () => {
         const homeDir = mkdtempSync(join(tmpdir(), "ccc-packaged-device-claim-race-"));
         const barrier = join(homeDir, "start");
-        const moduleUrl = pathToFileURL(join(repoRoot, "device-lab-mcp", "src", "state", "device-store.mjs")).href;
+        const moduleUrl = pathToFileURL(join(repoRoot, "dist", "packages", "device-lab", "providers", "state", "device-store.mjs")).href;
         const env = Object.fromEntries(
             Object.entries(process.env).filter(([key, value]) => value !== undefined && key !== "VITEST" && !key.startsWith("VITEST_")),
         ) as NodeJS.ProcessEnv;
@@ -415,7 +441,7 @@ describe("npm package contents", () => {
     });
 
     it("summarizes native JSON MCP content for real-test proof metadata", async () => {
-        const { parseToolPayload, parseToolResult, realMcpToolRequestTimeoutMs, summarizeToolResultForProof } = await import("../../scripts/real-tests/device-lab-mcp-client.mjs") as {
+        const { parseToolPayload, parseToolResult, realMcpToolRequestTimeoutMs, summarizeToolResultForProof } = await import("../../scripts/real-tests/device-lab-mcp-client.ts") as {
             parseToolPayload: (result: unknown) => Record<string, unknown>;
             parseToolResult: (result: unknown, options?: Record<string, unknown>) => Record<string, unknown>;
             realMcpToolRequestTimeoutMs: (name: string, args?: Record<string, unknown>) => number;
@@ -441,19 +467,60 @@ describe("npm package contents", () => {
             errorPayloadJson: true,
             errorCode: "provider-missing",
         });
-        expect(realMcpToolRequestTimeoutMs("device_status")).toBe(120000);
-        expect(realMcpToolRequestTimeoutMs("device_create", { createAvd: true })).toBe(360000);
-        expect(realMcpToolRequestTimeoutMs("device_start", { waitForBoot: true, bootTimeoutMs: 180000 })).toBe(210000);
-        expect(realMcpToolRequestTimeoutMs("mobile_get_clipboard", { backend: "android-emulator" })).toBe(360000);
-        expect(realMcpToolRequestTimeoutMs("device_exec", { helperTimeoutMs: 180000 })).toBe(210000);
-        expect(realMcpToolRequestTimeoutMs("device_create", { rpcTimeoutMs: 615000 })).toBe(615000);
+        expect(realMcpToolRequestTimeoutMs("status")).toBe(120000);
+        expect(realMcpToolRequestTimeoutMs("create_android_emulator", { systemImage: "system-images;android-35;google_apis;x86_64" })).toBe(360000);
+        expect(realMcpToolRequestTimeoutMs("start", { waitForBoot: true, bootTimeoutMs: 180000 })).toBe(210000);
+        expect(realMcpToolRequestTimeoutMs("clipboard", { backend: "android-emulator" })).toBe(360000);
+        expect(realMcpToolRequestTimeoutMs("exec", { timeoutMs: 180000 })).toBe(210000);
+        expect(realMcpToolRequestTimeoutMs("create_ios_simulator", { rpcTimeoutMs: 615000 })).toBe(630000);
+        expect(realMcpToolRequestTimeoutMs("create_windows_vm", {})).toBe(21645000);
+        expect(realMcpToolRequestTimeoutMs("create_windows_vm", {
+            rpcTimeoutMs: 30000,
+        })).toBe(21645000);
+        expect(realMcpToolRequestTimeoutMs("start", {
+            backend: "windows-vm",
+            waitForBoot: true,
+            bootTimeoutMs: 180000,
+        })).toBe(1245000);
+        expect(realMcpToolRequestTimeoutMs("reboot", {
+            backend: "linux-vm",
+            waitForBoot: true,
+            bootTimeoutMs: 600000,
+            rpcTimeoutMs: 30000,
+        })).toBe(2685000);
+        expect(realMcpToolRequestTimeoutMs("reboot", {
+            backend: "linux-vm",
+            waitForBoot: true,
+            bootTimeoutMs: Number.MAX_SAFE_INTEGER,
+        })).toBe(3285000);
+        expect(realMcpToolRequestTimeoutMs("reboot", {
+            backend: "linux-vm",
+            rpcTimeoutMs: Number.MAX_SAFE_INTEGER,
+        })).toBe(2385000);
+        expect(realMcpToolRequestTimeoutMs("start", {
+            backend: "windows-vm",
+            waitForBoot: false,
+        })).toBe(765000);
+        for (const name of ["status", "stop", "delete"]) {
+            expect(realMcpToolRequestTimeoutMs(name, {
+                backend: "windows-vm",
+            })).toBe(765000);
+        }
+    });
+
+    it("keeps real-provider transfer fixtures inside the broker-visible project root", async () => {
+        const { realProviderTempRoot } = await import("../../scripts/real-tests/helpers.ts") as {
+            realProviderTempRoot: (options?: Record<string, unknown>) => string;
+        };
+        expect(realProviderTempRoot()).toBe(join(repoRoot, "results", ".tmp"));
+        expect(realProviderTempRoot({ brokerOnly: false })).toBe(join(repoRoot, "results", ".tmp"));
     });
 
     it("runs the bundled device-lab MCP server with the advertised tool surface", { timeout: 30000 }, async () => {
         const { TOOLS } = await import("../../device-lab-mcp/src/tools.mjs") as {
             TOOLS: Array<{ name: string; inputSchema?: unknown }>;
         };
-        const { parseToolPayload, withDeviceLabMcp } = await import("../../scripts/real-tests/device-lab-mcp-client.mjs") as {
+        const { parseToolPayload, withDeviceLabMcp } = await import("../../scripts/real-tests/device-lab-mcp-client.ts") as {
             parseToolPayload: (result: unknown) => Record<string, unknown>;
             withDeviceLabMcp: (
                 callback: (ctx: {
@@ -463,7 +530,7 @@ describe("npm package contents", () => {
                 options?: { env?: Record<string, string>; name?: string; serverPath?: string },
             ) => Promise<void>;
         };
-        const { installedMcpSmokeSample: distSmokeSample } = await import("../../scripts/real-tests/installed-mcp-smoke.mjs") as {
+        const { installedMcpSmokeSample: distSmokeSample } = await import("../../scripts/real-tests/installed-mcp-smoke.ts") as {
             installedMcpSmokeSample: (toolName: string) => Record<string, unknown>;
         };
         const homeDir = mkdtempSync(join(tmpdir(), "ccc-device-lab-dist-smoke-"));
@@ -482,7 +549,7 @@ describe("npm package contents", () => {
                 expect(advertisedTransportKeys).toEqual([]);
                 expect(listed.tools.map((tool) => tool.name)).not.toContain("device_broker_service");
 
-                const payload = parseToolPayload(await callTool("device_backends", { implicitBroker: false })) as {
+                const payload = parseToolPayload(await callTool("devices", { view: "backends", implicitBroker: false, detail: true })) as {
                     source?: string;
                     backends?: Array<{ name?: string }>;
                 };
@@ -495,37 +562,33 @@ describe("npm package contents", () => {
                     "macos-vm",
                 ]));
 
-                const displayStatus = parseToolPayload(await callTool("device_status", { deviceId: "x11-current-display" })) as {
-                    id?: string;
+                const displayStatus = parseToolPayload(await callTool("status", { deviceId: "x11-current-display", detail: true })) as {
+                    deviceId?: string;
                     kind?: string;
                     backend?: string;
                 };
                 expect(displayStatus).toEqual(expect.objectContaining({
-                    id: "x11-current-display",
+                    deviceId: "x11-current-display",
                     kind: "display",
                     backend: "x11",
                 }));
 
-                const displayFlow = parseToolPayload(await callTool("device_run_flow", {
-                    steps: [{ tool: "device_status", arguments: { deviceId: "x11-current-display" } }],
+                const displayFlow = parseToolPayload(await callTool("run_flow", {
+                    detail: true,
+                    steps: [{ tool: "status", arguments: { deviceId: "x11-current-display" } }],
                 })) as {
                     ok?: boolean;
-                    results?: Array<{ tool?: string; isError?: boolean; content?: Array<{ value?: { id?: string } }> }>;
+                    results?: Array<{ tool?: string; isError?: boolean; content?: Array<{ value?: { deviceId?: string } }> }>;
                 };
                 expect(displayFlow.ok).toBe(true);
                 expect(displayFlow.results?.[0]).toEqual(expect.objectContaining({
-                    tool: "device_status",
+                    tool: "status",
                     isError: false,
                 }));
-                expect(displayFlow.results?.[0]?.content?.[0]?.value).toEqual(expect.objectContaining({ id: "x11-current-display" }));
+                expect(displayFlow.results?.[0]?.content?.[0]?.value).toEqual(expect.objectContaining({ deviceId: "x11-current-display" }));
 
-                for (const args of [
-                    { implicitBroker: false, backend: "android-emulator", name: "Dist Android smoke", deviceId: "dist-android-smoke" },
-                    { implicitBroker: false, backend: "ios-simulator", name: "Dist iOS smoke", deviceId: "dist-ios-smoke" },
-                    { implicitBroker: false, backend: "windows-sandbox", name: "Dist Windows smoke", deviceId: "dist-windows-smoke" },
-                    { implicitBroker: false, backend: "macos-vm", name: "Dist macOS smoke", deviceId: "dist-macos-smoke", image: "missing-image" },
-                ]) {
-                    await callTool("device_create", args);
+                for (const name of ["create_android_emulator", "create_ios_simulator", "create_windows_sandbox", "create_macos_vm"]) {
+                    await callTool(name, distSmokeSample(name));
                 }
 
                 const missingRequiredSamples = listed.tools.flatMap((tool) => {
@@ -580,30 +643,11 @@ describe("npm package contents", () => {
         }
     });
 
-    it("runs the installed MCP smoke contract against the bundled server", { timeout: 30000 }, async () => {
-        const { runInstalledMcpSmoke } = await import("../../scripts/real-tests/installed-mcp-smoke.mjs") as {
-            runInstalledMcpSmoke: (options: { env?: Record<string, string>; name?: string; serverPath?: string }) => Promise<{
-                status: string;
-                tools: number;
-                publicDispatchTools: number;
-                currentDisplayAliases: string[];
-            }>;
-        };
-        const homeDir = mkdtempSync(join(tmpdir(), "ccc-device-lab-installed-smoke-"));
-        try {
-            const result = await runInstalledMcpSmoke({
-                name: "ccc-device-lab-installed-smoke-package-test",
-                serverPath: join(repoRoot, "dist", "device-lab-mcp", "server.mjs"),
-                env: {
-                    HOME: homeDir,
-                    PATH: process.env.PATH || "",
-                },
-            });
-            expect(result.status).toBe("PASS");
-            expect(result.publicDispatchTools).toBe(result.tools);
-            expect(result.currentDisplayAliases).toEqual(expect.arrayContaining(["device_status"]));
-        } finally {
-            rmSync(homeDir, { recursive: true, force: true });
-        }
+    it("runs the Level 0 entrypoint against the bundled MCP server", { timeout: 30000 }, async () => {
+        const { run } = await import("../../scripts/real-tests/level0-package-smoke.ts");
+        const result = await run();
+        expect(result.status).toBe("PASS");
+        expect(result.installedMcpSmoke.publicDispatchTools).toBe(result.installedMcpSmoke.tools);
+        expect(result.installedMcpSmoke.currentDisplayCapabilities).toEqual(expect.arrayContaining(["status"]));
     });
 });

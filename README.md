@@ -50,35 +50,6 @@ ccc shell                  # Open bash shell
 ccc npm test               # Run arbitrary command
 ```
 
-### Codex startup recovery
-
-`ccc codex login` installs missing npm tools independently. An optional tool's
-installation failure, such as OpenCode's `EBADPLATFORM` error, is reported with
-the tool name and does not prevent a successful Codex installation from being
-used. If Codex itself cannot be installed or its wrapper cannot be created,
-CCC stops with the setup error. Retrying the command also checks and repairs a
-missing Codex installation in an already-running container.
-
-Before generating MCP settings, CCC checks host access to
-`~/.ccc/codex/config.toml`. If access is denied, it attempts to restore access
-only for that regular file, using its host-owned parent directory as the
-owner reference. It preserves configuration content, the file group and group
-permissions, and verifies access after repair. Symlinks and directories owned
-by a different host user require manual inspection; CCC does not recursively
-change credential ownership. Failed repair warns, and unresolved MCP access
-still fails explicitly. Ownership handoff does not guarantee simultaneous
-config access by host and container users with different UIDs.
-
-Before launching Codex, CCC also checks whether its container user can write the
-credential directory. When host and container UIDs differ, it can grant that
-user access to the directory through a POSIX ACL while retaining the host owner
-and existing group/other access. Images include the `acl` utilities; older
-containers install them on demand when this repair is needed. Unsafe paths,
-custom ACLs requiring changes, unsupported filesystems, and failed repairs stop
-startup with an error. This repair does not change permissions on existing
-private credential files or plugin directories. Those may still need manual
-inspection if they were created by another user.
-
 ## Commands
 
 ```bash
@@ -100,11 +71,14 @@ ccc ui                     # Launch the desktop app (Tauri 2). Set CCC_DEV=1 for
 ## Container VM Labs
 
 CCC configures ordinary project containers and the built-in `lab-runner`
-profile with the same lazy lab-mcp VM contract. On supported native Linux
+profile with the same lazy `device-lab` Linux VM contract. On supported native Linux
 hosts, containers receive a durable owner-scoped lab state volume plus bounded
-`/dev/kvm` access for in-container QEMU. On unsupported hosts, CCC still mounts
-the lab state volume and injects clear unsupported diagnostics, without using
-`--privileged`, host TUN devices, or manual environment variables.
+`/dev/kvm` access for in-container QEMU. On unsupported hosts (Docker Desktop,
+rootless runtimes, or no `/dev/kvm`), new containers get no lab state volume;
+CCC injects clear unsupported diagnostics and lab creation reports
+`lab-provider-unsupported`, without using `--privileged`, host TUN devices, or
+manual environment variables. Older containers keep an existing volume until
+they are recreated; see `doc/common/REQ__lab-state-volume.md` for cleanup.
 Both `Dockerfile` and `Containerfile` include the QEMU/KVM userland packages
 needed by this optional path, so Docker and Podman image builds keep the same
 zero-configuration VM capability contract.
@@ -112,7 +86,7 @@ zero-configuration VM capability contract.
 `ccc labs` and `ccc labs smoke` inspect this contract without starting a VM.
 The smoke output reports the default project container and the built-in
 `lab-runner` profile separately, so agents can tell whether ordinary in-container
-`lab-mcp` VM work is available or should remain SKIP on the current host.
+`device-lab` `linux-vm` work is available or should remain SKIP on the current host.
 
 ## Real Device Lab Tests
 
@@ -122,7 +96,21 @@ Real host-provider tests are split by authority level:
 npm run test:level1       # Readiness/inventory only
 npm run test:level2       # Creates disposable VMs, simulators, emulators, or sandboxes when prerequisites exist
 npm run test:level3       # Runs Level 3 and writes a platform result, or aggregates result files passed after --
+npm run test:level3:hyper-v          # Runs only the Hyper-V Windows and Linux VM E2E tests
+npm run test:level3:hyper-v:windows  # Runs only the Hyper-V Windows VM E2E test
+npm run test:level3:hyper-v:linux    # Runs only the Hyper-V Linux VM E2E test
 ```
+
+For MCP screen capture, mouse, keyboard, and the screenshot → input → screenshot
+workflow, see [Device Lab computer use](doc/device-lab/GUIDE__computer-use-quick-start.md).
+The Hyper-V Level 3 tests also verify visible GUI input effects; the
+guide identifies provider-specific limits and host proof status.
+Run `npm run test:level3:hyper-v` on the Windows Hyper-V host to check
+screenshot, keyboard, pointer, and visible scrolling through the packaged MCP
+on disposable Windows and Linux VMs.
+
+The targeted Hyper-V commands rebuild the packaged test artifacts and prepare
+the host broker automatically before running the selected provider tests.
 
 Run `npm run test:level3` on each provider host. Selecting Level 3 is the
 explicit authorization for destructive operations against disposable or leased
@@ -155,9 +143,18 @@ MCP tool coverage (`scriptedPublicTools`, `calledPublicTools`,
 `device_broker_appium:action=start`, per-call outcomes, unexpected MCP
 `error-result` records, and skip categories. The summary separates missing
 provider prerequisites (`provider-prerequisite`), incompatible host platforms
-(`host-platform`), missing virtualization (`host-virtualization`), unproven
+(`host-platform`), missing host permissions such as Hyper-V management access
+(`host-permission`), missing virtualization (`host-virtualization`), unproven
 tool surfaces, unproven action variants, and incomplete MCP call results
-without requiring anyone to scan long terminal logs.
+without requiring anyone to scan long terminal logs. On Windows, a missing or
+untrusted Android Emulator `qemu-img.exe` (`hyper-v-qemu-img-unavailable` or
+`hyper-v-qemu-img-untrusted`) skips linux-vm as `provider-prerequisite` only
+when no validated cached ubuntu-lts base image exists. Missing PowerShell, SSH,
+or SCP tools (including the macOS VM SSH bridge), the Hyper-V PowerShell
+module, and the VMMS service are also `provider-prerequisite`; a missing
+hypervisor is `host-virtualization`. Hyper-V base-image conflicts
+(`hyper-v-base-image-*`) and unknown reasons stay in `other`, which fails
+validation until the operator resolves them.
 
 On a container or host without Android SDK/ADB, Xcode/iOS, Windows Sandbox,
 macOS VM, KVM, or leased hardware prerequisites, a platform result records
@@ -166,10 +163,10 @@ The final matrix, rather than an impossible single-host zero-skip run, rejects
 any provider evidence still missing across the collected hosts.
 `--assert-json` exits non-zero for real test failures, tool coverage gaps,
 incomplete or unexpected MCP call outcomes, or
-skip categories outside `provider-prerequisite`, `host-platform`, and
-`host-virtualization`. Override those allowed categories with
-`CCC_REAL_DEVICE_LAB_ALLOWED_SKIP_CATEGORIES` when a stricter CI lane requires
-`skip=0`.
+skip categories outside `provider-prerequisite`, `host-platform`,
+`host-permission`, and `host-virtualization`. Override those allowed
+categories with `CCC_REAL_DEVICE_LAB_ALLOWED_SKIP_CATEGORIES` when a stricter
+CI lane requires `skip=0`.
 Inside a CCC project container, `ccc devices broker status`,
 `ccc devices backends`, and `ccc devices smoke` also validate the device-lab
 container wiring. If the container was created by an older CCC build, these
@@ -206,11 +203,106 @@ last successful minimize confirmation; it does not claim to be a continuous
 desktop-window monitor. These commands automatically start or reuse the host
 broker and do not require direct execution of files under `dist/`.
 
+Hyper-V Windows VMs use the same lifecycle surface. CCC automatically downloads,
+validates, and caches the official Windows Server 2025 evaluation VHDX on the
+first `windows-vm` create, then makes a verified, owner-scoped full VHDX clone
+for each VM:
+
+```text
+ccc devices setup hyper-v
+ccc devices setup hyper-v --confirm --accept-windows-evaluation-license
+ccc devices backends
+ccc devices create windows-vm dev-windows --memory-mb 4096 --cpus 2
+# Later VMs reuse the verified windows-server cache.
+ccc devices create windows-vm dev-windows-2 --memory-mb 4096 --cpus 2
+ccc devices start dev-windows
+ccc devices status dev-windows
+ccc devices reboot dev-windows --wait-for-boot --boot-timeout-ms 600000
+ccc devices stop dev-windows
+ccc devices snapshot create dev-windows before-install
+ccc devices snapshot restore dev-windows before-install --confirm-destructive
+ccc devices snapshot delete dev-windows before-install --confirm-destructive
+ccc devices delete dev-windows
+```
+
+The first setup command is diagnostic only. `--confirm` explicitly permits CCC
+to request UAC elevation, enable `Microsoft-Hyper-V-All` with `-NoRestart`, and
+add the invoking identity to the built-in `Hyper-V Administrators` group.
+`--accept-windows-evaluation-license` records the required one-time acceptance
+of the linked Microsoft evaluation terms and the explicit HTTPS/TOFU trust
+decision for the allowlisted Microsoft download chain. Microsoft does not
+publish a stable digest for that mutable evaluation redirect, so CCC reports
+the mode as TOFU, records the first acquired SHA-256, and rejects later cache
+changes; it records neither acceptance nor trust silently.
+CCC reports whether a reboot or one-time sign-out and sign-in is required to
+activate the new group membership; it never reboots or signs out the host itself.
+
+`ccc devices backends` reports whether the required host executables are
+discoverable. Use `ccc devices setup hyper-v` for the non-mutating Hyper-V
+feature/module/hypervisor/VMMS diagnostic, then use
+`ccc devices smoke --real-provider --timeout-ms 30000` for provider readiness;
+neither command starts a VM. VM lifecycle commands
+verify the owner marker, VM ID, VM name, and disk path before mutation. Image
+source paths are restricted to regular VHDX files directly under the project root. Imported
+images are hashed, validated with `Get-VHD`, and stored with a versioned
+manifest below the host-only `~/.ccc/device-broker-private/images/hyper-v/<profile>`;
+links, differencing
+parents, profile hash conflicts, cache hash mismatches, and paths outside the allowed roots are refused.
+Production checkpoint create/restore/delete uses the same owner-fenced broker
+path. Guest command execution and file transfer use an owner-fenced PowerShell
+Direct session and a broker-owned DPAPI credential file. CCC injects the
+per-device account into the offline child disk, removes bootstrap secrets after
+first logon, and waits for PowerShell Direct before reporting a ready start;
+credentials are never accepted as MCP arguments. A project-local generalized
+Windows 11 VHDX remains available as an explicit `--source-image` override.
+Writable VM disks, Linux seed disks, credentials, transfer staging, operation
+journals, and CCC-owned NAT allocations also stay in the host-only broker tree,
+which is not mounted into project containers. CCC-owned NAT networking is
+shared with Hyper-V Linux guests. MAC and IPv4 assignments are deterministic
+per owner/device and allocation cleanup is fenced by the VM incarnation.
+Overlapping host subnets are rejected; an existing NAT is reused or removed
+only when broker-private state proves CCC created it. The CCC switch, NAT, and
+gateway are removed after the last allocation. Repeating create with
+the same immutable VM configuration returns the existing owner-fenced VM;
+conflicting create requests remain errors. Start, stop, and delete are safe to
+repeat, and none of these retries adopts an unmarked Hyper-V resource.
+
+Hyper-V Linux VMs automatically download a dated official Ubuntu 24.04 LTS Azure
+VHD archive, verify it against CCC's pinned release SHA-256, convert it to VHDX,
+and cache it on first create. Later creates reuse it. CCC
+creates an owner-scoped SSH key and CIDATA cloud-init disk, assigns a static
+address on the CCC NAT, and uses SSH for execution and bounded downloads plus
+SCP for bounded uploads:
+
+```text
+ccc devices create linux-vm dev-ubuntu --memory-mb 2048 --cpus 2
+ccc devices start dev-ubuntu --wait-for-boot --boot-timeout-ms 600000
+ccc devices reboot dev-ubuntu --wait-for-boot --boot-timeout-ms 600000
+ccc devices snapshot create dev-ubuntu baseline
+```
+
+Run destructive Hyper-V durability directly; a first-run cache miss is acquired automatically:
+
+```text
+npm run test:durability:device-lab:real -- --target windows-vm --cycles 2
+npm run test:durability:device-lab:real -- --target linux-vm --cycles 2
+```
+
+For the internal typed library's route inventory, package checks, Windows
+PowerShell checks, and real-host verification tiers, see
+[`doc/hyper-v-windows/GUIDE__typed-library-support.md`](doc/hyper-v-windows/GUIDE__typed-library-support.md).
+
+The regular Level 3 Windows VM scenario also packs the current CCC candidate,
+uploads it with the current Windows `node.exe`, runs `ccc --version` inside the
+disposable guest, and downloads the result to
+`results/device-lab-real/hyper-v-windows-packaged-ccc-latest.json`. Durability
+cycles omit that large package transfer and focus on repeated provider cleanup.
+
 To verify the actual installed MCP server used by a running container image,
 run the installed-server smoke directly:
 
 ```bash
-node scripts/real-tests/installed-mcp-smoke.mjs /opt/ccc/dist/device-lab-mcp/server.mjs
+node scripts/real-tests/installed-mcp-smoke.ts /opt/ccc/dist/device-lab-mcp/server.mjs
 ```
 
 This catches stale image installs where `tools/list` advertises a public tool
@@ -222,12 +314,16 @@ different installed server path.
 On macOS, Level 2 now includes real iOS Simulator and Tart-backed macOS VM E2E
 coverage when the host has the required tools. iOS Simulator tests require a
 full active Xcode install with `xcrun simctl` available. Physical iOS smoke
-coverage requires `xcrun xctrace` and `CCC_REAL_IOS_DEVICE_UDID=<udid>` for a
-leased test device; deeper Appium/XCUITest automation still reports its own
+coverage requires `xcrun xctrace`. Exactly one visible physical iOS device is
+selected automatically; when multiple devices are visible,
+`CCC_REAL_IOS_DEVICE_UDID=<udid>` selects the leased test device explicitly.
+Deeper Appium/XCUITest automation still reports its own
 `xcodebuild`/driver prerequisites separately. macOS VM E2E tests require Tart
-(`brew install cirruslabs/cli/tart`). If exactly one usable local Tart image is
-present, the E2E selects it automatically; if multiple local candidates exist
-it skips and reports the candidate names instead of guessing. Set
+(`brew install cirruslabs/cli/tart`). A stopped local image explicitly named as
+a macOS base/template, such as `ccc-macos-base`, is preferred automatically as
+a read-only clone source; unrelated user VMs and registry entries are not
+mutated. If multiple equally preferred local candidates exist, the E2E skips
+and reports their names instead of guessing. Set
 `CCC_REAL_MACOS_VM_SOURCE_IMAGE=<image-or-vm>` to choose explicitly; the older
 `CCC_REAL_TART_SOURCE_IMAGE` name is still accepted. The macOS VM E2E always
 prepares SSH helper metadata using a default short user derived from the
@@ -316,15 +412,28 @@ If neither runtime is installed, `ccc` exits with a clear error.
 
 ## Profiles
 
-Switch between different Claude accounts or credential sets. Each profile gets its own `~/.claude` directory and container, fully isolated.
+Switch between different Claude and Codex accounts. Each profile has its own Claude login, Codex login and container, fully isolated. The account used without `CCC_PROFILE` is the built-in profile `default`.
 
 ```bash
 ccc profile add work       # Create profile
-ccc profile list           # List profiles
-ccc profile rm work        # Remove profile
+ccc profile list           # List profiles (always includes default)
+ccc profile rm work        # Remove profile (default cannot be removed)
 
 CCC_PROFILE=work ccc       # Run with profile
 ```
+
+Everything ccc keeps on the host lives in `~/.ccc`:
+
+```
+~/.ccc/
+├── config.json            # settings, including `ccc remote` configs
+├── profiles/<name>/       # claude/, claude.json, codex/ — one folder per account
+├── run/                   # locks and clipboard files; safe to delete when no session runs
+├── devices/               # device lab state shared with containers (read-only)
+└── device-broker-private/ # host-only device broker state (keys, VM images)
+```
+
+An older `~/.ccc` (with `claude/`, `codex/`, `locks/`, `remote/` at the top) is moved into this layout on the first start while no ccc session is running; each existing container is recreated once. Named profiles created before this layout sign in to Codex once. Details: [REQ__ccc-home-layout](doc/common/REQ__ccc-home-layout.md).
 
 Profiles are for **credential directory isolation** only. For environment variables (API keys, backend URLs), use [mise environments](doc/mise-environments.md):
 

@@ -1,6 +1,7 @@
+import { deviceLabTestHomeEnvironment } from "./device-lab-test-environment.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { installDefaultImplicitBroker, repoRoot, TIMEOUT } from "./device-lab-mcp-fixture.js";
@@ -90,6 +91,11 @@ if [ "$1" = "simctl" ] && [ "$2" = "shutdown" ]; then
   exit 0
 fi
 if [ "$1" = "simctl" ] && [ "$2" = "delete" ]; then
+  if [ -f "$HOME/fake-ios-delete-fail-once" ]; then
+    /bin/rm -f "$HOME/fake-ios-delete-fail-once"
+    echo "simulated delete failure" >&2
+    exit 1
+  fi
   replace_state_if_requested delete
   if [ "$3" = "CREATED-IOS-UDID" ]; then /bin/rm -f "$HOME/fake-ios-created-name" "$HOME/fake-ios-created-booted"; fi
   exit 0
@@ -152,6 +158,7 @@ const fs = require('fs');
 const port = Number(process.argv[2]);
 const log = process.argv[3];
 const stalePath = process.argv[4];
+fs.writeFileSync(process.env.HOME + '/fake-ios-appium-' + process.pid + '.pid', String(process.pid));
 let sessionCounter = 0;
 let sessionId = null;
 function send(res, status, payload) {
@@ -160,7 +167,11 @@ function send(res, status, payload) {
 }
 const server = http.createServer((req, res) => {
   fs.appendFileSync(log, 'appium-http ' + req.method + ' ' + req.url + '\\n');
-  if (req.method === 'GET' && req.url === '/status') return send(res, 200, {value: {ready: true}});
+  if (req.method === 'GET' && req.url === '/status') {
+    const failedStatus = process.env.HOME + '/fail-ios-status-once';
+    if (fs.existsSync(failedStatus)) { fs.unlinkSync(failedStatus); return send(res, 503, {value: {error: 'fixture status unavailable'}}); }
+    return send(res, 200, {value: {ready: true}});
+  }
   if (req.method === 'POST' && req.url === '/session') {
     let body = '';
     req.on('data', chunk => { body += chunk; });
@@ -252,9 +263,10 @@ exit 0
             command: process.execPath,
             args: [join(repoRoot, "device-lab-mcp/server.mjs")],
             env: {
-                HOME: homeDir,
+                ...deviceLabTestHomeEnvironment(homeDir),
                 PATH: binDir,
                 NODE_ENV: "test",
+                CCC_PROFILE: `test-${homeDir.split(/[\\/]/).pop()}`,
                 FAKE_IOS_LOG: logPath,
                 FAKE_IOS_CONTAINER_ROOT: containerRoot,
             },
@@ -274,6 +286,37 @@ exit 0
 export async function cleanupFakeIosMcpContext(context: FakeIosMcpContext | undefined) {
     if (!context) return;
     await context.client.close();
+    for (const entry of readdirSync(context.homeDir, { withFileTypes: true })) {
+        if (!entry.isFile() || !/^fake-ios-appium-\d+\.pid$/.test(entry.name)) continue;
+        const pid = Number(readFileSync(join(context.homeDir, entry.name), "utf-8").trim());
+        if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+        try { process.kill(pid, "SIGKILL"); } catch { /* fake Appium already exited */ }
+    }
     rmSync(context.homeDir, { recursive: true, force: true });
     rmSync(context.binDir, { recursive: true, force: true });
+}
+
+// Exercise the external-server reuse branch while preserving ownership metadata
+// for fixture cleanup after the assertion. No real provider is involved.
+export async function exerciseStaleExternalIosSession(context: FakeIosMcpContext, backend: "ios" | "ios-device", deviceId: string) {
+    const owners = join(context.homeDir, ".ccc", "devices", "owners");
+    const statePath = join(owners, readdirSync(owners)[0], backend, "devices.json");
+    const original = JSON.parse(readFileSync(statePath, "utf8"));
+    const device = original.devices.find((item: { id: string }) => item.id === deviceId);
+    if (!device?.appium?.sessionId) throw new Error("Fixture requires an existing Appium session");
+    const owned = structuredClone(device.appium);
+    device.appium = { ...owned, processOwner: "external", startedBy: "existing-server" };
+    writeFileSync(statePath, JSON.stringify(original));
+    writeFileSync(join(context.homeDir, "stale-ios-session"), "1");
+    const before = readFileSync(context.logPath, "utf8").length;
+    try {
+        const result = await context.client.callTool({ name: "ui", arguments: { deviceId } });
+        const log = readFileSync(context.logPath, "utf8").slice(before);
+        return { result, log, previousSessionId: owned.sessionId };
+    } finally {
+        const current = JSON.parse(readFileSync(statePath, "utf8"));
+        const latest = current.devices.find((item: { id: string }) => item.id === deviceId);
+        if (latest) latest.appium = { ...owned, sessionId: latest.appium?.sessionId || owned.sessionId };
+        writeFileSync(statePath, JSON.stringify(current));
+    }
 }

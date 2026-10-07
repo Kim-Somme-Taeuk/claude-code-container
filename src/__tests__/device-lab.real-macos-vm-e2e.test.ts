@@ -10,7 +10,7 @@ import {
     selectAutoTartSourceImageFromListResults,
     sshConfig,
     sourceImage,
-} from "../../scripts/real-tests/macos-vm-e2e.mjs";
+} from "../../scripts/real-tests/macos-vm-e2e.ts";
 
 const level = Number(process.env.CCC_TEST_LEVEL || "0");
 const cap = macosVmE2ECapability(level);
@@ -60,6 +60,19 @@ describe("macOS VM Tart E2E source image auto-selection", () => {
         }));
     });
 
+    it("prefers a stopped CCC macOS base without selecting unrelated user VMs or registry entries", () => {
+        expect(selectAutoTartSourceImage([
+            { name: "ccc-macos-base", state: "stopped", source: "local" },
+            { name: "ccc-525bceb2afd55cdb-user-device", state: "stopped", source: "local" },
+            { name: "work-vm", state: "stopped", source: "local" },
+            { name: "ghcr.io/cirruslabs/macos-sonoma-base:latest", state: "stopped", source: "OCI" },
+        ])).toEqual({
+            source: "ccc-macos-base",
+            candidates: ["ccc-macos-base"],
+            auto: true,
+        });
+    });
+
     it("falls through to later Tart list variants when an earlier successful command has no parseable images", () => {
         expect(selectAutoTartSourceImageFromListResults([
             { command: "tart list --source=local --format=json", status: 0, stdout: "Usage: tart list [options]\nOptions:\n  --help\n" },
@@ -70,7 +83,7 @@ describe("macOS VM Tart E2E source image auto-selection", () => {
         }));
     });
 
-    it("auto-selects a single local Tart image by default when no source env is configured", () => {
+    it.skipIf(process.platform === "win32")("auto-selects a single local Tart image by default when no source env is configured", () => {
         const previousSource = process.env.CCC_REAL_MACOS_VM_SOURCE_IMAGE;
         const previousCompatSource = process.env.CCC_REAL_TART_SOURCE_IMAGE;
         const dir = mkdtempSync(join(tmpdir(), "ccc-fake-tart-"));
@@ -107,7 +120,7 @@ describe("macOS VM Tart E2E source image auto-selection", () => {
         }
     });
 
-    it("uses the project name as the default SSH user and generates an owner-scoped key", () => {
+    it.skipIf(process.platform === "win32")("uses the project name as the default SSH user and generates an owner-scoped key", () => {
         const previousHome = process.env.HOME;
         const previousPath = process.env.PATH;
         const previousUser = process.env.CCC_REAL_MACOS_VM_SSH_USER;

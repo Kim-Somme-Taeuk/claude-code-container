@@ -2,12 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
     hashPath,
     getProjectId,
+    projectIdentityPath,
     DATA_DIR,
-    CLAUDE_DIR,
-    CLAUDE_JSON_FILE,
-    CODEX_DIR,
-    CODEX_CONFIG_FILE,
-    REMOTE_CONFIG_DIR,
     IMAGE_NAME,
     CONTAINER_PID_LIMIT,
     COMMON_IGNORE_DIRS,
@@ -23,9 +19,15 @@ import {
     getClaudeJsonFile,
     getCodexDir,
     getCodexConfigFile,
+    writeEnvFile,
+    writeOwnedEnvFile,
 } from '../utils.js';
-import { homedir } from 'os';
-import { join } from 'path';
+import { homedir, tmpdir } from 'os';
+import { mkdtempSync, readFileSync, statSync, existsSync, unlinkSync, rmSync, realpathSync } from 'fs';
+import { join, basename, dirname } from 'path';
+
+// Keep the native environment proxy: older suites replace process.env with snapshots.
+const nativeProcessEnv = process.env;
 
 // readline mock (hoisted at module level)
 const mockQuestion = vi.fn();
@@ -51,14 +53,6 @@ describe('utils constants', () => {
         expect(DATA_DIR).toBe(join(homedir(), '.ccc'));
     });
 
-    it('CLAUDE_DIR should be ~/.ccc/claude', () => {
-        expect(CLAUDE_DIR).toBe(join(homedir(), '.ccc', 'claude'));
-    });
-
-    it('REMOTE_CONFIG_DIR should be ~/.ccc/remote', () => {
-        expect(REMOTE_CONFIG_DIR).toBe(join(homedir(), '.ccc', 'remote'));
-    });
-
     it('IMAGE_NAME should be ccc', () => {
         expect(IMAGE_NAME).toBe('ccc');
     });
@@ -78,12 +72,25 @@ describe('utils constants', () => {
         expect(COMMON_IGNORE_DIRS).toContain('build');
     });
 
-    it('uses ~/.ccc credential paths on the host', () => {
+    it('uses the default profile credential paths on the host', () => {
         delete process.env.container;
-        expect(getClaudeDir()).toBe(CLAUDE_DIR);
-        expect(getClaudeJsonFile()).toBe(CLAUDE_JSON_FILE);
-        expect(getCodexDir()).toBe(CODEX_DIR);
-        expect(getCodexConfigFile()).toBe(CODEX_CONFIG_FILE);
+        process.env.HOME = mkdtempSync(join(tmpdir(), 'ccc-utils-home-'));
+        const profileRoot = join(homedir(), '.ccc', 'profiles', 'default');
+        expect(getClaudeDir()).toBe(join(profileRoot, 'claude'));
+        expect(getClaudeJsonFile()).toBe(join(profileRoot, 'claude.json'));
+        expect(getCodexDir()).toBe(join(profileRoot, 'codex'));
+        expect(getCodexConfigFile()).toBe(join(profileRoot, 'codex', 'config.toml'));
+        expect(getClaudeDir('default')).toBe(join(profileRoot, 'claude'));
+    });
+
+    it('uses per-profile claude and codex paths for a named profile', () => {
+        delete process.env.container;
+        process.env.HOME = mkdtempSync(join(tmpdir(), 'ccc-utils-home-'));
+        const profileRoot = join(homedir(), '.ccc', 'profiles', 'work');
+        expect(getClaudeDir('work')).toBe(join(profileRoot, 'claude'));
+        expect(getClaudeJsonFile('work')).toBe(join(profileRoot, 'claude.json'));
+        expect(getCodexDir('work')).toBe(join(profileRoot, 'codex'));
+        expect(getCodexConfigFile('work')).toBe(join(profileRoot, 'codex', 'config.toml'));
     });
 
     it('uses mounted credential paths inside a real ccc container', () => {
@@ -102,11 +109,13 @@ describe('utils constants', () => {
     it('keeps host-style credential paths inside Vitest even when container env is set', () => {
         process.env.container = CONTAINER_ENV_VALUE;
         process.env.VITEST_POOL_ID = '1';
+        process.env.HOME = mkdtempSync(join(tmpdir(), 'ccc-utils-home-'));
+        const profileRoot = join(homedir(), '.ccc', 'profiles', 'default');
 
-        expect(getClaudeDir()).toBe(CLAUDE_DIR);
-        expect(getClaudeJsonFile()).toBe(CLAUDE_JSON_FILE);
-        expect(getCodexDir()).toBe(CODEX_DIR);
-        expect(getCodexConfigFile()).toBe(CODEX_CONFIG_FILE);
+        expect(getClaudeDir()).toBe(join(profileRoot, 'claude'));
+        expect(getClaudeJsonFile()).toBe(join(profileRoot, 'claude.json'));
+        expect(getCodexDir()).toBe(join(profileRoot, 'codex'));
+        expect(getCodexConfigFile()).toBe(join(profileRoot, 'codex', 'config.toml'));
     });
 });
 
@@ -147,6 +156,26 @@ describe('hashPath', () => {
 });
 
 describe('getProjectId', () => {
+    it('uses the legacy lexical resolved path as its durable identity', () => {
+        const lexicalPath = '/logical/project/Repo';
+        const resolver = vi.fn(() => lexicalPath);
+
+        expect(projectIdentityPath('./repo', resolver)).toBe(lexicalPath);
+        expect(getProjectId('./repo', resolver))
+            .toBe(`repo-${hashPath(lexicalPath)}`);
+        expect(resolver).toHaveBeenCalledWith('./repo');
+    });
+
+    it('does not derive its ID from canonical filesystem identity', () => {
+        const lexicalPath = '/junction/project/Repo';
+        const canonicalPath = '/physical/project/Repo';
+
+        expect(getProjectId('./repo', () => lexicalPath))
+            .toBe(`repo-${hashPath(lexicalPath)}`);
+        expect(getProjectId('./repo', () => lexicalPath))
+            .not.toBe(`repo-${hashPath(canonicalPath)}`);
+    });
+
     it('generates name-hash format', () => {
         const result = getProjectId('/home/user/my-project');
         expect(result).toMatch(/^my-project-[a-f0-9]{12}$/);
@@ -310,15 +339,6 @@ describe('isValidEnvKey', () => {
 });
 
 describe('additional constants', () => {
-    it('CLAUDE_JSON_FILE should be ~/.ccc/claude.json', () => {
-        expect(CLAUDE_JSON_FILE).toBe(join(homedir(), '.ccc', 'claude.json'));
-    });
-
-    it('CODEX_CONFIG_FILE should be ~/.ccc/codex/config.toml', () => {
-        expect(CODEX_DIR).toBe(join(homedir(), '.ccc', 'codex'));
-        expect(CODEX_CONFIG_FILE).toBe(join(homedir(), '.ccc', 'codex', 'config.toml'));
-    });
-
     it('CONTAINER_ENV_KEY should be "container"', () => {
         expect(CONTAINER_ENV_KEY).toBe('container');
     });
@@ -398,5 +418,51 @@ describe('prompt', () => {
 
         const result = await prompt('Enter value: ', true);
         expect(result).toBe('n');
+    });
+});
+
+describe('public env-file writers', () => {
+    let root: string;
+    let previousProcessEnv: NodeJS.ProcessEnv;
+    beforeEach(() => {
+        previousProcessEnv = process.env;
+        process.env = nativeProcessEnv;
+        root = mkdtempSync(join(tmpdir(), 'ccc-utils-env-'));
+        vi.stubEnv('TMPDIR', root);
+        vi.stubEnv('TMP', root);
+        vi.stubEnv('TEMP', root);
+    });
+    afterEach(() => {
+        vi.unstubAllEnvs();
+        process.env = previousProcessEnv;
+        rmSync(root, { recursive: true, force: true });
+    });
+
+    it('keeps legacy bytes, entry order, native temp naming and caller-owned deletion', () => {
+        const baseline = process.listenerCount('exit');
+        const path = writeEnvFile([
+            ['SECOND', 'two=parts'], ['FIRST', ''], ['LF', 'a\nb'],
+            ['CR', 'a\rb'], ['NUL', 'a\0b'], ['UNICODE', '봄'],
+        ]);
+        try {
+            expect(typeof path).toBe('string');
+            expect(realpathSync(dirname(path))).toBe(realpathSync(root));
+            expect(basename(path)).toMatch(/^ccc-env-[a-f0-9]{12}$/);
+            expect(readFileSync(path, 'utf8')).toBe('SECOND=two=parts\nFIRST=\nUNICODE=봄\n');
+            if (process.platform !== 'win32') expect(statSync(path).mode & 0o777).toBe(0o600);
+            expect(process.listenerCount('exit')).toBe(baseline);
+        } finally { unlinkSync(path); }
+        expect(existsSync(path)).toBe(false);
+    });
+
+    it('retains the empty-file trailing newline and exposes an owned facade', () => {
+        const baseline = process.listenerCount('exit');
+        const owned = writeOwnedEnvFile([]);
+        try {
+            expect(readFileSync(owned.path, 'utf8')).toBe('\n');
+            expect(process.listenerCount('exit')).toBe(baseline + 1);
+        } finally { owned.dispose(); }
+        expect(existsSync(owned.path)).toBe(false);
+        expect(process.listenerCount('exit')).toBe(baseline);
     });
 });

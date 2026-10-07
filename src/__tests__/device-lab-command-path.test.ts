@@ -14,8 +14,8 @@ import {
     runBuffer,
     runWithInput,
     runWithTimeout,
-} from "../../device-lab-mcp/src/commands.mjs";
-import { commandPath as realTestCommandPath, hiddenSpawnSync } from "../../scripts/real-tests/helpers.mjs";
+} from "@ccc/device-lab/providers/commands.mjs";
+import { commandPath as realTestCommandPath, hiddenSpawnSync } from "../../scripts/real-tests/helpers.ts";
 
 vi.mock("child_process", () => ({
     spawnSync: vi.fn(),
@@ -91,6 +91,35 @@ describe("device-lab commandPath", () => {
             maxBuffer: DEVICE_COMMAND_MAX_BUFFER_BYTES,
             timeout: DEVICE_COMMAND_TIMEOUT_MS,
         }));
+    });
+
+    it("forces hidden PowerShell arguments at the shared MCP command boundary", () => {
+        setPlatform("win32");
+        spawnSyncMock.mockReturnValue({ status: 0, stdout: "", stderr: "" } as ReturnType<typeof spawnSync>);
+
+        run("powershell.exe", ["-NoProfile", "-Command", "exit 0"]);
+        run("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", [
+            "-WindowStyle",
+            "Hidden",
+            "-NoProfile",
+            "-Command",
+            "exit 0",
+        ]);
+
+        expect(spawnSyncMock.mock.calls[0][1]).toEqual([
+            "-WindowStyle",
+            "Hidden",
+            "-NoProfile",
+            "-Command",
+            "exit 0",
+        ]);
+        expect(spawnSyncMock.mock.calls[1][1]).toEqual([
+            "-WindowStyle",
+            "Hidden",
+            "-NoProfile",
+            "-Command",
+            "exit 0",
+        ]);
     });
 
     it("clamps explicit command execution bounds", () => {

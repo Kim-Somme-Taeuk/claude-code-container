@@ -12,17 +12,22 @@ const { installHiddenWindowsChildProcesses } = require("../../scripts/real-tests
 
 describe("Windows test child-process policy", () => {
     it("loads the policy in Level 3 and both Vitest entry points", () => {
-        const level3 = readFileSync(join(repoRoot, "scripts/real-tests/level3.mjs"), "utf8");
+        const level3 = readFileSync(join(repoRoot, "scripts/real-tests/level3.ts"), "utf8");
+        const level3Host = readFileSync(join(repoRoot, "scripts/real-tests/support/level3-host.ts"), "utf8");
         const vitestRunner = readFileSync(join(repoRoot, "scripts/run-vitest.mjs"), "utf8");
-        const level3Config = readFileSync(join(repoRoot, "scripts/real-tests/vitest.level3.config.mjs"), "utf8");
+        const level3Config = readFileSync(join(repoRoot, "scripts/real-tests/vitest.level3.config.ts"), "utf8");
         const vitestConfig = readFileSync(join(repoRoot, "vitest.config.ts"), "utf8");
 
         expect(level3).toContain("hidden-child-processes.cjs");
         expect(level3).toContain("NODE_OPTIONS");
-        expect(level3).toContain('[cli, "devices", "broker", "status"]');
-        expect(level3).toContain("brokerReady:\\s*true");
+        expect(level3Host).toContain('[join(repoRoot, "dist", "index.js"), "devices", "broker", "status", "--verbose"]');
+        expect(level3Host).toContain("brokerReady:\\s*true");
         expect(vitestRunner).toContain("hidden-child-processes.cjs");
         expect(vitestRunner).toContain("windowsHide: true");
+        expect(vitestRunner).toContain("process.env.npm_execpath");
+        expect(vitestRunner).toContain('process.env.CCC_E2E_SKIP_BUILD === "1"');
+        expect(vitestRunner).toContain('process.platform === "win32" ? process.execPath : "npm"');
+        expect(vitestRunner).not.toContain('process.platform === "win32" ? "npm.cmd" : "npm"');
         expect(level3Config).toContain("setupFiles: [\"./scripts/real-tests/hidden-child-processes.cjs\"]");
         expect(vitestConfig).toContain("setupFiles: ['./scripts/real-tests/hidden-child-processes.cjs']");
         expect(vitestConfig).toContain("Math.min(8, Math.floor(availableParallelism() / 2))");

@@ -1,3 +1,6 @@
+import * as processIdentity from "@ccc/device-lab/providers/state/process-identity.mjs";
+import { installNodeProviderFixtureRouting } from "./node-provider-fixture.js";
+import { isolateDeviceLabTestEnvironment } from "./device-lab-test-environment.js";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -8,8 +11,11 @@ export interface FakeMacosMcpContext {
     binDir: string;
     logPath: string;
     oldHome: string | undefined;
+    restoreEnvironment: () => void;
+    restoreNodeRouting: () => void;
     oldPath: string | undefined;
     platformSpy: ReturnType<typeof vi.spyOn>;
+    restoreNativeIdentity: () => void;
 }
 
 function writeExecutable(path: string, content: string) {
@@ -22,116 +28,115 @@ export function createFakeMacosMcpContext(): FakeMacosMcpContext {
     const binDir = mkdtempSync(join(tmpdir(), "ccc-device-lab-macos-bin-"));
     const logPath = join(homeDir, "fake-tart.log");
 
-    writeExecutable(join(binDir, "tart"), `#!/bin/sh
-echo "tart $*" >> "$FAKE_TART_LOG"
-if [ -n "$FAKE_TART_REPLACE_ON" ] && [ "$1" = "$FAKE_TART_REPLACE_ON" ] && [ -n "$FAKE_TART_REPLACEMENT_STATE" ] && [ -n "$FAKE_TART_TARGET_STATE" ]; then
-  /bin/cp "$FAKE_TART_REPLACEMENT_STATE" "$FAKE_TART_TARGET_STATE.replacement"
-  /bin/mv "$FAKE_TART_TARGET_STATE.replacement" "$FAKE_TART_TARGET_STATE"
-fi
-if [ "$1" = "clone" ]; then
-  case "$2" in
-    *fail-restore*) exit 8 ;;
-    *restore-*fail-activate*) exit 7 ;;
-  esac
-  case "$3" in
-    *fail-snapshot*) exit 9 ;;
-  esac
-fi
-if [ "$1" = "delete" ]; then
-  case "$2" in
-    *macos-partial-delete) echo "primary delete failed" >&2; exit 6 ;;
-    *fail-delete*) echo "delete failed" >&2; exit 6 ;;
-  esac
-fi
-if [ "$1" = "run" ] && [ "$2" = "--help" ]; then
-  echo "Usage: tart run [--with-softnet] [--no-graphics] VM"
-  exit 0
-fi
-if [ "$1" = "ip" ]; then
-  case "$*" in
-    *macos-arp-fallback*)
-      case "$*" in
-        *"--resolver=arp"*) echo "192.0.2.45"; exit 0 ;;
-        *) echo "no IP address found" >&2; exit 1 ;;
-      esac
-      ;;
-  esac
-  echo "192.0.2.44"
-  exit 0
-fi
-exit 0
+    writeExecutable(join(binDir, "tart"), `#!${process.execPath}
+const fs = require("node:fs"), args = process.argv.slice(2), env = process.env;
+fs.appendFileSync(env.FAKE_TART_LOG, "tart " + args.join(" ") + "\\n");
+if (env.FAKE_TART_REPLACE_ON && args[0] === env.FAKE_TART_REPLACE_ON && env.FAKE_TART_REPLACEMENT_STATE && env.FAKE_TART_TARGET_STATE) {
+    fs.copyFileSync(env.FAKE_TART_REPLACEMENT_STATE, env.FAKE_TART_TARGET_STATE + ".replacement");
+    fs.renameSync(env.FAKE_TART_TARGET_STATE + ".replacement", env.FAKE_TART_TARGET_STATE);
+}
+if (args[0] === "clone") {
+    if (args[1]?.includes("fail-restore")) process.exit(8);
+    if (/restore-.*fail-activate/.test(args[1] || "")) process.exit(7);
+    if (args[2]?.includes("fail-snapshot")) process.exit(9);
+}
+if (args[0] === "delete") {
+    if (args[1]?.endsWith("macos-partial-delete")) { console.error("primary delete failed"); process.exit(6); }
+    if (args[1]?.includes("fail-delete")) { console.error("delete failed"); process.exit(6); }
+}
+if (args[0] === "run" && args[1] === "--help") { console.log("Usage: tart run [--with-softnet] [--no-graphics] VM"); process.exit(0); }
+if (args[0] === "run" && env.FAKE_TART_RUN_EXIT_IMMEDIATELY !== "1") setTimeout(() => {}, 1000);
+if (args[0] === "ip") {
+    if (args.join(" ").includes("macos-arp-fallback")) {
+        if (args.includes("--resolver=arp")) console.log("192.0.2.45");
+        else { console.error("no IP address found"); process.exit(1); }
+    } else console.log("192.0.2.44");
+}
 `);
 
-    writeExecutable(join(binDir, "vz"), `#!/bin/sh
-echo "vz $*" >> "$FAKE_TART_LOG"
-exit 0
+    writeExecutable(join(binDir, "vz"), `#!${process.execPath}
+require("node:fs").appendFileSync(process.env.FAKE_TART_LOG, "vz " + process.argv.slice(2).join(" ") + "\\n");
 `);
 
-    writeExecutable(join(binDir, "ssh"), `#!/bin/sh
-echo "ssh $*" >> "$FAKE_TART_LOG"
-case "$*" in
-  *screencapture*"-v"*) exec /bin/sleep 20 ;;
-  *screencapture*"-x"*) exit 0 ;;
-  *"ccc-macos-fake-tart-guest-helper.sh' click '22' '33' 'right'"*) echo '{"ok":true,"clicked":{"x":22,"y":33,"button":"right"},"provider":"macos-helper"}'; exit 0 ;;
-  *"ccc-macos-fake-tart-guest-helper.sh' double_click '44' '55' 'left'"*) echo '{"ok":true,"doubleClicked":{"x":44,"y":55,"button":"left"},"provider":"macos-helper"}'; exit 0 ;;
-  *"ccc-macos-fake-tart-guest-helper.sh' key '0' 'command,shift'"*) echo '{"ok":true,"key":{"keyCode":0,"modifiers":"command,shift"},"provider":"macos-helper"}'; exit 0 ;;
-  *"ccc-macos-fake-tart-guest-helper.sh' type"*) echo '{"ok":true,"typed":{"text":"hello '\\''mac'\\'' {literal}"},"provider":"macos-helper"}'; exit 0 ;;
-  *"ccc-macos-fake-tart-guest-helper.sh' scroll 'left' '4'"*) echo '{"ok":true,"scrolled":{"direction":"left","amount":4},"provider":"macos-helper"}'; exit 0 ;;
-  *"ccc-macos-fake-tart-guest-helper.sh' cursor_position"*) echo '{"ok":true,"cursor":{"x":101,"y":202},"provider":"macos-helper"}'; exit 0 ;;
-  *"ccc-macos-fake-tart-guest-helper.sh' window_list"*) echo '{"ok":true,"provider":"macos-system-events","windows":[{"processName":"TextEdit","processId":501,"title":"Notes","role":"AXWindow","position":[10,20],"size":[300,200]}]}'; exit 0 ;;
-  *"ccc-macos-fake-tart-guest-helper.sh' accessibility_snapshot '8' '1000'"*) echo '{"ok":true,"provider":"macos-system-events","accessibility":{"provider":"macos-system-events","maxDepth":8,"maxNodes":1000,"nodeCount":3,"root":{"name":"macOS Desktop","role":"AXApplicationGroup","children":[{"name":"TextEdit","role":"AXApplication","processId":501,"children":[{"name":"Notes","role":"AXWindow","children":[]}]}]}}}'; exit 0 ;;
-  *"ccc-macos-fake-tart-guest-helper.sh' accessibility_snapshot '0' '1'"*) echo '{"ok":true,"provider":"macos-system-events","accessibility":{"provider":"macos-system-events","maxDepth":0,"maxNodes":1,"nodeCount":1,"root":{"name":"macOS Desktop","role":"AXApplicationGroup","children":[]}}}'; exit 0 ;;
-  *pkill*) exit 0 ;;
-  *rm\\ -f*) exit 0 ;;
-  *fail-command*) echo "ssh failure stdout"; echo "ssh failure stderr" >&2; exit 7 ;;
-  *) echo "ssh output"; exit 0 ;;
-esac
+    writeExecutable(join(binDir, "ssh"), `#!${process.execPath}
+const args = process.argv.slice(2), command = args.join(" ");
+require("node:fs").appendFileSync(process.env.FAKE_TART_LOG, "ssh " + command + "\\n");
+if (command.includes("screencapture") && command.includes("-v")) { setTimeout(() => {}, 20000); }
+else if (command.includes("screencapture") && command.includes("-x")) {}
+else if (command.includes("ccc-macos-fake-tart-guest-helper.sh'")) {
+    const result = { ok: true, provider: "macos-helper" };
+    if (command.includes("' click '22' '33' 'right'")) result.clicked = { x: 22, y: 33, button: "right" };
+    else if (command.includes("' double_click '44' '55' 'left'")) result.doubleClicked = { x: 44, y: 55, button: "left" };
+    else if (command.includes("' key '0' 'command,shift'")) result.key = { keyCode: 0, modifiers: "command,shift" };
+    else if (command.includes("' type")) result.typed = { text: "hello 'mac' {literal}" };
+    else if (command.includes("' scroll 'left' '4'")) result.scrolled = { direction: "left", amount: 4 };
+    else if (command.includes("' cursor_position")) result.cursor = { x: 101, y: 202 };
+    else if (command.includes("' window_list")) { result.provider = "macos-system-events"; result.windows = [{ processName: "TextEdit", processId: 501, title: "Notes", role: "AXWindow", position: [10, 20], size: [300, 200] }]; }
+    else if (command.includes("' accessibility_snapshot")) {
+        const shallow = command.includes("' accessibility_snapshot '0' '1'");
+        result.provider = "macos-system-events";
+        result.accessibility = { provider: "macos-system-events", maxDepth: shallow ? 0 : 8, maxNodes: shallow ? 1 : 1000, nodeCount: shallow ? 1 : 3, root: { name: "macOS Desktop", role: "AXApplicationGroup", children: shallow ? [] : [{ name: "TextEdit", role: "AXApplication", processId: 501, children: [{ name: "Notes", role: "AXWindow", children: [] }] }] } };
+    } else { console.log("ssh output"); process.exit(0); }
+    console.log(JSON.stringify(result));
+} else if (command.includes("pkill") || command.includes("rm -f")) {}
+else if (command.includes("fail-command")) { console.log("ssh failure stdout"); console.error("ssh failure stderr"); process.exit(7); }
+else console.log("ssh output");
 `);
 
-    writeExecutable(join(binDir, "scp"), `#!/bin/sh
-echo "scp $*" >> "$FAKE_TART_LOG"
-last=""
-for arg in "$@"; do last="$arg"; done
-case "$last" in
-  *fail-helper*) echo "scp helper failure" >&2; exit 5 ;;
-  *:*) exit 0 ;;
-  *)
-    case "$*" in
-      *fail-once-recording-copy*)
-        if [ ! -f "$HOME/fake-macos-recording-copy-retried" ]; then
-          : > "$HOME/fake-macos-recording-copy-retried"
-          echo "scp recording failure" >&2
-          exit 5
-        fi
-        ;;
-    esac
-    printf 'fakepng' > "$last"
-    exit 0
-    ;;
-esac
+    writeExecutable(join(binDir, "scp"), `#!${process.execPath}
+const fs = require("node:fs"), path = require("node:path"), args = process.argv.slice(2), last = args.at(-1);
+fs.appendFileSync(process.env.FAKE_TART_LOG, "scp " + args.join(" ") + "\\n");
+if (last.includes("fail-helper")) { console.error("scp helper failure"); process.exit(5); }
+// A Windows drive colon is local; SCP remote destinations have a host prefix.
+if (/^[^/\\\\]+@[^:]+:/.test(last)) process.exit(0);
+if (args.join(" ").includes("fail-once-recording-copy")) {
+    const marker = path.join(process.env.HOME, "fake-macos-recording-copy-retried");
+    if (!fs.existsSync(marker)) { fs.writeFileSync(marker, ""); console.error("scp recording failure"); process.exit(5); }
+}
+fs.writeFileSync(last, "fakepng");
 `);
 
     const oldHome = process.env.HOME;
     const oldPath = process.env.PATH;
-    process.env.HOME = homeDir;
+    const restoreEnvironment = isolateDeviceLabTestEnvironment(homeDir);
     process.env.PATH = binDir;
     process.env.FAKE_TART_LOG = logPath;
+    const restoreNodeRouting = installNodeProviderFixtureRouting(binDir);
+    const nativePlatform = process.platform;
     const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+    // Provider discovery requires Darwin, but recorder children are real native
+    // processes. Keep identity matching and signaling real on the host OS.
+    const nativeCall = <T>(call: () => T): T => {
+        const previousPlatform = process.platform;
+        platformSpy.mockReturnValue(nativePlatform);
+        try { return call(); } finally { platformSpy.mockReturnValue(previousPlatform); }
+    };
+    const readIdentity = processIdentity.readProcessIdentity;
+    const inspectIdentity = processIdentity.inspectProcessIdentity;
+    const signalRuntime = processIdentity.signalOwnedRuntimeProcess;
+    const identitySpies = [
+        vi.spyOn(processIdentity, "readProcessIdentity").mockImplementation((...args) => nativeCall(() => readIdentity(...args))),
+        vi.spyOn(processIdentity, "inspectProcessIdentity").mockImplementation((...args) => nativeCall(() => inspectIdentity(...args))),
+        vi.spyOn(processIdentity, "signalOwnedRuntimeProcess").mockImplementation((...args) => nativeCall(() => signalRuntime(...args))),
+    ];
+    const restoreNativeIdentity = () => identitySpies.forEach(spy => spy.mockRestore());
 
-    return { homeDir, binDir, logPath, oldHome, oldPath, platformSpy };
+    return { homeDir, binDir, logPath, oldHome, oldPath, platformSpy, restoreEnvironment, restoreNodeRouting, restoreNativeIdentity };
 }
 
 export function cleanupFakeMacosMcpContext(context: FakeMacosMcpContext | undefined) {
     if (!context) return;
+    context.restoreNodeRouting();
+    context.restoreNativeIdentity();
     context.platformSpy.mockRestore();
-    if (context.oldHome === undefined) delete process.env.HOME;
-    else process.env.HOME = context.oldHome;
+    context.restoreEnvironment();
     if (context.oldPath === undefined) delete process.env.PATH;
     else process.env.PATH = context.oldPath;
     delete process.env.FAKE_TART_LOG;
     delete process.env.FAKE_TART_REPLACE_ON;
     delete process.env.FAKE_TART_REPLACEMENT_STATE;
     delete process.env.FAKE_TART_TARGET_STATE;
+    delete process.env.FAKE_TART_RUN_EXIT_IMMEDIATELY;
     rmSync(context.homeDir, { recursive: true, force: true });
     rmSync(context.binDir, { recursive: true, force: true });
 }

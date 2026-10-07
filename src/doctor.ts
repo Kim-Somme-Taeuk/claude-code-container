@@ -2,7 +2,7 @@
 
 import { spawnSync } from "child_process";
 import { existsSync, readdirSync } from "fs";
-import { join, resolve } from "path";
+import { resolve } from "path";
 import {
     isDockerRunning,
     getContainerName,
@@ -11,9 +11,11 @@ import {
     isImageExists,
     getImageLabel,
 } from "./docker.js";
-import { getProjectId, DATA_DIR, MISE_VOLUME_NAME, CLI_VERSION } from "./utils.js";
-import { getActiveSessionsForProject } from "./session.js";
+import { getProjectId, MISE_VOLUME_NAME, CLI_VERSION } from "./utils.js";
+import { locksDir as sessionLocksDir } from "./home-layout.js";
+import { observeActiveSessionsForContainer } from "./session.js";
 import { getRuntimeInfo, runtimeCli } from "./container-runtime.js";
+import { buildClaudeLauncherReportCommand, sanitizeForTerminal, CLAUDE_BIN_PATH } from "./container-setup.js";
 
 interface DoctorCheck {
     name: string;
@@ -31,7 +33,12 @@ function printResults(checks: DoctorCheck[]): void {
         } else {
             icon = "✗";
         }
-        console.log(`  ${icon} ${check.name}: ${check.message}`);
+        // Sanitize here rather than where each check is built. Several of these
+        // messages carry strings produced inside a container — a path out of a
+        // volume any container can write, a runtime's own version output — and
+        // a rule applied at eighteen call sites is a rule the nineteenth
+        // forgets. This is the only place a check reaches a terminal.
+        console.log(`  ${icon} ${check.name}: ${sanitizeForTerminal(check.message)}`);
     }
 
     const errors = checks.filter((c) => c.status === "error").length;
@@ -145,7 +152,7 @@ export function runDoctor(projectPath: string): boolean {
     }
 
     // 5. Sessions
-    const activeSessions = getActiveSessionsForProject(projectId);
+    const activeSessions = observeActiveSessionsForContainer(projectId);
     if (activeSessions.length > 0) {
         checks.push({
             name: "Sessions",
@@ -161,7 +168,7 @@ export function runDoctor(projectPath: string): boolean {
     }
 
     // 6. Stale locks check (scoped to current project)
-    const locksDir = join(DATA_DIR, "locks");
+    const locksDir = sessionLocksDir();
     let totalProjectLocks = 0;
     if (existsSync(locksDir)) {
         totalProjectLocks = readdirSync(locksDir).filter((f) =>
@@ -188,11 +195,21 @@ export function runDoctor(projectPath: string): boolean {
                 containerName,
                 "sh",
                 "-c",
-                "test -x /home/ccc/.local/bin/claude && /home/ccc/.local/bin/claude --version 2>&1 | head -1",
+                buildClaudeLauncherReportCommand(CLAUDE_BIN_PATH),
             ],
             { encoding: "utf-8", timeout: 10000 },
         );
-        if (claudeCheck.status === 0 && claudeCheck.stdout?.trim()) {
+        // Exit 2 means the launcher works but is in the shape the native
+        // updater refuses to manage — `claude update` will report success and
+        // change nothing. Reporting that as ok is how the state stayed
+        // invisible; it is a warning, and the message says why.
+        if (claudeCheck.status === 2 && claudeCheck.stdout?.trim()) {
+            checks.push({
+                name: "Claude",
+                status: "warn",
+                message: claudeCheck.stdout.trim(),
+            });
+        } else if (claudeCheck.status === 0 && claudeCheck.stdout?.trim()) {
             checks.push({
                 name: "Claude",
                 status: "ok",

@@ -7,6 +7,7 @@ const mockExistsSync = vi.fn();
 const mockReadFileSync = vi.fn();
 const mockWriteFileSync = vi.fn();
 const mockMkdirSync = vi.fn();
+const mockRenameSync = vi.fn();
 
 vi.mock("fs", async (importOriginal) => {
     const actual = (await importOriginal()) as Record<string, unknown>;
@@ -16,6 +17,7 @@ vi.mock("fs", async (importOriginal) => {
         readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
         writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
         mkdirSync: (...args: unknown[]) => mockMkdirSync(...args),
+        renameSync: (...args: unknown[]) => mockRenameSync(...args),
     };
 });
 
@@ -31,6 +33,7 @@ describe("tool-detect.ts", () => {
         mockReadFileSync.mockReset();
         mockWriteFileSync.mockReset();
         mockMkdirSync.mockReset();
+        mockRenameSync.mockReset();
     });
 
     afterEach(() => {
@@ -65,7 +68,6 @@ describe("tool-detect.ts", () => {
             mockExistsSync.mockReturnValue(true);
             mockReadFileSync.mockReturnValue(JSON.stringify({ defaultTool: "claude" }));
             getDefaultToolPreference();
-            expect(mockExistsSync).toHaveBeenCalledWith(CONFIG_FILE);
             expect(mockReadFileSync).toHaveBeenCalledWith(CONFIG_FILE, "utf-8");
         });
 
@@ -77,56 +79,39 @@ describe("tool-detect.ts", () => {
     });
 
     describe("setDefaultToolPreference", () => {
-        it("creates config dir and writes config when dir does not exist", () => {
+        function writtenConfig(): Record<string, unknown> {
+            const [tempPath, content, options] = mockWriteFileSync.mock.calls[0];
+            expect(tempPath).toMatch(/config\.json\.\d+\.tmp$/);
+            expect(options).toEqual({ mode: 0o600 });
+            expect(mockRenameSync).toHaveBeenCalledWith(tempPath, CONFIG_FILE);
+            return JSON.parse(content as string);
+        }
+
+        it("creates the config dir and writes config atomically when none exists", () => {
             mockExistsSync.mockReturnValue(false);
-            mockReadFileSync.mockReturnValue(JSON.stringify({}));
 
             setDefaultToolPreference("gemini");
 
-            expect(mockMkdirSync).toHaveBeenCalledWith(DATA_DIR, { recursive: true });
-            expect(mockWriteFileSync).toHaveBeenCalledWith(
-                CONFIG_FILE,
-                JSON.stringify({ defaultTool: "gemini" }, null, 2),
-                "utf-8",
-            );
+            expect(mockMkdirSync).toHaveBeenCalledWith(DATA_DIR, { recursive: true, mode: 0o700 });
+            expect(writtenConfig()).toEqual({ defaultTool: "gemini" });
         });
 
-        it("writes config without creating dir when dir exists", () => {
+        it("preserves existing config keys, including remote configs", () => {
             mockExistsSync.mockReturnValue(true);
-            mockReadFileSync.mockReturnValue(JSON.stringify({}));
-
-            setDefaultToolPreference("codex");
-
-            expect(mockMkdirSync).not.toHaveBeenCalled();
-            expect(mockWriteFileSync).toHaveBeenCalledWith(
-                CONFIG_FILE,
-                JSON.stringify({ defaultTool: "codex" }, null, 2),
-                "utf-8",
-            );
-        });
-
-        it("preserves existing config keys when writing", () => {
-            mockExistsSync.mockReturnValue(true);
-            mockReadFileSync.mockReturnValue(JSON.stringify({ someOtherKey: "value", defaultTool: "claude" }));
+            mockReadFileSync.mockReturnValue(JSON.stringify({ someOtherKey: "value", remote: { abc: { host: "h" } }, defaultTool: "claude" }));
 
             setDefaultToolPreference("gemini");
 
-            const written = JSON.parse(mockWriteFileSync.mock.calls[0][1]);
-            expect(written.someOtherKey).toBe("value");
-            expect(written.defaultTool).toBe("gemini");
+            expect(writtenConfig()).toEqual({ someOtherKey: "value", remote: { abc: { host: "h" } }, defaultTool: "gemini" });
         });
 
-        it("writes config file when existing config has invalid JSON (starts fresh)", () => {
+        it("refuses to overwrite an unparseable config", () => {
             mockExistsSync.mockReturnValue(true);
             mockReadFileSync.mockReturnValue("bad-json");
 
-            setDefaultToolPreference("opencode");
-
-            expect(mockWriteFileSync).toHaveBeenCalledWith(
-                CONFIG_FILE,
-                JSON.stringify({ defaultTool: "opencode" }, null, 2),
-                "utf-8",
-            );
+            expect(() => setDefaultToolPreference("opencode")).toThrow(/not a valid JSON object/);
+            expect(mockWriteFileSync).not.toHaveBeenCalled();
+            expect(mockRenameSync).not.toHaveBeenCalled();
         });
     });
 

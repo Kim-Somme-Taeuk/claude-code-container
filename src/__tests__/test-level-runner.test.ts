@@ -1,13 +1,37 @@
-import { spawnSync } from "child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
+import Ajv from "ajv";
+import { toolInputError } from "../../device-lab-mcp/src/tool-arguments.mjs";
+import { backendProviderEnumDiagnostics, missingWindowsImageProbe, probeMissingMacosImage } from "../../scripts/real-tests/level2-broker-e2e.ts";
+import { spawn, spawnSync } from "child_process";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { pathToFileURL } from "url";
 import { parse } from "acorn";
+import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import { describe, expect, it } from "vitest";
 import { DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES, evaluateDestructivePolicy } from "../../device-lab-mcp/src/policy/destructive.mjs";
+import { DEVICE_FLOW_TOOL_NAMES, TOOLS, publicToolName, toolOperation, GROUP_OPERATIONS, CREATE_TOOL_BACKENDS } from "../../device-lab-mcp/src/tools.mjs";
+import { LINUX_VM_CAPABILITIES } from "@ccc/device-lab/providers/backends/linux-vm.mjs";
+import { androidDeviceE2EPrerequisites, prepareAndroidDeviceApp } from "../../scripts/real-tests/android-device-e2e.ts";
+import { androidEmulatorAppSelection, androidEmulatorCreateRequest, deviceFromPayload } from "../../scripts/real-tests/android-emulator-e2e.ts";
+import { currentDisplayPrerequisiteResult } from "../../scripts/real-tests/level1-display-e2e.ts";
+import { startWindowsSandboxE2EDevice } from "../../scripts/real-tests/windows-sandbox-e2e.ts";
+import { realMcpToolRequestTimeoutMs } from "../../scripts/real-tests/device-lab-mcp-client.ts";
+import {
+    normalizeProviderConcurrency,
+    partitionProviderFiles,
+    runResourceAware,
+} from "../../scripts/real-tests/provider-parallelism.ts";
 import { repoRoot } from "./helpers/device-lab-mcp-fixture.js";
 
 const runner = join(repoRoot, "scripts", "test-level.js");
+
+function parseModule(text: string) {
+    const javascript = transpileModule(text, {
+        compilerOptions: { module: ModuleKind.ESNext, target: ScriptTarget.ES2023 },
+    }).outputText;
+    return parse(javascript, { ecmaVersion: "latest", sourceType: "module" });
+}
 const HIDDEN_LEGACY_TRANSPORT_KEYS = new Set([
     "broker",
     "viaBroker",
@@ -21,22 +45,11 @@ const HIDDEN_LEGACY_TRANSPORT_KEYS = new Set([
     "rpcTimeoutMs",
     "launchTimeoutMs",
 ]);
-const HIDDEN_COMPATIBILITY_TOOLS = new Set([
-    "device_broker_shutdown",
-    "device_broker_rpc",
-    "device_broker_lease",
-    "device_broker_attach",
-    "device_broker_apple",
-    "device_broker_command",
-    "device_broker_appium",
-    "device_image_create",
-    "device_image_clone",
-]);
 const HIDDEN_PROVIDER_REAL_E2E_TRANSPORT_KEYS = new Set(
     [...HIDDEN_LEGACY_TRANSPORT_KEYS].filter((key) => key !== "port" && key !== "timeoutMs"),
 );
 const OPT_IN_REAL_TEST_UTILITY_FILES = new Set([
-    "installed-mcp-smoke.mjs",
+    "installed-mcp-smoke.ts",
 ]);
 
 function dryRun(level: string) {
@@ -55,6 +68,10 @@ function dryRunNode(level: string) {
     });
     expect(result.status).toBe(0);
     return JSON.parse(result.stdout) as { level: number; mode: string; args: string[]; env: Record<string, string> };
+}
+
+function mcpTextResult(payload: unknown, isError = false) {
+    return { isError, content: [{ type: "text", text: typeof payload === "string" ? payload : JSON.stringify(payload) }] };
 }
 
 function advertisedDeviceLabTools() {
@@ -80,13 +97,12 @@ function canonicalDeviceLabToolSurface() {
     return JSON.parse(result.stdout) as { toolCount: number; sha256: string };
 }
 
+function schemaBranches(schema: any): any[] {
+    return [schema, ...[...(schema?.oneOf || []), ...(schema?.anyOf || []), ...(schema?.allOf || [])].flatMap(schemaBranches)];
+}
+
 function advertisedDeviceLabToolSchemas() {
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", "import { TOOLS } from './device-lab-mcp/src/tools.mjs'; console.log(JSON.stringify(TOOLS.map((tool) => [tool.name, Object.keys(tool.inputSchema?.properties || {})])));"], {
-        cwd: repoRoot,
-        encoding: "utf-8",
-    });
-    expect(result.status).toBe(0);
-    return new Map((JSON.parse(result.stdout) as Array<[string, string[]]>).map(([name, properties]) => [name, new Set(properties)]));
+    return new Map(TOOLS.map(tool => [tool.name, new Set(schemaBranches(tool.inputSchema).flatMap(branch => Object.keys(branch.properties || {})))]));
 }
 
 function advertisedDeviceLabToolAnyOfRequired() {
@@ -99,12 +115,15 @@ function advertisedDeviceLabToolAnyOfRequired() {
 }
 
 function advertisedDeviceLabToolEnums() {
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", "import { TOOLS } from './device-lab-mcp/src/tools.mjs'; console.log(JSON.stringify(TOOLS.map((tool) => [tool.name, Object.fromEntries(Object.entries(tool.inputSchema?.properties || {}).filter(([, schema]) => Array.isArray(schema?.enum)).map(([key, schema]) => [key, schema.enum]))])));"], {
-        cwd: repoRoot,
-        encoding: "utf-8",
-    });
-    expect(result.status).toBe(0);
-    return new Map(JSON.parse(result.stdout) as Array<[string, Record<string, string[]>]>);
+    return new Map(TOOLS.map(tool => {
+        const enums: Record<string, string[]> = {};
+        for (const branch of schemaBranches(tool.inputSchema)) {
+            for (const [key, value] of Object.entries(branch.properties || {}) as Array<[string, any]>) {
+                if (Array.isArray(value.enum)) enums[key] = [...new Set([...(enums[key] || []), ...value.enum])];
+            }
+        }
+        return [tool.name, enums];
+    }));
 }
 
 function astChildren(node: unknown): unknown[] {
@@ -138,15 +157,28 @@ function propertyKey(property: Record<string, unknown>) {
     return null;
 }
 
+// Accept `{...}` and `Object.freeze({...})`; real E2E scripts freeze shared option sets.
+function frozenObjectExpression(init: Record<string, unknown> | undefined): Record<string, unknown> | null {
+    if (init?.type === "ObjectExpression") return init;
+    if (init?.type !== "CallExpression") return null;
+    const callee = init.callee as Record<string, unknown> | undefined;
+    const object = callee?.object as Record<string, unknown> | undefined;
+    const property = callee?.property as Record<string, unknown> | undefined;
+    const args = Array.isArray(init.arguments) ? init.arguments as Record<string, unknown>[] : [];
+    if (callee?.type !== "MemberExpression" || object?.name !== "Object" || property?.name !== "freeze") return null;
+    return args.length === 1 && args[0]?.type === "ObjectExpression" ? args[0] : null;
+}
+
 function literalObjectBindings(ast: unknown) {
     const bindings = new Map<string, Record<string, unknown> | null>();
     walkAst(ast, (node) => {
         if (node.type !== "VariableDeclarator") return;
         const id = node.id as Record<string, unknown> | undefined;
         const init = node.init as Record<string, unknown> | undefined;
-        if (id?.type !== "Identifier" || init?.type !== "ObjectExpression") return;
+        const object = frozenObjectExpression(init);
+        if (id?.type !== "Identifier" || !object) return;
         const name = String(id.name);
-        bindings.set(name, bindings.has(name) ? null : init);
+        bindings.set(name, bindings.has(name) ? null : object);
     });
     return bindings;
 }
@@ -200,10 +232,10 @@ function objectExpressionLiteralValues(objectExpression: Record<string, unknown>
 function realTestCallToolArgumentKeys() {
     const root = join(repoRoot, "scripts", "real-tests");
     return readdirSync(root)
-        .filter((file) => file.endsWith(".mjs"))
+        .filter((file) => file.endsWith(".ts"))
         .flatMap((file) => {
             const text = readFileSync(join(root, file), "utf-8");
-            const ast = parse(text, { ecmaVersion: "latest", sourceType: "module" });
+            const ast = parseModule(text);
             const bindings = literalObjectBindings(ast);
             const calls: Array<{ file: string; tool: string; keys: string[] }> = [];
             walkAst(ast, (node) => {
@@ -224,10 +256,10 @@ function realTestCallToolArgumentKeys() {
 function realTestCallToolLiteralValues() {
     const root = join(repoRoot, "scripts", "real-tests");
     return readdirSync(root)
-        .filter((file) => file.endsWith(".mjs"))
+        .filter((file) => file.endsWith(".ts"))
         .flatMap((file) => {
             const text = readFileSync(join(root, file), "utf-8");
-            const ast = parse(text, { ecmaVersion: "latest", sourceType: "module" });
+            const ast = parseModule(text);
             const bindings = literalObjectBindings(ast);
             const calls: Array<{ file: string; tool: string; values: Record<string, string | number | boolean | null> }> = [];
             walkAst(ast, (node) => {
@@ -247,21 +279,18 @@ function realTestCallToolLiteralValues() {
 
 const ALWAYS_DESTRUCTIVE_REAL_E2E_TOOLS = new Set([
     "device_broker_shutdown",
-    "device_delete",
-    "device_reset",
-    "device_snapshot_restore",
-    "device_snapshot_delete",
-    "mobile_uninstall_app",
-    "mobile_clear_app_data",
-    "mobile_set_battery",
-    "mobile_set_network",
-    "mobile_toggle_airplane_mode",
+    "delete",
+    "reset",
+    "uninstall_app",
+    "clear_app_data",
+    "set_battery",
+    "set_network",
 ]);
 
 function realTestDestructiveCallsMissingConfirmation() {
-    return realTestCallToolArgumentKeys()
-        .filter((call) => ALWAYS_DESTRUCTIVE_REAL_E2E_TOOLS.has(call.tool))
-        .filter((call) => !call.keys.includes("confirmDestructive"))
+    return realTestCallToolLiteralValues()
+        .filter((call) => evaluateDestructivePolicy(toolOperation(call.tool, call.values) || call.tool, call.values).destructive)
+        .filter((call) => call.values.confirmDestructive !== true)
         .map((call) => ({ file: call.file, tool: call.tool }));
 }
 
@@ -278,14 +307,15 @@ function realTestCallsMissingAnyOfRequired() {
 function alwaysDestructivePolicyTools() {
     return [...new Set(DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES
         .filter(({ name }) => evaluateDestructivePolicy(name, {}).destructive === true)
-        .map(({ name }) => name))]
+        .map(({ name }) => name === "device_broker_shutdown" ? name : publicToolName(name)))]
+        .filter((name) => !GROUP_OPERATIONS[name] || Object.values(GROUP_OPERATIONS[name]).every((operation) => evaluateDestructivePolicy(operation, {}).destructive))
         .sort();
 }
 
 function realTestText() {
     const root = join(repoRoot, "scripts", "real-tests");
     return readdirSync(root)
-        .filter((file) => file.endsWith(".mjs"))
+        .filter((file) => file.endsWith(".ts"))
         .map((file) => readFileSync(join(root, file), "utf-8"))
         .join("\n");
 }
@@ -302,10 +332,10 @@ function filesUnder(dir: string, suffixes: string[]): string[] {
 function productionDeviceLabText() {
     const files = [
         ...filesUnder(join(repoRoot, "device-lab-mcp"), [".mjs"]),
-        ...filesUnder(join(repoRoot, "lab-mcp", "src"), [".mjs"]),
-        ...filesUnder(join(repoRoot, "scripts", "real-tests"), [".mjs"]),
-        join(repoRoot, "src", "device-lab-owner.ts"),
-        join(repoRoot, "src", "device-lab-broker.ts"),
+        ...filesUnder(join(repoRoot, "packages", "device-lab", "providers"), [".mjs"]),
+        ...filesUnder(join(repoRoot, "scripts", "real-tests"), [".ts"]),
+        join(repoRoot, "packages", "device-lab", "src", "device-lab-owner.ts"),
+        join(repoRoot, "packages", "device-lab", "src", "device-lab-broker.ts"),
         join(repoRoot, "src", "device-lab-admin.ts"),
         join(repoRoot, "src", "docker.ts"),
     ];
@@ -328,9 +358,9 @@ function literalStringArrayValues(node: Record<string, unknown> | undefined): st
         .map((element) => String(element.value));
 }
 
-function deviceLabServerLiteralSets() {
+function deviceLabServerLiteralSets(publicNames = true) {
     const text = readFileSync(join(repoRoot, "device-lab-mcp", "src", "server.mjs"), "utf-8");
-    const ast = parse(text, { ecmaVersion: "latest", sourceType: "module" });
+    const ast = parseModule(text);
     const sets: Array<{ name: string; values: string[] }> = [];
     walkAst(ast, (node) => {
         if (node.type !== "VariableDeclarator") return;
@@ -344,19 +374,19 @@ function deviceLabServerLiteralSets() {
         const values = literalStringArrayValues(arrayArg);
         if (values.length > 0) sets.push({ name: String(id.name), values });
     });
-    return sets;
+    return publicNames ? sets.map(entry => ({ ...entry, values: entry.values.flatMap(name => name === "device_create" ? Object.keys(CREATE_TOOL_BACKENDS) : [publicToolName(name)]) })) : sets;
 }
 
 function deviceLabBackendCapabilityTools() {
     const roots = [
-        join(repoRoot, "device-lab-mcp", "src", "backends"),
-        join(repoRoot, "device-lab-mcp", "src", "display"),
+        join(repoRoot, "packages", "device-lab", "providers", "backends"),
+        join(repoRoot, "packages", "device-lab", "providers", "display"),
     ];
     const files = roots.flatMap((root) => filesUnder(root, [".mjs"]));
     const capabilities: Array<{ file: string; values: string[] }> = [];
     for (const file of files) {
         const text = readFileSync(file, "utf-8");
-        const ast = parse(text, { ecmaVersion: "latest", sourceType: "module" });
+        const ast = parseModule(text);
         walkAst(ast, (node) => {
             if (node.type === "VariableDeclarator") {
                 const id = node.id as Record<string, unknown> | undefined;
@@ -372,11 +402,11 @@ function deviceLabBackendCapabilityTools() {
             if (values.length > 0) capabilities.push({ file, values });
         });
     }
-    return capabilities;
+    return capabilities.map(entry => ({ ...entry, values: entry.values.map(publicToolName) }));
 }
 
 function brokerCommandForwardedInputKeys() {
-    const text = readFileSync(join(repoRoot, "device-lab-mcp", "src", "broker.mjs"), "utf-8");
+    const text = readFileSync(join(repoRoot, "device-lab-mcp", "src", "broker.mjs"), "utf-8").replace(/\r\n/g, "\n");
     const match = /export async function brokerCommand[\s\S]*?return brokerRpcRequest\(\{([\s\S]*?)\n\s*\}\);\n\}/.exec(text);
     expect(match).not.toBeNull();
     const body = match?.[1] || "";
@@ -407,7 +437,7 @@ function brokerAppiumActionKeys() {
 }
 
 function brokerAppiumForwardedInputKeys() {
-    const text = readFileSync(join(repoRoot, "device-lab-mcp", "src", "broker.mjs"), "utf-8");
+    const text = readFileSync(join(repoRoot, "device-lab-mcp", "src", "broker.mjs"), "utf-8").replace(/\r\n/g, "\n");
     const match = /export async function brokerAppium[\s\S]*?params:\s*\{([\s\S]*?)\n\s*\},\n\s*\}\);\n\}/.exec(text);
     expect(match).not.toBeNull();
     const body = match?.[1] || "";
@@ -421,7 +451,7 @@ function brokerAppiumForwardedInputKeys() {
 }
 
 function hostBrokerAppiumAllowedRequests() {
-    const text = readFileSync(join(repoRoot, "src", "device-lab-broker.ts"), "utf-8");
+    const text = readFileSync(join(repoRoot, "packages", "device-lab", "src", "device-lab-broker.ts"), "utf-8");
     const match = /const DEVICE_BROKER_APPIUM_REQUEST_ALLOWLIST = new Map<string, ReadonlySet<DeviceBrokerAppiumRequestMethod>>\(\[([\s\S]*?)\n\]\);/.exec(text);
     expect(match).not.toBeNull();
     const body = match?.[1] || "";
@@ -448,7 +478,7 @@ function brokerWrapperActionKeys(functionName: string) {
 }
 
 function brokerWrapperForwardedInputKeys(functionName: string) {
-    const text = readFileSync(join(repoRoot, "device-lab-mcp", "src", "broker.mjs"), "utf-8");
+    const text = readFileSync(join(repoRoot, "device-lab-mcp", "src", "broker.mjs"), "utf-8").replace(/\r\n/g, "\n");
     const match = new RegExp(`export async function ${functionName}[\\s\\S]*?params:\\s*\\{([\\s\\S]*?)\\n\\s*\\},\\n\\s*\\}\\);\\n\\}`).exec(text);
     expect(match).not.toBeNull();
     const body = match?.[1] || "";
@@ -459,7 +489,7 @@ function brokerWrapperForwardedInputKeys(functionName: string) {
 }
 
 function brokerAppleTrustActionKeys() {
-    const text = readFileSync(join(repoRoot, "src", "device-lab-broker.ts"), "utf-8");
+    const text = readFileSync(join(repoRoot, "packages", "device-lab", "src", "device-lab-broker.ts"), "utf-8");
     const match = /const DEVICE_BROKER_APPLE_TRUST_ACTIONS = new Set\(\[([^\]]*)\]\);/.exec(text);
     expect(match).not.toBeNull();
     return [...(match?.[1] || "").matchAll(/["']([a-z][a-z0-9-]*)["']/g)]
@@ -477,10 +507,10 @@ function publicBrokerRpcMethodKeys() {
 }
 
 function brokerMobileRequestToolKeys() {
-    const text = readFileSync(join(repoRoot, "device-lab-mcp", "src", "server.mjs"), "utf-8");
+    const text = readFileSync(join(repoRoot, "device-lab-mcp", "src", "server.mjs"), "utf-8").replace(/\r\n/g, "\n");
     const match = /function brokerMobileRequest\(name, args, backend\) \{([\s\S]*?)\n\}\n\nfunction brokerMobilePayload/.exec(text);
     expect(match).not.toBeNull();
-    return [...new Set([...(match?.[1] || "").matchAll(/\bname === "([^"]+)"/g)].map((item) => item[1]))].sort();
+    return [...new Set([...(match?.[1] || "").matchAll(/\bname === "([^"]+)"/g)].map((item) => publicToolName(item[1])))].sort();
 }
 
 function deviceLabToolSchemaPropertyMap() {
@@ -503,25 +533,27 @@ function deviceLabToolBackendEnums() {
 
 function deviceLabMcpBackendCapabilities() {
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", [
-        "import { androidBackend } from './device-lab-mcp/src/backends/android.mjs';",
-        "import { androidRealBackend } from './device-lab-mcp/src/backends/android-device.mjs';",
-        "import { iosBackend } from './device-lab-mcp/src/backends/ios-simulator.mjs';",
-        "import { iosRealBackend } from './device-lab-mcp/src/backends/ios-device.mjs';",
-        "import { windowsBackend } from './device-lab-mcp/src/backends/windows-sandbox.mjs';",
-        "import { macosBackend } from './device-lab-mcp/src/backends/macos-vm.mjs';",
-        "const backends = [androidBackend(), androidRealBackend(), iosBackend(), iosRealBackend(), windowsBackend(), macosBackend()];",
+        "import { androidBackend } from '@ccc/device-lab/providers/backends/android.mjs';",
+        "import { androidRealBackend } from '@ccc/device-lab/providers/backends/android-device.mjs';",
+        "import { iosBackend } from '@ccc/device-lab/providers/backends/ios-simulator.mjs';",
+        "import { iosRealBackend } from '@ccc/device-lab/providers/backends/ios-device.mjs';",
+        "import { windowsBackend } from '@ccc/device-lab/providers/backends/windows-sandbox.mjs';",
+        "import { windowsVmBackend } from '@ccc/device-lab/providers/backends/windows-vm.mjs';",
+        "import { macosBackend } from '@ccc/device-lab/providers/backends/macos-vm.mjs';",
+        "import { linuxVmBackend } from '@ccc/device-lab/providers/backends/linux-vm.mjs';",
+        "const backends = [androidBackend(), androidRealBackend(), iosBackend(), iosRealBackend(), windowsBackend(), windowsVmBackend(), macosBackend(), linuxVmBackend()];",
         "console.log(JSON.stringify(backends.map(({ name, capabilities }) => [name, [...capabilities].sort()])));",
     ].join("")], {
         cwd: repoRoot,
         encoding: "utf-8",
     });
     expect(result.status).toBe(0);
-    return new Map(JSON.parse(result.stdout) as Array<[string, string[]]>);
+    return new Map((JSON.parse(result.stdout) as Array<[string, string[]]>).map(([backend, names]) => [backend, [...new Set(names.map(publicToolName))].sort()]));
 }
 
 function functionSwitchCaseLabels(file: string, functionName: string) {
     const text = readFileSync(file, "utf-8");
-    const ast = parse(text, { ecmaVersion: "latest", sourceType: "module" });
+    const ast = parseModule(text);
     let functionNode: Record<string, unknown> | null = null;
     walkAst(ast, (node) => {
         if (functionNode || node.type !== "FunctionDeclaration") return;
@@ -535,31 +567,43 @@ function functionSwitchCaseLabels(file: string, functionName: string) {
         const test = node.test as Record<string, unknown> | undefined;
         if (test?.type === "Literal" && typeof test.value === "string") labels.add(String(test.value));
     });
-    return [...labels].sort();
+    return [...new Set([...labels].map(publicToolName))].sort();
 }
 
 function deviceLabBackendHandlerCases() {
-    const backendRoot = join(repoRoot, "device-lab-mcp", "src", "backends");
-    return new Map([
+    const backendRoot = join(repoRoot, "packages", "device-lab", "providers", "backends");
+    const handlers = new Map([
         ["android-emulator", functionSwitchCaseLabels(join(backendRoot, "android.mjs"), "handleAndroidToolUnlocked")],
         ["android-device", functionSwitchCaseLabels(join(backendRoot, "android-device.mjs"), "handleAndroidRealToolUnlocked")],
         ["ios-simulator", functionSwitchCaseLabels(join(backendRoot, "ios-simulator.mjs"), "handleIosToolUnlocked")],
         ["ios-device", functionSwitchCaseLabels(join(backendRoot, "ios-device.mjs"), "handleIosRealToolUnlocked")],
         ["windows-sandbox", functionSwitchCaseLabels(join(backendRoot, "windows-sandbox.mjs"), "handleWindowsToolUnlocked")],
+        ["windows-vm", [...quotedArrayConstant(readFileSync(join(repoRoot, "packages", "device-lab", "src", "device-lab-broker.ts"), "utf-8"), "HYPER_V_VM_CAPABILITIES")].sort()],
         ["macos-vm", functionSwitchCaseLabels(join(backendRoot, "macos-vm.mjs"), "handleMacosToolUnlocked")],
+        ["linux-vm", [...LINUX_VM_CAPABILITIES].map(publicToolName).sort()],
     ]);
+    const server = readFileSync(join(repoRoot, "device-lab-mcp/src/server.mjs"), "utf8");
+    expect(server).toContain('if (name === "device_list_files")');
+    expect(server).toContain('buildListFilesCommand(owner.backend, args)');
+    expect(server).toContain('listFilesFromExecResult(await dispatchTool("device_exec", { ...args, command }), args)');
+    for (const backend of ["android-emulator", "android-device", "windows-sandbox", "macos-vm"]) {
+        const cases = handlers.get(backend)!;
+        expect(cases).toContain("exec");
+        cases.push("list_files");
+    }
+    return handlers;
 }
 
 function quotedSetConstant(text: string, name: string) {
     const match = new RegExp(`const ${name} = new Set\\(\\[([\\s\\S]*?)\\]\\);`).exec(text);
     expect(match).not.toBeNull();
-    return new Set([...(match?.[1] || "").matchAll(/"([^"]+)"/g)].map((item) => item[1]));
+    return new Set([...(match?.[1] || "").matchAll(/"([^"]+)"/g)].map((item) => publicToolName(item[1])));
 }
 
 function quotedArrayConstant(text: string, name: string) {
     const match = new RegExp(`const ${name} = \\[([\\s\\S]*?)\\];`).exec(text);
     expect(match).not.toBeNull();
-    return new Set([...(match?.[1] || "").matchAll(/"([^"]+)"/g)].map((item) => item[1]));
+    return new Set([...(match?.[1] || "").matchAll(/"([^"]+)"/g)].map((item) => publicToolName(item[1])));
 }
 
 function quotedMapKeys(text: string, name: string) {
@@ -568,18 +612,24 @@ function quotedMapKeys(text: string, name: string) {
     return new Set([...(match?.[1] || "").matchAll(/\["([^"]+)",\s*"[^"]+"\]/g)].map((item) => item[1]));
 }
 
+// The broker serves linux-vm through Hyper-V on Windows hosts as well as QEMU in the container.
+function hyperVLinuxVmCapabilities(brokerText: string) {
+    expect(brokerText).toContain("const HYPER_V_LINUX_VM_CAPABILITIES = [...HYPER_V_VM_CAPABILITIES];");
+    return quotedArrayConstant(brokerText, "HYPER_V_VM_CAPABILITIES");
+}
+
 function backendAdvertisedSupportDrift() {
-    const brokerText = readFileSync(join(repoRoot, "src", "device-lab-broker.ts"), "utf-8");
+    const brokerText = readFileSync(join(repoRoot, "packages", "device-lab", "src", "device-lab-broker.ts"), "utf-8");
     const desktopCapabilities = quotedArrayConstant(brokerText, "DESKTOP_DEVICE_CAPABILITIES");
     const currentDisplayCapabilities = new Set([
-        "device_status",
-        "device_screenshot",
-        "device_click",
-        "device_double_click",
-        "device_key",
-        "device_type",
-        "device_scroll",
-        "device_cursor_position",
+        "devices",
+        "status",
+        "screenshot",
+        "click",
+        "key",
+        "type",
+        "scroll",
+        "cursor_position",
     ]);
     const capabilityCases = new Map([
         ["x11-current-display", currentDisplayCapabilities],
@@ -588,27 +638,32 @@ function backendAdvertisedSupportDrift() {
         ["ios-simulator", quotedArrayConstant(brokerText, "IOS_SIMULATOR_CAPABILITIES")],
         ["ios-device", quotedArrayConstant(brokerText, "IOS_REAL_CAPABILITIES")],
         ["windows-sandbox", desktopCapabilities],
+        ["windows-vm", quotedArrayConstant(brokerText, "HYPER_V_VM_CAPABILITIES")],
         ["macos-vm", new Set([...desktopCapabilities, ...quotedArrayConstant(brokerText, "MACOS_VM_CAPABILITIES")])],
+        ["linux-vm", new Set([...LINUX_VM_CAPABILITIES.map(publicToolName), ...hyperVLinuxVmCapabilities(brokerText)])],
     ]);
+    for (const backend of ["x11-current-display", "windows-vm", "linux-vm"]) capabilityCases.get(backend)?.add("move");
     const schemas = deviceLabToolBackendEnums();
     const backends = [...capabilityCases.keys()];
     const overAdvertised: Array<{ tool: string; backend: string; actual: string[] }> = [];
     const underAdvertised: Array<{ tool: string; backend: string; advertised: string[] }> = [];
     for (const [tool, advertised] of schemas.entries()) {
         if (advertised.length === 0 || tool.startsWith("device_broker_")) continue;
-        const actual = backends.filter((backend) => capabilityCases.get(backend)?.has(tool));
+        const actual = backends.filter((backend) => tool === "run_flow"
+            ? DEVICE_FLOW_TOOL_NAMES.some((step) => capabilityCases.get(backend)?.has(step))
+            : capabilityCases.get(backend)?.has(tool));
         for (const backend of advertised) {
             if (!actual.includes(backend)) overAdvertised.push({ tool, backend, actual });
         }
         for (const backend of actual) {
-            if (!advertised.includes(backend) && tool !== "device_wireless") underAdvertised.push({ tool, backend, advertised });
+            if (!advertised.includes(backend) && tool !== "wireless") underAdvertised.push({ tool, backend, advertised });
         }
     }
     return { overAdvertised, underAdvertised };
 }
 
 function hostBrokerBackendCapabilities() {
-    const brokerText = readFileSync(join(repoRoot, "src", "device-lab-broker.ts"), "utf-8");
+    const brokerText = readFileSync(join(repoRoot, "packages", "device-lab", "src", "device-lab-broker.ts"), "utf-8");
     const desktopCapabilities = quotedArrayConstant(brokerText, "DESKTOP_DEVICE_CAPABILITIES");
     return new Map([
         ["android-emulator", [...quotedArrayConstant(brokerText, "ANDROID_EMULATOR_CAPABILITIES")].sort()],
@@ -616,6 +671,7 @@ function hostBrokerBackendCapabilities() {
         ["ios-simulator", [...quotedArrayConstant(brokerText, "IOS_SIMULATOR_CAPABILITIES")].sort()],
         ["ios-device", [...quotedArrayConstant(brokerText, "IOS_REAL_CAPABILITIES")].sort()],
         ["windows-sandbox", [...desktopCapabilities].sort()],
+        ["windows-vm", [...quotedArrayConstant(brokerText, "HYPER_V_VM_CAPABILITIES")].sort()],
         ["macos-vm", [...new Set([...desktopCapabilities, ...quotedArrayConstant(brokerText, "MACOS_VM_CAPABILITIES")])].sort()],
     ]);
 }
@@ -623,7 +679,12 @@ function hostBrokerBackendCapabilities() {
 function realTestFilesWithCallTool() {
     const root = join(repoRoot, "scripts", "real-tests");
     return readdirSync(root)
-        .filter((file) => file.endsWith(".mjs"))
+        .filter((file) => file.endsWith(".ts"))
+        // Vitest specs are not runner call sites: the level 3 node runner never imports them, so
+        // they can never be reachable. They also quote `callTool(` as source-inspection text
+        // (hyper-v-vm-e2e.test.ts asserts on `callTool("device_stop"` appearing in a function
+        // body), which this text match would otherwise read as a real MCP call.
+        .filter((file) => !file.endsWith(".test.ts"))
         .filter((file) => /callTool\(/.test(readFileSync(join(root, file), "utf-8")))
         .sort();
 }
@@ -635,7 +696,7 @@ function reachableRealTestFilesFrom(entryFiles: string[]) {
         if (reachable.has(file)) return;
         reachable.add(file);
         const text = readFileSync(join(root, file), "utf-8");
-        for (const match of text.matchAll(/from\s+["']\.\/([^"']+\.mjs)["']/g)) {
+        for (const match of text.matchAll(/from\s+["']\.\/([^"']+\.ts)["']/g)) {
             visit(match[1]);
         }
     };
@@ -655,6 +716,73 @@ function testSupportText() {
 }
 
 describe("test level runner", () => {
+    it("does not stop a pre-existing foreign Windows Sandbox session during single-use recovery", async () => {
+        const foreignId = "11111111-1111-4111-8111-111111111111";
+        const stopped: string[] = [];
+        const runner = (_command: string, args: string[]) => {
+            if (args[0] === "list") return { status: 0, stdout: JSON.stringify([{ id: foreignId }]), stderr: "" };
+            if (args[0] === "stop") stopped.push(args[2]);
+            return { status: 0, stdout: "", stderr: "" };
+        };
+        const callTool = vi.fn(async (tool: string) => {
+            if (tool === "start") return mcpTextResult("CO_E_APPSINGLEUSE", true);
+            return mcpTextResult({ device: { id: "windows-real-sandbox-test", status: "stopped" } });
+        });
+
+        await expect(startWindowsSandboxE2EDevice(callTool, "windows-real-sandbox-test", {
+            wsb: "wsb",
+            runner,
+            retryDelayMs: 0,
+        })).rejects.toThrow(/^mcp-tool-failed/);
+        expect(callTool.mock.calls.filter(([tool]) => tool === "start")).toHaveLength(1);
+        expect(stopped).toEqual([]);
+    });
+
+    it("stops only the verified test-owned Windows Sandbox session when a foreign session appears concurrently", async () => {
+        const preExistingId = "11111111-1111-4111-8111-111111111111";
+        const ownedId = "22222222-2222-4222-8222-222222222222";
+        const concurrentForeignId = "33333333-3333-4333-8333-333333333333";
+        const stopped: string[] = [];
+        let listCount = 0;
+        const runner = (_command: string, args: string[]) => {
+            if (args[0] === "list") {
+                listCount += 1;
+                const ids = listCount === 1
+                    ? [preExistingId]
+                    : stopped.includes(ownedId)
+                        ? [preExistingId, concurrentForeignId]
+                        : [preExistingId, ownedId, concurrentForeignId];
+                return { status: 0, stdout: JSON.stringify(ids.map((id) => ({ id }))), stderr: "" };
+            }
+            if (args[0] === "stop") stopped.push(args[2]);
+            return { status: 0, stdout: "", stderr: "" };
+        };
+        let startCount = 0;
+        const startBudgets: unknown[] = [];
+        const callTool = async (tool: string, args: any) => {
+            if (tool === "status") {
+                return mcpTextResult({ device: { deviceId: "windows-real-sandbox-test", status: "running", sandboxId: ownedId } });
+            }
+            startCount += 1;
+            startBudgets.push({ boot: args.bootTimeoutMs, transport: realMcpToolRequestTimeoutMs(tool, args) });
+            return startCount === 1
+                ? mcpTextResult("CO_E_APPSINGLEUSE", true)
+                : mcpTextResult({ device: { deviceId: "windows-real-sandbox-test", status: "running", sandboxId: ownedId } });
+        };
+
+        const started = await startWindowsSandboxE2EDevice(callTool, "windows-real-sandbox-test", {
+            wsb: "wsb",
+            runner,
+            retryDelayMs: 0,
+            bootTimeoutMs: 180000,
+        });
+        expect(started.device.sandboxId).toBe(ownedId);
+        expect(startBudgets).toEqual([{ boot: 180000, transport: 210000 }, { boot: 180000, transport: 210000 }]);
+        expect(stopped).toEqual([ownedId]);
+        expect(stopped).not.toContain(preExistingId);
+        expect(stopped).not.toContain(concurrentForeignId);
+    });
+
     it("keeps level 0 mapped to the default vitest suite", () => {
         const plan = dryRun("0");
 
@@ -678,7 +806,7 @@ describe("test level runner", () => {
             "src/__tests__/device-lab.real-android-emulator-e2e.test.ts",
             "src/__tests__/device-lab.real-macos-vm-e2e.test.ts",
             "src/__tests__/device-lab.real-windows-sandbox.test.ts",
-            "src/__tests__/lab-mcp.real-linux-vm.test.ts",
+            "src/__tests__/device-lab-mcp.real-linux-vm.test.ts",
         ]));
         expect(level3.args).toEqual(expect.arrayContaining([
             "src/__tests__/device-lab.real-destructive.test.ts",
@@ -699,34 +827,306 @@ describe("test level runner", () => {
         const level2 = dryRunNode("2");
 
         expect(level2.mode).toBe("node-test");
-        expect(level2.args.join("\n")).toContain("scripts/real-tests/run.mjs");
-        expect(level2.args.join("\n")).toContain("scripts/real-tests/level0-package-smoke.mjs");
-        expect(level2.args.join("\n")).toContain("scripts/real-tests/level1-real-provider-readiness.mjs");
-        expect(level2.args.join("\n")).toContain("scripts/real-tests/level1-dist-real-provider-readiness.mjs");
-        expect(level2.args.join("\n")).toContain("scripts/real-tests/level1-display-e2e.mjs");
-        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-host-integration-slots.mjs");
-        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-broker-e2e.mjs");
-        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-dist-broker-e2e.mjs");
-        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-ios-e2e.mjs");
-        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-android-emulator-e2e.mjs");
-        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-android-device-e2e.mjs");
-        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-macos-vm-e2e.mjs");
-        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-windows-sandbox.mjs");
-        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-real-linux-vm.mjs");
+        expect(level2.args.slice(0, 3)).toEqual([
+            "--import",
+            pathToFileURL(join(repoRoot, "scripts", "real-tests", "typescript-source-loader.mjs")).href,
+            join(repoRoot, "scripts", "real-tests", "run.ts"),
+        ]);
+        expect(level2.args.join("\n")).toContain("scripts/real-tests/run.ts");
+        expect(level2.args.join("\n")).toContain("scripts/real-tests/level0-package-smoke.ts");
+        expect(level2.args.join("\n")).toContain("scripts/real-tests/level1-real-provider-readiness.ts");
+        expect(level2.args.join("\n")).toContain("scripts/real-tests/level1-dist-real-provider-readiness.ts");
+        expect(level2.args.join("\n")).toContain("scripts/real-tests/level1-display-e2e.ts");
+        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-host-integration-slots.ts");
+        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-broker-e2e.ts");
+        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-dist-broker-e2e.ts");
+        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-ios-e2e.ts");
+        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-android-emulator-e2e.ts");
+        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-android-device-e2e.ts");
+        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-macos-vm-e2e.ts");
+        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-windows-sandbox.ts");
+        expect(level2.args.join("\n")).toContain("scripts/real-tests/level2-real-linux-vm.ts");
 
         const level3 = dryRunNode("3");
         expect(level3.mode).toBe("node-test");
-        expect(level3.args.join("\n")).toContain("scripts/real-tests/level0-package-smoke.mjs");
-        expect(level3.args.join("\n")).toContain("scripts/real-tests/level1-dist-real-provider-readiness.mjs");
-        expect(level3.args.join("\n")).toContain("scripts/real-tests/level2-broker-e2e.mjs");
-        expect(level3.args.join("\n")).toContain("scripts/real-tests/level2-dist-broker-e2e.mjs");
-        expect(level3.args.join("\n")).toContain("scripts/real-tests/level2-android-device-e2e.mjs");
-        expect(level3.args.join("\n")).not.toContain("scripts/real-tests/level2-android-emulator-e2e.mjs");
-        expect(level3.args.join("\n")).toContain("scripts/real-tests/level3-real-destructive.mjs");
+        expect(level3.args.join("\n")).toContain("scripts/real-tests/level0-package-smoke.ts");
+        expect(level3.args.join("\n")).toContain("scripts/real-tests/level1-dist-real-provider-readiness.ts");
+        expect(level3.args.join("\n")).toContain("scripts/real-tests/level2-broker-e2e.ts");
+        expect(level3.args.join("\n")).toContain("scripts/real-tests/level2-dist-broker-e2e.ts");
+        expect(level3.args.join("\n")).toContain("scripts/real-tests/level2-android-device-e2e.ts");
+        expect(level3.args.join("\n")).not.toContain("scripts/real-tests/level2-android-emulator-e2e.ts");
+        expect(level3.args.join("\n")).toContain("scripts/real-tests/level3-real-destructive.ts");
+        expect(level3.args).toEqual(expect.arrayContaining(["--provider-concurrency", "2"]));
     });
 
+    it("validates and forwards the Level 3 provider concurrency override", () => {
+        const result = spawnSync(process.execPath, [runner, "3", "--dry-run", "--provider-concurrency", "4"], {
+            cwd: repoRoot,
+            encoding: "utf-8",
+        });
+        expect(result.status).toBe(0);
+        const plan = JSON.parse(result.stdout) as { args: string[]; mode: string };
+        expect(plan.mode).toBe("node-test");
+        expect(plan.args).toEqual(expect.arrayContaining(["--provider-concurrency", "4"]));
+
+        const invalid = spawnSync(process.execPath, [runner, "3", "--dry-run", "--node-test", "--provider-concurrency", "0"], {
+            cwd: repoRoot,
+            encoding: "utf-8",
+        });
+        expect(invalid.status).toBe(1);
+        expect(invalid.stderr).toContain("Provider concurrency must be an integer from 1 to 8");
+        expect(() => normalizeProviderConcurrency("9", 2)).toThrow("integer from 1 to 8");
+    });
+
+    it("partitions provider modules from serial Level 3 setup modules", () => {
+        const files = [
+            "/repo/scripts/real-tests/level2-broker-e2e.ts",
+            "/repo/scripts/real-tests/level2-hyper-v-windows-vm.ts",
+            "/repo/scripts/real-tests/level3-real-destructive.ts",
+        ];
+        const partitioned = partitionProviderFiles(files);
+        expect(partitioned.serial).toEqual([files[0]]);
+        expect(partitioned.providers).toEqual([
+            { file: files[1], resources: ["hyper-v", "host-virtualization"] },
+            { file: files[2], resources: ["android-emulator", "macos-vm", "host-virtualization"] },
+        ]);
+    });
+
+    it("runs independent providers concurrently while serializing shared resources", async () => {
+        const events: string[] = [];
+        let active = 0;
+        let maxActive = 0;
+        const items = [
+            { file: "macos-a", resources: ["macos-vm"] },
+            { file: "windows", resources: ["windows-sandbox"] },
+            { file: "macos-b", resources: ["macos-vm"] },
+        ];
+        const results = await runResourceAware(items, 2, async (file) => {
+            events.push(`start:${file}`);
+            active += 1;
+            maxActive = Math.max(maxActive, active);
+            await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+            active -= 1;
+            events.push(`end:${file}`);
+            return file;
+        });
+
+        expect(results).toEqual(["macos-a", "windows", "macos-b"]);
+        expect(maxActive).toBe(2);
+        expect(events.indexOf("start:macos-b")).toBeGreaterThan(events.indexOf("end:macos-a"));
+    });
+
+    it("serializes host virtualization while allowing a physical provider concurrently", async () => {
+        const events: string[] = [];
+        let active = 0;
+        let maxActive = 0;
+        await runResourceAware([
+            { file: "hyper-v", resources: ["hyper-v", "host-virtualization"] },
+            { file: "android", resources: ["android-device"] },
+            { file: "windows", resources: ["windows-sandbox", "host-virtualization"] },
+        ], 2, async (file) => {
+            events.push(`start:${file}`);
+            active += 1;
+            maxActive = Math.max(maxActive, active);
+            await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+            active -= 1;
+            events.push(`end:${file}`);
+            return file;
+        });
+
+        expect(events.indexOf("start:android")).toBeLessThan(events.indexOf("end:hyper-v"));
+        expect(events.indexOf("start:windows")).toBeGreaterThan(events.indexOf("end:hyper-v"));
+        expect(maxActive).toBe(2);
+    });
+
+    it("waits for active providers before reporting a scheduler failure", async () => {
+        const events: string[] = [];
+        await expect(runResourceAware([
+            { file: "failing", resources: ["android-device"] },
+            { file: "finishing", resources: ["windows-sandbox"] },
+        ], 2, async (file) => {
+            events.push(`start:${file}`);
+            if (file === "failing") throw new Error("provider failed");
+            await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+            events.push(`end:${file}`);
+            return file;
+        })).rejects.toThrow("provider failed");
+        expect(events).toContain("end:finishing");
+    });
+
+    it("executes provider modules in isolated child processes and keeps summary order", () => {
+        const tempDir = mkdtempSync(join(tmpdir(), "ccc-provider-workers-"));
+        const windowsFile = join(tempDir, "level2-android-device-e2e.ts");
+        const linuxFile = join(tempDir, "level2-windows-sandbox.ts");
+        const windowsStarted = join(tempDir, "windows.started");
+        const linuxStarted = join(tempDir, "linux.started");
+        const summaryFile = join(tempDir, "summary.json");
+        const moduleText = (name: string, ownMarker: string, peerMarker: string) => `
+            import { existsSync, writeFileSync } from "fs";
+            export const name = ${JSON.stringify(name)};
+            export async function run() {
+                writeFileSync(${JSON.stringify(ownMarker)}, String(process.pid));
+                const deadline = Date.now() + 20_000;
+                while (!existsSync(${JSON.stringify(peerMarker)}) && Date.now() < deadline) {
+                    await new Promise((resolve) => setTimeout(resolve, 20));
+                }
+                return existsSync(${JSON.stringify(peerMarker)})
+                    ? { status: "PASS" }
+                    : { status: "FAIL", reason: "peer provider did not start concurrently" };
+            }
+        `;
+        writeFileSync(windowsFile, moduleText("windows worker", windowsStarted, linuxStarted));
+        writeFileSync(linuxFile, moduleText("sandbox worker", linuxStarted, windowsStarted));
+        try {
+            const result = spawnSync(process.execPath, [
+                join(repoRoot, "scripts", "real-tests", "run.ts"),
+                "--compact",
+                "--provider-concurrency",
+                "2",
+                "--json-summary-file",
+                summaryFile,
+                windowsFile,
+                linuxFile,
+            ], {
+                cwd: repoRoot,
+                encoding: "utf-8",
+                timeout: 60_000,
+            });
+            expect(result.status, result.stderr || result.stdout).toBe(0);
+            const summary = JSON.parse(readFileSync(summaryFile, "utf-8")) as {
+                records: Array<{ test: string; status: string }>;
+            };
+            expect(summary.records).toEqual([
+                expect.objectContaining({ test: "windows worker", status: "PASS" }),
+                expect.objectContaining({ test: "sandbox worker", status: "PASS" }),
+            ]);
+            expect(readFileSync(windowsStarted, "utf-8")).not.toBe(String(process.pid));
+            expect(readFileSync(linuxStarted, "utf-8")).not.toBe(String(process.pid));
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true });
+        }
+    }, 70_000);
+
+    it("collects a provider worker exception as a failed real-test record", () => {
+        const tempDir = mkdtempSync(join(tmpdir(), "ccc-provider-worker-failure-"));
+        const providerFile = join(tempDir, "level2-hyper-v-windows-vm.ts");
+        const summaryFile = join(tempDir, "summary.json");
+        writeFileSync(providerFile, `
+            export const name = "worker failure";
+            export async function run() {
+                throw new Error("intentional worker failure");
+            }
+        `);
+        try {
+            const result = spawnSync(process.execPath, [
+                join(repoRoot, "scripts", "real-tests", "run.ts"),
+                "--compact",
+                "--provider-concurrency",
+                "2",
+                "--json-summary-file",
+                summaryFile,
+                providerFile,
+            ], {
+                cwd: repoRoot,
+                encoding: "utf-8",
+                timeout: 30_000,
+            });
+            expect(result.status).toBe(1);
+            const summary = JSON.parse(readFileSync(summaryFile, "utf-8")) as {
+                records: Array<{ test: string; status: string; reason?: string }>;
+            };
+            expect(summary.records).toEqual([
+                expect.objectContaining({
+                    test: "worker failure",
+                    status: "FAIL",
+                    reason: "intentional worker failure",
+                }),
+            ]);
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true });
+        }
+    }, 40_000);
+
+    it("terminates active provider workers when the collector is interrupted", async () => {
+        const tempDir = mkdtempSync(join(tmpdir(), "ccc-provider-worker-signal-"));
+        const providerFile = join(tempDir, "level2-windows-sandbox.ts");
+        const workerPidFile = join(tempDir, "worker.pid");
+        const grandchildPidFile = join(tempDir, "grandchild.pid");
+        writeFileSync(providerFile, `
+            import { spawn } from "child_process";
+            import { writeFileSync } from "fs";
+            export const name = "interrupt worker";
+            export async function run() {
+                writeFileSync(${JSON.stringify(workerPidFile)}, String(process.pid));
+                const grandchild = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+                    stdio: "ignore",
+                    windowsHide: true,
+                });
+                writeFileSync(${JSON.stringify(grandchildPidFile)}, String(grandchild.pid));
+                await new Promise((resolve) => setTimeout(resolve, 30_000));
+                return { status: "PASS" };
+            }
+        `);
+        const collector = spawn(process.execPath, [
+            join(repoRoot, "scripts", "real-tests", "run.ts"),
+            "--compact",
+            "--provider-concurrency",
+            "2",
+            providerFile,
+        ], {
+            cwd: repoRoot,
+            stdio: "ignore",
+            windowsHide: true,
+        });
+        try {
+            const deadline = Date.now() + 30_000;
+            while ((!existsSync(workerPidFile) || !existsSync(grandchildPidFile)) && Date.now() < deadline) {
+                await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+            }
+            expect(existsSync(workerPidFile)).toBe(true);
+            expect(existsSync(grandchildPidFile)).toBe(true);
+            const workerPid = Number(readFileSync(workerPidFile, "utf-8"));
+            const grandchildPid = Number(readFileSync(grandchildPidFile, "utf-8"));
+            expect(Number.isInteger(workerPid)).toBe(true);
+            expect(Number.isInteger(grandchildPid)).toBe(true);
+            const killSignal = "SIGTERM";
+            collector.kill(killSignal);
+            const collectorExit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolvePromise) => {
+                collector.once("close", (code, signal) => resolvePromise({ code, signal }));
+            });
+            expect(
+                collectorExit.signal === killSignal
+                || collectorExit.code === (process.platform === "win32" ? 1 : 143),
+            ).toBe(true);
+
+            for (const pid of [workerPid, grandchildPid]) {
+                const workerDeadline = Date.now() + 5000;
+                let processAlive = true;
+                while (processAlive && Date.now() < workerDeadline) {
+                    try {
+                        process.kill(pid, 0);
+                        if (process.platform === "linux") {
+                            const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+                            if (/\)\s+Z\s/.test(stat)) {
+                                processAlive = false;
+                                break;
+                            }
+                        }
+                        await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+                    } catch {
+                        processAlive = false;
+                    }
+                }
+                expect(processAlive).toBe(false);
+            }
+        } finally {
+            if (collector.exitCode === null) collector.kill("SIGKILL");
+            rmSync(tempDir, { recursive: true, force: true });
+        }
+    }, 40_000);
+
     it("always uses the current checkout CLI for real broker autolaunch", async () => {
-        const { localCccPathEnv } = await import("../../scripts/real-tests/helpers.mjs") as {
+        const { localCccPathEnv } = await import("../../scripts/real-tests/helpers.ts") as {
             localCccPathEnv: (env?: NodeJS.ProcessEnv) => { ok: boolean; source?: string; env?: NodeJS.ProcessEnv; cleanup: () => void };
         };
         const originalPath = process.platform === "win32" ? "C:\\global-ccc" : "/global-ccc";
@@ -755,27 +1155,33 @@ describe("test level runner", () => {
         expect(plan.env.CCC_REAL_DEVICE_LAB_FAIL_ON_SKIP).toBe("1");
     });
 
-    it("exposes only the four device-lab level commands", () => {
+    it("exposes the four device-lab levels and focused Hyper-V Level 3 commands", () => {
         const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf-8")) as {
             scripts?: Record<string, string>;
         };
-        expect(pkg.scripts?.["test:level3"]).toBe("node scripts/real-tests/level3.mjs");
+        expect(pkg.scripts?.["test:level3"]).toBe("node scripts/real-tests/level3.ts");
         expect(Object.keys(pkg.scripts || {}).filter((name) => name.startsWith("test:level"))).toEqual([
             "test:level0",
             "test:level1",
             "test:level2",
             "test:level3",
+            "test:level3:hyper-v",
+            "test:level3:hyper-v:windows",
+            "test:level3:hyper-v:windows:library",
+            "test:level3:hyper-v:windows:network:library",
+            "test:level3:hyper-v:linux",
         ]);
     });
 
     it("treats the explicit Level 3 command as destructive authorization without an environment switch", () => {
-        const level3Text = readFileSync(join(repoRoot, "scripts", "real-tests", "level3.mjs"), "utf-8");
-        const vitestText = readFileSync(join(repoRoot, "scripts", "real-tests", "level3-vitest.mjs"), "utf-8");
-        const configText = readFileSync(join(repoRoot, "scripts", "real-tests", "vitest.level3.config.mjs"), "utf-8");
-        const destructiveText = readFileSync(join(repoRoot, "scripts", "real-tests", "level3-real-destructive.mjs"), "utf-8");
+        const level3Text = readFileSync(join(repoRoot, "scripts", "real-tests", "level3.ts"), "utf-8");
+        const vitestText = readFileSync(join(repoRoot, "scripts", "real-tests", "level3-vitest.ts"), "utf-8");
+        const configText = readFileSync(join(repoRoot, "scripts", "real-tests", "vitest.level3.config.ts"), "utf-8");
+        const destructiveText = readFileSync(join(repoRoot, "scripts", "real-tests", "level3-real-destructive.ts"), "utf-8");
         expect(level3Text).toContain('vitest, "run", "--config", config');
-        expect(level3Text).toContain("buildLevel3Artifacts()");
-        expect(level3Text).toContain('"node_modules", "typescript", "bin", "tsc"');
+        expect(level3Text).toContain("buildLevel3Artifacts(repoRoot, { env })");
+        expect(level3Text).toContain("ensureHostBrokerReady(repoRoot, { env })");
+        expect(level3Text).toContain('from "./support/level3-host.ts"');
         expect(vitestText).toMatch(/runner,\s*"3"/);
         expect(vitestText).toContain('"--platform-result"');
         expect(vitestText).toContain("for (const record of records)");
@@ -785,17 +1191,17 @@ describe("test level runner", () => {
         expect(vitestText).not.toContain('it("runs the real provider suite"');
         expect(vitestText).not.toContain('"--fail-on-coverage-gap"');
         expect(vitestText).toContain('key !== "VITEST" && !key.startsWith("VITEST_")');
-        expect(configText).toContain('include: ["scripts/real-tests/level3-vitest.mjs"]');
-        expect(configText).toContain("testTimeout: 30 * 60 * 1000");
+        expect(configText).toContain('include: ["scripts/real-tests/level3-vitest.ts"]');
+        expect(configText).toContain("testTimeout: 10 * 60 * 60 * 1000");
         expect(destructiveText).toContain("destructive: true");
         expect(destructiveText).toContain("snapshot: true");
     });
 
     it("resolves the real-test repository root from Windows file URLs", async () => {
-        const { repositoryRootFromModuleUrl } = await import("../../scripts/real-tests/helpers.mjs") as {
+        const { repositoryRootFromModuleUrl } = await import("../../scripts/real-tests/helpers.ts") as {
             repositoryRootFromModuleUrl: (moduleUrl: string, options?: { windows?: boolean }) => string;
         };
-        const moduleUrl = "file:///C:/Users/TestUser/Project/_Project/claude-code-container/scripts/real-tests/helpers.mjs";
+        const moduleUrl = "file:///C:/Users/TestUser/Project/_Project/claude-code-container/scripts/real-tests/helpers.ts";
 
         expect(repositoryRootFromModuleUrl(moduleUrl, { windows: true })).toBe(
             "C:\\Users\\TestUser\\Project\\_Project\\claude-code-container\\",
@@ -803,7 +1209,7 @@ describe("test level runner", () => {
     });
 
     it("requires packaged real-provider evidence while retaining source and dist tool coverage", async () => {
-        const { assertResultMatrix } = await import("../../scripts/real-tests/assert-matrix.mjs") as {
+        const { assertResultMatrix } = await import("../../scripts/real-tests/assert-matrix.ts") as {
             assertResultMatrix: (shards: unknown[], options?: Record<string, unknown>) => Record<string, unknown>;
         };
         const shard = {
@@ -819,16 +1225,16 @@ describe("test level runner", () => {
             ],
             records: [],
             toolCoverage: {
-                advertisedTools: ["device_create"],
+                advertisedTools: ["create"],
                 calls: [
-                    { file: "/results/provider-e2e.mjs", tool: "device_create", outcome: "ok", mcpSessionId: "source-session", facets: ["device_create:backend=test-provider"] },
-                    { file: "/results/provider-e2e.mjs", tool: "device_create", outcome: "ok", mcpSessionId: "dist-session", facets: ["device_create:backend=test-provider"] },
+                    { file: "/results/provider-e2e.mjs", tool: "create", outcome: "ok", mcpSessionId: "source-session", facets: ["create:backend=test-provider"] },
+                    { file: "/results/provider-e2e.mjs", tool: "create", outcome: "ok", mcpSessionId: "dist-session", facets: ["create:backend=test-provider"] },
                 ],
             },
         };
         const options = {
-            advertisedTools: ["device_create"],
-            providerSpecs: [{ id: "test-provider", files: ["provider-e2e.mjs"], tools: ["device_create"] }],
+            advertisedTools: ["create"],
+            providerSpecs: [{ id: "test-provider", files: ["provider-e2e.mjs"], tools: ["create"] }],
             requireLinuxVm: false,
         };
 
@@ -839,7 +1245,7 @@ describe("test level runner", () => {
         }));
 
         const wrongFile = structuredClone(shard);
-        wrongFile.toolCoverage.calls[1].file = "/results/level2-broker-e2e.mjs";
+        wrongFile.toolCoverage.calls[1].file = "/results/level2-broker-e2e.ts";
         expect(assertResultMatrix([wrongFile], options)).toEqual(expect.objectContaining({
             ok: false,
             failures: expect.arrayContaining(["missingProviderEvidence:test-provider:dist=1"]),
@@ -866,23 +1272,23 @@ describe("test level runner", () => {
         expect(plan.mode).toBe("node-test");
         expect(plan.args).toContain("--json-summary");
         expect(plan.args).toEqual(expect.arrayContaining(["--json-summary-file", "results/summary.json"]));
-        expect(plan.args.join("\n")).toContain("scripts/real-tests/run.mjs");
-        expect(plan.args.join("\n")).toContain("scripts/real-tests/level1-display-e2e.mjs");
+        expect(plan.args.join("\n")).toContain("scripts/real-tests/run.ts");
+        expect(plan.args.join("\n")).toContain("scripts/real-tests/level1-display-e2e.ts");
     });
 
     it("runs device-lab real E2E operations through the MCP server instead of backend handlers", () => {
         for (const file of [
-            "android-emulator-e2e.mjs",
-            "ios-e2e.mjs",
-            "windows-sandbox-e2e.mjs",
-            "macos-vm-e2e.mjs",
+            "android-emulator-e2e.ts",
+            "ios-e2e.ts",
+            "windows-sandbox-e2e.ts",
+            "macos-vm-e2e.ts",
         ]) {
             const text = readFileSync(join(repoRoot, "scripts", "real-tests", file), "utf-8");
             expect(text).toContain("withDeviceLabMcp");
             expect(text).not.toContain("CCC_DEVICE_LAB_OWNER_BASIS");
             expect(text).not.toMatch(/\bhandle(?:Android|Ios|IosReal|Windows|Macos)Tool\b/);
         }
-        const helperText = readFileSync(join(repoRoot, "scripts", "real-tests", "device-lab-mcp-client.mjs"), "utf-8");
+        const helperText = readFileSync(join(repoRoot, "scripts", "real-tests", "device-lab-mcp-client.ts"), "utf-8");
         expect(helperText).toContain("serverPath");
         expect(helperText).toContain("CCC_REAL_DEVICE_LAB_MCP_SERVER");
         expect(helperText).not.toContain("NODE_ENV");
@@ -904,7 +1310,7 @@ describe("test level runner", () => {
     });
 
     it("keeps user-facing remediation on public device-lab tool names", () => {
-        const brokerText = readFileSync(join(repoRoot, "src", "device-lab-broker.ts"), "utf-8");
+        const brokerText = readFileSync(join(repoRoot, "packages", "device-lab", "src", "device-lab-broker.ts"), "utf-8");
         const mcpBrokerText = readFileSync(join(repoRoot, "device-lab-mcp", "src", "broker.mjs"), "utf-8");
         for (const hiddenName of [
             "device_broker_attach",
@@ -918,16 +1324,11 @@ describe("test level runner", () => {
         expect(mcpBrokerText).not.toContain("device_broker_service");
     });
 
-    it("keeps device-lab server literal tool sets deduplicated and advertised", () => {
-        const advertised = new Set(advertisedDeviceLabTools());
-        const setIssues = deviceLabServerLiteralSets().flatMap(({ name, values }) => {
+    it("keeps device-lab server literal tool sets deduplicated", () => {
+        const setIssues = deviceLabServerLiteralSets(false).flatMap(({ name, values }) => {
             const duplicates = values.filter((value, index) => values.indexOf(value) !== index)
                 .map((value) => ({ name, value, issue: "duplicate" }));
-            const unadvertisedTools = values
-                .filter((value) => /^(?:device|mobile|display)_/.test(value))
-                .filter((value) => !advertised.has(value))
-                .map((value) => ({ name, value, issue: "unadvertised-tool" }));
-            return [...duplicates, ...unadvertisedTools];
+            return duplicates;
         });
         expect(setIssues).toEqual([]);
     });
@@ -936,15 +1337,13 @@ describe("test level runner", () => {
         const advertised = advertisedDeviceLabTools();
         const sets = new Map(deviceLabServerLiteralSets().map(({ name, values }) => [name, values]));
         const directlyHandled = [
-            "device_backends",
-            "device_broker_status",
-            "device_list",
-            "device_run_flow",
-            "display_current",
-            "mobile_run_flow",
+            "devices",
+            "run_flow",
+            "status",
         ];
         const routed = new Set([
             ...directlyHandled,
+            "move",
             ...(sets.get("BROKER_LIFECYCLE_COMMANDS") || []),
             ...(sets.get("BROKER_READONLY_DEVICE_TOOLS") || []),
             ...(sets.get("BROKER_MUTATING_DEVICE_TOOLS") || []),
@@ -953,11 +1352,7 @@ describe("test level runner", () => {
             ...deviceLabBackendCapabilityTools().flatMap(({ values }) => values),
         ]);
         const missing = advertised.filter((tool) => !routed.has(tool));
-        const hiddenOrUnadvertised = [...routed]
-            .filter((tool) => /^(?:device|mobile|display)_/.test(tool))
-            .filter((tool) => !advertised.includes(tool) && !HIDDEN_COMPATIBILITY_TOOLS.has(tool));
         expect(missing).toEqual([]);
-        expect(hiddenOrUnadvertised).toEqual([]);
     });
 
     it("keeps advertised backend enums aligned with direct and broker-supported handlers", () => {
@@ -999,21 +1394,21 @@ describe("test level runner", () => {
     it("keeps provider real E2E scripts aligned with backend capability surfaces", () => {
         const capabilities = deviceLabMcpBackendCapabilities();
         const scripts = new Map<string, string>([
-            ["android-emulator", "android-emulator-e2e.mjs"],
-            ["android-device", "android-device-e2e.mjs"],
-            ["ios-simulator", "ios-e2e.mjs"],
-            ["ios-device", "ios-e2e.mjs"],
+            ["android-emulator", "android-emulator-e2e.ts"],
+            ["android-device", "android-device-e2e.ts"],
+            ["ios-simulator", "ios-e2e.ts"],
+            ["ios-device", "ios-e2e.ts"],
         ]);
         const expectedMissing = new Map<string, string[]>([
             ["android-emulator", []],
-            ["android-device", ["device_inventory", "device_wireless"]],
-            ["ios-simulator", ["device_inventory"]],
-            ["ios-device", ["device_inventory", "device_wireless"]],
+            ["android-device", []],
+            ["ios-simulator", []],
+            ["ios-device", ["wireless"]],
         ]);
         const drift = [...scripts.entries()].flatMap(([backend, file]) => {
             const calls = realTestCallToolNamesForFile(file);
             const missing = (capabilities.get(backend) || [])
-                .filter((tool) => !calls.has(tool))
+                .filter((tool) => TOOLS.some((entry) => entry.name === tool) && !calls.has(tool))
                 .sort();
             const expected = [...(expectedMissing.get(backend) || [])].sort();
             return JSON.stringify(missing) === JSON.stringify(expected)
@@ -1025,51 +1420,47 @@ describe("test level runner", () => {
 
     it("keeps backend handler-only tool cases explicitly classified", () => {
         const advertised = new Set(advertisedDeviceLabTools());
-        const compatibility = new Set(HIDDEN_COMPATIBILITY_TOOLS);
         const capabilities = deviceLabMcpBackendCapabilities();
         const handlerCases = deviceLabBackendHandlerCases();
         const expected = new Map<string, string[]>([
+            ["android-emulator", ["reset"]], // Private delegate used by public clear_app_data.
             ["android-device", [
-                "mobile_set_battery",
-                "mobile_set_location",
-                "mobile_set_network",
-                "mobile_toggle_airplane_mode",
+                "reset", // Private delegate used by public clear_app_data.
+                "set_battery",
+                "set_location",
+                "set_network",
             ]],
             ["ios-simulator", [
-                "mobile_back",
-                "mobile_forward",
-                "mobile_power",
-                "mobile_recents",
-                "mobile_set_battery",
-                "mobile_set_network",
-                "mobile_toggle_airplane_mode",
+                "back",
+                "forward",
+                "power",
+                "recents",
+                "set_battery",
+                "set_network",
             ]],
             ["ios-device", [
-                "device_exec",
-                "mobile_back",
-                "mobile_forward",
-                "mobile_get_clipboard",
-                "mobile_grant_permission",
-                "mobile_open_url",
-                "mobile_power",
-                "mobile_recents",
-                "mobile_revoke_permission",
-                "mobile_set_battery",
-                "mobile_set_clipboard",
-                "mobile_set_location",
-                "mobile_set_network",
-                "mobile_toggle_airplane_mode",
-                "mobile_uninstall_app",
+                "exec",
+                "back",
+                "forward",
+                "clipboard",
+                "permission",
+                "open_url",
+                "power",
+                "recents",
+                "set_battery",
+                "set_location",
+                "set_network",
+                "uninstall_app",
             ]],
         ]);
         const actual = new Map([...handlerCases.entries()].map(([backend, cases]) => {
             const backendCapabilities = new Set(capabilities.get(backend) || []);
             return [backend, cases
-                .filter((tool) => advertised.has(tool) || compatibility.has(tool))
+                .filter((tool) => advertised.has(tool))
                 .filter((tool) => !backendCapabilities.has(tool))
                 .sort()];
         }));
-        expect([...actual.entries()].filter(([, tools]) => tools.length > 0)).toEqual([...expected.entries()]);
+        expect([...actual.entries()].filter(([, tools]) => tools.length > 0)).toEqual([...expected.entries()].map(([backend, tools]) => [backend, [...tools].sort()]));
     });
 
     it("keeps hidden broker command forwarded lifecycle inputs explicit in the broker implementation", () => {
@@ -1099,6 +1490,11 @@ describe("test level runner", () => {
         ]);
         const forwarded = new Set(brokerDeviceToolForwardedInputKeys());
         const routeOnlyKeys = new Set([
+            "detail", // Public response formatting, never a provider argument.
+            "view", // Selects the private discovery operation before dispatch.
+            "count", // Selects the private single/double click operation before dispatch.
+            "region", // Crops the returned screenshot in the MCP adapter after provider dispatch.
+            "appId", // Translated to provider-specific packageName or bundleId.
             "broker",
             "viaBroker",
             "implicitBroker",
@@ -1124,8 +1520,16 @@ describe("test level runner", () => {
         expect(missing).toEqual([]);
 
         const routedSchemaKeys = new Set([...routedTools].flatMap((tool) => schemas.get(tool) || []));
+        const translatedInputs = new Set(["eraseSimulator", "helperTimeoutMs", "packageName", "bundleId", "service"]);
+        const privateOnlyInputs = new Set(["enabled"]); // Retained private mobile_toggle_airplane_mode delegate.
+        const normalization = readFileSync(join(repoRoot, "device-lab-mcp/src/tool-arguments.mjs"), "utf8");
+        expect(normalization).toContain('if (name === "reset") normalized.eraseSimulator = true');
+        expect(normalization).toContain("normalized.helperTimeoutMs");
+        expect(normalization).toContain("normalized.packageName = args.appId");
+        expect(normalization).toContain("normalized.bundleId = args.appId");
+        expect(normalization).toContain("normalized.service = normalized.permission");
         const hidden = [...forwarded]
-            .filter((key) => !routeOnlyKeys.has(key) && !routedSchemaKeys.has(key))
+            .filter((key) => !routeOnlyKeys.has(key) && !translatedInputs.has(key) && !privateOnlyInputs.has(key) && !routedSchemaKeys.has(key))
             .map((key) => ({ hidden: key }));
         expect(hidden).toEqual([]);
     });
@@ -1136,8 +1540,8 @@ describe("test level runner", () => {
         const backendProxyTools = new Set(sets.get("BROKER_BACKEND_MOBILE_TOOLS") || []);
         const appiumRequestTools = new Set(brokerMobileRequestToolKeys());
         const specialCases = new Set([
-            "mobile_session_status",
-            "mobile_wait_for_text",
+            "status",
+            "wait_for_text",
         ]);
         const missing = [...actions]
             .filter((tool) => !backendProxyTools.has(tool) && !appiumRequestTools.has(tool) && !specialCases.has(tool));
@@ -1202,59 +1606,62 @@ describe("test level runner", () => {
         expect(publicBrokerRpcMethodKeys()).toEqual(["broker.backends", "broker.echo", "broker.inventory", "broker.status"]);
     });
 
-    it("keeps device_run_flow free of tools that require destructive confirmation", () => {
-        const sets = new Map(deviceLabServerLiteralSets().map(({ name, values }) => [name, values]));
-        const deviceFlowTools = new Set([
-            ...(sets.get("DEVICE_FLOW_ALLOWED_TOOLS") || []),
-            ...(sets.get("DEVICE_FLOW_ALLOWED_MOBILE_TOOLS") || []),
+    it("keeps newly admitted destructive flow actions guarded by per-step confirmation", () => {
+        const actions = DESTRUCTIVE_POLICY_SCHEMA_EXAMPLES.filter(({ name }) => DEVICE_FLOW_TOOL_NAMES.includes(publicToolName(name)));
+        expect(actions.map(({ name }) => publicToolName(name))).toEqual([
+            "uninstall_app", "clear_app_data", "set_battery", "set_network",
         ]);
-        const schemas = deviceLabToolSchemaPropertyMap();
-        const confirmTools = [...schemas.entries()]
-            .filter(([, properties]) => properties.includes("confirmDestructive"))
-            .map(([name]) => name);
-        const unsafe = confirmTools.filter((tool) => deviceFlowTools.has(tool));
-        expect(unsafe).toEqual([]);
+        for (const { name, args } of actions) {
+            expect(evaluateDestructivePolicy(name, args).ok).toBe(false);
+            expect(evaluateDestructivePolicy(name, { ...args, confirmDestructive: true }).ok).toBe(true);
+        }
+    });
+
+    it("retains explicit double-click evidence after merging click tools", () => {
+        const calls = realTestCallToolLiteralValues();
+        for (const file of ["android-emulator-e2e.ts", "android-device-e2e.ts", "ios-e2e.ts", "level1-display-e2e.ts", "windows-sandbox-e2e.ts", "macos-vm-e2e.ts"]) {
+            expect(calls.some(call => call.file === file && call.tool === "click" && call.values.count === 2), file).toBe(true);
+        }
     });
 
     it("covers safe Android mobile controls in the real emulator E2E through MCP calls", () => {
-        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "android-emulator-e2e.mjs"), "utf-8");
+        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "android-emulator-e2e.ts"), "utf-8");
         expect(text).toContain('}, providerMcpSessionOptions(options, "ccc-real-android-emulator-e2e"));');
         expect(text).not.toContain('new Promise((resolvePromise) => {\n        const server = createServer();\n        server.once("error", () => resolvePromise(false));\n        server.listen(port, "127.0.0.1", () => {\n            server.close(() => resolvePromise(true));\n        });\n    }, providerMcpSessionOptions');
         for (const tool of [
-            "mobile_session_status",
-            "mobile_dump_ui",
-            "mobile_home",
-            "mobile_tap",
-            "mobile_double_tap",
-            "mobile_long_press",
-            "mobile_swipe",
-            "mobile_drag",
-            "mobile_type_text",
-            "mobile_key",
-            "mobile_back",
-            "mobile_forward",
-            "mobile_recents",
-            "mobile_lock",
-            "mobile_unlock",
-            "mobile_rotate_left",
-            "mobile_rotate_right",
-            "mobile_set_orientation",
-            "mobile_open_url",
-            "mobile_set_location",
-            "mobile_set_battery",
-            "mobile_grant_permission",
-            "mobile_revoke_permission",
-            "mobile_wait_for_app",
-            "device_record_video_start",
-            "device_record_video_status",
-            "device_record_video_stop",
-            "mobile_run_flow",
-            "mobile_screenshot",
-            "mobile_set_clipboard",
-            "mobile_get_clipboard",
-            "device_upload",
-            "device_download",
-            "device_status",
+            "status",
+            "ui",
+            "home",
+            "click",
+            "long_press",
+            "swipe",
+            "drag",
+            "type",
+            "key",
+            "back",
+            "forward",
+            "recents",
+            "lock",
+            "unlock",
+            "set_orientation",
+            "set_orientation",
+            "set_orientation",
+            "open_url",
+            "set_location",
+            "set_battery",
+            "permission",
+            "permission",
+            "wait_for_app",
+            "record_video",
+            "record_video",
+            "record_video",
+            "run_flow",
+            "screenshot",
+            "clipboard",
+            "clipboard",
+            "upload",
+            "download",
+            "status",
         ]) {
             expect(text).toContain(`callTool("${tool}"`);
         }
@@ -1262,21 +1669,22 @@ describe("test level runner", () => {
 
     it("covers destructive Android emulator controls only through the explicit level 3 path", () => {
         const level3 = dryRunNode("3");
-        expect(level3.args.join("\n")).toContain("scripts/real-tests/level3-real-destructive.mjs");
-        const destructiveText = readFileSync(join(repoRoot, "scripts", "real-tests", "level3-real-destructive.mjs"), "utf-8");
-        const androidText = readFileSync(join(repoRoot, "scripts", "real-tests", "android-emulator-e2e.mjs"), "utf-8");
+        expect(level3.args.join("\n")).toContain("scripts/real-tests/level3-real-destructive.ts");
+        const destructiveText = readFileSync(join(repoRoot, "scripts", "real-tests", "level3-real-destructive.ts"), "utf-8");
+        const androidText = readFileSync(join(repoRoot, "scripts", "real-tests", "android-emulator-e2e.ts"), "utf-8");
         expect(destructiveText).toContain("destructive: true");
         for (const tool of [
-            "mobile_power",
-            "mobile_set_network",
-            "mobile_toggle_airplane_mode",
+            "power",
+            "set_network",
         ]) {
             expect(androidText).toContain(`callTool("${tool}"`);
         }
+        expect(realTestCallToolLiteralValues().some(call => call.file === "android-emulator-e2e.ts"
+            && call.tool === "set_network" && call.values.airplaneMode === false)).toBe(true);
     });
 
-    it("covers Android app install, launch, reset, and uninstall with a deterministic fixture or configured APK", () => {
-        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "android-emulator-e2e.mjs"), "utf-8");
+    it("covers Android app install, launch, app clearing, and uninstall with a deterministic fixture or configured APK", () => {
+        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "android-emulator-e2e.ts"), "utf-8");
         expect(text).toContain("CCC_REAL_ANDROID_APK");
         expect(text).toContain("CCC_REAL_ANDROID_PACKAGE");
         expect(text).toContain("CCC_REAL_ANDROID_PERMISSION");
@@ -1284,128 +1692,238 @@ describe("test level runner", () => {
         expect(text).toContain("appArtifact: \"verified\"");
         expect(text).toContain("appPermission: \"verified\"");
         for (const tool of [
-            "device_install_app",
-            "device_launch_app",
-            "device_reset",
-            "mobile_install_app",
-            "mobile_launch_app",
-            "mobile_uninstall_app",
-            "mobile_clear_app_data",
-            "device_upload",
-            "device_download",
+            "install_app",
+            "launch_app",
+            "install_app",
+            "launch_app",
+            "uninstall_app",
+            "clear_app_data",
+            "upload",
+            "download",
         ]) {
             expect(text).toContain(`callTool("${tool}"`);
         }
     });
 
     it("covers safe Android physical-device controls in the real-device E2E through MCP calls", () => {
-        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "android-device-e2e.mjs"), "utf-8");
+        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "android-device-e2e.ts"), "utf-8");
         expect(text).toContain("CCC_REAL_ANDROID_DEVICE_SERIAL");
-        expect(text).toContain("CCC_REAL_DEVICE_LAB_FAIL_ON_SKIP");
-        expect(text).toContain("missing CCC_REAL_ANDROID_DEVICE_APK/CCC_REAL_ANDROID_DEVICE_PACKAGE");
+        expect(text).toContain("use deterministic fixture");
+        expect(text).toContain("prepareAndroidDeviceApp(appSelection, tempDir)");
+        expect(text).toContain("wirelessCoverage: \"status-actions-device verified\"");
+        expect(text).not.toContain("if (appArtifactReady)");
+        expect(text.indexOf("androidDeviceE2EPrerequisites()")).toBeLessThan(text.indexOf("mkdirSync(artifactRoot"));
         for (const tool of [
-            "device_attach",
-            "device_status",
-            "device_start",
-            "device_exec",
-            "mobile_session_status",
-            "mobile_dump_ui",
-            "mobile_wait_for_text",
-            "mobile_tap",
-            "mobile_double_tap",
-            "mobile_long_press",
-            "mobile_swipe",
-            "mobile_drag",
-            "mobile_type_text",
-            "mobile_key",
-            "mobile_home",
-            "mobile_back",
-            "mobile_forward",
-            "mobile_recents",
-            "mobile_power",
-            "mobile_lock",
-            "mobile_unlock",
-            "mobile_set_orientation",
-            "mobile_rotate_left",
-            "mobile_rotate_right",
-            "mobile_open_url",
-            "mobile_set_clipboard",
-            "mobile_get_clipboard",
-            "mobile_screenshot",
-            "device_screenshot",
-            "device_record_video_start",
-            "device_record_video_status",
-            "device_record_video_stop",
-            "device_upload",
-            "device_download",
-            "device_install_app",
-            "device_launch_app",
-            "mobile_install_app",
-            "mobile_launch_app",
-            "mobile_wait_for_app",
-            "mobile_grant_permission",
-            "mobile_revoke_permission",
-            "mobile_stop_app",
-            "device_reset",
-            "mobile_clear_app_data",
-            "mobile_uninstall_app",
-            "device_stop",
-            "device_detach",
+            "attach",
+            "status",
+            "start",
+            "exec",
+            "status",
+            "ui",
+            "wait_for_text",
+            "click",
+            "long_press",
+            "swipe",
+            "drag",
+            "type",
+            "key",
+            "home",
+            "back",
+            "forward",
+            "recents",
+            "power",
+            "lock",
+            "unlock",
+            "set_orientation",
+            "set_orientation",
+            "set_orientation",
+            "open_url",
+            "clipboard",
+            "clipboard",
+            "screenshot",
+            "screenshot",
+            "record_video",
+            "record_video",
+            "record_video",
+            "upload",
+            "download",
+            "install_app",
+            "launch_app",
+            "install_app",
+            "launch_app",
+            "wait_for_app",
+            "permission",
+            "permission",
+            "stop_app",
+            "clear_app_data",
+            "uninstall_app",
+            "stop",
+            "detach",
         ]) {
             expect(text).toContain(`callTool("${tool}"`);
         }
-        expect(text).toContain("install-launch-wait-permission-stop-reset-clear-uninstall verified");
+        expect(text).toContain("install-launch-wait-permission-stop-clear-uninstall verified");
     });
 
-    it("covers iOS Simulator app install, launch, reset, and uninstall when a disposable .app is configured", () => {
-        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "ios-e2e.mjs"), "utf-8");
+    it("covers iOS Simulator app install, launch, app clearing, and uninstall when a disposable .app is configured", () => {
+        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "ios-e2e.ts"), "utf-8");
         expect(text).toContain("CCC_REAL_IOS_SIMULATOR_APP");
         expect(text).toContain("CCC_REAL_IOS_SIMULATOR_BUNDLE_ID");
         expect(text).toContain("CCC_REAL_DEVICE_LAB_FAIL_ON_SKIP");
         expect(text).toContain("missing CCC_REAL_IOS_SIMULATOR_APP/CCC_REAL_IOS_SIMULATOR_BUNDLE_ID");
         expect(text).toContain("missing iOS Appium/XCUITest prerequisites");
         for (const tool of [
-            "device_install_app",
-            "device_launch_app",
-            "device_reset",
-            "mobile_install_app",
-            "mobile_launch_app",
-            "mobile_uninstall_app",
-            "mobile_clear_app_data",
+            "install_app",
+            "launch_app",
+            "install_app",
+            "launch_app",
+            "uninstall_app",
+            "clear_app_data",
         ]) {
             expect(text).toContain(`callTool("${tool}"`);
         }
     });
 
+    it("rejects incomplete Android app proof before physical-device mutation", () => {
+        expect(androidDeviceE2EPrerequisites({
+            CCC_REAL_ANDROID_DEVICE_APK: "missing.apk",
+            CCC_REAL_ANDROID_DEVICE_PACKAGE: "dev.ccc.fixture",
+        })).toEqual(expect.objectContaining({
+            available: false,
+            reason: expect.stringContaining("CCC_REAL_ANDROID_DEVICE_PERMISSION"),
+        }));
+    });
+
+    it("uses the signed fixture when no physical Android app inputs are supplied", () => {
+        expect(androidDeviceE2EPrerequisites({})).toEqual(expect.objectContaining({
+            available: true,
+            source: "fixture",
+            app: null,
+        }));
+    });
+
+    it("preserves physical Android external-app aliases and cleans failed fixture materialization", () => {
+        const tempDir = mkdtempSync(join(tmpdir(), "ccc-android-device-selection-"));
+        const apk = join(tempDir, "external.apk");
+        writeFileSync(apk, "fixture");
+        try {
+            for (const env of [
+                { CCC_REAL_ANDROID_DEVICE_APK: apk, CCC_REAL_ANDROID_DEVICE_PACKAGE: "dev.external", CCC_REAL_ANDROID_DEVICE_PERMISSION: "android.permission.CAMERA" },
+                { CCC_REAL_ANDROID_APK: apk, CCC_REAL_ANDROID_PACKAGE: "dev.external", CCC_REAL_ANDROID_PERMISSION: "android.permission.CAMERA" },
+                { CCC_REAL_DEVICE_LAB_ANDROID_DEVICE_APK: apk, CCC_REAL_DEVICE_LAB_ANDROID_DEVICE_PACKAGE: "dev.external", CCC_REAL_DEVICE_LAB_ANDROID_DEVICE_PERMISSION: "android.permission.CAMERA" },
+            ]) {
+                expect(androidDeviceE2EPrerequisites(env)).toEqual(expect.objectContaining({
+                    available: true,
+                    source: "external",
+                    app: expect.objectContaining({ path: apk, packageName: "dev.external" }),
+                }));
+            }
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true });
+        }
+
+        const failedTemp = mkdtempSync(join(tmpdir(), "ccc-android-device-fixture-failure-"));
+        expect(() => prepareAndroidDeviceApp({ source: "fixture", app: null }, failedTemp, () => {
+            throw new Error("fixture failure");
+        })).toThrow("fixture failure");
+        expect(existsSync(failedTemp)).toBe(false);
+    });
+
+    it("uses the emulator fixture only when no external app inputs were supplied", () => {
+        expect(androidEmulatorAppSelection({})).toEqual(expect.objectContaining({
+            available: true,
+            source: "fixture",
+        }));
+        expect(androidEmulatorAppSelection({ CCC_REAL_ANDROID_APK: "partial.apk" })).toEqual(expect.objectContaining({
+            available: false,
+            source: "external",
+            reason: expect.stringContaining("CCC_REAL_ANDROID_PACKAGE"),
+        }));
+
+        const tempDir = mkdtempSync(join(tmpdir(), "ccc-android-selection-"));
+        const apk = join(tempDir, "fixture.apk");
+        writeFileSync(apk, "fixture");
+        try {
+            expect(androidEmulatorAppSelection({
+                CCC_REAL_ANDROID_APK: apk,
+                CCC_REAL_ANDROID_PACKAGE: "dev.ccc.fixture",
+                CCC_REAL_ANDROID_PERMISSION: "android.permission.CAMERA",
+            })).toEqual(expect.objectContaining({
+                available: true,
+                source: "external",
+                app: expect.objectContaining({ path: apk }),
+            }));
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true });
+        }
+
+        const emulatorText = readFileSync(join(repoRoot, "scripts", "real-tests", "android-emulator-e2e.ts"), "utf-8");
+        expect(emulatorText.indexOf("androidEmulatorAppSelection()")).toBeLessThan(emulatorText.indexOf("mkdtempSync("));
+    });
+
+    it("preserves broker command failure details in Android real-test assertions", () => {
+        expect(() => deviceFromPayload({
+            ok: false,
+            error: "provider-command-failed",
+            detail: "stderr: Error: Package path is not valid. Valid system image paths are:",
+        }, "create")).toThrow(
+            "create returned no device: provider-command-failed: stderr: Error: Package path is not valid. Valid system image paths are:",
+        );
+    });
+
+    it("preserves Android real-test device extraction and legacy diagnostics", () => {
+        const device = { id: "android-real-test" };
+        expect(deviceFromPayload({ device }, "create")).toBe(device);
+        expect(() => deviceFromPayload({
+            launch: { error: "launch-failed", detail: "emulator exited", command: "emulator" },
+            attempts: [{ error: "boot-timeout" }],
+        }, "start")).toThrow("start returned no device: launch-failed: emulator exited: emulator: boot-timeout");
+        expect(() => deviceFromPayload({}, "create")).toThrow("create returned no device (keys: none)");
+        expect(() => deviceFromPayload({ ok: false }, "create")).toThrow("create returned no device (keys: ok)");
+    });
+
+    it("delegates real Android emulator port allocation to the broker", () => {
+        const request = androidEmulatorCreateRequest({
+            name: "Port Allocated Pixel",
+            deviceId: "android-port-allocated",
+            systemImage: "system-images;android-35;google_apis;x86_64",
+        });
+        expect(request).toEqual({
+            name: "Port Allocated Pixel",
+            deviceId: "android-port-allocated",
+            systemImage: "system-images;android-35;google_apis;x86_64",
+        });
+        expect(request).not.toHaveProperty("port");
+    });
+
     it("covers safe iOS Simulator mobile controls in the real simulator E2E through MCP calls", () => {
-        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "ios-e2e.mjs"), "utf-8");
+        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "ios-e2e.ts"), "utf-8");
         for (const tool of [
-            "mobile_session_status",
-            "mobile_dump_ui",
-            "mobile_tap",
-            "mobile_double_tap",
-            "mobile_long_press",
-            "mobile_swipe",
-            "mobile_drag",
-            "mobile_home",
-            "mobile_lock",
-            "mobile_unlock",
-            "mobile_rotate_left",
-            "mobile_rotate_right",
-            "mobile_set_orientation",
-            "mobile_screenshot",
-            "mobile_open_url",
-            "mobile_stop_app",
-            "mobile_set_location",
-            "mobile_grant_permission",
-            "mobile_revoke_permission",
-            "mobile_set_clipboard",
-            "mobile_get_clipboard",
-            "mobile_wait_for_app",
-            "device_record_video_start",
-            "device_record_video_status",
-            "device_record_video_stop",
-            "device_status",
+            "status",
+            "ui",
+            "click",
+            "long_press",
+            "swipe",
+            "drag",
+            "home",
+            "lock",
+            "unlock",
+            "set_orientation",
+            "set_orientation",
+            "set_orientation",
+            "screenshot",
+            "open_url",
+            "stop_app",
+            "set_location",
+            "permission",
+            "permission",
+            "clipboard",
+            "clipboard",
+            "wait_for_app",
+            "record_video",
+            "record_video",
+            "record_video",
+            "status",
         ]) {
             expect(text).toContain(`callTool("${tool}"`);
         }
@@ -1414,32 +1932,31 @@ describe("test level runner", () => {
     });
 
     it("covers safe iOS physical-device Appium controls in the real-device E2E through MCP calls", () => {
-        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "ios-e2e.mjs"), "utf-8");
+        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "ios-e2e.ts"), "utf-8");
         expect(text).toContain("CCC_REAL_IOS_DEVICE_BUNDLE_ID");
         expect(text).toContain("CCC_REAL_DEVICE_LAB_FAIL_ON_SKIP");
         expect(text).toContain("missing iOS real-device Appium/XCUITest prerequisites");
         for (const tool of [
-            "mobile_session_status",
-            "mobile_dump_ui",
-            "mobile_screenshot",
-            "mobile_tap",
-            "mobile_double_tap",
-            "mobile_long_press",
-            "mobile_swipe",
-            "mobile_drag",
-            "mobile_type_text",
-            "mobile_key",
-            "mobile_home",
-            "mobile_lock",
-            "mobile_unlock",
-            "mobile_rotate_left",
-            "mobile_rotate_right",
-            "mobile_set_orientation",
-            "mobile_wait_for_text",
-            "mobile_install_app",
-            "mobile_launch_app",
-            "mobile_wait_for_app",
-            "mobile_stop_app",
+            "status",
+            "ui",
+            "screenshot",
+            "click",
+            "long_press",
+            "swipe",
+            "drag",
+            "type",
+            "key",
+            "home",
+            "lock",
+            "unlock",
+            "set_orientation",
+            "set_orientation",
+            "set_orientation",
+            "wait_for_text",
+            "install_app",
+            "launch_app",
+            "wait_for_app",
+            "stop_app",
         ]) {
             expect(text).toContain(`callTool("${tool}"`);
         }
@@ -1448,80 +1965,86 @@ describe("test level runner", () => {
     });
 
     it("covers macOS VM snapshot restore in the destructive real E2E path", () => {
-        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "macos-vm-e2e.mjs"), "utf-8");
-        for (const tool of [
-            "device_snapshot_create",
-            "device_snapshot_restore",
-            "device_snapshot_delete",
-        ]) {
-            expect(text).toContain(`callTool("${tool}"`);
-        }
-        expect(text).toContain("options.snapshot === true");
+        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "macos-vm-e2e.ts"), "utf-8");
+        const snapshotActions = realTestCallToolLiteralValues()
+            .filter(call => call.file === "macos-vm-e2e.ts" && call.tool === "snapshot")
+            .map(call => call.values.action);
+        expect(snapshotActions).toEqual(expect.arrayContaining(["create", "restore", "delete"]));
+        expect(text).toContain("typedOptions.snapshot === true");
     });
 
     it("covers the current X11 display tools in a real MCP E2E", () => {
         const level1 = dryRunNode("1");
-        expect(level1.args.join("\n")).toContain("scripts/real-tests/level1-display-e2e.mjs");
-        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "level1-display-e2e.mjs"), "utf-8");
+        expect(level1.args.join("\n")).toContain("scripts/real-tests/level1-display-e2e.ts");
+        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "level1-display-e2e.ts"), "utf-8");
         for (const tool of [
-            "display_current",
-            "display_screenshot",
-            "display_click",
-            "display_double_click",
-            "display_key",
-            "display_type",
-            "display_scroll",
-            "display_cursor_position",
-            "device_list",
-            "device_status",
-            "device_screenshot",
-            "device_click",
-            "device_double_click",
-            "device_key",
-            "device_type",
-            "device_scroll",
-            "device_cursor_position",
-            "device_run_flow",
+            "status",
+            "screenshot",
+            "click",
+            "key",
+            "type",
+            "scroll",
+            "cursor_position",
+            "devices",
+            "status",
+            "screenshot",
+            "click",
+            "key",
+            "type",
+            "scroll",
+            "cursor_position",
+            "run_flow",
         ]) {
             expect(text).toContain(`"${tool}"`);
         }
         expect(text).toContain("withDeviceLabMcp");
         expect(text).toContain("\"left\", \"right\"");
         expect(text).toContain("\"up\", \"down\", \"left\", \"right\"");
-        expect(text).toContain("device_list includes current display");
-        expect(text).toContain("device_status current display alias");
-        expect(text).toContain("device_cursor_position current display alias");
-        expect(text).toContain("display_click buttons");
-        expect(text).toContain("display_double_click buttons");
-        expect(text).toContain("display_scroll directions");
-        expect(text).toContain("device_click current display alias buttons");
-        expect(text).toContain("device_double_click current display alias buttons");
-        expect(text).toContain("device_scroll current display alias directions");
+        expect(text).toContain("devices includes current display");
+        expect(text).toContain("status current display alias");
+        expect(text).toContain("cursor_position current display alias");
+        expect(text).toContain("click buttons");
+        expect(text).toContain("double_click buttons");
+        expect(text).toContain("scroll directions");
+        expect(text).toContain("click current display alias buttons");
+        expect(text).toContain("double_click current display alias buttons");
+        expect(text).toContain("scroll current display alias directions");
+    });
+
+    it("reports an unavailable current display E2E as skipped at both levels", () => {
+        expect(currentDisplayPrerequisiteResult(["xdotool", "scrot"])).toEqual({
+            status: "SKIP",
+            reason: "missing xdotool, scrot",
+            steps: [{
+                name: "current display prerequisites",
+                status: "SKIP",
+                reason: "missing xdotool, scrot",
+            }],
+        });
     });
 
     it("covers safe desktop read-only tools in Windows and macOS real E2E through MCP calls", () => {
-        for (const file of ["windows-sandbox-e2e.mjs", "macos-vm-e2e.mjs"]) {
+        for (const file of ["windows-sandbox-e2e.ts", "macos-vm-e2e.ts"]) {
             const text = readFileSync(join(repoRoot, "scripts", "real-tests", file), "utf-8");
             for (const tool of [
-                "device_click",
-                "device_double_click",
-                "device_key",
-                "device_type",
-                "device_scroll",
-                "device_window_list",
-                "device_cursor_position",
-                "device_accessibility_snapshot",
-                "device_record_video_status",
+                "click",
+                "key",
+                "type",
+                "scroll",
+                "window_list",
+                "cursor_position",
+                "ui",
+                "record_video",
             ]) {
                 expect(text).toContain(`callTool("${tool}"`);
             }
         }
-        const windowsText = readFileSync(join(repoRoot, "scripts", "real-tests", "windows-sandbox-e2e.mjs"), "utf-8");
+        const windowsText = readFileSync(join(repoRoot, "scripts", "real-tests", "windows-sandbox-e2e.ts"), "utf-8");
         expect(windowsText).toContain("status.device.sandboxId");
         expect(windowsText).toContain("upload.uploaded.remotePath");
         expect(windowsText).toContain("download.downloaded.localPath");
 
-        const macosText = readFileSync(join(repoRoot, "scripts", "real-tests", "macos-vm-e2e.mjs"), "utf-8");
+        const macosText = readFileSync(join(repoRoot, "scripts", "real-tests", "macos-vm-e2e.ts"), "utf-8");
         expect(macosText).toContain("upload.provider");
         expect(macosText).toContain("download.provider");
         expect(macosText).toContain("upload.uploaded.remotePath");
@@ -1529,33 +2052,112 @@ describe("test level runner", () => {
     });
 
     it("covers physical wireless status and safe action diagnostics in real MCP readiness", () => {
-        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "level1-real-provider-readiness.mjs"), "utf-8");
-        expect(text).toContain("device_wireless");
+        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "level1-real-provider-readiness.ts"), "utf-8");
+        expect(text).toContain("wireless");
         expect(text).toContain("action: \"status\"");
-        expect(text).toContain("\"usb-tcpip\", \"pair\", \"connect\"");
+        expect(text).toContain("markExpectedInputError");
         expect(text).toContain("android-wireless-missing-adb");
-        expect(text).toContain("android-wireless-usb-tcpip-requires-serial");
-        expect(text).toContain("android-wireless-pair-requires-host-port-code");
-        expect(text).toContain("android-wireless-connect-requires-host");
-        expect(text).toContain("ios-wireless-missing-xcrun");
-        expect(text).toContain("ios-wireless-pairing-requires-xcode-trust");
+        expect(text).toContain("wireless usb-tcpip requires serial");
+        expect(text).toContain("wireless pair requires pairHost, pairPort and pairingCode");
+        expect(text).toContain("wireless connect requires host or serial");
+        expect(text).toContain("iOS wireless supports only action:status");
         expect(text).toContain("Android physical wireless action diagnostics MCP");
         expect(text).toContain("iOS physical wireless action diagnostics MCP");
     });
 
+    it("keeps backend enum diagnostic probes schema-valid across physical providers", () => {
+        const probes = backendProviderEnumDiagnostics({ brokerPort: 17373, port: 17373, detail: true });
+        const physical = probes.filter(([tool]) => tool === "attach" || tool === "wireless");
+        expect(physical).toHaveLength(4);
+        for (const [tool, args] of physical) {
+            expect(toolInputError(tool, args), `${tool}:${args.backend}`).toBeNull();
+            expect(args.brokerPort).toBe(17373);
+            const publicArgs = Object.fromEntries(Object.entries(args)
+                .filter(([key]) => !HIDDEN_LEGACY_TRANSPORT_KEYS.has(key)));
+            expect(new Ajv({ strict: false }).compile(TOOLS.find(t => t.name === tool)!.inputSchema)(publicArgs)).toBe(true);
+        }
+        const iosAttach = physical.find(([tool, args]) => tool === "attach" && args.backend === "ios-device")![1];
+        expect(iosAttach.udid).toBe("00000000-0000000000000000");
+        expect(iosAttach).not.toHaveProperty("serial");
+        for (const [tool, args] of physical) if (tool === "wireless") expect(args).not.toHaveProperty("port");
+    });
+
+    it("sends a valid missing-image create probe without confusing broker and device ports", () => {
+        const request = missingWindowsImageProbe({
+            detail: true, autolaunch: true, port: 17373, brokerPort: 17373,
+            hostCandidates: ["127.0.0.1"], timeoutMs: 1000,
+            rpcTimeoutMs: 10000, launchTimeoutMs: 5000,
+        }, "level2-broker-e2e-public-windows");
+        expect(request).not.toHaveProperty("port");
+        expect(request).toHaveProperty("dryRun", true);
+        expect(request).toMatchObject({ brokerPort: 17373, image: "ccc-level2-missing-image" });
+        expect(toolInputError("create_windows_vm", request)).toBeNull();
+        const publicArgs = Object.fromEntries(Object.entries(request)
+            .filter(([key]) => !HIDDEN_LEGACY_TRANSPORT_KEYS.has(key)));
+        const schema = TOOLS.find(tool => tool.name === "create_windows_vm")!.inputSchema;
+        expect(new Ajv({ strict: false }).compile(schema)(publicArgs)).toBe(true);
+        expect(toolInputError("create_windows_vm", { ...request, port: 17373 }))
+            .toBe("create windows-vm does not support port");
+    });
+
+    it.each(["device-not-found", "device-backend-not-found"])("accepts immediate missing macOS image failure with unpublished device (%s)", async (error) => {
+        const deviceId = "missing-image-device";
+        const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+        const createRecord = { expectedError: false };
+        const statusRecord = { expectedError: false };
+        await probeMissingMacosImage(async (tool, args) => {
+            calls.push({ tool, args });
+            return tool === "create_macos_vm"
+                ? { isError: true, content: [{ type: "text", text: "Tart source image missing-source does not exist" }], __cccToolCallRecord: createRecord }
+                : { isError: true, content: [{ type: "text", text: JSON.stringify({ ok: false, error, deviceId }) }], __cccToolCallRecord: statusRecord };
+        }, deviceId);
+        expect(calls.map(call => call.tool)).toEqual(["create_macos_vm", "status"]);
+        expect(calls[0].args).toMatchObject({ deviceId, image: "missing-source" });
+        expect(calls[1].args).toMatchObject({ deviceId });
+        expect(createRecord.expectedError).toBe(true);
+        expect(statusRecord.expectedError).toBe(true);
+    });
+
+    it("rejects deferred macOS image creation that only publishes a definition", async () => {
+        const calls: string[] = [];
+        await expect(probeMissingMacosImage(async (tool) => {
+            calls.push(tool);
+            return { content: [{ type: "text", text: JSON.stringify({ device: { deviceId: "missing-image-device", status: "stopped" } }) }] };
+        }, "missing-image-device")).rejects.toThrow("missing image unexpectedly cloned during create");
+        expect(calls).toEqual(["create_macos_vm"]);
+    });
+
+    it("rejects a failed macOS image creation that leaves a published device", async () => {
+        const calls: string[] = [];
+        await expect(probeMissingMacosImage(async (tool) => {
+            calls.push(tool);
+            return tool === "create_macos_vm"
+                ? { isError: true, content: [{ type: "text", text: "missing source image" }] }
+                : { content: [{ type: "text", text: JSON.stringify({ device: { deviceId: "missing-image-device", status: "stopped" } }) }] };
+        }, "missing-image-device")).rejects.toThrow("status unexpectedly succeeded for missing device");
+        expect(calls).toEqual(["create_macos_vm", "status"]);
+    });
+
+    it.each(["Unexpected error: provider dispatch threw", "Unknown tool: create_macos_vm"])("rejects unrelated macOS image probe errors (%s)", async (diagnostic) => {
+        await expect(probeMissingMacosImage(async () => ({
+            isError: true, content: [{ type: "text", text: diagnostic }],
+        }), "missing-image-device")).rejects.toThrow("missing image create: unexpected dispatch or internal error");
+    });
+
     it("covers broker autolaunch and broker-backed provider discovery in the real MCP E2E", () => {
-        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "level2-broker-e2e.mjs"), "utf-8");
-        const distText = readFileSync(join(repoRoot, "scripts", "real-tests", "level2-dist-broker-e2e.mjs"), "utf-8");
-        const helperText = readFileSync(join(repoRoot, "scripts", "real-tests", "helpers.mjs"), "utf-8");
-        expect(text).toContain("device_broker_status");
-        expect(text).toContain("device_broker_rpc");
+        const text = readFileSync(join(repoRoot, "scripts", "real-tests", "level2-broker-e2e.ts"), "utf-8");
+        const distText = readFileSync(join(repoRoot, "scripts", "real-tests", "level2-dist-broker-e2e.ts"), "utf-8");
+        const helperText = readFileSync(join(repoRoot, "scripts", "real-tests", "helpers.ts"), "utf-8");
+        expect(text).toContain("devices");
+        expect(text).toContain('callInternal("brokerRpc"');
+        expect(text).not.toContain('callTool("device_broker_rpc"');
         expect(text).toContain("broker.echo");
         expect(text).toContain("broker.status");
         expect(text).toContain("broker.inventory");
         expect(text).toContain("broker.backends");
         expect(text).toContain("broker RPC status");
         expect(text).toContain("broker RPC inventory");
-        expect(text).toContain("device_backends");
+        expect(text).toContain("devices");
         expect(text).toContain("action: \"status\"");
         expect(text).toContain("action: \"claim\"");
         expect(text).toContain("action: \"heartbeat\"");
@@ -1585,7 +2187,7 @@ describe("test level runner", () => {
         expect(text).toContain("broker lifecycle command invoke missing-device diagnostic");
         expect(text).toContain("\"device_create\", \"device_status\", \"device_start\", \"device_stop\", \"device_delete\"");
         expect(text).toContain("broker lifecycle command plan enum diagnostics");
-        expect(text).toContain("broker lifecycle command options flattening");
+        expect(text).toContain("broker lifecycle command flat arguments");
         expect(text).toContain("devicePort: 5598");
         expect(text).toContain("autolaunch: true");
         expect(text).toContain("ccc-broker-e2e-home-");
@@ -1609,28 +2211,28 @@ describe("test level runner", () => {
         expect(helperText).toContain("cleanup: () => rmSync");
         expect(text).not.toContain("CCC_DEVICE_LAB_OWNER_BASIS");
         expect(text).not.toContain("implicitBroker: false");
-        expect(text).toContain("export async function runBrokerE2E(options = {})");
+        expect(text).toContain("export async function runBrokerE2E(options: any = {})");
         expect(distText).toContain("runBrokerE2E");
         expect(distText).toContain("dist\", \"device-lab-mcp\", \"server.mjs");
     });
 
     it("runs available real-provider E2E scenarios through source and packaged MCP servers", () => {
-        const matrixText = readFileSync(join(repoRoot, "scripts", "real-tests", "provider-mcp-matrix.mjs"), "utf-8");
-        const readinessText = readFileSync(join(repoRoot, "scripts", "real-tests", "level1-dist-real-provider-readiness.mjs"), "utf-8");
+        const matrixText = readFileSync(join(repoRoot, "scripts", "real-tests", "provider-mcp-matrix.ts"), "utf-8");
+        const readinessText = readFileSync(join(repoRoot, "scripts", "real-tests", "level1-dist-real-provider-readiness.ts"), "utf-8");
         const coreFiles = [
-            "android-emulator-e2e.mjs",
-            "android-device-e2e.mjs",
-            "ios-e2e.mjs",
-            "macos-vm-e2e.mjs",
-            "windows-sandbox-e2e.mjs",
+            "android-emulator-e2e.ts",
+            "android-device-e2e.ts",
+            "ios-e2e.ts",
+            "macos-vm-e2e.ts",
+            "windows-sandbox-e2e.ts",
         ];
         const levelFiles = [
-            "level2-android-emulator-e2e.mjs",
-            "level2-android-device-e2e.mjs",
-            "level2-ios-e2e.mjs",
-            "level2-macos-vm-e2e.mjs",
-            "level2-windows-sandbox.mjs",
-            "level3-real-destructive.mjs",
+            "level2-android-emulator-e2e.ts",
+            "level2-android-device-e2e.ts",
+            "level2-ios-e2e.ts",
+            "level2-macos-vm-e2e.ts",
+            "level2-windows-sandbox.ts",
+            "level3-real-destructive.ts",
         ];
 
         expect(matrixText).toContain("packagedDeviceLabMcpServer");
@@ -1647,7 +2249,7 @@ describe("test level runner", () => {
     });
 
     it("runs each expensive real provider exactly once through the packaged MCP", async () => {
-        const { runProviderMcpMatrix } = await import("../../scripts/real-tests/provider-mcp-matrix.mjs") as {
+        const { runProviderMcpMatrix } = await import("../../scripts/real-tests/provider-mcp-matrix.ts") as {
             runProviderMcpMatrix: (runner: (options: Record<string, unknown>) => Promise<Record<string, unknown>>) => Promise<Record<string, unknown>>;
         };
         const calls: Array<Record<string, unknown>> = [];
@@ -1661,7 +2263,7 @@ describe("test level runner", () => {
     });
 
     it("preserves all-skipped provider matrices instead of reporting a false pass", async () => {
-        const { runProviderMcpMatrix } = await import("../../scripts/real-tests/provider-mcp-matrix.mjs") as {
+        const { runProviderMcpMatrix } = await import("../../scripts/real-tests/provider-mcp-matrix.ts") as {
             runProviderMcpMatrix: (runner: (options: Record<string, unknown>) => Promise<Record<string, unknown>>) => Promise<Record<string, unknown>>;
         };
 
@@ -1682,7 +2284,7 @@ describe("test level runner", () => {
     });
 
     it("aggregates real-test steps without false passes", async () => {
-        const { aggregateStepResult } = await import("../../scripts/real-tests/result-status.mjs") as {
+        const { aggregateStepResult } = await import("../../scripts/real-tests/result-status.ts") as {
             aggregateStepResult: (steps: Array<Record<string, unknown>>) => Record<string, unknown>;
         };
 
@@ -1707,21 +2309,21 @@ describe("test level runner", () => {
         const advertised = advertisedDeviceLabTools();
         const intentionallyNotSafeInGenericRealE2E: string[] = [];
         const missing = advertised.filter((tool) => !calledTools.has(tool));
-        const unadvertised = [...calledTools].filter((tool) => !advertised.includes(tool) && !HIDDEN_COMPATIBILITY_TOOLS.has(tool));
+        const unadvertised = [...calledTools].filter((tool) => !advertised.includes(tool));
         expect(missing).toEqual(intentionallyNotSafeInGenericRealE2E);
         expect(unadvertised).toEqual([]);
     });
 
-    it("keeps provider real E2E scripts on public device-lab MCP tool names", () => {
+    it("keeps provider real E2E scripts on advertised public device-lab tools", () => {
         const hiddenProviderCalls = realTestCallToolArgumentKeys()
-            .filter((call) => call.file !== "level2-broker-e2e.mjs")
-            .filter((call) => HIDDEN_COMPATIBILITY_TOOLS.has(call.tool));
+            .filter((call) => call.file !== "level2-broker-e2e.ts")
+            .filter((call) => !TOOLS.some((tool) => tool.name === call.tool));
         expect(hiddenProviderCalls).toEqual([]);
     });
 
     it("keeps provider real E2E scripts free of hidden broker transport arguments", () => {
         const hiddenProviderArgs = realTestCallToolArgumentKeys()
-            .filter((call) => call.file !== "level2-broker-e2e.mjs")
+            .filter((call) => call.file !== "level2-broker-e2e.ts")
             .filter((call) => !OPT_IN_REAL_TEST_UTILITY_FILES.has(call.file))
             .flatMap((call) => call.keys
                 .filter((key) => HIDDEN_PROVIDER_REAL_E2E_TRANSPORT_KEYS.has(key))
@@ -1742,7 +2344,6 @@ describe("test level runner", () => {
         const schemas = advertisedDeviceLabToolSchemas();
         const unknownKeys = realTestCallToolArgumentKeys().flatMap((call) => {
             const properties = schemas.get(call.tool);
-            if (HIDDEN_COMPATIBILITY_TOOLS.has(call.tool)) return [];
             if (!properties) return [{ file: call.file, tool: call.tool, unknown: "<unadvertised-tool>" }];
             return call.keys
                 .filter((key) => !properties.has(key) && !HIDDEN_LEGACY_TRANSPORT_KEYS.has(key))
@@ -1764,16 +2365,16 @@ describe("test level runner", () => {
     });
 
     it("keeps destructive real E2E MCP calls explicitly confirmed", () => {
-        expect([...ALWAYS_DESTRUCTIVE_REAL_E2E_TOOLS].sort()).toEqual(expect.arrayContaining(alwaysDestructivePolicyTools()));
+        expect([...ALWAYS_DESTRUCTIVE_REAL_E2E_TOOLS].sort()).toEqual(expect.arrayContaining(alwaysDestructivePolicyTools().filter(tool => tool === "device_broker_shutdown" || TOOLS.some(entry => entry.name === tool))));
         expect(realTestDestructiveCallsMissingConfirmation()).toEqual([]);
     });
 
     it("keeps every real E2E MCP call reachable from the level 3 node runner", () => {
         const plan = dryRunNode("3");
         const entryFiles = plan.args
-            .filter((arg) => arg.includes("/scripts/real-tests/") && arg.endsWith(".mjs"))
+            .filter((arg) => arg.includes("/scripts/real-tests/") && arg.endsWith(".ts"))
             .map((arg) => arg.split("/scripts/real-tests/")[1])
-            .filter((file) => file !== "run.mjs");
+            .filter((file) => file !== "run.ts");
         const reachable = reachableRealTestFilesFrom(entryFiles);
         const unreachableCallToolFiles = realTestFilesWithCallTool()
             .filter((file) => !OPT_IN_REAL_TEST_UTILITY_FILES.has(file))
@@ -1797,10 +2398,12 @@ describe("test level runner", () => {
         try {
             const passFile = join(tempDir, "pass.mjs");
             const stepFailFile = join(tempDir, "step-fail.mjs");
+            const multilineFailFile = join(tempDir, "multiline-fail.mjs");
             writeFileSync(passFile, "export const name='pass'; export async function run(){ return { status: 'PASS', detail: 'provider=tart' }; }\n");
             writeFileSync(stepFailFile, "export const name='step-fail'; export async function run(){ return { status: 'FAIL', steps: [{ name: 'inner', status: 'FAIL', reason: 'boom', detail: 'device=abc' }] }; }\n");
+            writeFileSync(multilineFailFile, "export const name='multiline-fail'; export async function run(){ throw new Error('Expected values to be strictly equal:\\n+ actual\\n- expected'); }\n");
 
-            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.mjs"), passFile, stepFailFile], {
+            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.ts"), passFile, stepFailFile], {
                 cwd: repoRoot,
                 encoding: "utf-8",
             });
@@ -1811,7 +2414,7 @@ describe("test level runner", () => {
             expect(result.stdout).toContain("SUMMARY real-tests total=2 pass=1 skip=0 fail=1 failOnSkip=false");
             expect(result.stdout).not.toContain("strictSkipFailures");
 
-            const compactResult = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.mjs"), "--compact", passFile, stepFailFile], {
+            const compactResult = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.ts"), "--compact", passFile, stepFailFile], {
                 cwd: repoRoot,
                 encoding: "utf-8",
             });
@@ -1819,6 +2422,13 @@ describe("test level runner", () => {
             expect(compactResult.stdout).not.toContain("PASS pass");
             expect(compactResult.stdout).toContain("FAIL step-fail: inner - boom");
             expect(compactResult.stdout).toContain("SUMMARY real-tests total=2 pass=1 skip=0 fail=1 failOnSkip=false");
+
+            const multilineResult = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.ts"), "--compact", multilineFailFile], {
+                cwd: repoRoot,
+                encoding: "utf-8",
+            });
+            expect(multilineResult.status).toBe(1);
+            expect(multilineResult.stderr).toContain("FAIL multiline-fail - Expected values to be strictly equal: + actual - expected");
         } finally {
             rmSync(tempDir, { recursive: true, force: true });
         }
@@ -1827,7 +2437,7 @@ describe("test level runner", () => {
     it("fails closed when real-test results omit or invent statuses", () => {
         const tempDir = mkdtempSync(join(tmpdir(), "ccc-real-test-runner-"));
         try {
-            const missingResultStatus = join(tempDir, "missing-result-status.mjs");
+            const missingResultStatus = join(tempDir, "missing-result-status.ts");
             const invalidStepStatus = join(tempDir, "invalid-step-status.mjs");
             const nullStep = join(tempDir, "null-step.mjs");
             const inconsistentParent = join(tempDir, "inconsistent-parent.mjs");
@@ -1839,7 +2449,7 @@ describe("test level runner", () => {
             writeFileSync(emptySteps, "export const name='empty-steps'; export async function run(){ return { status: 'PASS', steps: [] }; }\n");
 
             const result = spawnSync(process.execPath, [
-                join(repoRoot, "scripts", "real-tests", "run.mjs"),
+                join(repoRoot, "scripts", "real-tests", "run.ts"),
                 "--compact",
                 missingResultStatus,
                 invalidStepStatus,
@@ -1868,7 +2478,7 @@ describe("test level runner", () => {
             writeFileSync(skipFile, "export const name='skip'; export async function run(){ return { status: 'SKIP', reason: 'missing provider' }; }\n");
             writeFileSync(stepSkipFile, "export const name='step-skip'; export async function run(){ return { status: 'SKIP', steps: [{ name: 'inner', status: 'SKIP', reason: 'missing device' }] }; }\n");
 
-            const defaultResult = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.mjs"), skipFile, stepSkipFile], {
+            const defaultResult = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.ts"), skipFile, stepSkipFile], {
                 cwd: repoRoot,
                 encoding: "utf-8",
             });
@@ -1877,7 +2487,7 @@ describe("test level runner", () => {
             expect(defaultResult.stdout).not.toContain("strictSkipFailures");
             expect(defaultResult.stdout).not.toContain("strictCoverageFailures");
 
-            const strictResult = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.mjs"), "--fail-on-skip", skipFile, stepSkipFile], {
+            const strictResult = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.ts"), "--compact", "--fail-on-skip", skipFile, stepSkipFile], {
                 cwd: repoRoot,
                 encoding: "utf-8",
             });
@@ -1899,14 +2509,14 @@ describe("test level runner", () => {
             writeFileSync(skippedFile, [
                 "export const name='skipped-scripted';",
                 "export async function run(){",
-                "  const skipped = () => callTool(\"mobile_set_battery\", { backend: \"android-emulator\", deviceId: \"skipped-device\", level: 77, charging: true, confirmDestructive: true });",
+                "  const skipped = () => callTool(\"set_battery\", { backend: \"android-emulator\", deviceId: \"skipped-device\", level: 77, charging: true, confirmDestructive: true });",
                 "  void skipped;",
                 "  return { status: 'SKIP', reason: 'missing adb, emulator' };",
                 "}",
                 "",
             ].join("\n"));
 
-            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.mjs"), "--json-summary-file", summaryFile, skippedFile], {
+            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.ts"), "--json-summary-file", summaryFile, skippedFile], {
                 cwd: repoRoot,
                 encoding: "utf-8",
             });
@@ -1937,14 +2547,14 @@ describe("test level runner", () => {
             writeFileSync(scriptedButUncalledFile, [
                 "export const name='scripted-gap';",
                 "export async function run(){",
-                "  const never = () => callTool(\"device_backends\", { backend: \"android-emulator\" });",
+                "  const never = () => callTool(\"devices\", { backend: \"android-emulator\" });",
                 "  void never;",
-                "  return { status: 'PASS', tools: ['device_backends'] };",
+                "  return { status: 'PASS', tools: ['devices'] };",
                 "}",
                 "",
             ].join("\n"));
 
-            const defaultResult = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.mjs"), scriptedButUncalledFile], {
+            const defaultResult = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.ts"), scriptedButUncalledFile], {
                 cwd: repoRoot,
                 encoding: "utf-8",
             });
@@ -1952,12 +2562,12 @@ describe("test level runner", () => {
             expect(defaultResult.stdout).toContain("SUMMARY real-tests total=1 pass=1 skip=0 fail=0 failOnSkip=false");
             expect(defaultResult.stdout).not.toContain("strictCoverageFailures");
 
-            const strictResult = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.mjs"), "--fail-on-coverage-gap", scriptedButUncalledFile], {
+            const strictResult = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.ts"), "--fail-on-coverage-gap", scriptedButUncalledFile], {
                 cwd: repoRoot,
                 encoding: "utf-8",
             });
             expect(strictResult.status).toBe(1);
-            expect(strictResult.stdout).toContain("SUMMARY real-tests total=1 pass=1 skip=0 fail=0 failOnSkip=false strictCoverageFailures=82");
+            expect(strictResult.stdout).toContain(`SUMMARY real-tests total=1 pass=1 skip=0 fail=0 failOnSkip=false strictCoverageFailures=${TOOLS.length + 1}`);
         } finally {
             rmSync(tempDir, { recursive: true, force: true });
         }
@@ -1971,16 +2581,16 @@ describe("test level runner", () => {
             writeFileSync(facetFile, [
                 "export const name='boolean-facets';",
                 "export async function run(){",
-                "  const scripted = () => callTool(\"mobile_set_battery\", { backend: \"android-emulator\", deviceId: \"facet-device\", level: 42, status: 2, charging: true, confirmDestructive: true });",
+                "  const scripted = () => callTool(\"set_battery\", { backend: \"android-emulator\", deviceId: \"facet-device\", level: 42, status: 2, charging: true, confirmDestructive: true });",
                 "  void scripted;",
                 "  const key = Symbol.for('ccc.deviceLabRealTests.toolCalls');",
-                "  globalThis[key] = [{ name: 'mobile_set_battery', arguments: { backend: 'android-emulator', deviceId: 'facet-device', level: 42, status: 2, charging: true, confirmDestructive: true }, outcome: 'ok', isError: false }];",
+                "  globalThis[key] = [{ name: 'set_battery', arguments: { backend: 'android-emulator', deviceId: 'facet-device', level: 42, status: 2, charging: true, confirmDestructive: true }, outcome: 'ok', isError: false }];",
                 "  return { status: 'PASS' };",
                 "}",
                 "",
             ].join("\n"));
 
-            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.mjs"), "--json-summary-file", summaryFile, facetFile], {
+            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.ts"), "--json-summary-file", summaryFile, facetFile], {
                 cwd: repoRoot,
                 encoding: "utf-8",
             });
@@ -1994,11 +2604,11 @@ describe("test level runner", () => {
                 };
             };
             const expectedFacets = [
-                "mobile_set_battery:backend=android-emulator",
-                "mobile_set_battery:charging=true",
-                "mobile_set_battery:confirmDestructive=true",
-                "mobile_set_battery:level=42",
-                "mobile_set_battery:status=2",
+                "set_battery:backend=android-emulator",
+                "set_battery:charging=true",
+                "set_battery:confirmDestructive=true",
+                "set_battery:level=42",
+                "set_battery:status=2",
             ];
             expect(summary.toolCoverage.calledArgumentFacets).toEqual(expect.arrayContaining(expectedFacets));
             expect(summary.toolCoverage.scriptedArgumentFacets).toEqual(expect.arrayContaining(expectedFacets));
@@ -2018,13 +2628,13 @@ describe("test level runner", () => {
                 "export const name='enum-facets';",
                 "export async function run(){",
                 "  const key = Symbol.for('ccc.deviceLabRealTests.toolCalls');",
-                "  globalThis[key] = [{ name: 'display_click', arguments: { x: 1, y: 1, button: 'left' }, outcome: 'ok', isError: false }];",
+                "  globalThis[key] = [{ name: 'click', arguments: { x: 1, y: 1, button: 'left' }, outcome: 'ok', isError: false }];",
                 "  return { status: 'PASS' };",
                 "}",
                 "",
             ].join("\n"));
 
-            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.mjs"), "--json-summary-file", summaryFile, facetFile], {
+            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.ts"), "--json-summary-file", summaryFile, facetFile], {
                 cwd: repoRoot,
                 encoding: "utf-8",
             });
@@ -2039,19 +2649,19 @@ describe("test level runner", () => {
                 };
             };
             expect(summary.toolCoverage.advertisedArgumentEnumFacets).toEqual(expect.arrayContaining([
-                "display_click:button=left",
-                "display_click:button=right",
-                "mobile_set_orientation:orientation=reverse-landscape",
+                "click:button=left",
+                "click:button=right",
+                "set_orientation:orientation=reverse-landscape",
             ]));
-            expect(summary.toolCoverage.calledAdvertisedArgumentEnumFacets).toContain("display_click:button=left");
-            expect(summary.toolCoverage.uncalledAdvertisedArgumentEnumFacets).toContain("display_click:button=right");
-            expect(summary.toolCoverage.uncalledAdvertisedArgumentEnumFacets).not.toContain("display_click:button=left");
+            expect(summary.toolCoverage.calledAdvertisedArgumentEnumFacets).toContain("click:button=left");
+            expect(summary.toolCoverage.uncalledAdvertisedArgumentEnumFacets).toContain("click:button=right");
+            expect(summary.toolCoverage.uncalledAdvertisedArgumentEnumFacets).not.toContain("click:button=left");
             expect(summary.toolCoverage.uncalledProviderArgumentEnumFacets).toEqual(expect.arrayContaining([
-                "device_status:backend=android-emulator",
-                "device_create:provider=auto",
+                "devices:backend=android-emulator",
+                "create_linux_vm:provider=auto",
             ]));
-            expect(summary.toolCoverage.uncalledNonProviderArgumentEnumFacets).toContain("display_click:button=right");
-            expect(summary.toolCoverage.uncalledNonProviderArgumentEnumFacets).not.toContain("device_status:backend=android-emulator");
+            expect(summary.toolCoverage.uncalledNonProviderArgumentEnumFacets).toContain("click:button=right");
+            expect(summary.toolCoverage.uncalledNonProviderArgumentEnumFacets).not.toContain("status:backend=android-emulator");
         } finally {
             rmSync(tempDir, { recursive: true, force: true });
         }
@@ -2066,13 +2676,13 @@ describe("test level runner", () => {
                 "export const name='declared-facets';",
                 "export async function run(){",
                 "  const key = Symbol.for('ccc.deviceLabRealTests.toolCalls');",
-                "  globalThis[key] = [{ name: 'mobile_toggle_airplane_mode', arguments: { backend: 'android-emulator', deviceId: 'facet-device', enabled: false, confirmDestructive: true }, outcome: 'ok', isError: false }];",
-                "  return { status: 'PASS', scriptedArgumentFacets: ['mobile_toggle_airplane_mode:enabled=false', 'mobile_toggle_airplane_mode:confirmDestructive=true'] };",
+                "  globalThis[key] = [{ name: 'set_network', arguments: { backend: 'android-emulator', deviceId: 'facet-device', airplaneMode: false, confirmDestructive: true }, outcome: 'ok', isError: false }];",
+                "  return { status: 'PASS', scriptedArgumentFacets: ['set_network:airplaneMode=false', 'set_network:confirmDestructive=true'] };",
                 "}",
                 "",
             ].join("\n"));
 
-            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.mjs"), "--json-summary-file", summaryFile, facetFile], {
+            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.ts"), "--json-summary-file", summaryFile, facetFile], {
                 cwd: repoRoot,
                 encoding: "utf-8",
             });
@@ -2086,15 +2696,15 @@ describe("test level runner", () => {
                 };
             };
             expect(summary.toolCoverage.scriptedArgumentFacets).toEqual(expect.arrayContaining([
-                "mobile_toggle_airplane_mode:enabled=false",
-                "mobile_toggle_airplane_mode:confirmDestructive=true",
+                "set_network:airplaneMode=false",
+                "set_network:confirmDestructive=true",
             ]));
             expect(summary.toolCoverage.invalidScriptedArgumentFacets).toEqual([]);
             expect(summary.toolCoverage.uncalledScriptedArgumentFacets).toEqual([]);
             expect(summary.toolCoverage.scripted).toEqual(expect.arrayContaining([
                 expect.objectContaining({
                     source: "declared-scripted-argument-facet",
-                    facets: ["mobile_toggle_airplane_mode:enabled=false"],
+                    facets: ["set_network:airplaneMode=false"],
                 }),
             ]));
         } finally {
@@ -2110,24 +2720,24 @@ describe("test level runner", () => {
             writeFileSync(facetFile, [
                 "export const name='invalid-scripted-facets';",
                 "export async function run(){",
-                "  return { status: 'PASS', scriptedArgumentFacets: ['display_click:bogus=left', 'missing_tool:button=left', 'not-a-facet'] };",
+                "  return { status: 'PASS', scriptedArgumentFacets: ['click:bogus=left', 'missing_tool:button=left', 'not-a-facet'] };",
                 "}",
                 "",
             ].join("\n"));
 
-            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.mjs"), "--fail-on-coverage-gap", "--json-summary-file", summaryFile, facetFile], {
+            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.ts"), "--fail-on-coverage-gap", "--json-summary-file", summaryFile, facetFile], {
                 cwd: repoRoot,
                 encoding: "utf-8",
             });
             expect(result.status).toBe(1);
-            expect(result.stdout).toContain("strictCoverageFailures=89");
+            expect(result.stdout).toContain(`strictCoverageFailures=${TOOLS.length + 8}`);
             const summary = JSON.parse(readFileSync(summaryFile, "utf-8")) as {
                 toolCoverage: {
                     invalidScriptedArgumentFacets: string[];
                 };
             };
             expect(summary.toolCoverage.invalidScriptedArgumentFacets).toEqual([
-                "display_click:bogus=left",
+                "click:bogus=left",
                 "missing_tool:button=left",
                 "not-a-facet",
             ]);
@@ -2144,13 +2754,13 @@ describe("test level runner", () => {
                 "export const name='outcome-gap';",
                 "export async function run(){",
                 "  const key = Symbol.for('ccc.deviceLabRealTests.toolCalls');",
-                "  globalThis[key] = [{ name: 'display_current', arguments: {}, outcome: 'thrown', error: 'boom' }];",
-                "  return { status: 'PASS', scriptedTools: ['display_current'] };",
+                "  globalThis[key] = [{ name: 'status', arguments: { deviceId: 'x11-current-display' }, outcome: 'thrown', error: 'boom' }];",
+                "  return { status: 'PASS', scriptedTools: ['status'] };",
                 "}",
                 "",
             ].join("\n"));
 
-            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.mjs"), "--fail-on-coverage-gap", outcomeFile], {
+            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.ts"), "--fail-on-coverage-gap", outcomeFile], {
                 cwd: repoRoot,
                 encoding: "utf-8",
             });
@@ -2169,13 +2779,13 @@ describe("test level runner", () => {
                 "export const name='unexpected-error';",
                 "export async function run(){",
                 "  const key = Symbol.for('ccc.deviceLabRealTests.toolCalls');",
-                "  globalThis[key] = [{ name: 'display_current', arguments: {}, outcome: 'error-result', isError: true }];",
-                "  return { status: 'PASS', scriptedTools: ['display_current'] };",
+                "  globalThis[key] = [{ name: 'status', arguments: { deviceId: 'x11-current-display' }, outcome: 'error-result', isError: true }];",
+                "  return { status: 'PASS', scriptedTools: ['status'] };",
                 "}",
                 "",
             ].join("\n"));
 
-            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.mjs"), "--fail-on-coverage-gap", outcomeFile], {
+            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.ts"), "--fail-on-coverage-gap", outcomeFile], {
                 cwd: repoRoot,
                 encoding: "utf-8",
             });
@@ -2194,13 +2804,13 @@ describe("test level runner", () => {
                 "export const name='ok-payload-gap';",
                 "export async function run(){",
                 "  const key = Symbol.for('ccc.deviceLabRealTests.toolCalls');",
-                "  globalThis[key] = [{ name: 'display_current', arguments: {}, outcome: 'ok', isError: false, okPayloadText: true, okPayloadJson: false, okPayloadImage: false }];",
-                "  return { status: 'PASS', scriptedTools: ['display_current'] };",
+                "  globalThis[key] = [{ name: 'status', arguments: { deviceId: 'x11-current-display' }, outcome: 'ok', isError: false, okPayloadText: true, okPayloadJson: false, okPayloadImage: false }];",
+                "  return { status: 'PASS', scriptedTools: ['status'] };",
                 "}",
                 "",
             ].join("\n"));
 
-            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.mjs"), "--fail-on-coverage-gap", outcomeFile], {
+            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.ts"), "--fail-on-coverage-gap", outcomeFile], {
                 cwd: repoRoot,
                 encoding: "utf-8",
             });
@@ -2228,16 +2838,16 @@ describe("test level runner", () => {
                 "  globalThis[key] = globalThis[key] || [];",
                 "  globalThis[sessions] = globalThis[sessions] || [];",
                 `  globalThis[sessions].push({ id: 'fixture-session-1', name: 'fixture-session', serverPath: '/tmp/device-lab-mcp/server.mjs', serverSource: 'source', serverFile: { exists: true, size: 123, sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }, advertisedToolSurface: ${JSON.stringify(advertisedToolSurface)}, node: process.execPath, envOverrides: [] });`,
-                "  globalThis[key].push({ name: 'display_current', mcpSessionId: 'fixture-session-1', arguments: {}, outcome: 'ok', isError: false, okPayloadText: true, okPayloadJson: true, okPayloadImage: false });",
+                "  globalThis[key].push({ name: 'status', mcpSessionId: 'fixture-session-1', arguments: { deviceId: 'x11-current-display' }, outcome: 'ok', isError: false, okPayloadText: true, okPayloadJson: true, okPayloadImage: false });",
                 "  globalThis[key].push({ name: 'device_broker_rpc', mcpSessionId: 'fixture-session-1', arguments: { method: 'broker.status' }, outcome: 'error-result', isError: true, expectedError: true, errorPayloadJson: true, errorCode: 'broker-unavailable' });",
-                "  globalThis[key].push({ name: 'device_run_flow', mcpSessionId: 'fixture-session-1', arguments: { steps: [{ tool: 'display_current', arguments: {} }] }, outcome: 'ok', isError: false, okPayloadText: true, okPayloadJson: true, okPayloadImage: false, flowSteps: [{ tool: 'display_current', isError: false, expectedError: false, okPayloadJson: true, okPayloadImage: false }] });",
-                "  return { status: 'PASS', detail: 'provider=display', scriptedTools: ['display_current', 'device_broker_rpc', 'device_run_flow'] };",
+                "  globalThis[key].push({ name: 'run_flow', mcpSessionId: 'fixture-session-1', arguments: { steps: [{ tool: 'status', arguments: { deviceId: 'x11-current-display' } }] }, outcome: 'ok', isError: false, okPayloadText: true, okPayloadJson: true, okPayloadImage: false, flowSteps: [{ tool: 'status', isError: false, expectedError: false, okPayloadJson: true, okPayloadImage: false }] });",
+                "  return { status: 'PASS', detail: 'provider=display', scriptedTools: ['status', 'device_broker_rpc', 'run_flow'] };",
                 "}",
                 "",
             ].join("\n"));
             writeFileSync(stepSkipFile, "export const name='step-skip'; export async function run(){ return { status: 'SKIP', steps: [{ name: 'inner', status: 'SKIP', reason: 'missing adb', detail: 'backend=android-device' }] }; }\n");
 
-            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.mjs"), "--fail-on-skip", "--json-summary", "--json-summary-file", summaryFile, passFile, stepSkipFile], {
+            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "run.ts"), "--fail-on-skip", "--json-summary", "--json-summary-file", summaryFile, passFile, stepSkipFile], {
                 cwd: repoRoot,
                 encoding: "utf-8",
             });
@@ -2256,7 +2866,6 @@ describe("test level runner", () => {
                     canonicalToolSurface: { toolCount: number; sha256: string };
                     calledTools: string[];
                     calledPublicTools: string[];
-                    calledHiddenCompatibilityTools: string[];
                     calledArgumentFacets: string[];
                     callOutcomes: Record<string, number>;
                     toolEvidenceSummary: Record<string, { evidence: string[] }>;
@@ -2269,7 +2878,6 @@ describe("test level runner", () => {
                     unexplainedProviderArgumentEnumFacets: string[];
                     scriptedTools: string[];
                     scriptedPublicTools: string[];
-                    scriptedHiddenCompatibilityTools: string[];
                     scriptedArgumentFacets: string[];
                     uncalledAdvertisedTools: string[];
                     unscriptedAdvertisedTools: string[];
@@ -2306,7 +2914,7 @@ describe("test level runner", () => {
                 strictSkipFailures: 1,
             }));
             expect(summary.records).toEqual([
-                expect.objectContaining({ test: "pass", status: "PASS", detail: "provider=display", tools: ["device_broker_rpc", "device_run_flow", "display_current"] }),
+                expect.objectContaining({ test: "pass", status: "PASS", detail: "provider=display", tools: ["device_broker_rpc", "run_flow", "status"] }),
                 expect.objectContaining({ test: "step-skip", step: "inner", status: "SKIP", reason: "missing adb", detail: "backend=android-device" }),
             ]);
             expect(summary.skipCategories).toEqual([
@@ -2316,17 +2924,16 @@ describe("test level runner", () => {
                     records: [{ test: "step-skip", step: "inner", reason: "missing adb" }],
                 },
             ]);
-            expect(summary.toolCoverage.calledTools).toEqual(["device_broker_rpc", "device_run_flow", "display_current"]);
+            expect(summary.toolCoverage.calledTools).toEqual(["device_broker_rpc", "run_flow", "status"]);
             expect(summary.toolCoverage.canonicalToolSurface).toEqual(canonicalDeviceLabToolSurface());
-            expect(summary.toolCoverage.calledPublicTools).toEqual(["device_run_flow", "display_current"]);
-            expect(summary.toolCoverage.calledHiddenCompatibilityTools).toEqual(["device_broker_rpc"]);
+            expect(summary.toolCoverage.calledPublicTools).toEqual(["run_flow", "status"]);
             expect(summary.toolCoverage.calledArgumentFacets).toEqual(["device_broker_rpc:method=broker.status"]);
             expect(summary.toolCoverage.callOutcomes).toEqual({ "error-result": 1, ok: 2 });
             expect(summary.toolCoverage.toolOutcomeSummary).toEqual(expect.objectContaining({
-                display_current: expect.objectContaining({ ok: 1, expectedError: 0 }),
+                status: expect.objectContaining({ ok: 1, expectedError: 0 }),
                 device_broker_rpc: expect.objectContaining({ ok: 0, expectedError: 1 }),
             }));
-            expect(summary.toolCoverage.toolEvidenceSummary.display_current.evidence).toEqual(["direct-ok", "flow-ok"]);
+            expect(summary.toolCoverage.toolEvidenceSummary.status.evidence).toEqual(["direct-ok", "flow-ok"]);
             expect(summary.toolCoverage.publicToolsWithoutEvidence).toEqual([]);
             expect(summary.toolCoverage.publicToolsWithoutDirectOk).toEqual([]);
             expect(summary.toolCoverage.publicToolsWithOnlyExpectedErrorEvidence).toEqual([]);
@@ -2334,18 +2941,17 @@ describe("test level runner", () => {
             expect(summary.toolCoverage.unjustifiedMissingDirectOkTools).toEqual([]);
             expect(summary.toolCoverage.explainedProviderValues).toEqual([]);
             expect(summary.toolCoverage.unexplainedProviderArgumentEnumFacets).toEqual(expect.arrayContaining([
-                "device_create:backend=android-emulator",
-                "device_create:provider=tart",
+                "create_linux_vm:provider=container-qemu",
+                "create_macos_vm:provider=tart",
             ]));
             expect(summary.toolCoverage.publicToolsWithoutOkOrExpectedError).toEqual([]);
-            expect(summary.toolCoverage.scriptedTools).toEqual(["device_broker_rpc", "device_run_flow", "display_current"]);
-            expect(summary.toolCoverage.scriptedPublicTools).toEqual(["device_run_flow", "display_current"]);
-            expect(summary.toolCoverage.scriptedHiddenCompatibilityTools).toEqual(["device_broker_rpc"]);
+            expect(summary.toolCoverage.scriptedTools).toEqual(["device_broker_rpc", "run_flow", "status"]);
+            expect(summary.toolCoverage.scriptedPublicTools).toEqual(["run_flow", "status"]);
             expect(summary.toolCoverage.scriptedArgumentFacets).toEqual([]);
             expect(summary.toolCoverage.uncalledScriptedTools).toEqual([]);
             expect(summary.toolCoverage.uncalledScriptedArgumentFacets).toEqual([]);
-            expect(summary.toolCoverage.unadvertisedTools).toEqual([]);
-            expect(summary.toolCoverage.argumentSchemaFailureRecords).toEqual([]);
+            expect(summary.toolCoverage.unadvertisedTools).toEqual(["device_broker_rpc"]);
+            expect(summary.toolCoverage.argumentSchemaFailureRecords).toEqual([expect.objectContaining({ tool: "device_broker_rpc", schemaErrors: ["device_broker_rpc:unadvertised"] })]);
             expect(summary.toolCoverage.flowStepArgumentSchemaFailures).toEqual([]);
             expect(summary.toolCoverage.expectedErrorResultRecords).toEqual([
                 expect.objectContaining({ test: "pass", tool: "device_broker_rpc", expectedError: true, errorPayloadJson: true, errorCode: "broker-unavailable" }),
@@ -2354,12 +2960,12 @@ describe("test level runner", () => {
             expect(summary.toolCoverage.okPublicPayloadFailures).toEqual([]);
             expect(summary.toolCoverage.emptyOkPublicPayloadRecords).toEqual([]);
             expect(summary.toolCoverage.flowStepOutcomeSummary).toEqual({
-                display_current: { total: 1, ok: 1, error: 0 },
+                status: { total: 1, ok: 1, error: 0 },
             });
             expect(summary.toolCoverage.flowStepToolOutcomeSummary).toEqual({
-                display_current: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 },
+                status: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 },
             });
-            expect(summary.toolCoverage.publicFlowStepTools).toEqual(["display_current"]);
+            expect(summary.toolCoverage.publicFlowStepTools).toEqual(["status"]);
             expect(summary.toolCoverage.publicFlowStepToolsWithoutOkOrExpectedError).toEqual([]);
             expect(summary.toolCoverage.expectedFlowStepErrorRecords).toEqual([]);
             expect(summary.toolCoverage.unexpectedFlowStepErrorRecords).toEqual([]);
@@ -2367,19 +2973,155 @@ describe("test level runner", () => {
             expect(summary.toolCoverage.okPublicFlowStepPayloadFailures).toEqual([]);
             expect(summary.toolCoverage.emptyOkPublicFlowStepPayloadRecords).toEqual([]);
             expect(summary.toolCoverage.calls).toEqual([
-                expect.objectContaining({ test: "pass", tool: "display_current", mcpSessionId: "fixture-session-1", schemaValid: true }),
-                expect.objectContaining({ test: "pass", tool: "device_broker_rpc", mcpSessionId: "fixture-session-1", schemaValid: true }),
-                expect.objectContaining({ test: "pass", tool: "device_run_flow", mcpSessionId: "fixture-session-1", schemaValid: true }),
+                expect.objectContaining({ test: "pass", tool: "status", mcpSessionId: "fixture-session-1", schemaValid: true }),
+                expect.objectContaining({ test: "pass", tool: "device_broker_rpc", mcpSessionId: "fixture-session-1", schemaValid: false }),
+                expect.objectContaining({ test: "pass", tool: "run_flow", mcpSessionId: "fixture-session-1", schemaValid: true }),
             ]);
             expect(summary.toolCoverage.scripted).toEqual([
-                expect.objectContaining({ test: "pass", tool: "display_current", source: "declared-scripted-result" }),
+                expect.objectContaining({ test: "pass", tool: "status", source: "declared-scripted-result" }),
                 expect.objectContaining({ test: "pass", tool: "device_broker_rpc", source: "declared-scripted-result" }),
-                expect.objectContaining({ test: "pass", tool: "device_run_flow", source: "declared-scripted-result" }),
+                expect.objectContaining({ test: "pass", tool: "run_flow", source: "declared-scripted-result" }),
             ]);
             expect(summary.mcpSessions).toEqual([
                 expect.objectContaining({ test: "pass", id: "fixture-session-1", name: "fixture-session", serverPath: "/tmp/device-lab-mcp/server.mjs", serverSource: "source" }),
             ]);
             expect(JSON.parse(readFileSync(summaryFile, "utf-8"))).toEqual(summary);
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true });
+        }
+    });
+
+    it("classifies Hyper-V management permission skips as an allowed host prerequisite", () => {
+        const tempDir = mkdtempSync(join(tmpdir(), "ccc-real-test-hyper-v-permission-"));
+        try {
+            const skipFile = join(tempDir, "hyper-v-permission-skip.mjs");
+            const summaryFile = join(tempDir, "summary.json");
+            writeFileSync(skipFile, [
+                "export const name='level 2 Hyper-V VM E2E';",
+                "export async function run(){",
+                "  return { status: 'SKIP', steps: [",
+                "    { name: 'Hyper-V Windows VM packaged MCP', status: 'SKIP', reason: 'Hyper-V unavailable: hyper-v-management-permission' },",
+                "    { name: 'Hyper-V Linux VM packaged MCP', status: 'SKIP', reason: 'Hyper-V unavailable: hyper-v-management-permission' },",
+                "  ] };",
+                "}",
+                "",
+            ].join("\n"));
+
+            const collected = spawnSync(process.execPath, [
+                join(repoRoot, "scripts", "real-tests", "run.ts"),
+                "--json-summary-file",
+                summaryFile,
+                skipFile,
+            ], {
+                cwd: repoRoot,
+                encoding: "utf-8",
+            });
+            expect(collected.status).toBe(0);
+            const summary = JSON.parse(readFileSync(summaryFile, "utf-8"));
+            expect(summary.skipCategories).toEqual([
+                {
+                    category: "host-permission",
+                    count: 2,
+                    records: [
+                        {
+                            test: "level 2 Hyper-V VM E2E",
+                            step: "Hyper-V Windows VM packaged MCP",
+                            reason: "Hyper-V unavailable: hyper-v-management-permission",
+                        },
+                        {
+                            test: "level 2 Hyper-V VM E2E",
+                            step: "Hyper-V Linux VM packaged MCP",
+                            reason: "Hyper-V unavailable: hyper-v-management-permission",
+                        },
+                    ],
+                },
+            ]);
+            expect(summary.toolCoverage.explainedProviderValues).toContain("backend=windows-vm");
+            expect(summary.toolCoverage.explainedProviderValues).toContain("backend=linux-vm");
+
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true });
+        }
+    });
+
+    it("classifies Hyper-V readiness skips and keeps base-image conflicts in other", () => {
+        // The macOS VM real-provider smoke reports a missing SSH bridge with the same reason shape;
+        // it is a genuine macos-vm prerequisite, so it also explains that backend's coverage gap.
+        const macosBridgeSkip = "SKIP - missing ssh, scp";
+        const expectedCategories: Record<string, string> = {
+            "missing hyper-v-qemu-img-untrusted": "provider-prerequisite",
+            "missing hyper-v-qemu-img-unavailable": "provider-prerequisite",
+            "SKIP - missing hyper-v-qemu-img-untrusted": "provider-prerequisite",
+            // The shapes the smoke and the Linux E2E gate emit, with the probe's closed signature status.
+            "missing hyper-v-qemu-img-untrusted (qemu-img signature NotTrusted)": "provider-prerequisite",
+            "missing hyper-v-qemu-img-untrusted (qemu-img signature check-failed)": "provider-prerequisite",
+            "SKIP - missing hyper-v-qemu-img-untrusted (qemu-img signature check-failed)": "provider-prerequisite",
+            "missing powershell.exe, ssh, scp": "provider-prerequisite",
+            [macosBridgeSkip]: "provider-prerequisite",
+            "missing ssh, scp": "provider-prerequisite",
+            "missing scp": "provider-prerequisite",
+            "missing powershell": "provider-prerequisite",
+            "missing PowerShell": "provider-prerequisite",
+            "missing hyper-v-powershell-module, hypervisor, vmms-service": "provider-prerequisite",
+            "missing vmms-service": "provider-prerequisite",
+            "Hyper-V unavailable: hyper-v-powershell-module, hypervisor, vmms-service": "provider-prerequisite",
+            "Hyper-V unavailable: vmms-service": "provider-prerequisite",
+            "missing hypervisor": "host-virtualization",
+            "SKIP - missing hypervisor": "host-virtualization",
+            "Hyper-V unavailable: hypervisor": "host-virtualization",
+            // A failed probe's raw stderr is not a readiness token list, whatever it mentions.
+            "FAIL - The hypervisor is not running": "other",
+            "missing hyper-v-management-permission": "host-permission",
+            "missing hypervisor, hyper-v-management-permission": "host-permission",
+            "missing hyper-v-base-image-profile-conflict": "other",
+            "missing hyper-v-base-image-unmanaged-existing": "other",
+            "missing hyper-v-base-image-artifact-owner-unknown": "other",
+            "missing hyper-v-base-image-profile-conflict, hyper-v-qemu-img-untrusted": "other",
+            "Hyper-V unavailable": "other",
+        };
+        const reasons = Object.keys(expectedCategories);
+        const categoryByReason = (groups: Array<{ category: string; records: Array<{ reason?: string }> }>) => Object.fromEntries(
+            groups.flatMap((group) => group.records.map((record) => [record.reason, group.category])),
+        );
+        const tempDir = mkdtempSync(join(tmpdir(), "ccc-real-test-hyper-v-readiness-"));
+        try {
+            const skipFile = join(tempDir, "hyper-v-readiness-skip.mjs");
+            const summaryFile = join(tempDir, "summary.json");
+            const recordsFile = join(tempDir, "records.json");
+            const steps = reasons.map((reason, index) => ({
+                name: reason === macosBridgeSkip ? "macOS VM real integration slot" : `Hyper-V readiness ${index}`,
+                status: "SKIP",
+                reason,
+            }));
+            writeFileSync(skipFile, [
+                "export const name='level 1 Hyper-V readiness';",
+                `export async function run(){ return { status: 'SKIP', steps: ${JSON.stringify(steps)} }; }`,
+                "",
+            ].join("\n"));
+
+            const collected = spawnSync(process.execPath, [
+                join(repoRoot, "scripts", "real-tests", "run.ts"),
+                "--json-summary-file",
+                summaryFile,
+                skipFile,
+            ], {
+                cwd: repoRoot,
+                encoding: "utf-8",
+            });
+            expect(collected.status).toBe(0);
+            const summary = JSON.parse(readFileSync(summaryFile, "utf-8"));
+            expect(categoryByReason(summary.skipCategories)).toEqual(expectedCategories);
+            expect(summary.toolCoverage.explainedProviderValues).toEqual(["backend=macos-vm"]);
+
+            writeFileSync(recordsFile, JSON.stringify({
+                records: reasons.map((reason) => ({ test: "level 1 Hyper-V readiness", status: "SKIP", reason })),
+            }));
+            const summarized = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "summarize-json.ts"), recordsFile], {
+                cwd: repoRoot,
+                encoding: "utf-8",
+            });
+            expect(summarized.status).toBe(0);
+            expect(categoryByReason(JSON.parse(summarized.stdout).skippedCategories)).toEqual(expectedCategories);
         } finally {
             rmSync(tempDir, { recursive: true, force: true });
         }
@@ -2404,35 +3146,33 @@ describe("test level runner", () => {
                 strictOutcomeFailures: 0,
                 toolCoverage: {
                     canonicalToolSurface,
-                    advertisedTools: ["device_backends", "display_current"],
-                    calledTools: ["device_broker_rpc", "display_current"],
-                    calledPublicTools: ["display_current"],
-                    calledHiddenCompatibilityTools: ["device_broker_rpc"],
+                    advertisedTools: ["devices", "status"],
+                    calledTools: ["device_broker_rpc", "status"],
+                    calledPublicTools: ["status"],
                     calledArgumentFacets: ["device_broker_rpc:method=broker.status"],
                     callOutcomes: { "error-result": 1, ok: 1 },
                     toolOutcomeSummary: {
-                        display_current: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 },
+                        status: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 },
                         device_broker_rpc: { total: 1, ok: 0, expectedError: 1, unexpectedError: 0, incomplete: 0 },
                     },
                     toolEvidenceSummary: {
-                        display_current: { direct: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-ok", "flow-ok"] },
-                        device_backends: { direct: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: [] },
+                        status: { direct: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-ok", "flow-ok"] },
+                        devices: { direct: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: [] },
                     },
                     publicToolsWithoutOkOrExpectedError: [],
                     publicToolsWithoutEvidence: [],
-                    publicToolsWithoutDirectOk: ["device_backends"],
+                    publicToolsWithoutDirectOk: ["devices"],
                     publicToolsWithOnlyExpectedErrorEvidence: [],
                     unexplainedDiagnosticOnlyTools: [],
-                    unjustifiedMissingDirectOkTools: ["device_backends"],
+                    unjustifiedMissingDirectOkTools: ["devices"],
                     explainedProviderValues: ["backend=android-device", "backend=android-emulator"],
                     unexplainedProviderArgumentEnumFacets: [],
-                    scriptedTools: ["device_backends", "device_broker_rpc", "display_current"],
-                    scriptedPublicTools: ["device_backends", "display_current"],
-                    scriptedHiddenCompatibilityTools: ["device_broker_rpc"],
+                    scriptedTools: ["devices", "device_broker_rpc", "status"],
+                    scriptedPublicTools: ["devices", "status"],
                     scriptedArgumentFacets: ["device_broker_rpc:method=broker.status"],
-                    uncalledAdvertisedTools: ["device_backends"],
+                    uncalledAdvertisedTools: ["devices"],
                     unscriptedAdvertisedTools: [],
-                    uncalledScriptedTools: ["device_backends"],
+                    uncalledScriptedTools: ["devices"],
                     uncalledScriptedArgumentFacets: [],
                     invalidScriptedArgumentFacets: [],
                     unadvertisedTools: [],
@@ -2447,28 +3187,28 @@ describe("test level runner", () => {
                     okPublicPayloadFailures: [],
                     emptyOkPublicPayloadRecords: [],
                     flowStepOutcomeSummary: {
-                        display_current: { total: 1, ok: 1, error: 0 },
+                        status: { total: 1, ok: 1, error: 0 },
                     },
                     flowStepToolOutcomeSummary: {
-                        display_current: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 },
+                        status: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 },
                     },
-                    publicFlowStepTools: ["display_current"],
+                    publicFlowStepTools: ["status"],
                     publicFlowStepToolsWithoutOkOrExpectedError: [],
                     expectedFlowStepErrorRecords: [
-                        { test: "broker", flowTool: "mobile_run_flow", tool: "mobile_tap", isError: true, expectedError: true },
+                        { test: "broker", flowTool: "run_flow", tool: "click", isError: true, expectedError: true },
                     ],
                     unexpectedFlowStepErrorRecords: [],
                     expectedFlowStepPayloadFailures: [],
                     okPublicFlowStepPayloadFailures: [],
                     emptyOkPublicFlowStepPayloadRecords: [],
                     calls: [
-                        { test: "display", tool: "display_current", mcpSessionId: "source-session-1" },
+                        { test: "display", tool: "status", mcpSessionId: "source-session-1" },
                         { test: "broker", tool: "device_broker_rpc", mcpSessionId: "source-session-1", outcome: "error-result", expectedError: true, errorPayloadJson: true, errorCode: "broker-unavailable" },
                     ],
                     scripted: [
-                        { test: "display", tool: "display_current", source: "callTool" },
+                        { test: "display", tool: "status", source: "callTool" },
                         { test: "broker", tool: "device_broker_rpc", source: "callTool" },
-                        { test: "backends", tool: "device_backends", source: "callTool" },
+                        { test: "devices", tool: "devices", source: "callTool" },
                     ],
                 },
                 mcpSessions: [
@@ -2482,7 +3222,7 @@ describe("test level runner", () => {
                     { test: "broker", step: "rpc", status: "FAIL", reason: "owner rejected" },
                 ],
             }));
-            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "summarize-json.mjs"), summaryFile], {
+            const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "real-tests", "summarize-json.ts"), summaryFile], {
                 cwd: repoRoot,
                 encoding: "utf-8",
             });
@@ -2520,33 +3260,31 @@ describe("test level runner", () => {
                         advertised: 2,
                     called: 2,
                     calledPublic: 1,
-                    calledHiddenCompatibility: 1,
                     calledArgumentFacets: 1,
                     callOutcomes: { "error-result": 1, ok: 1 },
                     toolOutcomeSummary: {
-                        display_current: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 },
+                        status: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 },
                         device_broker_rpc: { total: 1, ok: 0, expectedError: 1, unexpectedError: 0, incomplete: 0 },
                     },
                     toolEvidenceSummary: {
-                        display_current: { direct: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-ok", "flow-ok"] },
-                        device_backends: { direct: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: [] },
+                        status: { direct: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-ok", "flow-ok"] },
+                        devices: { direct: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: [] },
                     },
                     publicToolsWithoutOkOrExpectedError: [],
                     publicToolsWithoutEvidence: [],
-                    publicToolsWithoutDirectOk: ["device_backends"],
+                    publicToolsWithoutDirectOk: ["devices"],
                     publicToolsWithOnlyExpectedErrorEvidence: [],
                     unexplainedDiagnosticOnlyTools: [],
-                    unjustifiedMissingDirectOkTools: ["device_backends"],
+                    unjustifiedMissingDirectOkTools: ["devices"],
                     explainedProviderValues: ["backend=android-device", "backend=android-emulator"],
                     unexplainedProviderArgumentEnumFacets: [],
                     scripted: 3,
                     scriptedPublic: 2,
-                    scriptedHiddenCompatibility: 1,
                     scriptedArgumentFacets: 1,
                     invalidScriptedArgumentFacets: [],
-                    uncalledAdvertisedTools: ["device_backends"],
+                    uncalledAdvertisedTools: ["devices"],
                     unscriptedAdvertisedTools: [],
-                    uncalledScriptedTools: ["device_backends"],
+                    uncalledScriptedTools: ["devices"],
                     uncalledScriptedArgumentFacets: [],
                     unadvertisedTools: [],
                     incompleteOutcomeRecords: [],
@@ -2560,15 +3298,15 @@ describe("test level runner", () => {
                     okPublicPayloadFailures: [],
                     emptyOkPublicPayloadRecords: [],
                     flowStepOutcomeSummary: {
-                        display_current: { total: 1, ok: 1, error: 0 },
+                        status: { total: 1, ok: 1, error: 0 },
                     },
                     flowStepToolOutcomeSummary: {
-                        display_current: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 },
+                        status: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 },
                     },
-                    publicFlowStepTools: ["display_current"],
+                    publicFlowStepTools: ["status"],
                     publicFlowStepToolsWithoutOkOrExpectedError: [],
                     expectedFlowStepErrorRecords: [
-                        { test: "broker", flowTool: "mobile_run_flow", tool: "mobile_tap", isError: true, expectedError: true },
+                        { test: "broker", flowTool: "run_flow", tool: "click", isError: true, expectedError: true },
                     ],
                     unexpectedFlowStepErrorRecords: [],
                     expectedFlowStepPayloadFailures: [],
@@ -2636,6 +3374,7 @@ describe("test level runner", () => {
             const unlinkedCallFile = join(tempDir, "unlinked-call.json");
             const staleSessionSurfaceFile = join(tempDir, "stale-session-surface.json");
             const forbiddenSessionEnvFile = join(tempDir, "forbidden-session-env.json");
+            const hyperVPermissionSkipFile = join(tempDir, "hyper-v-permission-skip.json");
             const sourceServerFile = { exists: true, size: 123, sha256: "a".repeat(64) };
             const distServerFile = { exists: true, size: 456, sha256: "b".repeat(64) };
             const advertisedToolSurface = canonicalDeviceLabToolSurface();
@@ -2652,13 +3391,13 @@ describe("test level runner", () => {
                 ],
                 toolCoverage: {
                     canonicalToolSurface: canonicalDeviceLabToolSurface(),
-                    advertisedTools: ["display_current"],
-                    calledPublicTools: ["display_current"],
+                    advertisedTools: ["status"],
+                    calledPublicTools: ["status"],
                     unscriptedAdvertisedTools: [],
                     uncalledAdvertisedTools: [],
                     publicToolsWithoutOkOrExpectedError: [],
                     toolEvidenceSummary: {
-                        display_current: { direct: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-ok"] },
+                        status: { direct: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-ok"] },
                     },
                     publicToolsWithoutEvidence: [],
                     publicToolsWithoutDirectOk: [],
@@ -2667,7 +3406,7 @@ describe("test level runner", () => {
                     uncalledScriptedTools: [],
                     uncalledScriptedArgumentFacets: [],
                     invalidScriptedArgumentFacets: [],
-                    uncalledAdvertisedArgumentEnumFacets: ["device_status:backend=macos-vm", "device_create:provider=tart"],
+                    uncalledAdvertisedArgumentEnumFacets: ["status:backend=macos-vm", "create:provider=tart"],
                     unadvertisedTools: [],
                     incompleteOutcomeRecords: [],
                     argumentSchemaFailureRecords: [],
@@ -2682,8 +3421,8 @@ describe("test level runner", () => {
                     okPublicFlowStepPayloadFailures: [],
                     emptyOkPublicFlowStepPayloadRecords: [],
                     calls: [
-                        { test: "display", tool: "display_current", outcome: "ok", mcpSessionId: "source-session-1" },
-                        { test: "package", tool: "display_current", outcome: "ok", mcpSessionId: "dist-session-1" },
+                        { test: "display", tool: "status", outcome: "ok", mcpSessionId: "source-session-1" },
+                        { test: "package", tool: "status", outcome: "ok", mcpSessionId: "dist-session-1" },
                     ],
                 },
                 mcpSessions: [
@@ -2692,6 +3431,28 @@ describe("test level runner", () => {
                 ],
             };
             writeFileSync(passingFile, JSON.stringify(baseSummary));
+            writeFileSync(hyperVPermissionSkipFile, JSON.stringify({
+                ...baseSummary,
+                total: 5,
+                skip: 3,
+                skipCategories: [
+                    ...baseSummary.skipCategories,
+                    {
+                        category: "host-permission",
+                        count: 2,
+                        records: [
+                            {
+                                test: "level 2 Hyper-V Windows VM E2E",
+                                reason: "Hyper-V unavailable: hyper-v-management-permission",
+                            },
+                            {
+                                test: "level 2 Hyper-V Linux VM E2E",
+                                reason: "Hyper-V unavailable: hyper-v-management-permission",
+                            },
+                        ],
+                    },
+                ],
+            }));
             writeFileSync(failingFile, JSON.stringify({
                 ...baseSummary,
                 fail: 1,
@@ -2699,26 +3460,26 @@ describe("test level runner", () => {
                 skipCategories: [{ category: "other", count: 1, records: [{ test: "mystery", reason: "ambiguous skip" }] }],
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
-                    unscriptedAdvertisedTools: ["device_backends"],
-                    uncalledScriptedTools: ["device_backends"],
-                    publicToolsWithoutOkOrExpectedError: ["device_backends"],
-                    publicToolsWithoutEvidence: ["device_backends"],
-                    invalidScriptedArgumentFacets: ["display_click:bogus=left"],
+                    unscriptedAdvertisedTools: ["devices"],
+                    uncalledScriptedTools: ["devices"],
+                    publicToolsWithoutOkOrExpectedError: ["devices"],
+                    publicToolsWithoutEvidence: ["devices"],
+                    invalidScriptedArgumentFacets: ["click:bogus=left"],
                     uncalledAdvertisedArgumentEnumFacets: [
-                        "device_status:backend=macos-vm",
-                        "display_scroll:direction=left",
+                        "status:backend=macos-vm",
+                        "scroll:direction=left",
                     ],
                     unexpectedErrorResultRecords: [{ test: "broker", tool: "device_broker_rpc" }],
-                    argumentSchemaFailureRecords: [{ test: "display", tool: "display_click", schemaValid: false, schemaErrors: ["arguments.x:required"] }],
-                    flowStepArgumentSchemaFailures: [{ test: "display", flowTool: "device_run_flow", index: 0, tool: "display_click", schemaErrors: ["arguments.x:required"], schemaErrorCount: 1 }],
+                    argumentSchemaFailureRecords: [{ test: "display", tool: "click", schemaValid: false, schemaErrors: ["arguments.x:required"] }],
+                    flowStepArgumentSchemaFailures: [{ test: "display", flowTool: "run_flow", index: 0, tool: "click", schemaErrors: ["arguments.x:required"], schemaErrorCount: 1 }],
                     expectedErrorPayloadFailures: [{ test: "broker", tool: "device_broker_rpc", expectedError: true }],
-                    okPublicPayloadFailures: [{ test: "display", tool: "display_current", okPayloadText: true, okPayloadJson: false, okPayloadImage: false }],
-                    emptyOkPublicPayloadRecords: [{ test: "display", tool: "display_current", okPayloadJson: true, okPayloadShape: { kind: "object", keys: [] } }],
-                    publicFlowStepToolsWithoutOkOrExpectedError: ["display_current"],
-                    unexpectedFlowStepErrorRecords: [{ test: "display", flowTool: "device_run_flow", tool: "display_current", isError: true }],
-                    expectedFlowStepPayloadFailures: [{ test: "broker", flowTool: "mobile_run_flow", tool: "mobile_tap", isError: true, expectedError: true, errorPayloadJson: false }],
-                    okPublicFlowStepPayloadFailures: [{ test: "display", flowTool: "device_run_flow", tool: "display_current", isError: false, okPayloadJson: false, okPayloadImage: false }],
-                    emptyOkPublicFlowStepPayloadRecords: [{ test: "display", flowTool: "device_run_flow", tool: "display_current", isError: false, okPayloadJson: true, okPayloadShape: { kind: "object", keys: [] } }],
+                    okPublicPayloadFailures: [{ test: "display", tool: "status", okPayloadText: true, okPayloadJson: false, okPayloadImage: false }],
+                    emptyOkPublicPayloadRecords: [{ test: "display", tool: "status", okPayloadJson: true, okPayloadShape: { kind: "object", keys: [] } }],
+                    publicFlowStepToolsWithoutOkOrExpectedError: ["status"],
+                    unexpectedFlowStepErrorRecords: [{ test: "display", flowTool: "run_flow", tool: "status", isError: true }],
+                    expectedFlowStepPayloadFailures: [{ test: "broker", flowTool: "run_flow", tool: "click", isError: true, expectedError: true, errorPayloadJson: false }],
+                    okPublicFlowStepPayloadFailures: [{ test: "display", flowTool: "run_flow", tool: "status", isError: false, okPayloadJson: false, okPayloadImage: false }],
+                    emptyOkPublicFlowStepPayloadRecords: [{ test: "display", flowTool: "run_flow", tool: "status", isError: false, okPayloadJson: true, okPayloadShape: { kind: "object", keys: [] } }],
                 },
             }));
             writeFileSync(uncategorizedSkipFile, JSON.stringify({ ...baseSummary, skipCategories: [] }));
@@ -2733,27 +3494,27 @@ describe("test level runner", () => {
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
                     explainedProviderValues: [],
-                    unexplainedProviderArgumentEnumFacets: ["device_status:backend=macos-vm"],
-                    unexplainedDiagnosticOnlyTools: ["display_current"],
-                    unjustifiedMissingDirectOkTools: ["display_current"],
+                    unexplainedProviderArgumentEnumFacets: ["status:backend=macos-vm"],
+                    unexplainedDiagnosticOnlyTools: ["status"],
+                    unjustifiedMissingDirectOkTools: ["status"],
                 },
             }));
             writeFileSync(unexplainedDiagnosticOnlyFile, JSON.stringify({
                 ...baseSummary,
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
-                    advertisedTools: ["display_current", "device_backends"],
-                    calledPublicTools: ["display_current", "device_backends"],
-                    publicToolsWithOnlyExpectedErrorEvidence: ["device_backends"],
+                    advertisedTools: ["status", "devices"],
+                    calledPublicTools: ["status", "devices"],
+                    publicToolsWithOnlyExpectedErrorEvidence: ["devices"],
                     uncalledAdvertisedArgumentEnumFacets: [],
                     toolEvidenceSummary: {
                         ...baseSummary.toolCoverage.toolEvidenceSummary,
-                        device_backends: { direct: { total: 1, ok: 0, expectedError: 1, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-expected-error"] },
+                        devices: { direct: { total: 1, ok: 0, expectedError: 1, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-expected-error"] },
                     },
                     calls: [
                         ...baseSummary.toolCoverage.calls,
-                        { test: "display", tool: "device_backends", outcome: "expected-error", mcpSessionId: "source-session-1" },
-                        { test: "package", tool: "device_backends", outcome: "expected-error", mcpSessionId: "dist-session-1" },
+                        { test: "display", tool: "devices", outcome: "expected-error", mcpSessionId: "source-session-1" },
+                        { test: "package", tool: "devices", outcome: "expected-error", mcpSessionId: "dist-session-1" },
                     ],
                 },
             }));
@@ -2761,18 +3522,18 @@ describe("test level runner", () => {
                 ...baseSummary,
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
-                    advertisedTools: ["device_status"],
-                    calledPublicTools: ["device_status"],
-                    publicToolsWithoutDirectOk: ["device_status"],
-                    publicToolsWithOnlyExpectedErrorEvidence: ["device_status"],
-                    calledAdvertisedArgumentEnumFacets: ["device_status:backend=macos-vm"],
+                    advertisedTools: ["status"],
+                    calledPublicTools: ["status"],
+                    publicToolsWithoutDirectOk: ["status"],
+                    publicToolsWithOnlyExpectedErrorEvidence: ["status"],
+                    calledAdvertisedArgumentEnumFacets: ["status:backend=macos-vm"],
                     uncalledAdvertisedArgumentEnumFacets: [],
                     toolEvidenceSummary: {
-                        device_status: { direct: { total: 1, ok: 0, expectedError: 1, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-expected-error"] },
+                        status: { direct: { total: 1, ok: 0, expectedError: 1, unexpectedError: 0, incomplete: 0 }, flow: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0 }, evidence: ["direct-expected-error"] },
                     },
                     calls: [
-                        { test: "display", tool: "device_status", outcome: "expected-error", mcpSessionId: "source-session-1" },
-                        { test: "package", tool: "device_status", outcome: "expected-error", mcpSessionId: "dist-session-1" },
+                        { test: "display", tool: "status", outcome: "expected-error", mcpSessionId: "source-session-1" },
+                        { test: "package", tool: "status", outcome: "expected-error", mcpSessionId: "dist-session-1" },
                     ],
                 },
             }));
@@ -2780,10 +3541,10 @@ describe("test level runner", () => {
                 ...baseSummary,
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
-                    publicToolsWithoutDirectOk: ["display_current"],
+                    publicToolsWithoutDirectOk: ["status"],
                     toolEvidenceSummary: {
                         ...baseSummary.toolCoverage.toolEvidenceSummary,
-                        display_current: { direct: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 }, evidence: ["flow-ok"] },
+                        status: { direct: { total: 0, ok: 0, expectedError: 0, unexpectedError: 0, incomplete: 0 }, flow: { total: 1, ok: 1, expectedError: 0, unexpectedError: 0 }, evidence: ["flow-ok"] },
                     },
                 },
             }));
@@ -2799,7 +3560,7 @@ describe("test level runner", () => {
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
                     calls: [
-                        { test: "display", tool: "display_current", outcome: "ok", mcpSessionId: "source-session-1" },
+                        { test: "display", tool: "status", outcome: "ok", mcpSessionId: "source-session-1" },
                     ],
                 },
                 mcpSessions: [
@@ -2811,8 +3572,8 @@ describe("test level runner", () => {
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
                     calls: [
-                        { test: "display", tool: "display_current", outcome: "ok", mcpSessionId: "source-session-1" },
-                        { test: "package", tool: "display_current", outcome: "declared", mcpSessionId: "dist-session-1" },
+                        { test: "display", tool: "status", outcome: "ok", mcpSessionId: "source-session-1" },
+                        { test: "package", tool: "status", outcome: "declared", mcpSessionId: "dist-session-1" },
                     ],
                 },
             }));
@@ -2821,8 +3582,8 @@ describe("test level runner", () => {
                 toolCoverage: {
                     ...baseSummary.toolCoverage,
                     calls: [
-                        { test: "display", tool: "display_current", outcome: "ok", mcpSessionId: "source-session-1" },
-                        { test: "package", tool: "display_current", outcome: "error-result", expectedError: true, mcpSessionId: "dist-session-1" },
+                        { test: "display", tool: "status", outcome: "ok", mcpSessionId: "source-session-1" },
+                        { test: "package", tool: "status", outcome: "error-result", expectedError: true, mcpSessionId: "dist-session-1" },
                     ],
                 },
             }));
@@ -2839,7 +3600,7 @@ describe("test level runner", () => {
                     ...baseSummary.toolCoverage,
                     calls: [
                         ...baseSummary.toolCoverage.calls,
-                        { test: "display", tool: "display_current", outcome: "ok", mcpSessionId: "missing-session" },
+                        { test: "display", tool: "status", outcome: "ok", mcpSessionId: "missing-session" },
                     ],
                 },
             }));
@@ -2874,7 +3635,7 @@ describe("test level runner", () => {
                 }),
                 unlinkedMcpCallRecords: [],
                 forbiddenMcpSessionEnvOverrides: [],
-                publicToolsByMcpSessionSource: { dist: ["display_current"], source: ["display_current"] },
+                publicToolsByMcpSessionSource: { dist: ["status"], source: ["status"] },
                 missingPublicToolsByMcpSessionSource: {},
                 publicToolsWithoutDirectOkByMcpSessionSource: { dist: [], source: [] },
                 unjustifiedMissingDirectOkToolsByMcpSessionSource: {},
@@ -2890,6 +3651,14 @@ describe("test level runner", () => {
             expect(quietPassing.status).toBe(0);
             expect(quietPassing.stdout).toBe("");
             expect(quietPassing.stderr).toBe("");
+
+            const hyperVPermissionSkip = spawnSync(process.execPath, [runner, "--assert-json", hyperVPermissionSkipFile, "--quiet"], {
+                cwd: repoRoot,
+                encoding: "utf-8",
+            });
+            expect(hyperVPermissionSkip.status).toBe(0);
+            expect(hyperVPermissionSkip.stdout).toBe("");
+            expect(hyperVPermissionSkip.stderr).toBe("");
 
             const noSkipsAllowed = spawnSync(process.execPath, [runner, "--assert-json", passingFile], {
                 cwd: repoRoot,
@@ -3010,7 +3779,7 @@ describe("test level runner", () => {
             expect(JSON.parse(unexplainedDiagnosticOnly.stdout)).toEqual(expect.objectContaining({
                 ok: false,
                 failures: ["unexplainedDiagnosticOnlyTools=1"],
-                unexplainedDiagnosticOnlyTools: ["device_backends"],
+                unexplainedDiagnosticOnlyTools: ["devices"],
             }));
 
             const nonExemptDiagnosticOnly = spawnSync(process.execPath, [runner, "--assert-json", nonExemptDiagnosticOnlyFile], {
@@ -3022,7 +3791,7 @@ describe("test level runner", () => {
                 ok: false,
                 failures: ["unjustifiedMissingDirectOkTools=1"],
                 unexplainedDiagnosticOnlyTools: [],
-                unjustifiedMissingDirectOkTools: ["device_status"],
+                unjustifiedMissingDirectOkTools: ["status"],
             }));
 
             const missingDirectOk = spawnSync(process.execPath, [runner, "--assert-json", missingDirectOkFile], {
@@ -3033,7 +3802,7 @@ describe("test level runner", () => {
             expect(JSON.parse(missingDirectOk.stdout)).toEqual(expect.objectContaining({
                 ok: false,
                 failures: ["unjustifiedMissingDirectOkTools=1"],
-                unjustifiedMissingDirectOkTools: ["display_current"],
+                unjustifiedMissingDirectOkTools: ["status"],
             }));
 
             const staleSurface = spawnSync(process.execPath, [runner, "--assert-json", staleSurfaceFile], {
@@ -3043,7 +3812,7 @@ describe("test level runner", () => {
             expect(staleSurface.status).toBe(1);
             expect(JSON.parse(staleSurface.stdout)).toEqual(expect.objectContaining({
                 ok: false,
-                failures: ["canonicalToolSurfaceMismatch"],
+                failures: ["canonicalToolSurfaceMismatch(source-changed-since-run; saved results do not validate the current tool schema)"],
             }));
 
             const sourceOnlySession = spawnSync(process.execPath, [runner, "--assert-json", sourceOnlySessionFile], {
@@ -3064,7 +3833,7 @@ describe("test level runner", () => {
             expect(JSON.parse(missingSessionSourceCoverage.stdout)).toEqual(expect.objectContaining({
                 ok: false,
                 failures: ["missingPublicToolsByMcpSessionSource=1"],
-                missingPublicToolsByMcpSessionSource: { dist: ["display_current"] },
+                missingPublicToolsByMcpSessionSource: { dist: ["status"] },
             }));
 
             const platformResultCoverage = spawnSync(process.execPath, [runner, "--assert-json", missingSessionSourceCoverageFile, "--platform-result"], {
@@ -3075,7 +3844,7 @@ describe("test level runner", () => {
             expect(JSON.parse(platformResultCoverage.stdout)).toEqual(expect.objectContaining({
                 ok: true,
                 failures: [],
-                missingPublicToolsByMcpSessionSource: { dist: ["display_current"] },
+                missingPublicToolsByMcpSessionSource: { dist: ["status"] },
             }));
 
             const missingSessionSourceDirectOk = spawnSync(process.execPath, [runner, "--assert-json", missingSessionSourceDirectOkFile], {
@@ -3086,8 +3855,8 @@ describe("test level runner", () => {
             expect(JSON.parse(missingSessionSourceDirectOk.stdout)).toEqual(expect.objectContaining({
                 ok: false,
                 failures: ["unjustifiedMissingDirectOkToolsByMcpSessionSource=1"],
-                publicToolsWithoutDirectOkByMcpSessionSource: { dist: ["display_current"], source: [] },
-                unjustifiedMissingDirectOkToolsByMcpSessionSource: { dist: ["display_current"] },
+                publicToolsWithoutDirectOkByMcpSessionSource: { dist: ["status"], source: [] },
+                unjustifiedMissingDirectOkToolsByMcpSessionSource: { dist: ["status"] },
             }));
 
             const missingFingerprint = spawnSync(process.execPath, [runner, "--assert-json", missingFingerprintFile], {
@@ -3133,5 +3902,86 @@ describe("test level runner", () => {
         } finally {
             rmSync(tempDir, { recursive: true, force: true });
         }
+    });
+});
+
+
+describe("canonical real-runner argument interpretation", () => {
+    it("validates omitted backend defaults and flat inputs while rejecting explicit selectors and wrappers", () => {
+        const dir = mkdtempSync(join(tmpdir(), "ccc-input-clarity-runner-"));
+        try {
+            const fixture = join(dir, "calls.mjs");
+            const summaryPath = join(dir, "summary.json");
+            const targets: Array<[string, string, Record<string, unknown>]> = [
+                ["list_images", "linux-vm", {}],
+                ["import_image", "linux-vm", { name: "base", sourcePath: "incoming/base.qcow2" }],
+                ["create_macos_vm", "macos-vm", { name: "base", image: "registry/base" }],
+                ["create_macos_vm", "macos-vm", { name: "clone", sourceDeviceId: "owned-target" }],
+            ];
+            const valid: Array<{ name: string; arguments: Record<string, unknown> }> = targets.map(([name, _backend, args]) => ({ name, arguments: { ...args, detail: true } }));
+            valid.push({ name: "create_linux_vm", arguments: {  name: "flat", cpus: 2, detail: true } });
+            valid.push(
+                { name: "create_android_emulator", arguments: {  name: "new", systemImage: "system-images;android-35;google_apis;x86_64" } },
+                { name: "create_android_emulator", arguments: {  name: "reuse", avdName: "owned-existing" } },
+                { name: "create_ios_simulator", arguments: {  name: "new", deviceType: "iphone", runtime: "ios" } },
+                { name: "create_ios_simulator", arguments: {  name: "reuse", udid: "owned-existing" } },
+            );
+            const invalid = targets.flatMap(([name, backend, args]) => [backend, "", null, false, {}, "unsupported"].flatMap(selector => [
+                { name, arguments: { ...args, backend: selector } },
+                { name, arguments: { ...args, options: { backend: selector } } },
+                { name, arguments: { ...args, backend: selector, options: { backend } } },
+            ]));
+            invalid.push(...["workspace_sync", "artifacts_export"].map(name => ({ name, arguments: { deviceId: "owned-target" } })));
+            invalid.push(
+                { name: "create_android_emulator", arguments: {  name: "wrong-backend-field", avdName: "existing", guestSshHost: "localhost" } },
+                { name: "create_ios_simulator", arguments: {  name: "conflicting-reuse", udid: "existing", runtime: "ios" } },
+                { name: "create_android_emulator", arguments: {  name: "missing-image" } },
+            );
+            writeFileSync(fixture, `export const name='input-clarity'; export async function run(){globalThis[Symbol.for('ccc.deviceLabRealTests.toolCalls')]=${JSON.stringify([...valid, ...invalid].map(call => ({ ...call, outcome: "ok", isError: false })))};return {status:'PASS'};}`);
+            const result = spawnSync(process.execPath, [join(repoRoot, "scripts/real-tests/run.ts"), "--json-summary-file", summaryPath, fixture], { cwd: repoRoot, encoding: "utf8", timeout: 30000 });
+            expect(result.status, result.stderr).toBe(0);
+            const coverage = JSON.parse(readFileSync(summaryPath, "utf8")).toolCoverage;
+            expect(coverage.calls.slice(0, valid.length).map((call: any) => call.schemaValid)).toEqual(valid.map(() => true));
+            expect(coverage.argumentSchemaFailureRecords).toHaveLength(invalid.length);
+            expect(coverage.calls.slice(valid.length).every((call: any) => call.schemaValid === false)).toBe(true);
+        } finally { rmSync(dir, { recursive: true, force: true }); }
+    });
+    it("rejects removed aliases and validates canonical shared flow targets", () => {
+        const dir = mkdtempSync(join(tmpdir(), "ccc-canonical-runner-"));
+        try {
+            const fixture = join(dir, "calls.mjs");
+            const summaryPath = join(dir, "summary.json");
+            const valid = [
+                { name: "run_flow", arguments: { deviceId: "android-test", incarnationId: "a".repeat(32), steps: [{ tool: "click", arguments: { x: 1, y: 2 } }] } },
+                { name: "install_app", arguments: { deviceId: "android-test", path: "/app.apk" } },
+                { name: "launch_app", arguments: { deviceId: "android-test", appId: "com.example" } },
+                { name: "screenshot", arguments: { deviceId: "android-test" } },
+                { name: "set_orientation", arguments: { deviceId: "android-test", orientation: "landscape" } },
+                { name: "run_flow", arguments: { deviceId: "vm-a", incarnationId: "a".repeat(32), steps: [
+                    { tool: "click", arguments: { x: 1, y: 2 } },
+                    { tool: "click", arguments: { deviceId: "vm-b", incarnationId: "b".repeat(32), x: 3, y: 4 } },
+                ] } },
+            ];
+            const removed = ["mobile_install_app", "mobile_launch_app", "mobile_screenshot", "mobile_rotate_left", "mobile_rotate_right", "mobile_run_flow", "device_broker_rpc"];
+            const invalid = [
+                ...removed.map(name => ({ name, arguments: { deviceId: "android-test" } })),
+                { name: "run_flow", arguments: { deviceId: "vm-a", steps: [] } },
+                { name: "run_flow", arguments: { steps: [
+                    { tool: "click", arguments: { x: 1, y: 2 } },
+                ] } },
+                { name: "run_flow", arguments: { deviceId: "vm-a", steps: [{ tool: "click", arguments: null }] } },
+                { name: "run_flow", arguments: { deviceId: "vm-a", steps: [{ tool: "click", name: "click", arguments: { x: 1, y: 2 } }] } },
+            ];
+            writeFileSync(fixture, `export const name='canonical-arguments'; export async function run(){globalThis[Symbol.for('ccc.deviceLabRealTests.toolCalls')]=${JSON.stringify([...valid, ...invalid].map((call) => ({ ...call, outcome: "ok", isError: false })))}; return {status:'PASS'};}`);
+            const result = spawnSync(process.execPath, [join(repoRoot, "scripts/real-tests/run.ts"), "--json-summary-file", summaryPath, fixture], { cwd: repoRoot, encoding: "utf8", timeout: 30000 });
+            expect(result.status, result.stderr).toBe(0);
+            const coverage = JSON.parse(readFileSync(summaryPath, "utf8")).toolCoverage;
+            expect(coverage.unadvertisedTools).toEqual([...removed].sort());
+            expect(coverage.calls.slice(0, valid.length).every((call: any) => call.schemaValid)).toBe(true);
+            expect(coverage.argumentSchemaFailureRecords).toHaveLength(removed.length + 3);
+            expect(coverage.flowStepArgumentSchemaFailures).toHaveLength(2);
+            expect(coverage.flowStepArgumentSchemaFailures[0].schemaErrors).toContain("arguments.deviceId:required");
+            expect(coverage.flowStepArgumentSchemaFailures[1].schemaErrors).toContain("arguments:type=object");
+        } finally { rmSync(dir, { recursive: true, force: true }); }
     });
 });

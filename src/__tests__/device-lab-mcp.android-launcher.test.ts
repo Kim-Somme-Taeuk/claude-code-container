@@ -1,3 +1,5 @@
+import { directorySymlink } from "./helpers/file-symlink-fixture.js";
+import { isolateDeviceLabTestEnvironment } from "./helpers/device-lab-test-environment.js";
 import { EventEmitter } from "events";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -8,22 +10,21 @@ import {
     materializeAndroidWindowsHiddenLauncher,
     removeAndroidWindowsHiddenLauncher,
     scheduleAndroidWindowsHiddenLauncherCleanup,
-} from "../../device-lab-mcp/src/backends/android.mjs";
+} from "@ccc/device-lab/providers/backends/android.mjs";
 
 describe("device-lab MCP direct Android Windows launcher", () => {
     let home: string;
-    let originalHome: string | undefined;
+    let originalHomeRestore: (() => void) | undefined;
 
     beforeEach(() => {
-        originalHome = process.env.HOME;
+
         home = mkdtempSync(join(tmpdir(), "ccc-android-launcher-"));
-        process.env.HOME = home;
+        originalHomeRestore = isolateDeviceLabTestEnvironment(home);
     });
 
     afterEach(() => {
         vi.useRealTimers();
-        if (originalHome === undefined) delete process.env.HOME;
-        else process.env.HOME = originalHome;
+        originalHomeRestore?.();
         rmSync(home, { recursive: true, force: true });
     });
 
@@ -69,7 +70,7 @@ describe("device-lab MCP direct Android Windows launcher", () => {
         const marker = join(external, "preserve.txt");
         mkdirSync(external);
         writeFileSync(marker, "preserve");
-        symlinkSync(external, join(home, ".ccc"));
+        directorySymlink(external, join(home, ".ccc"));
 
         expect(() => materializeAndroidWindowsHiddenLauncher(
             { id: "android-pixel" },

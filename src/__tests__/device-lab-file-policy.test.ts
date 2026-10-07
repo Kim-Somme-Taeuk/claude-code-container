@@ -1,3 +1,4 @@
+import { directorySymlink, fileSymlinkOrSkip } from "./helpers/file-symlink-fixture.js";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -6,7 +7,7 @@ import {
     validateLocalInputPath,
     validateLocalOutputPath,
     validateLocalReferencePath,
-} from "../../device-lab-mcp/src/policy/files.mjs";
+} from "@ccc/device-lab/providers/policy/files.mjs";
 
 describe("device-lab local file policy", () => {
     const roots: string[] = [];
@@ -66,33 +67,20 @@ describe("device-lab local file policy", () => {
         expect(JSON.stringify(result)).not.toContain("super-secret-token-value-12345");
     });
 
-    it("rejects symlink inputs, symlink output ancestors, and symlink references", () => {
-        const root = tempRoot();
-        const outside = tempRoot();
-        const source = join(root, "source.txt");
-        const sourceLink = join(root, "source-link.txt");
-        const ancestorLink = join(root, "linked-parent");
-        const key = join(root, "id_ed25519");
-        const keyLink = join(root, "key-link");
-        writeFileSync(source, "ok");
-        writeFileSync(key, "private-key");
-        symlinkSync(source, sourceLink);
-        symlinkSync(outside, ancestorLink);
-        symlinkSync(key, keyLink);
+    it.for(["input", "reference"] as const)("rejects a linked %s file", (kind, context) => {
+        const root = tempRoot(), source = join(root, "source"), link = join(root, "linked");
+        writeFileSync(source, "safe-value");
+        expect(validateLocalReferencePath(source)).toEqual(expect.objectContaining({ ok: true, path: source }));
+        fileSymlinkOrSkip(context, source, link);
+        const result = kind === "input" ? validateLocalInputPath(link) : validateLocalReferencePath(link, { label: "ssh-key-path" });
+        expect(result).toEqual(expect.objectContaining({ ok: false, error: kind === "input" ? "local-input-path-symlink-rejected" : "ssh-key-path-symlink-rejected" }));
+    });
 
-        expect(validateLocalInputPath(sourceLink)).toEqual(expect.objectContaining({
-            ok: false,
-            error: "local-input-path-symlink-rejected",
-        }));
+    it("rejects linked output ancestors", () => {
+        const root = tempRoot(), outside = tempRoot(), ancestorLink = join(root, "linked-parent");
+        directorySymlink(outside, ancestorLink);
         expect(validateLocalOutputPath(join(ancestorLink, "out.txt"))).toEqual(expect.objectContaining({
-            ok: false,
-            error: "local-output-path-symlink-ancestor-rejected",
-            ancestorPath: ancestorLink,
-        }));
-        expect(validateLocalReferencePath(key)).toEqual(expect.objectContaining({ ok: true, path: key }));
-        expect(validateLocalReferencePath(keyLink, { label: "ssh-key-path" })).toEqual(expect.objectContaining({
-            ok: false,
-            error: "ssh-key-path-symlink-rejected",
+            ok: false, error: "local-output-path-symlink-ancestor-rejected", ancestorPath: ancestorLink,
         }));
     });
 
@@ -104,7 +92,7 @@ describe("device-lab local file policy", () => {
         const link = join(root, "linked-parent");
         writeFileSync(source, "ok");
         writeFileSync(key, "private-key");
-        symlinkSync(outside, link);
+        directorySymlink(outside, link);
 
         expect(validateLocalInputPath(`${root}/linked-parent/../safe.txt`)).toEqual(expect.objectContaining({
             ok: false,

@@ -1,47 +1,13 @@
+import { canonicalWindowsPowerShellPath, windowsStartTokenExpression } from "@ccc/device-lab/windows-system-powershell.js";
 import { chmodSync, writeFileSync } from "fs";
 import { createServer } from "http";
 import { AddressInfo } from "net";
 import { join } from "path";
 
-const FAKE_BROKER_CAPABILITIES = [
-    "windows-sandbox-window-minimize-v4",
-    "constant-time-existing-owner-auth-v1",
-    "atomic-owner-secret-provisioning-v1",
-    "owner-mutation-serialization-v1",
-    "atomic-owner-device-state-v1",
-    "cross-process-owner-state-serialization-v1",
-    "owner-device-identity-fencing-v1",
-    "rpc-fault-containment-v1",
-    "cross-owner-physical-lease-serialization-v1",
-    "physical-lease-operation-fencing-v1",
-    "physical-lifecycle-lease-fencing-v1",
-    "physical-attach-detach-operation-serialization-v1",
-    "physical-detach-runtime-cleanup-v1",
-    "physical-runtime-cleanup-lease-fencing-v1",
-    "physical-lease-state-write-rollback-v1",
-    "runtime-cleanup-failure-preservation-v1",
-    "appium-runtime-generation-fencing-v1",
-    "windows-sandbox-singleton-fencing-v1",
-    "cross-process-device-operation-serialization-v1",
-    "cross-process-device-runtime-serialization-v1",
-    "direct-recording-generation-fencing-v1",
-    "direct-appium-generation-fencing-v1",
-    "finite-device-operation-serialization-v1",
-    "direct-runtime-process-identity-v1",
-    "host-recording-process-identity-v1",
-    "runtime-process-observation-v1",
-    "host-appium-process-identity-v1",
-    "broker-owned-owner-secret-provisioning-v1",
-    "host-broker-port-process-identity-v1",
-    "direct-appium-process-identity-v1",
-    "owner-device-state-validation-v1",
-    "shared-device-ownership-state-validation-v1",
-    "android-emulator-port-allocation-fencing-v1",
-    "bounded-error-responses-v1",
-    "physical-lease-directory-fencing-v1",
-    "owner-auth-directory-fencing-v1",
-    "appium-runtime-installation-fencing-v1", "bounded-no-redirect-appium-http-transport-v1", "windows-provider-launcher-path-fencing-v1", "canonical-owner-device-ids-v1", "ios-simulator-owner-identity-fencing-v1", "physical-appium-lease-fencing-v1", "physical-device-tool-lease-fencing-v1", "physical-lifecycle-use-lease-refresh-v1", "appium-live-runtime-metadata-fencing-v1", "direct-android-lifecycle-generation-fencing-v1", "direct-ios-lifecycle-generation-fencing-v1", "direct-windows-lifecycle-generation-fencing-v1", "direct-macos-lifecycle-generation-fencing-v1", "direct-macos-snapshot-clone-generation-fencing-v1", "physical-direct-state-transition-fencing-v1", "multi-project-owner-resolve-v1", "stopped-android-status-observation-v1", "stopped-android-boot-metadata-v1", "guest-helper-recording-proxy-v1",
-];
+import { DEVICE_BROKER_PROTOCOL_VERSION } from "@ccc/device-lab/providers/contracts/broker-protocol.mjs";
+
+// Fixtures share the wire protocol with the real broker.
+const FAKE_BROKER_PROTOCOL_VERSION = DEVICE_BROKER_PROTOCOL_VERSION;
 
 export async function freePort(): Promise<number> {
     const server = createServer();
@@ -88,6 +54,25 @@ const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + "\\n");
 const host = args[args.indexOf("--host") + 1] || "127.0.0.1";
 const port = Number(args[args.indexOf("--port") + 1] || 17373);
+const startedAt = new Date().toISOString();
+function processStartToken() {
+  if (process.platform === "win32") {
+    const executable = ${JSON.stringify(canonicalWindowsPowerShellPath())};
+    if (!executable) return null;
+    const script = "$P = Get-Process -Id " + process.pid + "; [Console]::Out.Write(" + ${JSON.stringify(windowsStartTokenExpression("$P"))} + ")";
+    const result = require("child_process").spawnSync(executable, ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: 5000, windowsHide: true });
+    return result.status === 0 && result.stdout.trim() ? "windows:" + result.stdout.trim() : null;
+  }
+  try {
+    const stat = fs.readFileSync("/proc/" + process.pid + "/stat", "utf8");
+    const close = stat.lastIndexOf(")");
+    const fields = close >= 0 ? stat.slice(close + 1).trim().split(/\\s+/) : [];
+    return fields[19] ? "linux:" + fields[19] : null;
+  } catch {
+    return null;
+  }
+}
+const stableStartToken = processStartToken();
 function send(res, status, body) {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
@@ -131,7 +116,7 @@ function expectedOwnerToken(ownerId) {
 }
 const server = http.createServer((req, res) => {
   if (req.url === "/health") return send(res, 200, { ok: true, name: "ccc-device-broker", mode: "host-broker-daemon" });
-  if (req.url === "/status") return send(res, 200, { ok: true, broker: { name: "ccc-device-broker", host, port, implemented: ${JSON.stringify(FAKE_BROKER_CAPABILITIES)} } });
+  if (req.url === "/status") return send(res, 200, { ok: true, broker: { name: "ccc-device-broker", mode: "host-broker-daemon", host, port, process: { pid: process.pid, startToken: stableStartToken }, startedAt, protocolVersion: ${JSON.stringify(FAKE_BROKER_PROTOCOL_VERSION)} } });
   if (req.url === "/v1/owner/resolve" && req.method === "POST") {
     let raw = "";
     req.on("data", (chunk) => { raw += chunk; });
@@ -161,6 +146,14 @@ const server = http.createServer((req, res) => {
     if (body.method === "broker.physical.attach") return send(res, 200, { ok: true, result: { ownerId: match[1], device: { id: body.params.deviceId, backend: body.params.backend, serial: body.params.serial || null, udid: body.params.udid || null, connection: body.params.connection || "usb" } } });
     if (body.method === "broker.physical.detach") return send(res, 200, { ok: true, result: { ownerId: match[1], detached: body.params.deviceId, physicalDevicePoweredOff: false } });
     if (body.method === "broker.physical.list") return send(res, 200, { ok: true, result: { ownerId: match[1], backend: body.params.backend, devices: [], leases: [] } });
+    if (body.method === "broker.inventory") {
+      const root = path.join(os.homedir(), ".ccc/devices/owners", match[1]);
+      const backends = ["android", "android-device", "ios", "ios-device", "windows", "windows-vm", "linux-vm", "macos"].map(stateKey => {
+        const file = path.join(root, stateKey, "devices.json");
+        return { stateKey, devices: fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")).devices : [] };
+      });
+      return send(res, 200, { ok: true, result: { backends } });
+    }
     if (body.method === "broker.command.plan") return send(res, 200, { ok: true, result: { ownerId: match[1], backend: body.params.backend, command: body.params.command, deviceId: body.params.deviceId, device: { id: body.params.deviceId, status: "stopped" }, execution: { mode: "planned", providerExecution: "fake", mutatesHost: false } } });
     if (body.method === "broker.command.invoke") return send(res, 200, { ok: true, result: { ownerId: match[1], backend: body.params.backend, command: body.params.command, deviceId: body.params.deviceId, dryRun: body.params.dryRun === true, invoked: body.params.dryRun !== true, device: { id: body.params.deviceId, status: body.params.command === "device_start" ? "running" : "stopped" }, execution: { mode: body.params.dryRun === true ? "dry-run" : "exec", providerExecution: "fake", mutatesHost: body.params.dryRun !== true && body.params.command !== "device_status" } } });
     return send(res, 418, { ok: false, error: "fake-broker-error", method: body.method });
@@ -189,6 +182,25 @@ const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + "\\n");
 const host = args[args.indexOf("--host") + 1] || "127.0.0.1";
 const port = Number(args[args.indexOf("--port") + 1] || 17373);
+const startedAt = new Date().toISOString();
+function processStartToken() {
+  if (process.platform === "win32") {
+    const executable = ${JSON.stringify(canonicalWindowsPowerShellPath())};
+    if (!executable) return null;
+    const script = "$P = Get-Process -Id " + process.pid + "; [Console]::Out.Write(" + ${JSON.stringify(windowsStartTokenExpression("$P"))} + ")";
+    const result = require("child_process").spawnSync(executable, ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: 5000, windowsHide: true });
+    return result.status === 0 && result.stdout.trim() ? "windows:" + result.stdout.trim() : null;
+  }
+  try {
+    const stat = fs.readFileSync("/proc/" + process.pid + "/stat", "utf8");
+    const close = stat.lastIndexOf(")");
+    const fields = close >= 0 ? stat.slice(close + 1).trim().split(/\\s+/) : [];
+    return fields[19] ? "linux:" + fields[19] : null;
+  } catch {
+    return null;
+  }
+}
+const stableStartToken = processStartToken();
 function send(res, status, body) {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
@@ -211,6 +223,7 @@ function ownerIdForRequestBody(body) {
 }
 const server = http.createServer((req, res) => {
   if (req.url === "/health") return send(res, 200, { ok: true, name: "ccc-device-broker" });
+  if (req.url === "/status") return send(res, 200, { ok: true, broker: { name: "ccc-device-broker", mode: "host-broker-daemon", host, port, process: { pid: process.pid, startToken: stableStartToken }, startedAt, protocolVersion: ${JSON.stringify(FAKE_BROKER_PROTOCOL_VERSION)} } });
   if (req.url === "/v1/owner/resolve" && req.method === "POST") {
     let raw = "";
     req.on("data", (chunk) => { raw += chunk; });

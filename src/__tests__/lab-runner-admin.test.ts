@@ -94,6 +94,7 @@ describe("lab-runner admin CLI helpers", () => {
         const status = formatLabRunnerStatus("/project/example");
         expect(status).toContain("default container: VM-capable when supported");
         expect(status).toContain("default status: ready");
+        expect(status).toMatch(/default state volume: ccc-[^\n]*-lab-state/);
         expect(status).toContain("default kvm: /dev/kvm group=108");
         expect(status).toContain("safety: no --privileged and no host TUN exposure");
         expect(status).toContain("vm networking: user (QEMU user-mode; no host TUN exposure)");
@@ -117,6 +118,12 @@ describe("lab-runner admin CLI helpers", () => {
         mockExistsSync.mockReturnValue(false);
         const smoke = formatLabRunnerSmoke("/project/example");
 
+        expect(smoke).toContain("default-durable-lab-state: SKIP /dev/kvm is not available on the container host");
+        expect(smoke).toContain("lab-runner-durable-lab-state: SKIP /dev/kvm is not available on the container host");
+        expect(smoke).not.toContain("durable-lab-state: PASS");
+        const status = formatLabRunnerStatus("/project/example");
+        expect(status).toContain("state volume: not mounted for new containers (nested VM unavailable)");
+        expect(status).toContain("default state volume: not mounted for new containers (nested VM unavailable)");
         expect(smoke).toContain("default-nested-kvm: SKIP /dev/kvm is not available on the container host");
         expect(smoke).toContain("lab-runner-nested-kvm: SKIP /dev/kvm is not available on the container host");
         expect(smoke).toContain("container-qemu-provider-gate: SKIP");

@@ -18,18 +18,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Architecture
 
 ```
-~/.ccc/
-├── claude/             # Claude credentials (mounted to /claude)
-└── locks/              # Session lock files (per session)
-    ├── my-project-a1b2c3d4e5f6-uuid1.lock
-    └── my-project-a1b2c3d4e5f6-uuid2.lock
+~/.ccc/                 # Layout: doc/common/REQ__ccc-home-layout.md
+├── config.json         # Settings, incl. `ccc remote` configs under "remote"
+├── profiles/
+│   ├── default/        # Account used without CCC_PROFILE
+│   │   ├── claude/     # Claude credentials (mounted to /home/ccc/.claude)
+│   │   ├── claude.json # Onboarding state (mounted to /home/ccc/.claude.json)
+│   │   └── codex/      # Codex credentials (mounted to /home/ccc/.codex)
+│   └── <name>/         # Same entries per named profile
+├── run/                # Disposable runtime files
+│   ├── locks/          # Session lock files (per session)
+│   │   ├── my-project-a1b2c3d4e5f6-uuid1.lock
+│   │   └── my-project-a1b2c3d4e5f6-uuid2.lock
+│   └── clipboard.port, clipboard-files/, bin/
+├── devices/            # Device lab state shared with containers (read-only)
+└── device-broker-private/ # Host-only device broker state (keys, VM images)
 
-Docker Volume:
-└── ccc-mise-cache      # Shared mise cache (named volume for macOS/Windows performance)
+Docker Volumes:
+├── ccc-mise-cache      # Shared mise cache (named volume for macOS/Windows performance)
+└── ccc-codex-packages  # Codex daemon packages (/home/ccc/.codex/packages)
 
 Container (ccc-<project>-<hash>):
 ├── /project/<project>-<hash>  # Mounted from actual project path
-├── /claude                     # Mounted from ~/.ccc/claude
+├── /home/ccc/.claude           # Mounted from ~/.ccc/profiles/<profile>/claude
+├── /home/ccc/.codex            # Mounted from ~/.ccc/profiles/<profile>/codex
 ├── /home/ccc/.ssh              # Mounted from ~/.ssh (read-only)
 ├── /tmp/ssh-agent.sock         # SSH agent socket (auto-detected per platform)
 └── /home/ccc/.local/share/mise # Named volume (ccc-mise-cache)
@@ -163,7 +175,7 @@ Built from Dockerfile on first run. Includes:
 Run ccc on a remote desktop from your MacBook:
 - **Mutagen**: Direct sync to Docker container (no filesystem middleman)
 - **SSH**: Start container, run docker exec claude
-- Config saved per-project in `~/.ccc/remote/`
+- Config saved per-project in `~/.ccc/config.json` (under `remote`)
 - Use `ccc remote <host>` for first-time setup
 - Better performance on Windows/macOS (bypasses slow volume mounts)
 

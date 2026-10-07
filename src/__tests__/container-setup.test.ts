@@ -1,8 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { SpawnSyncReturns } from "child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
+import { readFileSync } from "node:fs";
 
 // Mock child_process before importing
 const spawnSyncMock = vi.fn<(...args: unknown[]) => SpawnSyncReturns<string>>();
@@ -13,22 +11,23 @@ vi.mock("child_process", async (importOriginal) => {
 
 // Import AFTER mocks
 const {
-    CLAUDE_PERSIST_DIR,
+    CLAUDE_DATA_DIR,
+    CLAUDE_DATA_VOLUME_DIR,
+    CLAUDE_LEGACY_CACHE_FILE,
     CLAUDE_EXECUTABLE,
     CLAUDE_BIN_PATH,
-    isClaudeVersionLine,
-    isMiseShim,
-    isValidClaudeBinary,
-    saveClaudeBinaryToVolume,
+    CONTAINER_TOOL_PROBE_TIMEOUT_MS,
+    CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS,
+    CONTAINER_TOOL_MUTATION_TIMEOUT_MS,
     ensureClaudeInContainer,
+    ensureUvAvailable,
     ensureTools,
 } = await import("../container-setup.js");
 
-const toolRegistry = await import("../tool-registry.js");
-const { getDefaultTool, getToolByName } = toolRegistry;
+const { getDefaultTool, getToolByName } = await import("../tool-registry.js");
 
-function makeResult(status: number, stdout = ""): SpawnSyncReturns<string> {
-    return { pid: 1, output: [], stdout, stderr: "", status, signal: null };
+function makeResult(status: number, stdout = "", stderr = ""): SpawnSyncReturns<string> {
+    return { pid: 1, output: [], stdout, stderr, status, signal: null };
 }
 
 describe("container-setup.ts module", () => {
@@ -44,10 +43,154 @@ describe("container-setup.ts module", () => {
         vi.restoreAllMocks();
     });
 
+    describe("what a successful start still tells the user", () => {
+        // The probe can change state every project on the host shares — removing
+        // a version name held by a link — and succeed. That was reported on
+        // none of the paths where it happens: dropped on VALID, dropped on the
+        // first probe of an INSTALL, which is the one that does the removing.
+        const note = "removed 2.1.261: a version must be a real file, not a symlink"
+
+        it("reports a shared-volume change on a start that needed nothing else", () => {
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "VALID\n", `${note}\n`))
+
+            ensureClaudeInContainer(container)
+
+            expect(console.log).toHaveBeenCalledWith(note)
+        })
+
+        it("reports it on the reuse path", () => {
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "RESTORED 2.1.261\n", `${note}\n`))
+
+            ensureClaudeInContainer(container)
+
+            expect(console.log).toHaveBeenCalledWith(note)
+        })
+
+        it("reports the removal that unblocked an install, from the probe that did it", () => {
+            // The confirm probe cannot report it: by then the entry is gone and
+            // it has nothing to say. Only the first probe knows.
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "INSTALL\n", `${note}\n`))
+            spawnSyncMock.mockReturnValueOnce(makeResult(0))
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "RESTORED 2.1.261\n"))
+
+            ensureClaudeInContainer(container)
+
+            expect(console.log).toHaveBeenCalledWith(note)
+        })
+
+        it("says a persisting failure once, not once per probe", () => {
+            const stuck = "cannot remove 2.1.261: a version must be a real file, not a symlink"
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "INSTALL\n", `${stuck}\n`))
+            spawnSyncMock.mockReturnValueOnce(makeResult(0))
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "RESTORED 2.1.261\n", `${stuck}\n`))
+
+            ensureClaudeInContainer(container)
+
+            const said = (console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls
+                .filter(call => call[0] === stuck)
+            expect(said).toHaveLength(1)
+        })
+
+        it("relays a refusal that did not fail the start", () => {
+            // The refusals at a version name do not fail the probe — the start
+            // goes on to install. So nothing carries them into an error, and
+            // the only layer that could show them is this one. Pinning them on
+            // the generated script's stderr, as the layout tests do, cannot see
+            // whether a user is ever told.
+            const refusal = "cannot remove 2.1.261: it is a mount point in the volume, and clearing it would empty the other side"
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "INSTALL\n", `${refusal}\n`))
+            spawnSyncMock.mockReturnValueOnce(makeResult(0))
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "RESTORED 2.1.260\n"))
+
+            ensureClaudeInContainer(container)
+
+            expect(console.log).toHaveBeenCalledWith(refusal)
+        })
+
+        it("does not relay the noise of the tools the probe calls", () => {
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "VALID\n",
+                "rm: cannot remove '/vol/versions/2.1.261': Permission denied\n"))
+
+            ensureClaudeInContainer(container)
+
+            expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining("Permission denied"))
+        })
+
+        it("strips the invisible direction marks as well as the overrides", () => {
+            // LRM and RLM are not overrides and not control bytes, and they are
+            // invisible — which is what makes them useful for making a name
+            // read as one thing while being another.
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "VALID\n",
+                "removed 2.1.\u200e261\u200f\u061c: a version must be a real file, not a symlink\n"))
+
+            ensureClaudeInContainer(container)
+
+            expect(console.log).toHaveBeenCalledWith(
+                "removed 2.1.?261??: a version must be a real file, not a symlink")
+        })
+
+        it("strips the marks that reorder how a name renders", () => {
+            // A right-to-left override is not a control byte, and it makes the
+            // rest of the line read backwards — enough to disguise which entry
+            // a message is about.
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "VALID\n",
+                "removed 2.1.261\u202eDEHCAH: a version must be a real file, not a symlink\n"))
+
+            ensureClaudeInContainer(container)
+
+            expect(console.log).toHaveBeenCalledWith(
+                "removed 2.1.261?DEHCAH: a version must be a real file, not a symlink")
+        })
+
+        it("strips a volume-derived name out of the reuse line as well", () => {
+            // The version in that line is a directory entry read from the
+            // shared volume, printed by name. Sanitizing the notes and leaving
+            // this raw closed two channels of three.
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "RESTORED 2.1.261\u001b[2KX\n"))
+
+            ensureClaudeInContainer(container)
+
+            expect(console.log).toHaveBeenCalledWith(
+                "Reusing claude 2.1.261?[2KX from the shared volume.")
+        })
+
+        it("strips control bytes out of a name inside a failure too", () => {
+            // The same name travels on the failure channel, inside the Error,
+            // where stripping it on the reporting path alone does nothing.
+            spawnSyncMock.mockReturnValueOnce(makeResult(1, "",
+                "cannot remove 2.1.261\u001b[31mHACK: a version must be a real file, not a symlink\n"))
+
+            expect(() => ensureClaudeInContainer(container))
+                .toThrow("cannot remove 2.1.261?[31mHACK: a version must be a real file, not a symlink")
+        })
+
+        it("strips control bytes out of a name it repeats", () => {
+            // The name comes from a volume every project can write to, so it is
+            // data on its way to a terminal, not text to trust.
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "VALID\n",
+                "removed 2.1.261\u001b[31mHACK: a version must be a real file, not a symlink\n"))
+
+            ensureClaudeInContainer(container)
+
+            expect(console.log).toHaveBeenCalledWith(
+                "removed 2.1.261?[31mHACK: a version must be a real file, not a symlink")
+        })
+    })
+
     describe("constants", () => {
-        it("exports CLAUDE_PERSIST_DIR", () => {
-            expect(CLAUDE_PERSIST_DIR).toBe(
-                "/home/ccc/.local/share/mise/.claude-bin",
+        it("puts the claude data dir inside the persistent named volume", () => {
+            // /home/ccc/.local/share/mise is the ccc-mise-cache volume mount.
+            // versions/ has to live under it or an in-container `claude update`
+            // is discarded when the container is recreated.
+            expect(CLAUDE_DATA_VOLUME_DIR).toBe(
+                "/home/ccc/.local/share/mise/.claude-data",
+            );
+            expect(CLAUDE_DATA_DIR).toBe("/home/ccc/.local/share/claude");
+        });
+
+        it("still knows the pre-symlink cache path, for migration only", () => {
+            expect(CLAUDE_LEGACY_CACHE_FILE).toBe(
+                "/home/ccc/.local/share/mise/.claude-bin/claude",
             );
         });
 
@@ -60,115 +203,14 @@ describe("container-setup.ts module", () => {
         });
     });
 
-    describe("isMiseShim", () => {
-        it("returns true when head+grep finds mise in file", () => {
-            spawnSyncMock.mockReturnValue(makeResult(0));
-            expect(isMiseShim(container, "/some/path")).toBe(true);
-        });
-
-        it("returns false when grep does not find mise", () => {
-            spawnSyncMock.mockReturnValue(makeResult(1));
-            expect(isMiseShim(container, "/some/path")).toBe(false);
-        });
-
-        it("passes correct docker exec command", () => {
-            spawnSyncMock.mockReturnValue(makeResult(1));
-            isMiseShim(container, "/usr/bin/claude");
-            expect(spawnSyncMock).toHaveBeenCalledWith(
-                "docker",
-                [
-                    "exec",
-                    container,
-                    "sh",
-                    "-c",
-                    "head -c 500 '/usr/bin/claude' 2>/dev/null | grep -q mise",
-                ],
-                expect.any(Object),
-            );
-        });
-    });
-
-    describe("isValidClaudeBinary", () => {
-        it("accepts Claude Code version lines", () => {
-            expect(isClaudeVersionLine("2.1.158")).toBe(true);
-            expect(isClaudeVersionLine("1.0.83 (Claude Code)")).toBe(true);
-            expect(isClaudeVersionLine("Claude Code 1.0.83")).toBe(true);
-        });
-
-        it("rejects Bun crash output even when it mentions the claude path", () => {
-            expect(isClaudeVersionLine("============================================================")).toBe(false);
-            expect(isClaudeVersionLine('Args: "/home/ccc/.local/bin/claude" "--dangerously-skip-permissions"')).toBe(false);
-            expect(isClaudeVersionLine("Bun v1.3.14 (521eedd6) Linux x64")).toBe(false);
-        });
-
-        it("returns true when --version has Claude Code version shape", () => {
-            spawnSyncMock.mockReturnValue(makeResult(0));
-            expect(isValidClaudeBinary(container, "/usr/bin/claude")).toBe(true);
-
-            const shCmd = (spawnSyncMock.mock.calls[0][1] as string[]).at(-1) as string;
-            expect(shCmd).toContain("head -n 1");
-            expect(shCmd).toContain("claude([[:space:]]+code)?");
-        });
-
-        it("returns false when --version does not match Claude Code version shape", () => {
-            spawnSyncMock.mockReturnValue(makeResult(1));
-            expect(isValidClaudeBinary(container, "/usr/bin/claude")).toBe(
-                false,
-            );
-        });
-    });
-
-    describe("saveClaudeBinaryToVolume", () => {
-        it("skips saving if binary is a mise shim", () => {
-            // command -v claude resolves
-            spawnSyncMock.mockReturnValueOnce(makeResult(0, "/home/ccc/.claude/local/claude\n"));
-            // isMiseShim returns true (status 0)
-            spawnSyncMock.mockReturnValueOnce(makeResult(0));
-            saveClaudeBinaryToVolume(container);
-            // resolve + isMiseShim, no copy
-            expect(spawnSyncMock).toHaveBeenCalledTimes(2);
-        });
-
-        it("skips saving if binary is not valid claude", () => {
-            // command -v claude resolves
-            spawnSyncMock.mockReturnValueOnce(makeResult(0, "/home/ccc/.claude/local/claude\n"));
-            // isMiseShim returns false (status 1)
-            spawnSyncMock.mockReturnValueOnce(makeResult(1));
-            // isValidClaudeBinary returns false (status 1)
-            spawnSyncMock.mockReturnValueOnce(makeResult(1));
-            saveClaudeBinaryToVolume(container);
-            // 3 calls: resolve + isMiseShim + isValidClaudeBinary, no copy
-            expect(spawnSyncMock).toHaveBeenCalledTimes(3);
-        });
-
-        it("copies binary when valid and not a shim", () => {
-            // command -v claude resolves
-            spawnSyncMock.mockReturnValueOnce(makeResult(0, "/home/ccc/.claude/local/claude\n"));
-            // isMiseShim returns false
-            spawnSyncMock.mockReturnValueOnce(makeResult(1));
-            // isValidClaudeBinary returns true
-            spawnSyncMock.mockReturnValueOnce(makeResult(0));
-            // cp command
-            spawnSyncMock.mockReturnValueOnce(makeResult(0));
-            saveClaudeBinaryToVolume(container);
-            expect(spawnSyncMock).toHaveBeenCalledTimes(4);
-            // Verify the copy command
-            const cpCall = spawnSyncMock.mock.calls[3];
-            expect(cpCall[0]).toBe("docker");
-            const args = cpCall[1] as string[];
-            expect(args).toContain("exec");
-            const shCmd = args[args.length - 1];
-            expect(shCmd).toContain("cp -L");
-            expect(shCmd).toContain("/home/ccc/.claude/local/claude");
-            expect(shCmd).toContain(CLAUDE_BIN_PATH);
-        });
-    });
-
     describe("ensureClaudeInContainer", () => {
-        // The new implementation uses a single docker exec with a shell script
-        // that returns VALID, RESTORED, or INSTALL as stdout.
+        // This describe covers orchestration only: how many docker execs run,
+        // which statuses are accepted, and how failures surface. What the probe
+        // script actually DOES to the filesystem is covered by executing it, in
+        // claude-launcher-layout.test.ts — substring assertions on generated
+        // shell are what let the launcher bug live here undetected.
 
-        it("does nothing when valid binary exists at known path", () => {
+        it("does nothing when the launcher is already correct", () => {
             // Single probe script returns VALID
             spawnSyncMock.mockReturnValueOnce(makeResult(0, "VALID\n"));
             ensureClaudeInContainer(container);
@@ -176,26 +218,54 @@ describe("container-setup.ts module", () => {
             expect(spawnSyncMock).toHaveBeenCalledTimes(1);
         });
 
-        it("restores from cache when volume has valid claude binary", () => {
-            // Single probe script returns RESTORED (cache found and copied back)
-            spawnSyncMock.mockReturnValueOnce(makeResult(0, "RESTORED\n"));
+        it("names the version it reused, because that is the question this line answers", () => {
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "RESTORED 2.1.261\n"));
             ensureClaudeInContainer(container);
             expect(console.log).toHaveBeenCalledWith(
-                "Restored claude from cache.",
+                "Reusing claude 2.1.261 from the shared volume.",
             );
             expect(spawnSyncMock).toHaveBeenCalledTimes(1);
         });
 
-        it("does fresh install when probe returns INSTALL", () => {
-            // Probe returns INSTALL (no valid binary at either path)
+        it("still reports a reuse when the probe names no version", () => {
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "RESTORED\n"));
+            ensureClaudeInContainer(container);
+            expect(console.log).toHaveBeenCalledWith(
+                "Reusing claude from the shared volume.",
+            );
+        });
+
+        it("puts the probe's stderr into the failure, so the cause is not lost", () => {
+            spawnSyncMock.mockReturnValueOnce({
+                ...makeResult(1, ""),
+                stderr: "cp: cannot create regular file: Read-only file system\n",
+            });
+            expect(() => ensureClaudeInContainer(container)).toThrow(
+                /Read-only file system/,
+            );
+        });
+
+        it("installs, then re-probes to confirm the installer left a usable launcher", () => {
             spawnSyncMock.mockReturnValueOnce(makeResult(0, "INSTALL\n"));
-            // Fresh install succeeds
             spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "RESTORED\n"));
             ensureClaudeInContainer(container);
             expect(console.log).toHaveBeenCalledWith(
                 "Installing claude (first run)...",
             );
-            expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+            expect(spawnSyncMock).toHaveBeenCalledTimes(3);
+        });
+
+        it("throws when the installer exits 0 but leaves nothing usable", () => {
+            // `curl | bash` succeeding is not evidence the launcher exists.
+            // Without this the failure surfaced much later, as an unexplained
+            // "tool is unavailable after setup".
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "INSTALL\n"));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "INSTALL\n"));
+            expect(() => ensureClaudeInContainer(container)).toThrow(
+                "Claude installation left no usable launcher",
+            );
         });
 
         it("throws when fresh install fails", () => {
@@ -205,214 +275,322 @@ describe("container-setup.ts module", () => {
             spawnSyncMock.mockReturnValueOnce(makeResult(1));
 
             expect(() => ensureClaudeInContainer(container)).toThrow(
-                "Failed to install claude in container",
+                "Claude installation failed",
             );
         });
 
-        it("falls through to install on unexpected probe output", () => {
-            // Probe returns unexpected output
+        it("fails closed on an unsuccessful probe", () => {
             spawnSyncMock.mockReturnValueOnce(makeResult(1, ""));
-            // Fresh install succeeds
-            spawnSyncMock.mockReturnValueOnce(makeResult(0));
-            ensureClaudeInContainer(container);
-            expect(console.log).toHaveBeenCalledWith(
-                "Installing claude (first run)...",
+            expect(() => ensureClaudeInContainer(container)).toThrow(
+                "Claude readiness probe failed",
             );
+            expect(spawnSyncMock).toHaveBeenCalledTimes(1);
         });
 
-        it("probe script checks both bin path and cache path", () => {
+        it("fails closed when the probe times out", () => {
+            spawnSyncMock.mockReturnValueOnce({
+                ...makeResult(0),
+                status: null,
+                error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
+            });
+            expect(() => ensureClaudeInContainer(container)).toThrow(
+                "Claude readiness probe timed out",
+            );
+            expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+        });
+
+        it("fails closed on an invalid successful probe response", () => {
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "UNKNOWN\n"));
+            expect(() => ensureClaudeInContainer(container)).toThrow(
+                "Claude readiness probe returned an invalid result",
+            );
+            expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+        });
+
+        it("runs the probe against the real container paths", () => {
             spawnSyncMock.mockReturnValueOnce(makeResult(0, "VALID\n"));
             ensureClaudeInContainer(container);
-            const probeCall = spawnSyncMock.mock.calls[0];
-            const shCmd = (probeCall[1] as string[]).at(-1) as string;
+            const shCmd = (spawnSyncMock.mock.calls[0][1] as string[]).at(-1) as string;
             expect(shCmd).toContain(CLAUDE_BIN_PATH);
-            expect(shCmd).toContain(CLAUDE_PERSIST_DIR);
-            expect(shCmd).toContain("command -v claude");
-            expect(shCmd).toContain("is_shim");
-            expect(shCmd).toContain("is_claude");
-            expect(shCmd).toContain("head -n 1");
-            expect(shCmd).toContain("claude([[:space:]]+code)?");
+            expect(shCmd).toContain(CLAUDE_DATA_DIR);
+            expect(shCmd).toContain(CLAUDE_DATA_VOLUME_DIR);
+            expect(shCmd).toContain(CLAUDE_LEGACY_CACHE_FILE);
         });
 
-        it("install command caches binary to volume", () => {
+        it("hands the install step nothing but the installer", () => {
+            // The old install command appended `cp -L $CACHE $BIN`, which is the
+            // line that flattened the launcher into a regular file. The native
+            // installer creates the symlink itself; ccc must not overwrite it.
             spawnSyncMock.mockReturnValueOnce(makeResult(0, "INSTALL\n"));
             spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "RESTORED\n"));
             ensureClaudeInContainer(container);
-            const installCall = spawnSyncMock.mock.calls[1];
-            const shCmd = (installCall[1] as string[]).at(-1) as string;
+            const shCmd = (spawnSyncMock.mock.calls[1][1] as string[]).at(-1) as string;
             expect(shCmd).toContain("curl -fsSL");
-            expect(shCmd).toContain("command -v claude");
-            expect(shCmd).toContain(CLAUDE_PERSIST_DIR);
-            expect(shCmd).toContain(`cp -L ${CLAUDE_PERSIST_DIR}/claude ${CLAUDE_BIN_PATH}`);
+            expect(shCmd).not.toContain("cp -L");
+        });
+    });
+
+    describe("Codex bubblewrap readiness", () => {
+        it.each(["Dockerfile", "Containerfile"])("%s installs bubblewrap in the shipped image", recipe => {
+            const source = readFileSync(new URL(`../../${recipe}`, import.meta.url), "utf8");
+            const commands = source.replace(/\\\r?\n/g, " ");
+            expect(commands).toMatch(/\bapt-get\s+install\b[^;&\n]*\bbubblewrap\b/);
+        });
+
+        const isProbe = (args: string[]) => args.some(arg => arg.includes("bwrap --version"));
+
+        it("reuses a working bubblewrap binary as the normal user without installing packages", () => {
+            spawnSyncMock.mockReturnValue(makeResult(0));
+            ensureTools(container, getToolByName("codex")!);
+            const calls = spawnSyncMock.mock.calls.map(call => call[1] as string[]);
+            const probes = calls.filter(isProbe);
+            expect(probes).toHaveLength(1);
+            expect(probes[0].slice(0, 2)).toEqual(["exec", container]);
+            expect(probes[0]).not.toContain("root");
+            expect(calls.some(args => args.includes("apt-get"))).toBe(false);
+        });
+
+        it("installs missing bubblewrap with bounded root package commands then verifies as normal user", () => {
+            let probes = 0;
+            spawnSyncMock.mockImplementation((_command, rawArgs) => {
+                const args = rawArgs as string[];
+                return makeResult(isProbe(args) && ++probes === 1 ? 42 : 0);
+            });
+            ensureTools(container, getToolByName("codex")!);
+            const calls = spawnSyncMock.mock.calls;
+            const packageCalls = calls.filter(call => (call[1] as string[]).includes("apt-get"));
+            expect(packageCalls).toHaveLength(2);
+            for (const call of packageCalls) {
+                const args = call[1] as string[];
+                expect(args.slice(0, 4)).toEqual(["exec", "-u", "root", container]);
+                expect(args).toContain("timeout");
+                expect(args).not.toContain("sh");
+                expect((call[2] as { timeout: number }).timeout).toBeGreaterThan(0);
+                expect((call[2] as { timeout: number }).timeout).toBeLessThanOrEqual(CONTAINER_TOOL_MUTATION_TIMEOUT_MS);
+            }
+            expect(packageCalls[0][1]).toEqual(expect.arrayContaining(["apt-get", "update"]));
+            expect(packageCalls[1][1]).toEqual(expect.arrayContaining(["DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "bubblewrap"]));
+            const normalProbes = calls.map(call => call[1] as string[]).filter(isProbe);
+            expect(normalProbes).toHaveLength(2);
+            expect(normalProbes[1].slice(0, 2)).toEqual(["exec", container]);
+            expect(calls.at(-1)![1]).toEqual(normalProbes[1]);
+        });
+
+        it.each([1, 124])("fails readiness for probe exit %s instead of installing over a runtime error", status => {
+            spawnSyncMock.mockImplementation((_command, args) => makeResult(isProbe(args as string[]) ? status : 0));
+            expect(() => ensureTools(container, getToolByName("codex")!)).toThrow(/bubblewrap/i);
+            expect(spawnSyncMock.mock.calls.some(call => (call[1] as string[]).includes("apt-get"))).toBe(false);
+        });
+
+        it.each(["update", "install", "verification"])("fails readiness and stops after bubblewrap %s fails", stage => {
+            let probes = 0;
+            spawnSyncMock.mockImplementation((_command, rawArgs) => {
+                const args = rawArgs as string[];
+                if (isProbe(args)) return makeResult(++probes === 1 ? 42 : stage === "verification" ? 1 : 0);
+                if (args.includes("apt-get") && args.includes(stage)) return makeResult(1);
+                return makeResult(0);
+            });
+            expect(() => ensureTools(container, getToolByName("codex")!)).toThrow(/bubblewrap/i);
+            const packageCalls = spawnSyncMock.mock.calls.filter(call => (call[1] as string[]).includes("apt-get"));
+            expect(packageCalls).toHaveLength(stage === "update" ? 1 : 2);
+            expect(probes).toBe(stage === "verification" ? 2 : 1);
+        });
+    });
+
+    describe("ensureUvAvailable", () => {
+        it("does not install uv when the bounded probe succeeds", () => {
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            ensureUvAvailable(container);
+            expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+            expect(spawnSyncMock).toHaveBeenCalledWith(
+                "docker",
+                expect.any(Array),
+                expect.objectContaining({ timeout: CONTAINER_TOOL_PROBE_TIMEOUT_MS }),
+            );
+        });
+
+        it("fails closed when the uv probe times out", () => {
+            spawnSyncMock.mockReturnValueOnce({
+                ...makeResult(0),
+                status: null,
+                error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
+            });
+            expect(() => ensureUvAvailable(container)).toThrow("Container uv probe timed out");
+            expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+        });
+
+        it("installs uv only after an absent result and rejects install failure", () => {
+            spawnSyncMock.mockReturnValueOnce(makeResult(1));
+            spawnSyncMock.mockReturnValueOnce(makeResult(1));
+            expect(() => ensureUvAvailable(container)).toThrow("Container uv installation failed");
+            expect(spawnSyncMock).toHaveBeenCalledTimes(2);
         });
     });
 
     describe("ensureTools", () => {
-        const codexTool = getToolByName("codex")!;
-        const npmPrefix = "~/.local/bin/mise exec node@22 -- npm install -g ";
-
-        function scripts(): string[] {
-            return spawnSyncMock.mock.calls.map(([, args]) => (args as string[]).at(-1)!);
-        }
-
-        function mockNpmSetup(
-            missing: string[],
-            failure?: { command: string; result: SpawnSyncReturns<string> },
-        ): void {
-            spawnSyncMock.mockImplementation((_cli, args) => {
-                const script = (args as string[]).at(-1)!;
-                if (script.startsWith("[ -x ")) return makeResult(0, missing.join("\n"));
-                if (failure && script.includes(failure.command)) return failure.result;
-                return makeResult(0);
-            });
-        }
+        it("should be exported as a function", () => {
+            expect(typeof ensureTools).toBe("function");
+        });
 
         it("calls ensureClaudeInContainer when activeTool is claude", () => {
+            const claudeTool = getDefaultTool();
+            // ensureClaudeInContainer: combined probe returns VALID
             spawnSyncMock.mockReturnValueOnce(makeResult(0, "VALID\n"));
+            // requested-tool readiness proof
             spawnSyncMock.mockReturnValueOnce(makeResult(0));
-            ensureTools(container, getDefaultTool());
+            ensureTools(container, claudeTool);
             expect(spawnSyncMock).toHaveBeenCalledTimes(2);
         });
 
-        it("does nothing beyond readiness when all npm tools are present", () => {
-            mockNpmSetup([]);
-            ensureTools(container, codexTool);
-            expect(spawnSyncMock).toHaveBeenCalledTimes(1);
-            expect(scripts()[0]).toContain("/home/ccc/.local/bin/codex");
+        it("skips ensureClaudeInContainer when activeTool is not claude", () => {
+            const geminiTool = getToolByName("gemini")!;
+            // Active npm tool exists.
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, ""));
+            // requested-tool readiness proof
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            ensureTools(container, geminiTool);
+            // Combined npm check + exact requested-tool proof, no claude install
+            expect(spawnSyncMock).toHaveBeenCalledTimes(2);
         });
 
-        it("installs missing packages in separate commands and creates each wrapper", () => {
-            mockNpmSetup(["gemini", "codex", "opencode"]);
-            ensureTools(container, codexTool);
-            expect(scripts().filter((script) => script.startsWith(npmPrefix))).toEqual([
-                `${npmPrefix}@google/gemini-cli`,
-                `${npmPrefix}@openai/codex`,
-                `${npmPrefix}opencode-ai`,
-            ]);
-            for (const cmd of ["gemini", "codex", "opencode"]) {
-                expect(scripts().some((script) => script.includes(`cat > /home/ccc/.local/bin/${cmd}`))).toBe(true);
-            }
+        it("installs only the requested npm tool", () => {
+            const geminiTool = getToolByName("gemini")!;
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "gemini\n"));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "MISSING\n")); // persisted binary probe
+            // cleanup partial install dirs
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            // stale shim nuke
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            // npm install succeeds
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            // mise reshim
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            // wrapper scripts
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            // requested-tool readiness proof
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            ensureTools(container, geminiTool);
+            // check + cleanup + shim-nuke + install + reshim + wrapper + proof
+            expect(spawnSyncMock).toHaveBeenCalledTimes(8);
+            const geminiWrapperCall = spawnSyncMock.mock.calls[6];
+            const geminiCmd = (geminiWrapperCall[1] as string[]).at(-1) as string;
+            expect(geminiCmd).toContain("gemini");
+            const installCmd = (spawnSyncMock.mock.calls[4][1] as string[]).at(-1) as string;
+            expect(installCmd).toContain("@google/gemini-cli");
+            expect(installCmd).not.toContain("@openai/codex");
+            expect(installCmd).not.toContain("opencode-ai");
         });
 
-        it.each([false, true])("retains Codex when OpenCode fails (OpenCode first: %s)", (opencodeFirst) => {
-            if (opencodeFirst) {
-                vi.spyOn(toolRegistry, "getNpmTools").mockReturnValue([
-                    { cmd: "opencode", pkg: "opencode-ai" },
-                    { cmd: "codex", pkg: "@openai/codex" },
-                ]);
-            }
-            mockNpmSetup(["codex", "opencode"], {
-                command: `${npmPrefix}opencode-ai`,
-                result: { ...makeResult(1), stderr: "npm error EBADPLATFORM" },
-            });
-
-            expect(() => ensureTools(container, codexTool)).not.toThrow();
-
-            expect(scripts().filter((script) => script.startsWith(npmPrefix))).toEqual(
-                (opencodeFirst ? ["opencode-ai", "@openai/codex"] : ["@openai/codex", "opencode-ai"])
-                    .map((pkg) => `${npmPrefix}${pkg}`),
+        it("fails closed when npm install leaves the requested tool unavailable", () => {
+            const geminiTool = getToolByName("gemini")!;
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "gemini\n"));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "MISSING\n")); // persisted binary probe
+            // cleanup
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            // stale shim nuke
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            // npm install fails
+            spawnSyncMock.mockReturnValueOnce(makeResult(1));
+            expect(() => ensureTools(container, geminiTool)).toThrow(
+                "Container gemini installation failed",
             );
-            expect(scripts().some((script) => script.includes("cat > /home/ccc/.local/bin/codex"))).toBe(true);
-            expect(scripts().some((script) => script.includes("cat > /home/ccc/.local/bin/opencode"))).toBe(false);
-            expect(console.warn).toHaveBeenCalledWith(expect.stringMatching(/install opencode \(opencode-ai\).*EBADPLATFORM/));
+            // Later mutations and readiness proof must not run.
+            expect(spawnSyncMock).toHaveBeenCalledTimes(5);
         });
 
-        it("reports active installation failure after preserving independent successes", () => {
-            mockNpmSetup(["codex", "opencode"], {
-                command: `${npmPrefix}@openai/codex`,
-                result: { ...makeResult(1), stderr: "npm error EACCES" },
-            });
+        it("stops before installation when cleanup times out", () => {
+            const codexTool = getToolByName("codex")!;
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "codex\n"));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "MISSING\n")); // persisted binary probe
+            spawnSyncMock.mockReturnValueOnce(makeResult(124));
 
-            expect(() => ensureTools(container, codexTool)).toThrow(/install codex \(@openai\/codex\).*EACCES/);
-            expect(scripts().some((script) => script.includes("cat > /home/ccc/.local/bin/codex"))).toBe(false);
-            expect(scripts().some((script) => script.includes("cat > /home/ccc/.local/bin/opencode"))).toBe(true);
+            expect(() => ensureTools(container, codexTool)).toThrow(
+                "Container codex cleanup timed out",
+            );
+            expect(spawnSyncMock).toHaveBeenCalledTimes(3);
+            const cleanupCommand = (spawnSyncMock.mock.calls[2][1] as string[]).at(-1) as string;
+            expect(cleanupCommand).toContain("timeout -k 2s 8s");
+            expect(cleanupCommand).not.toContain("npm install -g");
+            expect(spawnSyncMock.mock.calls[2][2]).toEqual(
+                expect.objectContaining({ timeout: CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS }),
+            );
         });
 
-        it.each([
-            { ...makeResult(1), stderr: "container is not running" },
-            { ...makeResult(0), status: null, error: new Error("spawn docker ENOENT") },
-        ])("rejects failed readiness instead of assuming empty stdout means ready", (result) => {
-            spawnSyncMock.mockReturnValue(result);
-            expect(() => ensureTools(container, codexTool)).toThrow(/check.*codex.*(container is not running|spawn docker ENOENT)/);
+        it("stops before wrapper creation when reshim fails", () => {
+            const codexTool = getToolByName("codex")!;
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "codex\n"));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "MISSING\n")); // persisted binary probe
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            spawnSyncMock.mockReturnValueOnce(makeResult(1));
+
+            expect(() => ensureTools(container, codexTool)).toThrow(
+                "Container codex reshim failed",
+            );
+            expect(spawnSyncMock).toHaveBeenCalledTimes(6);
+        });
+
+        it("does not inspect or install inactive npm tools", () => {
+            const geminiTool = getToolByName("gemini")!;
+            // Gemini exists even if other registered tools do not.
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, ""));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            ensureTools(container, geminiTool);
+            expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+            const probe = (spawnSyncMock.mock.calls[0][1] as string[]).at(-1) as string;
+            expect(probe).toContain("gemini");
+            expect(probe).not.toContain("codex");
+            expect(probe).not.toContain("opencode");
+            expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining("Installing"));
+        });
+
+        it("fails closed when the initial readiness probe cannot inspect the container", () => {
+            const codexTool = getToolByName("codex")!;
+            spawnSyncMock.mockReturnValueOnce(makeResult(1, ""));
+
+            expect(() => ensureTools(container, codexTool)).toThrow(
+                "Container npm tool probe failed",
+            );
             expect(spawnSyncMock).toHaveBeenCalledTimes(1);
         });
 
-        it("includes the spawn cause when active package installation cannot launch", () => {
-            mockNpmSetup(["codex"], {
-                command: `${npmPrefix}@openai/codex`,
-                result: { ...makeResult(0), status: null, error: new Error("spawn docker ENOENT") },
+        it("fails with a bounded error when the npm probe times out", () => {
+            const codexTool = getToolByName("codex")!;
+            spawnSyncMock.mockReturnValueOnce({
+                ...makeResult(0),
+                status: null,
+                error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
             });
-            expect(() => ensureTools(container, codexTool)).toThrow(/install codex \(@openai\/codex\).*spawn docker ENOENT/);
+
+            expect(() => ensureTools(container, codexTool)).toThrow(
+                "Container npm tool probe timed out",
+            );
+            expect(spawnSyncMock).toHaveBeenCalledWith(
+                "docker",
+                expect.any(Array),
+                expect.objectContaining({ timeout: CONTAINER_TOOL_PROBE_TIMEOUT_MS }),
+            );
         });
 
-        it("fails active setup when its wrapper cannot be created", () => {
-            mockNpmSetup(["codex"], {
-                command: "cat > /home/ccc/.local/bin/codex",
-                result: { ...makeResult(1), stderr: "Permission denied" },
+        it("fails with a bounded error when the final readiness proof times out", () => {
+            const codexTool = getToolByName("codex")!;
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, ""));
+            spawnSyncMock.mockReturnValueOnce({
+                ...makeResult(0),
+                status: null,
+                error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
             });
-            expect(() => ensureTools(container, codexTool)).toThrow(/wrapper.*codex \(@openai\/codex\).*Permission denied/);
-        });
 
-        it.skipIf(process.platform === "win32").each(["write", "chmod", "success"])(
-            "runs wrapper shell with correct cleanup when outcome is %s",
-            async (outcome) => {
-                mockNpmSetup(["codex"]);
-                ensureTools(container, codexTool);
-                const script = scripts().find((command) => command.includes("cat > /home/ccc/.local/bin/codex"))!;
-                const { spawnSync: actualSpawnSync } = await vi.importActual<typeof import("child_process")>("child_process");
-                const directory = mkdtempSync(join(tmpdir(), "ccc-wrapper-test-"));
-                const wrapper = join(directory, "codex");
-                const failure = outcome === "write"
-                    ? "cat() { printf partial; return 1; }\n"
-                    : outcome === "chmod" ? "chmod() { return 1; }\n" : "";
-                try {
-                    const result = actualSpawnSync("sh", ["-c", failure + script.replaceAll("/home/ccc/.local/bin/codex", '"$CCC_TEST_WRAPPER_PATH"')], {
-                        encoding: "utf-8",
-                        env: { ...process.env, CCC_TEST_WRAPPER_PATH: wrapper },
-                    });
-                    expect(result.error).toBeUndefined();
-                    if (outcome === "success") {
-                        expect(result.status).toBe(0);
-                        expect(readFileSync(wrapper, "utf-8")).toBe('#!/bin/sh\nexec ~/.local/bin/mise exec node@22 -- codex "$@"\n');
-                        expect(statSync(wrapper).mode & 0o111).not.toBe(0);
-                    } else {
-                        expect(result.status).not.toBe(0);
-                        expect(existsSync(wrapper)).toBe(false);
-                    }
-                } finally {
-                    rmSync(directory, { recursive: true, force: true });
-                }
-            },
-        );
-
-        it("warns and continues when an optional wrapper cannot be created", () => {
-            mockNpmSetup(["gemini", "codex"], {
-                command: "cat > /home/ccc/.local/bin/gemini",
-                result: { ...makeResult(1), stderr: "No space left on device" },
-            });
-            expect(() => ensureTools(container, codexTool)).not.toThrow();
-            expect(console.warn).toHaveBeenCalledWith(expect.stringMatching(/wrapper.*gemini \(@google\/gemini-cli\).*No space left on device/));
-            expect(scripts().some((script) => script.includes("cat > /home/ccc/.local/bin/codex"))).toBe(true);
-        });
-
-        it("only installs missing tools", () => {
-            mockNpmSetup(["codex"]);
-            ensureTools(container, codexTool);
-            expect(scripts().filter((script) => script.startsWith(npmPrefix))).toEqual([`${npmPrefix}@openai/codex`]);
-        });
-
-        it("only checks and repairs the selected npm tool in active-only mode", () => {
-            mockNpmSetup(["codex"]);
-            ensureTools(container, codexTool, { activeOnly: true });
-            expect(scripts()[0]).toContain("/home/ccc/.local/bin/codex");
-            expect(scripts()[0]).not.toMatch(/gemini|opencode/);
-            expect(scripts().filter((script) => script.startsWith(npmPrefix))).toEqual([`${npmPrefix}@openai/codex`]);
-        });
-
-        it("skips npm checks for Claude in active-only mode", () => {
-            spawnSyncMock.mockReturnValueOnce(makeResult(0, "VALID\n"));
-            ensureTools(container, getDefaultTool(), { activeOnly: true });
-            expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+            expect(() => ensureTools(container, codexTool)).toThrow(
+                "Requested tool codex readiness check timed out",
+            );
+            expect(spawnSyncMock).toHaveBeenLastCalledWith(
+                "docker",
+                ["exec", container, "test", "-x", "/home/ccc/.local/bin/codex"],
+                { stdio: "ignore", timeout: CONTAINER_TOOL_PROBE_TIMEOUT_MS },
+            );
         });
     });
 });

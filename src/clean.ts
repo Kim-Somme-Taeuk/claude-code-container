@@ -4,6 +4,7 @@ import { spawnSync } from "child_process";
 import { ensureDockerRunning } from "./docker.js";
 import { runtimeCli } from "./container-runtime.js";
 import { prompt, DOCKER_REGISTRY_IMAGE } from "./utils.js";
+import { getSessionLockClaimsForContainer, withContainerLifecycleLock } from "./session.js";
 
 export interface CleanOptions {
     volumes?: boolean;   // also remove volumes
@@ -13,6 +14,7 @@ export interface CleanOptions {
 }
 
 interface ContainerInfo {
+    id: string;
     name: string;
     status: string;
 }
@@ -26,14 +28,17 @@ interface ImageInfo {
 function listContainers(): ContainerInfo[] {
     const result = spawnSync(
         runtimeCli(),
-        ["ps", "-a", "--filter", "name=^ccc-", "--format", "{{.Names}}\t{{.Status}}"],
+        ["ps", "-a", "--no-trunc", "--filter", "name=^ccc-", "--format", "{{.ID}}\t{{.Names}}\t{{.Status}}"],
         { encoding: "utf-8" },
     );
     const out = (result.stdout ?? "").trim();
     if (!out) return [];
-    return out.split("\n").map((line) => {
-        const [name, ...rest] = line.split("\t");
-        return { name: name.trim(), status: rest.join("\t").trim() };
+    return out.split("\n").flatMap((line) => {
+        const [id, name, ...rest] = line.split("\t");
+        const normalizedId = (id ?? "").trim();
+        const normalizedName = (name ?? "").trim();
+        if (!/^[a-f0-9]{12,64}$/i.test(normalizedId) || !normalizedName.startsWith("ccc-")) return [];
+        return [{ id: normalizedId, name: normalizedName, status: rest.join("\t").trim() }];
     });
 }
 
@@ -154,31 +159,50 @@ export async function cleanContainers(options: CleanOptions): Promise<void> {
 
     const cli = runtimeCli();
 
-    // Stop running containers first
-    for (const c of containersToStop) {
-        console.log(`Stopping ${c.name}...`);
-        spawnSync(cli, ["stop", c.name], { stdio: "inherit" });
-    }
-
-    // Remove containers
+    const stopNames = new Set(containersToStop.map((container) => container.name));
     for (const c of containersToRemove) {
-        console.log(`Removing container ${c.name}...`);
-        const r = spawnSync(cli, ["rm", c.name], { stdio: "inherit" });
-        if (r.status === 0) removed++;
+        const containerPrefix = c.name.startsWith("ccc-") ? c.name.slice("ccc-".length) : "";
+        if (!containerPrefix) throw new Error(`Refusing to clean unmanaged container name: ${c.name}`);
+        withContainerLifecycleLock(containerPrefix, () => {
+            const sessionClaims = getSessionLockClaimsForContainer(containerPrefix);
+            if (sessionClaims.length > 0) {
+                console.log(`Skipping ${c.name}: ${sessionClaims.length} CCC session ownership claim(s).`);
+                return;
+            }
+            if (stopNames.has(c.name)) {
+                console.log(`Stopping ${c.name}...`);
+                const stopped = spawnSync(cli, ["stop", c.id], { stdio: "inherit" });
+                if (stopped.error || stopped.status !== 0) {
+                    throw new Error(`Failed to stop container ${c.name}; cleanup aborted.`);
+                }
+            }
+            console.log(`Removing container ${c.name}...`);
+            const r = spawnSync(cli, ["rm", c.id], { stdio: "inherit" });
+            if (r.error || r.status !== 0) {
+                throw new Error(`Failed to remove container ${c.name}; cleanup aborted.`);
+            }
+            removed++;
+        });
     }
 
     // Remove images
     for (const img of images) {
         console.log(`Removing image ${img.repository} (${img.id})...`);
         const r = spawnSync(cli, ["rmi", img.id], { stdio: "inherit" });
-        if (r.status === 0) removed++;
+        if (r.error || r.status !== 0) {
+            throw new Error(`Failed to remove image ${img.repository}; cleanup aborted.`);
+        }
+        removed++;
     }
 
     // Remove volumes
     for (const v of volumes) {
         console.log(`Removing volume ${v}...`);
         const r = spawnSync(cli, ["volume", "rm", v], { stdio: "inherit" });
-        if (r.status === 0) removed++;
+        if (r.error || r.status !== 0) {
+            throw new Error(`Failed to remove volume ${v}; cleanup aborted.`);
+        }
+        removed++;
     }
 
     console.log(`\nDone. Removed ${removed} item(s).`);

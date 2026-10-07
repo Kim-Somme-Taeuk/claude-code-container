@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { existsSync, readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import type { SpawnSyncReturns } from "child_process";
 
 // Mock child_process before importing the module under test
@@ -39,107 +42,227 @@ describe("ensureTools (npm tools)", () => {
         vi.restoreAllMocks();
     });
 
-    it("does nothing when all tools already exist", () => {
-        // Single combined check returns empty stdout (all present)
+    it("does nothing when the selected tool already exists", () => {
         spawnSyncMock.mockReturnValueOnce(makeResult(0, ""));
+        spawnSyncMock.mockReturnValueOnce(makeResult(0)); // requested-tool proof
 
         ensureTools(container, getToolByName("gemini")!);
 
-        // Only 1 combined check call, no install
-        expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+        // Selected-tool check + exact requested-tool proof, no install.
+        expect(spawnSyncMock).toHaveBeenCalledTimes(2);
         expect(console.log).not.toHaveBeenCalled();
     });
 
-    it("installs missing tools independently and creates each wrapper", () => {
-        // Combined check returns all 3 missing
-        spawnSyncMock.mockReturnValue(makeResult(0));
-        spawnSyncMock.mockReturnValueOnce(makeResult(0, "gemini\ncodex\nopencode\n"));
-
-        ensureTools(container, getToolByName("gemini")!);
-
-        const installCalls = spawnSyncMock.mock.calls.filter(([, args]) =>
-            (args as string[]).at(-1)!.includes("npm install -g"),
-        );
-        expect(installCalls.map(([, args]) => (args as string[]).at(-1))).toEqual([
-            "~/.local/bin/mise exec node@22 -- npm install -g @google/gemini-cli",
-            "~/.local/bin/mise exec node@22 -- npm install -g @openai/codex",
-            "~/.local/bin/mise exec node@22 -- npm install -g opencode-ai",
-        ]);
-        for (const [cli, args] of installCalls) {
-            expect(cli).toBe("docker");
-            expect(args).toEqual(expect.arrayContaining(["exec", container]));
-        }
-
-        const wrapperCommands = spawnSyncMock.mock.calls
-            .map(([, args]) => (args as string[]).at(-1)!)
-            .filter((script) => script.includes("cat > /home/ccc/.local/bin/"));
-        expect(wrapperCommands).toHaveLength(3);
-        for (const cmd of ["gemini", "codex", "opencode"]) {
-            expect(wrapperCommands).toContainEqual(expect.stringContaining(`mise exec node@22 -- ${cmd}`));
-            expect(wrapperCommands).toContainEqual(expect.stringContaining(`chmod +x /home/ccc/.local/bin/${cmd}`));
-        }
-
-        expect(console.log).toHaveBeenCalledWith("Installing gemini, codex, opencode...");
-    });
-
-    it("installs only missing tools (partial)", () => {
-        // Combined check returns only codex missing
-        spawnSyncMock.mockReturnValueOnce(makeResult(0, "codex\n"));
+    it("installs the selected missing tool and creates its wrapper", () => {
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, "gemini\n"));
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, "MISSING\n")); // persisted binary probe
         spawnSyncMock.mockReturnValueOnce(makeResult(0)); // cleanup stale dirs
         spawnSyncMock.mockReturnValueOnce(makeResult(0)); // cleanup stale shims
         spawnSyncMock.mockReturnValueOnce(makeResult(0)); // npm install success
         spawnSyncMock.mockReturnValueOnce(makeResult(0)); // mise reshim
-        spawnSyncMock.mockReturnValueOnce(makeResult(0)); // wrapper codex
+        spawnSyncMock.mockReturnValueOnce(makeResult(0)); // wrapper gemini
+        spawnSyncMock.mockReturnValueOnce(makeResult(0)); // requested-tool proof
 
         ensureTools(container, getToolByName("gemini")!);
 
-        // 1 check + 2 cleanups + 1 install + 1 reshim + 1 wrapper = 6 calls
-        expect(spawnSyncMock).toHaveBeenCalledTimes(6);
+        expect(spawnSyncMock).toHaveBeenCalledTimes(8);
 
-        // Install only codex (index 3 after cleanup)
-        const installCall = spawnSyncMock.mock.calls[3];
-        const shCmd = (installCall[1] as string[])[
-            (installCall[1] as string[]).length - 1
-        ];
-        expect(shCmd).toContain("@openai/codex");
-        expect(shCmd).not.toContain("@google/gemini-cli");
+        // Verify install command uses mise exec node@22 (index 4 after cache probe and cleanup)
+        const installCall = spawnSyncMock.mock.calls[4];
+        expect(installCall[0]).toBe("docker");
+        const installArgs = installCall[1] as string[];
+        expect(installArgs).toContain("exec");
+        expect(installArgs).toContain(container);
+        const shCmd = installArgs[installArgs.length - 1];
+        expect(shCmd).toContain("mise exec node@22");
+        expect(shCmd).toContain("@google/gemini-cli");
+        expect(shCmd).not.toContain("@openai/codex");
+        expect(shCmd).not.toContain("opencode-ai");
 
-        expect(console.log).toHaveBeenCalledWith("Installing codex...");
+        // Verify wrapper creation
+        const wrapperCall = spawnSyncMock.mock.calls[6];
+        const wrapperArgs = wrapperCall[1] as string[];
+        const wrapperCmd = wrapperArgs[wrapperArgs.length - 1];
+        expect(wrapperCmd).toContain("mise exec node@22 -- gemini");
+        expect(wrapperCmd).toContain("chmod +x");
+
+        expect(console.log).toHaveBeenCalledWith("Installing gemini...");
     });
 
-    it("fails active installation while preserving independent tool wrappers", () => {
-        spawnSyncMock.mockImplementation((_cli, args) => {
-            const script = (args as string[]).at(-1)!;
-            if (script.startsWith("[ -x ")) return makeResult(0, "gemini\ncodex\nopencode\n");
-            if (script === "~/.local/bin/mise exec node@22 -- npm install -g @google/gemini-cli") {
-                return { ...makeResult(1), stderr: "npm error EACCES" };
-            }
-            return makeResult(0);
-        });
-
-        expect(() => ensureTools(container, getToolByName("gemini")!))
-            .toThrow(/install gemini \(@google\/gemini-cli\).*EACCES/);
-
-        const wrapperCommands = spawnSyncMock.mock.calls
-            .map(([, args]) => (args as string[]).at(-1)!)
-            .filter((script) => script.includes("cat > /home/ccc/.local/bin/"));
-        expect(wrapperCommands).toHaveLength(2);
-        expect(wrapperCommands).toContainEqual(expect.stringContaining("mise exec node@22 -- codex"));
-        expect(wrapperCommands).toContainEqual(expect.stringContaining("mise exec node@22 -- opencode"));
-        expect(wrapperCommands).not.toContainEqual(expect.stringContaining("mise exec node@22 -- gemini"));
-        expect(console.warn).not.toHaveBeenCalled();
-    });
-
-    it("checks all tools in single docker exec", () => {
+    it("does not inspect missing inactive tools", () => {
         spawnSyncMock.mockReturnValueOnce(makeResult(0, ""));
+        spawnSyncMock.mockReturnValueOnce(makeResult(0));
+        ensureTools(container, getToolByName("gemini")!);
+        expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+        const shCmd = (spawnSyncMock.mock.calls[0][1] as string[]).at(-1) as string;
+        expect(shCmd).toContain("gemini");
+        expect(shCmd).not.toContain("codex");
+        expect(shCmd).not.toContain("opencode");
+    });
+
+    it("warns, skips wrappers, and fails when install leaves the requested tool absent", () => {
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, "gemini\n"));
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, "MISSING\n")); // persisted binary probe
+        spawnSyncMock.mockReturnValueOnce(makeResult(0)); // cleanup stale dirs
+        spawnSyncMock.mockReturnValueOnce(makeResult(0)); // cleanup stale shims
+        spawnSyncMock.mockReturnValueOnce(makeResult(1)); // npm install FAIL
+
+        expect(() => ensureTools(container, getToolByName("gemini")!)).toThrow(
+            "Container gemini installation failed",
+        );
+
+        // wrapper check + cache probe + 2 cleanups + failed install; no later mutation or proof.
+        expect(spawnSyncMock).toHaveBeenCalledTimes(5);
+    });
+
+    it("checks only the selected tool in one docker exec", () => {
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, ""));
+        spawnSyncMock.mockReturnValueOnce(makeResult(0));
 
         ensureTools(container, getToolByName("gemini")!);
 
-        // Verify the combined check command
         const checkCall = spawnSyncMock.mock.calls[0];
         const checkArgs = checkCall[1] as string[];
         const shCmd = checkArgs[checkArgs.length - 1];
         expect(shCmd).toContain("[ -x /home/ccc/.local/bin/gemini ]");
-        expect(shCmd).toContain("[ -x /home/ccc/.local/bin/codex ]");
+        expect(shCmd).not.toContain("[ -x /home/ccc/.local/bin/codex ]");
+        expect(shCmd).not.toContain("[ -x /home/ccc/.local/bin/opencode ]");
     });
+    it("restores a healthy cached tool wrapper without installs or shim removal", () => {
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, "gemini\n"));
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, "READY\n"));
+        spawnSyncMock.mockReturnValueOnce(makeResult(0)); // wrapper
+        spawnSyncMock.mockReturnValueOnce(makeResult(0)); // executable proof
+        ensureTools(container, getToolByName("gemini")!);
+        expect(spawnSyncMock).toHaveBeenCalledTimes(4);
+        const commands = spawnSyncMock.mock.calls.map(call => (call[1] as string[]).at(-1)).join("\n");
+        expect(commands).toContain("MISE_OFFLINE=1");
+        expect(commands).toContain('"$node_dir/bin/gemini" --version');
+        expect(commands).toContain("chmod +x /home/ccc/.local/bin/gemini");
+        expect(commands).not.toContain("npm install");
+        expect(commands).not.toContain("rm -f ~/.local/share/mise/shims");
+        expect(commands).not.toContain("mise reshim");
+        expect(console.log).not.toHaveBeenCalled();
+        expect(spawnSyncMock.mock.calls[1]).toEqual([
+            "docker", ["exec", "-w", "/home/ccc", container, "sh", "-c", expect.any(String)],
+            { encoding: "utf-8", timeout: 20_000 },
+        ]);
+        expect(commands).toContain("timeout -k 1s 3s");
+        expect(commands).toContain("timeout -k 1s 10s");
+        expect(commands).not.toContain("codex");
+        expect(commands).not.toContain("opencode");
+    });
+
+    it.each([1, 42, 126, 127, 124, 137])("does not reinstall when persisted binary verification fails with %s", status => {
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, "gemini\n"));
+        spawnSyncMock.mockReturnValueOnce(makeResult(status));
+        expect(() => ensureTools(container, getToolByName("gemini")!)).toThrow(/cached executable probe/);
+        expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+        const commands = spawnSyncMock.mock.calls.map(call => (call[1] as string[]).at(-1)).join("\n");
+        expect(commands).not.toMatch(/npm install|rm -rf|rm -f|mise reshim|cat > /);
+    });
+
+    it.each(["", "noise\nREADY\n", "READY\nMISSING\n", "missing", "READY extra"])("rejects unexpected cache probe output %j before changing the installation", output => {
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, "gemini\n"));
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, output));
+        expect(() => ensureTools(container, getToolByName("gemini")!)).toThrow("invalid result");
+        expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+        expect(console.log).not.toHaveBeenCalled();
+    });
+
+    it.each(["ETIMEDOUT", "ENOENT"])("refuses mutation when the cache runtime probe reports %s", code => {
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, "gemini\n"));
+        spawnSyncMock.mockReturnValueOnce({ ...makeResult(0, "READY\n"), error: Object.assign(new Error("fixture failure"), { code }) });
+        expect(() => ensureTools(container, getToolByName("gemini")!)).toThrow(
+            code === "ETIMEDOUT" ? "cached executable probe timed out" : "cached executable probe failed",
+        );
+        expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+        expect(console.log).not.toHaveBeenCalled();
+    });
+
+    it("fails when a cached tool wrapper cannot be created", () => {
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, "gemini\n"));
+        spawnSyncMock.mockReturnValueOnce(makeResult(0, "READY\n"));
+        spawnSyncMock.mockReturnValueOnce(makeResult(1));
+        expect(() => ensureTools(container, getToolByName("gemini")!)).toThrow("wrapper creation failed");
+        expect(spawnSyncMock).toHaveBeenCalledTimes(3);
+        const script = (spawnSyncMock.mock.calls[2][1] as string[]).at(-1)!;
+        expect(script).toContain('gemini "$@"');
+        expect(script).toContain("chmod +x /home/ccc/.local/bin/gemini && exit 0");
+        expect(script).toContain("rm -f /home/ccc/.local/bin/gemini\nexit 1");
+    });
+        // This runs the Linux container probe verbatim, including coreutils timeout.
+        it.skipIf(process.platform !== "linux").each([
+            "healthy", "missing", "broken", "runtime-missing", "missing-node", "resolver-failure", "timeout", "killed", "missing-timeout",
+        ])("executes the persisted binary probe with %s state and a PATH decoy", async (outcome) => {
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "codex\n"));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0, "READY\n"));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0)); // upstream bubblewrap readiness
+            ensureTools(container, getToolByName("codex")!);
+            const script = (spawnSyncMock.mock.calls[1][1] as string[]).at(-1)!;
+            const { spawnSync: actualSpawnSync } = await vi.importActual<typeof import("child_process")>("child_process");
+            const directory = mkdtempSync(join(tmpdir(), "ccc-persisted-tool-"));
+            const bin = join(directory, ".local", "share", "mise", "installs", "node", "22.0.0", "bin");
+            const localBin = join(directory, ".local", "bin");
+            const decoy = join(directory, "decoy");
+            const marker = join(directory, "executed");
+            mkdirSync(bin, { recursive: true });
+            mkdirSync(localBin, { recursive: true });
+            mkdirSync(decoy);
+            writeFileSync(join(localBin, "mise"), `#!/bin/sh
+if [ "$1 $2 $3" = 'exec node@22 --' ]; then
+    shift 3
+    PATH="$CCC_TEST_NODE_DIR/bin:$PATH" exec "$@"
+fi
+[ "$MISE_OFFLINE" = 1 ] && [ "$*" = 'where node@22' ] || exit 92
+if [ "$CCC_TEST_OUTCOME" = resolver-failure ]; then echo 'mise resolution failed' >&2; exit 7; fi
+printf '%s\\n' "$CCC_TEST_NODE_DIR"
+`, { mode: 0o755 });
+            if (outcome !== "missing-node") writeFileSync(join(bin, "node"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+            writeFileSync(join(decoy, "codex"), '#!/bin/sh\nprintf decoy > "$CCC_TEST_MARKER"\n', { mode: 0o755 });
+            if (outcome !== "missing") writeFileSync(join(bin, "codex"), `#!/bin/sh
+[ "$1" = --version ] && [ "\${PATH%%:*}" = "$CCC_TEST_NODE_DIR/bin" ] || exit 91
+printf actual > "$CCC_TEST_MARKER"
+if [ "$CCC_TEST_OUTCOME" = timeout ]; then sleep 5; fi
+if [ "$CCC_TEST_OUTCOME" = killed ]; then kill -KILL $$; fi
+if [ "$CCC_TEST_OUTCOME" = broken ]; then echo 'broken package' >&2; exit 1; fi
+if [ "$CCC_TEST_OUTCOME" = runtime-missing ]; then echo 'runtime dependency missing' >&2; exit 127; fi
+printf '1.0.0\\n'
+`, { mode: 0o755 });
+            try {
+                const probe = actualSpawnSync("/bin/sh", ["-c", script
+                    .replaceAll("~/.local/", '"$CCC_TEST_HOME"/.local/')
+                    .replaceAll("$HOME", "$CCC_TEST_HOME")
+                    .replaceAll("/usr/bin/timeout", outcome === "missing-timeout" ? '"$CCC_TEST_HOME"/missing-timeout' : "/usr/bin/timeout")
+                    .replace("timeout -k 1s 10s", "timeout -k 0.05s 0.05s")], {
+                    encoding: "utf-8", timeout: 2_000,
+                    env: {
+                        ...process.env, MISE_DATA_DIR: join(directory, ".local", "share", "mise"),
+                        PATH: outcome === "missing-timeout" ? decoy : `${decoy}:/usr/bin:/bin`,
+                        CCC_TEST_HOME: directory, CCC_TEST_NODE_DIR: join(bin, ".."),
+                        CCC_TEST_OUTCOME: outcome, CCC_TEST_MARKER: marker,
+                    },
+                });
+                expect(probe.error).toBeUndefined();
+                if (["broken", "runtime-missing", "resolver-failure", "timeout", "killed", "missing-timeout"].includes(outcome)) {
+                    expect(probe.status).not.toBe(0);
+                    expect(probe.stderr).toMatch(/broken package|runtime dependency missing|mise resolution failed|Timed out verifying|was killed \(exit 137\)|requires timeout/);
+                    if (outcome === "broken") expect(probe.status).toBe(1);
+                    if (outcome === "runtime-missing") expect(probe.status).toBe(127);
+                    if (outcome === "timeout") expect(probe.status).toBe(124);
+                    if (outcome === "killed") expect(probe.status).toBe(137);
+                } else {
+                    expect(probe.status).toBe(0);
+                    expect(probe.stdout.trim()).toBe(outcome === "healthy" ? "READY" : "MISSING");
+                }
+                const binaryRuns = ["healthy", "broken", "runtime-missing", "timeout", "killed"].includes(outcome);
+                expect(existsSync(marker)).toBe(binaryRuns);
+                if (binaryRuns) expect(readFileSync(marker, "utf-8")).toBe("actual");
+            } finally {
+                rmSync(directory, { recursive: true, force: true });
+            }
+        });
+
 });

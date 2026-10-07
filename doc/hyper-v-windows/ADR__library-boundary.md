@@ -1,0 +1,1732 @@
+# ADR: Hyper-V Windows internal library boundary
+
+## Status
+
+Accepted on 2026-08-31.
+
+## Context
+
+Device Lab currently reaches Hyper-V through host-control helpers and a large
+broker orchestration path. Those helpers are useful implementation material,
+but their contracts are not a reusable Windows library boundary: required CCC
+owner/device/incarnation fields, a CCC Notes marker, combined VM-and-artifact
+deletion, and a single optional `diskPath` mix consumer policy with native host
+behavior.
+
+The lossy disk representation caused a concrete lifecycle failure. A valid
+Running or Off VM with no attached hard disks produces no `diskPath`, while
+broker reconciliation requires that scalar to equal the journal's expected
+root disk. Safe partial residue is therefore rejected before Device Lab can
+recover it. More local guards would leave the same modeling error available to
+the next consumer.
+
+The intended long-term shape is a typed Node/TypeScript library aligned first
+with Windows Hyper-V operations, with optional generic lifecycle conveniences
+above it. Device Lab then consumes that library rather than defining its
+contracts. The boundary must be proven internally before committing to public
+package compatibility or a broad native-API implementation.
+
+## Decision
+
+Create a new internal boundary at `src/hyper-v-windows/` with two layers that
+form one future extraction unit:
+
+```text
+Device Lab MCP/provider
+    -> Device Lab Hyper-V adapter
+        -> hyper-v-windows/lifecycle
+            -> hyper-v-windows/low-level
+                -> injected PowerShell/CIM transport
+                    -> Windows Hyper-V
+```
+
+Dependencies point only downward. `hyper-v-windows` cannot import Device Lab,
+its broker, MCP/HTTP contracts, state layout, or CCC ownership contracts. The
+low-level layer cannot import lifecycle. Device Lab-specific translation stays
+in an adapter outside the library.
+
+### Low-level responsibility
+
+Low-level maps one typed call to one target Hyper-V primitive. The initial VM
+lifecycle slice was `Get-VM`, `Get-VMHardDiskDrive`, `Get-VMDvdDrive`,
+`Start-VM`, `Stop-VM`, and `Remove-VM`; migration slice 1 added `Get-VMSnapshot`,
+`Checkpoint-VM`, `Remove-VMSnapshot`, and `Restore-VMSnapshot`. It owns request validation, a single transport
+invocation, strict bounded response decoding, native-faithful result types, and
+stable typed validation/transport/protocol/native errors. The PowerShell
+transport may perform resolution reads before exactly one target primitive for
+operations other than `Get-VM`: one `Get-VM` to resolve the selector, and where
+the target names something inside the VM rather than the VM itself, one further
+read to resolve that. `Rename-VMNetworkAdapter` and `Set-VMNetworkAdapter` read
+`Get-VMNetworkAdapter` — which is what lets a target be "the VM's only adapter"
+rather than a literal name that is wrong on a localized host — and
+`Set-VMFirmware` with a first-boot disk reads `Get-VMHardDiskDrive`, because
+native wants a device object where the caller has a path. `Remove-VMNetworkAdapter`
+is the fourth: it resolves its own adapter inline, matching on name and MAC
+together, which is why it does not go through the shared target resolver. All of
+this is resolution inside the single attempt, not retry or lifecycle policy, and
+the count that matters is one *target* invocation. The earlier wording allowed
+only the `Get-VM` read and was already stale when `Remove-VMNetworkAdapter`
+landed in 2B; it is the rule that was wrong, not the four operations.
+Selector resolution queries a single ID or name with `Get-VM -Id` or
+`Get-VM -Name` and filters exact matches. An empty successful scoped result
+means absence. The Hyper-V `GetVM` cmdlet's exact `ObjectNotFound` error requires
+one successful full `Get-VM` inventory read before absence can be concluded:
+the same error can report an inaccessible existing VM. Other native errors,
+including inventory, module and host failures, fail closed.
+Some Hyper-V versions report a missing valid name as `InvalidParameter` with
+category `InvalidArgument`; only that exact name-query pair enters the same
+confirming inventory path. It is not accepted for ID selectors.
+
+Native collections remain collections, including exact empty arrays. Unknown
+native state/status/controller strings remain observable. Low-level does not
+own retries, polling, ownership policy, journals, idempotency, artifact cleanup,
+or public Device Lab responses. `Remove-VM` removes the VM only.
+
+### Lifecycle responsibility
+
+Lifecycle depends on low-level and adds consumer-neutral operation intents,
+unique identity checks, kind-specific attachment subset safety, discriminated reconciliation
+outcomes, and bounded retry with injected sleeping/cancellation. An empty
+attachment set is safe partial residue once VM identity is proven. A foreign
+attachment is a terminal conflict; a permitted hard-disk root does not permit
+DVD media at the same root. Absence is idempotent for remove; unknown or
+transitional state remains pending.
+Pathless hard-disk records, including pass-through physical disks represented
+by `diskNumber`, are conflicts because this slice has no physical-disk ownership
+allowlist. Empty DVD drives remain safe.
+
+No journal-store abstraction is added in the first slice because the library
+does not yet persist an intent. When persistence enters the library, it must be
+an injected generic port; Device Lab filenames and schemas remain outside.
+
+These lifecycle capabilities are part of the later library extraction, not a
+Device Lab implementation detail. Current contracts describe native identity,
+allowed attachments, desired lifecycle state, and bounded retry—not CCC owners,
+commands, filenames, or cleanup roots. A generic persistence port joins that
+boundary only if lifecycle later owns persistence.
+
+### Device Lab responsibility
+
+The dedicated adapter translates the existing version-1 operation journal and
+CCC owner/device/incarnation identity into lifecycle expectations and builds the
+injected executor/client. Device Lab broker orchestration continues to own
+journal files, state mutation, public error mapping, network allocation, and
+path-fenced artifact cleanup. Together they own VM naming/Notes policy, and the
+broker clears the journal only after a typed settled result and existing
+completion rules. When the expected ID is absent, the adapter checks the exact
+expected name before reporting absence, so a replacement/different-ID VM fences
+all cleanup. The adapter also recomputes a shared broker deadline before each
+low-level transport invocation in a multi-step reconciliation.
+The adapter executes the library's digest-verified source through the exported
+fixed `-Command` bootstrap and bounded stdin-envelope helper. It never reopens
+that source with `-File`, so the production consumer and standalone proof share
+the same check/use-safe transport contract.
+
+The broker capability `hyper-v-windows-library-v17` is the current compatibility
+fence. Version 8 introduced the exact `Get-VM` no-match confirmation semantics
+above. Version 7 was already advertised when those
+asset bytes and their digest changed, so a same-package-version v7 broker could
+pass startup attestation, retain the previous digest in memory, and reject the
+current on-disk asset as an executor failure. Version 9 adds the bounded host
+adapter and Tentative gateway stabilization loop described below. A v8 broker
+already running on the host retains the old three-observation loop in memory,
+so the v9 fence replaces it before another Level 3 attempt. Version 10 adds the
+five-minute no-progress bound for
+valid, unchanged Windows guest-readiness observations. A v9 broker retains the
+full caller timeout in memory, so the v10 fence replaces it before the next
+Level 3 guest boot. Version 11 applies the same five-minute bound to an unchanged
+bounded PowerShell Direct transport reason. A v10 process would still wait the
+full 20 minutes when OOBE never opens a guest session, so the v11 fence replaces
+it before another host run. Version 12 adds explicit allocation-only
+`preserveNetwork` delete recovery. A v11 broker would ignore the forwarded
+option and enter destructive elevated host-fabric cleanup, so the v12 fence
+replaces it before residue recovery. Version 13 adds the required ownership
+Notes field to `Remove-VMNetworkAdapter` and rechecks it immediately before the
+native mutation. A v12 broker holds the earlier three-field removal contract in
+memory, so the v13 fence replaces it before bootstrap teardown. Version 14 adds
+bounded read-only re-observation for a checkpoint inventory mismatch. The Linux
+Level 3 host run on 2026-09-23 reused a broker started before that change; its
+same-version v13 capability passed attestation and the listing still reported
+one missing tracked checkpoint. Requiring v14 makes the existing broker repair
+replace that process before the next Level 3 attempt. The host outcome of the
+new retry remained unverified until the next host run. Version 15 waits for the
+exact `Checkpoint-VM -Passthru` ID, owner-scoped name, and VM ID to appear in
+`Get-VMSnapshot` before Device Lab records a successful create. The v14 host run
+still observed one missing tracked checkpoint after three list reads; the v15
+fence replaces any v14 process before testing the stronger create contract. New
+create journals mark exact-ID confirmation as required before mutation, then
+store the returned ID before observation. Reconciliation preserves unknown or
+absent outcomes and cannot adopt a different same-name checkpoint.
+Version 16 shipped the typed library for the remaining broker paths (status,
+lifecycle, delete and orphan cleanup, guest PowerShell Direct, image
+preparation, and VM console input); the operation asset and its pinned digest
+changed, so a v15 process is replaced before it rejects the new asset. Version
+17 gives the batch exact-name `Get-VM` read the selector's absence rule: the
+`InvalidParameter`/`InvalidArgument` no-match pair is accepted, and either
+no-match pair is proven only by a successful host-wide inventory read. The
+2026-09-27 Level 3 run showed that a v16 process rejects a missing orphan VM
+name as a native error, which blocks every networked create at allocation
+reconciliation; the v17 fence replaces it along with its stale asset digest.
+
+Any later behavior-affecting change to the pinned asset or its production adapter after
+the current capability is advertised must advance the library capability in
+the broker advertisement, CLI requirement, Level 3 requirement, and packaged
+MCP requirement together. The existing
+identity-fenced broker repair then replaces the stale process before provider
+execution; age-based or unconditional restart is not part of this contract.
+
+Level 3 invokes the repair-capable CLI status once per attestation attempt, then
+confirms its OS-verified broker identity with two independent read-only loopback
+status requests. It never uses another repair-capable status invocation as an
+observation because that command may replace the process it is meant to check.
+When only PID or start time changes, Level 3 repeats the complete attestation up
+to three times inside the existing repair deadline. It accepts only an attempt
+where all three identities agree. Missing capabilities, malformed status,
+invalid ports, failed loopback probes, and persistent process churn remain
+fail-closed.
+
+For a stable start/stop mismatch, broker orchestration performs the one typed
+pending action and re-inspects; it mutates state and clears the journal only
+after the fresh outcome is settled.
+
+The first production migration was deliberately narrow: operation
+reconciliation, including delete reconciliation and the zero-attached-disk
+residue case, moved through the new boundary. Later roadmap slices move one
+coherent production path at a time. Image, unmigrated networking,
+guest setup/transport, and ordinary lifecycle call sites may remain on legacy
+host-control helpers until their named slice is complete. Actual Windows and
+Linux VM creation now uses the typed creation plan and native VM operations;
+the legacy generated create command remains only for validation and dry-run
+projection.
+
+## Migration roadmap
+
+`src/host-control/hyper-v` is migrated into the library one slice at a time. The
+agreed scope is Hyper-V primitives plus VHD manipulation; image download/hash
+acquisition and the Linux SSH/cloud-init paths stay in host-control because they
+are not Hyper-V operations and would contradict this boundary.
+
+| Slice | Legacy commands retired | Low-level operations added |
+|---|---|---|
+| 1. Snapshots (done) | `hyperVSnapshotCreateCommand`, `hyperVSnapshotDeleteCommand`, `hyperVSnapshotRestoreCommand` | `Get-VMSnapshot`, `Checkpoint-VM`, `Remove-VMSnapshot`, `Restore-VMSnapshot` |
+| 2A. Host networking | host-fabric portions of `hyperVEnsureNetworkCommand`, `hyperVCleanupNetworkCommand`, and `hyperVInspectNetworkAllocationsCommand` | switch, host-adapter/interface, gateway, NAT, attachment, and bounded exact-name VM inventory primitives |
+| 2B. VM networking (done) | `hyperVBootstrapNetworkCommand`, `hyperVBootstrapNetworkCleanupCommand` | VM-scoped and management-OS `Get-VMNetworkAdapter`, `Get-NetNeighbor`, `Remove-VMNetworkAdapter` |
+| 2C. Setup-network retirement (done) | private network ensure logic embedded in the Windows setup command | reuses the typed 2A adapter; no second host-fabric implementation |
+| 3A. Creation primitives and compensation (done) | none yet — nothing is routed | `New-VM`, `Set-VM`, `Set-VMMemory`, `Set-VMProcessor`, `Get-VMFirmware`, `Set-VMFirmware`, `Set-VMBios`, `Add-VMNetworkAdapter`, `Rename-VMNetworkAdapter`, `Set-VMNetworkAdapter` |
+| 3B. The create transaction moves (done in source; Windows host proof pending) | `hyperVCreateCommand` in actual creation | `Get-VMBios` for generation 1 boot readback; routes 3A's primitives and moves host capacity, hashing and the disk copy into Node; a narrow host prologue retains Windows reparse and ACL checks |
+| 3C. VHD (phased; 3C-1 Get-VHD create inspection in source) | the temporary create inspection bridge first; the VHD portion of `hyperVPrepareBaseImageCommand` in a later transaction | `Get-VHD` first; `Mount-VHD`, `Dismount-VHD`, `Convert-VHD`, `Resize-VHD` with their production transactions; `New-VHD` and `Optimize-VHD` when a production caller exists |
+| 4. Guest PowerShell Direct | `hyperVGuestExecCommand`, `hyperVGuestUploadCommand`, `hyperVGuestDownloadCommand`, `hyperVGuestReadyCommand`, `hyperVGuestBootDiagnosticCommand`, `hyperVGuestProvisionCommand` | PowerShell Direct session primitives |
+| 5. Lifecycle residue | `hyperVStatusCommand`, `hyperVRebootCommand`, `hyperVDeleteCommand`, `hyperVRecoverOrphanCommand` | typed status composition first, then `Restart-VM` and adapter migration onto the existing operations |
+
+The 3C-1 production seam is the base/clone inspection in actual VM creation.
+Typed `Get-VHD` reports native metadata; Device Lab checks owner-root containment,
+VHDX format, parent/type and exact cloned virtual size. Imported and automatic
+image preparation are separate production transactions.
+
+The 3C-2 imported-image seam uses the newly staged owner-private source as the
+only mount target. Typed `Get-VHD`, `Mount-VHD`, and `Dismount-VHD` remain native
+operations; Device Lab owns the Storage partition-style read, hashes, file
+publication, manifest, and the bounded dismount recovery after an uncertain
+mount response. Mounting a unique staged file permits path-based cleanup
+without dismounting a pre-existing base.
+
+The 3C-3 automatic-image seam spans both catalog profiles. The low-level layer
+maps `Get-VHD`, `Convert-VHD`, and `Resize-VHD` to one native target each and
+accepts a bounded longer timeout for conversion and resize within the existing
+acquisition deadline. Device Lab orchestrates the preparation, typed VHD calls,
+and finalization. Download, QEMU, hashes, ACLs, path ownership, content
+comparison, publication, manifests, and public diagnostics stay outside the
+low-level library. Because typed calls run in separate PowerShell processes,
+phase boundaries reopen and revalidate files rather than depending on the
+monolithic acquisition script's long-lived file handles. An uncertain VHD
+mutation cannot authorize image or manifest publication. A lost finalization
+response or later validation failure retains the unmanifested base for guarded
+recovery, at the original path or a unique retained path when a validated prior
+pair must be restored. A hash or post-hoc path stat alone cannot prove that
+this transaction created it. An interrupted prior-pair retirement is recovered
+before a new acquisition attempt.
+
+### Networking slice boundary
+
+Slice 2A is a complete vertical migration of the Device Lab host-fabric path,
+not a second implementation that is run alongside the legacy path. It covers
+internal switch inspection/creation/notes repair/removal, the host `vEthernet`
+adapter and IPv4 gateway, NAT, attachment inspection, and the bounded exact-name
+VM inventory used to validate address allocations. The production broker
+composition always supplies the typed host-network adapter. The old host-fabric
+helpers remain reachable only through the explicit injected compatibility seam
+used by legacy regression tests and source-level rollback; the broker never
+dual-runs or dual-writes both paths.
+
+Broker composition represents that routing seam as a closed `hostFabric`
+union: `typed`, `legacy-compatibility`, or `unavailable`. A runtime cannot carry
+typed and legacy executors at the same time.
+
+The dependency direction for this slice is strict:
+
+```text
+hyper-v-windows/low-level
+    -> hyper-v-windows network reconciliation
+        -> Device Lab Hyper-V network adapter
+```
+
+This diagram shows the direction in which decoded facts and typed outcomes
+flow. Imports point the other way: the adapter imports reconciliation, and
+reconciliation imports low-level. Low-level remains a native-faithful mapping;
+network reconciliation owns the generic inspect → decide → execute one
+primitive → inspect sequence; the adapter alone owns CCC markers,
+owner/device/incarnation policy, persistence, UAC presentation, and public
+error/status mapping. “Network reconciliation” does not alter VM start/stop
+timing or the general VM lifecycle policy.
+
+Slice 2B (done) moved the two bootstrap commands the roadmap names. Slice 2C
+(done) removed the private network ensure implementation embedded in Windows
+setup. Image acquisition and the Linux SSH/cloud-init paths remain in
+host-control: they are not Hyper-V primitives and are not part of any slice 2
+claim.
+
+### Broker elevation gate
+
+Every broker administrator transaction opens its own callback-scoped executor,
+and each scope makes one RunAs attempt. Nothing remembered a declined or
+unanswered prompt, so each later administrator need in the same broker asked
+again; an unattended host has nobody to answer. The broker now holds an
+elevation gate (`src/device-lab/broker/hyper-v/elevation-gate.ts`) with two
+states, `never-asked` and `refused{code,at}`:
+
+- A refusal sticks when the scope raised a prompt and the relay never became
+  ready. `request-failed`, `launch-failed`, `relay-spawn-failed`, and
+  `executable-rejected` settle before any prompt and stay retryable. A prompt
+  whose relay reports nothing before the scope closes records `scope-closed`.
+- An approval is not recorded; the next administrator need asks again.
+- While refused, no relay starts and no REQUEST line is written. The
+  transaction runs against an executor that fails every call with
+  `hyper-v-network-elevation-suppressed`. That code is in the adapter's
+  proven-not-started set, so it never makes a mutation indeterminate, and a
+  relay that reports it is read as `protocol-invalid`.
+- Attempts are serialized, so a second transaction waits for the first one's
+  verdict instead of raising its own prompt.
+- The gate can only deny. It lives in memory in one broker process, is never
+  persisted or shared, and no RPC or parameter re-enables elevation. The broker
+  `/status` reports it as `hyperVElevationGate`; the Level 3 broker preflight
+  prints it and, while it is `refused`, stops the run before any step starts,
+  the non-Hyper-V Level 3 steps included.
+  Restarting the broker clears it; `ccc devices setup hyper-v --confirm` runs in
+  its own process with its own gate.
+
+The broker log records each attempt as a timestamped `REQUEST` line with its
+purpose (`ensure`, `cleanup`, or `unspecified` when a caller names none), its
+outcome as an `ELEVATION` line, and each suppressed transaction as `SUPPRESSED`;
+the lines carry bounded enums only, no paths or host text.
+Together with keeping the shared fabric when a failed create is compensated
+(`doc/device-lab/REQ__hyper-v-network-teardown-identity.md`), this bounds an
+unattended run to no prompt when the fabric exists and at most one when it does
+not. A reusable elevated-session lease was rejected: it would widen the elevated
+surface without improving that bound.
+
+### What slice 3A settled
+
+**Slice 3 is three slices, and not for the reason first assumed.** The expected
+difficulty was rollback atomicity. Measuring `hyperVCreateCommand` found two
+larger facts. Roughly 60% of its 261 lines contain no Hyper-V cmdlet at all —
+host capacity via CIM, `Get-PSDrive`, reparse-point checks, ACL application and
+verification, SHA-256 over a multi-GB file, and a streaming byte copy. Under
+this ADR those do not belong in `hyper-v-windows/`, by the same rule that keeps
+image acquisition in host-control. They also need not stay in PowerShell:
+`providerCommandForCreate` already calls `lstatSync` on the base image, so the
+broker's Node process reaches that filesystem directly.
+
+The second fact is the harder one. Slices 2A and 2B replaced a seam inside an
+`async` path. Creation is not reached that way — `providerCommandForCreate` is
+**synchronous** and returns a command descriptor for something else to run
+later. So creation cannot be migrated by substituting a typed client at the call
+site; the call site has to stop being a descriptor builder. That is a change to
+how creation is dispatched, not to how it is implemented, and it is why the
+slice is large.
+
+**Compensation derives from what was done, never from what was asked.** The
+legacy rollback kept `$CreatedVm` and `$DeviceRootExisted` and consulted those,
+not the request. That is reproduced here as recorded effects: a directory that
+already existed produces no effect, so nothing can remove it. Creation deleting
+a device root it found rather than made is the failure this shape exists to
+prevent, and re-deriving the undo from the request is exactly how that happens.
+
+**An effect is recorded when the host object appears, not when the step ends.**
+The two are different only for the base-image copy, and that is the case that
+matters: a copy that creates its destination and then fails on a hash or length
+mismatch has already put a partial multi-gigabyte VHDX in the device root.
+Recording on success would produce no `file-created` effect and therefore no
+`delete-file`, leaving it there — the effect-derived plan would be strictly
+weaker than the `catch` it replaces, which deleted the disk path unconditionally.
+So the timing is part of the contract rather than an executor detail.
+
+**The plan says `AutomaticCheckpointsEnabled $false`, typed as a literal.** On a
+client Hyper-V host automatic checkpoints default ON, and then every `Start-VM`
+of a device switches its OS disk onto an AVHDX differencing chain: the
+created-disk identity check no longer describes what the VM boots, the snapshot
+machinery collides with checkpoints nobody asked for, and storage grows silently.
+`CheckpointType` does not cover it — that picks which kind of checkpoint is
+taken, not whether the host takes one unasked. The field is `false` rather than
+`boolean` because there is no correct `true` here; it can widen the day a caller
+needs one, and widening a literal is compatible where narrowing later would not
+be. The first version of the plan dropped the flag while every other layer kept
+it, which is the shape of omission a whole-plan assertion catches and a
+shape-only assertion pins as correct.
+
+Effects are undone in reverse, because the later a change was made the more it
+depends on the earlier ones — the VM holds its disk, the directory holds the
+disk. Applied to what the legacy script recorded, reverse order reproduces its
+rollback sequence exactly, which is how the two were checked against each other.
+Each entry is independent and best-effort, as the legacy `catch` was: a caller
+that stops at the first failure leaves the residue the rest exists to clear.
+
+**One step, one cmdlet — which cost `configure-firmware` its second job.** Every
+step kind names exactly one native cmdlet, except that firmware configuration
+named two: `Set-VMBios` for generation 1 and `Set-VMFirmware` for generation 2.
+Carrying both on one kind meant the step also carried a first-boot disk path
+that generation 1 has no use for, since `Set-VMBios` resolves no disk — a field
+no decision reads, which this slice adopted as a defect in its own right.
+
+Splitting it produced a fact worth recording, because the obvious fix does not
+work: two members distinguished only by `firmware.generation` change nothing,
+as TypeScript does not narrow a union by a nested property. A consumer would
+still hold an unnarrowable union. The discriminant has to be `kind`, which is
+what every other step already uses, so the split restores the one-cmdlet rule
+and makes the absent field absent to a consumer rather than only on paper.
+
+**Generation and firmware are one value.** A generation-1 VM has a BIOS and no
+firmware object; a generation-2 VM has firmware and no BIOS. The legacy command
+carried the generation as a number beside the settings it applied, so nothing
+stopped the wrong branch being written, and "Secure Boot on generation 1" needed
+a runtime `throw` reached only on a real host. Modelled as a union, the pairing
+is the type: only by narrowing the union does a caller reach a startup order or
+a Secure Boot setting, and the two are on opposite members, so no code path
+holds both. The primitives sit one level below that and take the settings
+themselves — `Set-VMBios` a startup order, `Set-VMFirmware` a Secure Boot
+setting — rather than a member of the union; the planner is the only thing that
+unpacks it, and it cannot cross the branches. Secure Boot disabled with a
+template — which native rejects — cannot be written either. These are pinned by
+a type-contract file that fails by compiling.
+
+**`New-VM` returns the VM it made.** Every later step selects by that id. A
+creating call that returned nothing would force a read-back by name, and a name
+is not unique until the VM exists — so the read-back would be the one step that
+cannot tell its own VM from someone else's.
+
+### What slice 2B settled
+
+**The VM adapter work inside VM creation is not slice 2B.** Every adapter
+mutation in `hyperVCreateCommand` sits between `New-VM` and a single `catch`
+whose rollback is one `Remove-VM`, which takes the adapters with it. Extracting
+those calls into N typed round trips would trade Hyper-V's free all-or-nothing
+rollback for a half-configured VM that ccc must reconcile itself. That cost is
+only worth paying when the whole creation transaction moves, which is slice 3.
+The bootstrap read embedded in the cloud-init seed stays out for the same reason
+the rest of that path does.
+
+**Slice 2B inherits none of 2A's elevation machinery.** Both commands ran at
+ordinary privilege and still do: the VM already exists and its adapters belong
+to it. No part of this path may construct an administrator-scoped executor, and
+a test asserts that against the source, because the invariant is about what the
+code may reach rather than about a value. Teardown is contained to one adapter
+on one owned VM, so it needs no crash-recovery intent journal either. What it
+does keep is the host-wide containment re-check after removal: that is the
+property proving the address is free for the next device that derives it.
+
+**Slice 2B's original compatibility rationale is superseded.** For 2A the
+legacy host-fabric helpers run only through the explicit injected seam, as
+stated above. Slice 2B originally retained a second PowerShell lookup and a
+`legacy-compatibility` branch if that lookup failed. A later caller audit found
+that Hyper-V lifecycle command construction already rejects a missing executable
+and passes the selected path to bootstrap discovery and teardown. The second
+lookup did not establish a supported additional runtime; it could only change
+the route after the lifecycle command was built. The live VM bootstrap branch
+was therefore retired while the exported legacy generators stayed available
+for compatibility consumers and direct tests.
+
+**A decision reads only what it decides from.** Bootstrap teardown originally
+took the same host observation discovery takes, though it consults only the VM's
+own adapters. The extra reads were not merely wasted: teardown runs on the
+success path of a device start, so a failure in any of them reported a guest
+that had booted and finalized as a failed start — a way to fail that the legacy
+command, with its three native calls, did not have. The fix is in the signature
+rather than in the call: `planHyperVBootstrapTeardown` takes adapters, so the
+wide read is not expressible. Reviews of later slices should treat "this
+observation carries fields this decision never reads" as a defect, not as
+tidiness.
+
+**A native value must be validated once, by the strictest rule that will be
+applied to it.** Candidate addresses were screened by a lax pattern and then
+handed to a parser that throws on a stricter one, so a shape the screen admitted
+and the parser refused — a leading zero, say — threw out of the whole discovery
+pass. That is exactly the behaviour the departure note above claims was removed;
+it held only for the one case a test pinned. Where a guard exists so that bad
+input is skipped rather than fatal, the guard has to be at least as strict as
+every parser downstream of it, and that relationship belongs in a comment beside
+the guard, since nothing in the types enforces it.
+
+**A MAC address is an opaque value with one canonical form.** Native spells it
+three ways depending on the cmdlet — bare hex from `Get-VMNetworkAdapter`,
+hyphen groups from `Get-NetNeighbor` — and ccc records its own with colons.
+Reconciling those per call site is how a destructive adapter removal silently
+selects the wrong adapter, because a spelling mismatch does not fail loudly. The
+all-zero address native reports for an unassigned adapter decodes to absent, not
+to a value: absent is the one representation no identity comparison can match.
+
+**Ownership is proved with the same marker the PowerShell embedded**, not a
+second copy of the format, because two copies can drift and a drifted marker
+makes the check fail or — worse — pass wrongly. `Get-VM` by exact name already
+returns id, name and notes, so this needed no new primitive.
+
+**Two deliberate departures from the PowerShell, both losing less.** A candidate
+address with an octet above 255 reached `[Net.IPAddress]::Parse` and threw,
+which failed the whole discovery pass and reported no addresses at all; it is
+now skipped, which cannot lose a valid address. And host prefixes are still
+found by interface alias when the management adapter read comes back empty —
+that branch existed in the PowerShell, and dropping it would have turned a
+recoverable gap into failed discovery.
+
+Host-network values that are easy to confuse are opaque validated values, not
+interchangeable strings or numbers. PowerShell and persisted JSON enter as
+`unknown` and cross the boundary only through exact decoders and safe factories.
+The low-level protocol exposes one target Windows/Hyper-V primitive per request;
+it does not accept a fake VM selector for a host-wide operation. Closed
+reconciliation unions carry the exact identity evidence required by mutation,
+so invalid cleanup/adoption combinations are not representable as independent
+booleans. Their operation parameter also correlates ensure outcomes with only
+ensure action receipts and cleanup outcomes with only cleanup action receipts;
+conflict and indeterminate reasons are operation-specific too, including in the
+default exported union used without a generic argument.
+
+Privilege is runtime evidence, not a TypeScript brand. Ordinary inspection
+produces a typed decision before UAC. After consent, the transaction obtains one
+callback-scoped administrator executor and inspects again before its first
+mutation, because host state may have changed while consent was pending. A
+mutation whose response is lost is indeterminate and is never blindly replayed;
+exact ID/name reinspection must prove success or absence, while a same-name,
+different-ID successor is a conflict. Cleanup likewise rechecks VM attachments
+after elevation and removes only proven identities in NAT → gateway → switch
+order.
+
+Administrator-session shutdown uses nested bounded windows. The elevated child
+does not prove its own termination, and the medium-integrity relay cannot be
+trusted to force-stop a higher-integrity process. Windows anonymous pipes do
+not support overlapped read/write, so a PowerShell 5.1 asynchronous copy from
+redirected stdin is not used as a completion signal. The relay instead forwards
+the existing bounded line protocol synchronously: one request is flushed into
+the administrator pipe and its one response is flushed to Node before the next
+input line. The session already permits only one in-flight request, so this
+removes concurrency without reducing supported throughput. Idle normal scope closure that
+begins before deadline handling therefore disarms the relay's operation timer
+and sends the relay a close-control frame containing its private terminal token
+and an absolute five-second finalization deadline computed at scope close. The
+relay validates both and forwards only the existing child close marker through
+the authenticated session pipe, keeping its token out of the elevated child.
+Node ends relay stdin only after the control-frame write callback confirms the ordered
+bytes were accepted. A separate one-second handoff bound fails as
+`relay-input-write` and enters abrupt shutdown if that callback stalls, preserving
+margin before the ten-second relay owner. The relay recognizes and flushes the
+exact close line, then stops accepting input without waiting for stdin EOF.
+After exact elevated-child termination reinspection and pipe cleanup, the relay
+emits a terminal acknowledgement carrying a
+separate random token unavailable to the elevated child. Terminal failure and
+acknowledgement lines use the same synchronous stdout writer that already
+flushed each response, so there is no concurrent output-copy writer and the last
+response is ordered before terminal output. A terminal
+acknowledgement is accepted only after normal scope closure begins, and no later
+stdout line is permitted.
+Any unterminated stdout bytes at EOF enter the typed termination-failure path
+even during abrupt shutdown, so they cannot replace a previous termination
+failure with an ignorable primary failure.
+Successful completion then requires the
+acknowledgement, complete relay-stdout drainage, and the exact relay process
+exit in either order. Waiting for stdout EOF validates every terminal protocol
+line without depending on the later stdio-close event. Any bounded primary
+relay-completion failure rejects an otherwise successful callback; an existing
+thrown callback failure or direct execution result carrying the same bounded
+code and a valid execution-result shape is preserved unless termination identity
+is uncertain. A generic object with a coincidental `error` property is not an
+execution result. Pending or queued work,
+an expired deadline, and every abrupt failure
+retain the force-stop path; the elevated watchdog remains transaction-deadline
+bound. This prevents a close frame from sitting behind an unconfirmed mutation
+or entering an unfinished handshake without extending an orphaned administrator
+process beyond its existing watchdog contract. After the child close line is
+flushed, the medium-integrity PowerShell relay uses the remaining part of the
+Node-authored absolute five-second window to confirm the exact elevated process
+exit. The relay subtracts a fixed 500-millisecond force-stop confirmation reserve
+before every graceful-wait calculation, including after delayed relay reads. The relay emits
+`hyper-v-network-elevation-termination-unconfirmed` if the same process remains.
+The Node parent independently gives the PowerShell relay a strictly longer
+ten-second grace from the same scope-closure instant before forcing the
+Node-owned relay process. The absolute inner deadline cannot slide when relay
+scheduling or pipe reads are delayed.
+The callback wrapper waits a third, strictly longer fifteen-second window so
+that asynchronous process-close delivery after the ten-second force fallback
+can publish its terminal result. Once graceful close has begun, these windows
+are not recomputed from the operation deadline. Equal adjacent windows are
+invalid: timer jitter can let an outer owner erase the inner owner's terminal
+result and misclassify it as a different termination uncertainty. The stable
+error retains a bounded stage (`elevated-child`, `relay-terminal-ack-missing`,
+`relay-terminal-ack-invalid`, `relay-process-exit-timeout`,
+`relay-output-drain-timeout`, `relay-input-write`, or
+`relay-completion-timeout`) rather than native text.
+The standalone proof prints that stage separately while its failure text stays
+stable. Because an abrupt discard intentionally sends no close-control frame
+and therefore cannot produce a terminal acknowledgement, an acknowledgement
+fallback alone does not identify the failed boundary. The Node owner retains a
+bounded diagnostic snapshot: graceful versus abrupt shutdown (including escalation
+from graceful handoff to abrupt force-stop), the last closed-set operation or a
+correlated operation/session-error pair, close-write state, relay exit/stdout/stderr/force-event
+booleans, exact scope-close-time caller-active and delivered-pending execution
+counts, and the last
+token-correlated closed-set relay progress stage. Relay
+progress frames are filtered control traffic and never contain native output,
+paths, PIDs, or the token in reported diagnostics. This keeps real-host
+investigation actionable without treating progress as success evidence or
+weakening the acknowledgement and exact-process checks. Unknown-error extraction
+and optional injected diagnostic providers are runtime-validated and copied against
+private immutable membership tables backed by declaration-frozen authoritative
+operation and session-error tuples; invalid or throwing providers contribute a
+null relay snapshot, retain valid typed execution evidence, and cannot replace
+the stable error. Relays without that optional provider remain type-compatible.
+An admitted cancellation or deadline-expired call becomes the last known
+operation unless an earlier session error has already sealed its correlated
+operation/error pair. A transport write that explicitly reports non-delivery is
+excluded from the delivered-pending count. Fatal protocol rejection is an
+absorbing control-parser state: stdout is still drained, but no later line may
+change failure, progress, or session evidence. The elevated child's explicit
+termination-unconfirmed failure is absorbing as well.
+Non-control stdout before relay readiness is also absorbing rather than
+discarded, so a desynchronized transcript cannot continue into privileged work.
+Existing primary relay failures outrank later input-write or force
+fallbacks, while a primary failure decoded after a fallback replaces it; only
+the authenticated elevated child's explicit termination result outranks a
+primary failure and cannot be erased by a later relay event. Verification covers
+exception-contained, single-read decoding of injected failure/completion
+providers and arbitrary callback-result access. Malformed or rejected injected
+completion evidence becomes a bounded termination failure rather than native
+text or success. Session notification is distinct from relay completion: a
+request-write failure releases session callers promptly, then the relay owner
+still waits for exact process exit and stdout drainage under its force bound.
+The wrapper watchdog remains referenced only while its completion race is
+pending, is cleared on the other branch, and best-effort kills the exact relay
+before surfacing invalid, rejected, or timed-out completion evidence.
+Verification also covers the close-frame-write-before-stdin-EOF ordering, independence from redirected
+stdin EOF, synchronous request/response forwarding, the 500-millisecond reserve
+under delayed close reads, terminal-ack and process-exit
+arrival in either order, stdout
+drainage before success including exit-before-duplicate-ack, rejection of
+premature and post-terminal lines, independence from stdio close, completion after the
+ten-second force window, disarming the relay operation timer, idle gating,
+abrupt discard, stage correlation, and fail-closed termination at the
+fifteen-second wrapper bound.
+
+Device Lab continues to own and encode version-1 network intent/state. New
+token-scoped intent checkpoints exact switch, gateway, and NAT receipts after
+fresh reinspection confirms each typed mutation and before the next primitive,
+so recovery can reconcile creations made before the final allocation-state
+commit. Cleanup similarly clears each exact managed-resource flag after fresh
+absence confirmation and before the next removal. These are intentional
+semantic checkpoints: a later failure may leave a valid earlier receipt or
+removal checkpoint. Each individual checkpoint still uses atomic file
+replacement, so readers never observe torn JSON, and a revision conflict does
+not overwrite newer bytes. Existing v1 records remain conservatively readable;
+this slice changes neither required fields and filenames nor public
+response/status shapes.
+
+An exact receipt is a fence, not an immortal identifier. If fresh inspection
+proves its resource absent, a confirmed replacement may supersede it; replacing
+a switch also invalidates any gateway receipt tied to the predecessor. A
+same-name resource observed while the old exact ID still exists remains a
+successor conflict. Compatible stable↔token adoption first atomically aligns the
+intent identity and records its adopted ownership origin, preventing
+partial-fabric receipts from contradicting their top-level journal or a restart
+from widening ownership over pre-existing resources. Existing current state is
+likewise checkpointed as one correlated marker/NAT identity before any missing
+resource mutation, so later per-action receipts cannot mix the old and new
+identities. The final cleanup removal deletes the state file as its terminal
+checkpoint, so a crash before the caller returns resumes as already complete
+rather than as an unmanaged stale identity.
+
+Snapshot journal repair now uses a typed native `Repair-VMSnapshotState`
+transaction. It keeps policy restoration, readback, and failed-restore
+quarantine inside one owner-fenced native execution. Splitting those steps
+across typed calls would leave a gap between the ownership read and `Set-VM`.
+Device Lab still owns the journal, checkpoint name, expected policy, and
+post-repair status confirmation. The older host-control repair asset remains
+packaged for compatibility, with no live broker caller.
+
+Each slice moves consumer policy into the Device Lab adapter rather than into the
+library. Slice 1 moved ownership fencing, delete confirmation by observation, and
+restore stop/start sequencing out of generated PowerShell and into
+`src/device-lab/broker/hyper-v/snapshots.ts`. Owner-scoped checkpoint naming
+(`hyperVSnapshotName`) and the checkpoint-policy assertion stay in the broker
+preflight in `src/device-lab-broker.ts`, where they already were; the adapter
+receives the resolved provider name and never derives it.
+
+Each slice also costs provider round trips, because the library issues one
+primitive per call where a generated script could batch several. Slice 1 raised
+the Windows lifecycle test's provider call count from 90 to 105.
+
+### The round trips are cheap; the process was not
+
+That count is now a poor proxy for cost. The expense was never the fork — it was
+`Import-Module -Force` running inside every one, which the pinned asset did on
+each invocation. The library can therefore serve many primitives from one reused
+PowerShell process, and the asset skips the reimport when the trusted module is
+already loaded from the expected base. A slice's round-trip count still matters
+for latency, but it no longer multiplies a module load.
+
+**Batching was considered and rejected, and the reasoning should not be
+re-derived.** The adapter flows are dependent chains, not independent sets:
+`deleteDeviceLabHyperVSnapshot` is `getVMSnapshots` →
+`removeVMSnapshot(snapshot.id)` → `getVMSnapshots`, where each request needs the
+previous response to exist. Nothing can be sent together, so a batch envelope
+removes no round trip from the flows that actually cost. Session reuse pays the
+module load once whatever the call graph looks like; batching would still pay it
+once per flow. If a future slice introduces genuinely independent operations,
+batching can be added over the session transport — but it is not the answer to
+the cost recorded above.
+
+The loop lives in the session bootstrap, never in the pinned asset. Both
+transports execute a byte-identical artifact, which is what stops the one-shot
+path and the session path from diverging; if that ever stops being true, every
+adapter test proves less than it appears to, because they all exercise the
+one-shot path.
+
+The session is created only when the broker owns process execution. An injected
+command runner means the caller owns it, and a long-lived child spawned behind
+that seam would run work the caller never saw.
+
+**The asset must never call `exit`, and this is load-bearing rather than
+stylistic.** PowerShell's `exit` is not scoped to a script block: under
+`& ([ScriptBlock]::Create($source))` — how both transports invoke the asset — it
+unwinds past the caller instead of returning to it. The first session
+implementation kept the asset's `exit 1` on the failure path, which aborted the
+`Out-String` pipeline that was capturing the failure envelope and terminated the
+child. An ordinary `virtual-machine-not-found` — the condition every ownership
+fence and every reconcile exists to discover — therefore reached callers as a
+non-retryable `hyper-v-windows-transport` instead of a typed native error, and
+cost a process spawn and module load per occurrence. `try`/`catch` is no defence:
+`exit` raises a flow-control exception, which `catch` does not intercept.
+
+The asset now resets `$global:CccHyperVExitCode` on entry and sets it to 1 on the
+failure path, and each bootstrap decides what to do with it — the one-shot
+bootstrap exits with it at the top level of `-Command`, where there is nothing
+left to unwind past, and the session bootstrap reports it as the response frame's
+exit status. That is what makes the two transports produce identical
+`HyperVWindowsExecutionResult`s for identical host conditions.
+
+The bootstrap clears `$global:CccHyperVJsonInput` and resets
+`$global:PSDefaultParameterValues` between requests. **That list can never be
+complete, and does not need to be.** Functions and aliases defined during
+`& $Operation` land in the invocation's child scope and die with it — the same
+mechanism that already keeps the asset's own helpers from leaking.
+`$PSDefaultParameterValues` is different in kind: it is consulted by dynamic
+scope lookup, so a global one is honoured, nothing disposes of it, and it would
+silently re-aim the pinned asset's cmdlet calls for every later owner without
+changing a byte of the hashed asset — `Remove-VMSnapshot`'s
+`-IncludeAllChildSnapshots` being the obvious one. The actual invariant is that
+the hash-pinned asset is the only code that runs in that runspace; these two
+resets are belt-and-braces for the one variable that could re-aim it silently.
+`$env:` is the only other member of that class and is deliberately not reset —
+the child legitimately needs its inherited environment.
+
+**Two signals decide whether a request reached the child, and only one of them is
+load-bearing.** The latch is: did the child emit the ready marker? The bootstrap
+writes and flushes it immediately *before* entering the read loop, so a child that
+has not announced cannot have reached that loop, which proves nothing sent was
+executed. That is a logical invariant, it is deterministic, and it is the
+mechanism the crash-on-start fallback actually rests on.
+
+Two narrower versions were tried and are both worse. Latching on *any* byte
+counts a child that writes a startup banner and dies as having spoken, so its
+request is not re-issued when it safely could be. Gating on the marker reaching
+the *session's* line listener is unsound in the dangerous direction: that listener
+is attached later, inside `ensureChild`, so the marker can be emitted first and
+lost, and concluding "never announced" from a lost marker moves a request toward
+being retried. The latch here is set by the pool's own line handler, attached
+synchronously at spawn, so it cannot miss it.
+
+The write completion callback is the secondary signal and does **not** answer the
+same question. It reports whether the bytes left this process, not whether
+anything read them: a write into a pipe succeeds into the kernel buffer whether
+or not the reader is alive, so measured against an instantly-dying child on Linux
+it identified the case 2/30. It is kept because it is sound where it does fire,
+and because raising the failure from inside it orders the correction ahead of
+`failAll`. It must never be combined with the latch: the callback runs before any
+of the child's output can be delivered, so consulting the latch there reads
+"never announced" even for a child that had — which measured 3/40 as a false
+never-ran, the direction that duplicates a mutation.
+
+**The never-ran classification is checked, not trusted.** The write-path codes
+mean "this frame never reached the child", and that is what makes the broker
+re-issue them — so believing the reason string would make the safety of a
+duplicate `Remove-VMSnapshot` a contract on whatever implements
+`HyperVWindowsSessionProcess`, enforced only by prose in a different file. The
+session records whether each request's write reported reaching the pipe — the
+completion callback, not the return, which proves nothing — and reports a
+delivered request as an exit no matter what reason arrives. QA demonstrated the gap with a
+fully conforming process that accepted the frame and then reported
+`stdin-failed`; the shipped implementation never does that, which is exactly why
+nothing would have caught it.
+
+State the boundary as it now stands rather than as it was: **the process is
+trusted for delivery, not for classification.** It asserts one bit — that a
+particular write did not reach the pipe — and that bit is believed. It is not
+trusted to name what happened, which is what the check above removes. The default
+is the safe one: a process that never reports delivery is treated as having
+delivered, so an implementation that does not cooperate can only cause hard
+failures, never a duplicate mutation.
+
+Two related constraints on the session bootstrap follow from the same reasoning.
+The reply is joined, not piped through `Out-String`, because `Out-String` formats
+to a host width and is free to break a long JSON envelope into lines the reader
+would reject as `response-malformed`. And `2>&1` is not used, because merging the
+error stream into machine-readable output corrupts it; the session owner drains
+stderr separately.
+
+**A caller's deadline and the child's health are separate questions, and
+conflating them is worse than either alone.** The broker bounds each primitive by
+what is left of its operation deadline, and `hyperVRemainingTimeout` floors that
+at 1ms, so a caller can legitimately arrive with almost no budget. The first
+implementation let that one caller's timeout discard the session — killing a
+child every other concurrent flow was using, failing all of them with an error
+that is deliberately not retryable, and making the next primitive pay the
+PowerShell start and module load this slice exists to remove. The caller's
+deadline now settles only that caller and leaves the request pending; a late but
+correlated reply still clears it and still counts as a productive session. A
+separate health floor, matched to the library's per-execution ceiling, is what
+concludes the child is wedged.
+
+The corollary is that the request queue is released when the request leaves the
+pipe, not when its caller stops waiting. Releasing on the caller broke the
+one-request-at-a-time invariant the transport depends on — measured, six frames
+were written to a child that had answered nothing — and started each queued
+caller's deadline against work it had not reached, timing it out for someone
+else's stall. A caller that gives up therefore still holds the pipe until the
+child answers or the health floor fires.
+
+That leaves one wedged operation blocking the pipe for up to the health floor,
+which on its own would be a real availability regression against the one-shot
+transport: there, four callers behind a wedged one got four healthy processes,
+because a session is shared process-wide while a one-shot execution is not. The
+resolution is classification, not a shorter floor. A caller whose deadline
+expires **while still queued** provably never ran — its frame was never written.
+That is the same proof `SESSION_NEVER_RAN_ERRORS` already rests on, so it gets
+its own code, `hyper-v-windows-session-queue-timeout`, and the broker serves it
+one-shot. A caller whose frame *was* written keeps
+`hyper-v-windows-session-timeout` and still fails outright, because the host may
+already have done the work. The pipe blocks; the other callers do not.
+
+That fraction is sized for pipe contention between runnable primitives, and
+the callback-scoped administrator executor is the one place it was measured
+against something else. Its first primitive starts the relay and therefore
+holds the pipe through UAC consent, elevated-child start, pipe handshake, and
+session bootstrap. The real network proof issues five inspection primitives
+concurrently, so four sat in the queue behind that start; on a consent slower
+than roughly twenty seconds one of them expired at the thirty-second queue
+fraction, the inspection rejected, and the scope closed abruptly with work
+pending — reported honestly as `relay-terminal-ack-missing` with
+`lastSessionError=hyper-v-windows-session-queue-timeout`, `activeExecutions=4`,
+`pendingExecutions=1`, and relay progress stopped at `runas-returned`. The
+broker adapter issues the same concurrent inspection, so this was a product
+defect, not a proof artifact. Gating only the primitives behind the first was
+not enough: the next real run failed as
+`hyper-v-windows-transport:Get-VMSwitch:executor-failed` with no termination
+diagnostic, which is the starting primitive itself expiring at its own
+120-second ceiling — its caller deadline and the health floor both begin at
+`execute`, and the session starts its child only from a request, so the first
+primitive of a scope was paying for the consent. The resolution keeps every
+per-primitive budget and moves the start out of them: the session exposes a
+request-free `start()`, the scope calls it and then awaits the relay's readiness
+promise (settled on the relay-ready marker or on completion), and no primitive
+enters the session before that. The wait is bounded by the relay's own
+deadline and the abort signals, and the elevation deadline is re-checked after
+it, so no primitive gains budget. Once the relay is ready every budget,
+including the queue fraction, applies unchanged. Session error codes are
+forwarded through the network client as bounded transport codes for the same
+reason the termination stage is printed: a failure that reads only
+`executor-failed` cannot be distinguished on the next run.
+
+With both budgets out of the way the next real run reported the relay's own
+`hyper-v-network-elevation-handshake-timeout`: consent was granted, the child
+was launched, and it never connected to the pipe. The pipe, ACL and child
+source were unchanged since the feature commit, so the elevated child had
+never connected on any run; every earlier `relay-terminal-ack-missing` was
+the concurrent inspection expiring behind a relay that was still waiting for
+a child that had already died. The cause was the loader that `-EncodedCommand`
+hands the child: `[IO.MemoryStream]::new(,$bytes)` is the `New-Object`
+-ArgumentList idiom, and on a method call it wraps the byte array in
+`object[]`, so overload binding fails before any pipe code runs. The proven
+elevation loader in the standalone library proof passes the array directly,
+and the child loader now does the same. A binding failure is invisible to a
+parser, so the loader shape is pinned by test, and both generated child
+programs — the loader and the decompressed child — now enter the Windows
+parser gate beside the relay bootstrap, because a hidden, non-interactive,
+elevated program that fails before the pipe presents on a Windows host only as
+a handshake timeout.
+
+Two further consequences of that opacity. The relay classified a declined or
+timed-out UAC prompt as `hyper-v-network-elevation-launch-failed`, because
+`Start-Process` wraps the ShellExecute `Win32Exception` in an
+`InvalidOperationException` and the relay tested only the outer exception for
+`ERROR_CANCELLED` (1223); it now walks the `InnerException` chain. And because
+each real run through UAC yields exactly one bounded code, the standalone
+proof gains a companion diagnostic,
+`scripts/real-tests/hyper-v-windows-network-child-probe.mjs`, which runs the
+exact generated child loader as a visible child of an already elevated
+console against a pipe server with the production name, ACL, and handshake.
+It executes no Hyper-V operation — the bootstrap it hands the child only
+echoes a line — and exists so that a child failure is read from the child's
+own output in one run rather than inferred from which timer fired.
+
+Its first run did exactly that. With the loader fixed, the child connected and
+authenticated as administrator, then died on `[Console]::Out.AutoFlush=$true`:
+`Console.SetOut` wraps the supplied writer in a synchronized `TextWriter`, so
+`Console.Out` has no `AutoFlush` property and the assignment throws. The child
+now sets `AutoFlush` on the `StreamWriter` before handing it to `SetOut`. The
+relay could only have reported this as a protocol failure or a timeout; the
+probe reported it as the PowerShell error it was.
+
+The shared library-test elevation launcher had the same outer-exception bug.
+It also collapsed every other `Start-Process` exception to
+`elevation-launch-failed`, which made a Windows Setup diagnostic rerun unable
+to distinguish input decoding, RunAs, and exit-result failures. It now walks at
+most eight inner exceptions, preserves 1223 as `elevation-cancelled`, and emits
+only the stage plus signed Int32 native-error and HRESULT fields. Raw localized
+messages and paths never cross the launcher frame. The parent validates the
+exact frame grammar and Int32 ranges before appending that fingerprint to the
+Level 3 diagnostic reason.
+
+The run after that reached the first Hyper-V mutation and failed as
+`hyper-v-network-real-ensure-mutation-unconfirmed`, with the library's bounded
+cause discarded by the proof's own assertion. The proof now reports
+`…-mutation-unconfirmed:<action>:<category>:<operation>:<code>`, every part a
+bounded token, and on an unconfirmed ensure mutation it reinspects and adopts
+only resources carrying this run's token exactly once — switch by exact name
+and notes, gateway by the switch adapter owning the gateway address, NAT by
+exact name — so an applied-but-unanswered mutation is cleaned up rather than
+left on the host. It never replays the mutation, and ambiguity is left alone.
+
+The first run with that reporting named the primitive:
+`create-gateway:native:New-NetIPAddress:net-ip-address-create-result-ambiguous`.
+`New-NetIPAddress` emits the one address it created twice, once for the
+ActiveStore and once for the PersistentStore, so the asset's "exactly one
+result" check rejected every successful creation. Ambiguity is now defined as
+more than one distinct interface/address/prefix identity among the outputs,
+and the ActiveStore object is reported because that is the store
+`Get-NetIPAddress` reads back by default. The asset digest pin moved with it.
+
+Ensure then completed and the run failed in cleanup as
+`hyper-v-network-real-cleanup-deferred`. The switch-in-use deferral counted the
+switch's own management OS host vNIC as a tenant. Creating an Internal switch
+creates `vEthernet (<name>)` in the management OS, `Get-VMNetworkAdapter -All`
+returns it, the managed gateway address sits on it, and `Remove-VMSwitch`
+removes it — so every Internal switch deferred forever. The deferral now counts
+only virtual machine adapters. Every fake modelled VM adapters and none
+modelled the host vNIC, which is why the whole suite passed while the host
+could not: the real-host fake now creates and removes it with the switch, so
+the gap is closed where it was open.
+
+With that the standalone proof passed on the real host at token
+`0246763dc4ae037b`: one UAC prompt, two administrator callback scopes over one
+reused elevated session, exact-ID cleanup of switch, gateway and NAT in both
+the cold and warm attempts, and no unrelated resource mutated. Cold cost 71
+elevated native calls in 28.3s, warm 81 in 13.4s, six mutations each; warm
+issues more calls because the host adapter takes longer to appear and each
+`gateway-transitioning` retry re-inspects. The eight defects this sequence
+uncovered were all invisible to the suite, and seven of the eight were in the
+elevated child, the generated PowerShell, or a fake that did not model the
+host. That is the boundary's real lesson: everything below the typed contract
+needs a host, and the child probe is how a host answers in one run.
+
+The Device Lab production adapter uses the same stabilization rule exposed by
+that proof. A newly created Internal switch can take several observations to
+publish its management adapter, and a newly assigned gateway can remain
+`Tentative` while Windows performs address checks. Those two outcomes are
+read-only retries: the adapter waits 250 ms, re-observes at most 12 times, and
+never repeats the preceding mutation. The caller's operation deadline is also
+threaded into the loop, so it declines another wait when that interval no
+longer fits. Conflict, ambiguous mutation, and cleanup outcomes are not retried.
+
+For the same reason the caller's deadline starts in `execute`, before the queue
+wait, not inside the write. Timing it from the write gave a queued caller no
+deadline at all — it waited out the health floor, which is exactly the "a
+primitive with 2.5s of budget must not run against the 120s ceiling" failure the
+clamp exists to prevent, reappearing one layer up.
+
+The start budget bounds *consecutive unproductive* starts, not starts over the
+process lifetime. A lifetime counter conflates "this host cannot run PowerShell"
+with "this broker has been up for days": the third restart, however far apart,
+made the pool return `hyper-v-windows-session-unavailable` permanently, which
+falls back to one-shot — so the whole feature disappeared with no error anywhere.
+
+**Sharing one pipe needs admission control, or one owner denies the path to
+every other.** A slow operation — `Stop-VM` against a guest ignoring shutdown, a
+checkpoint on a large VM — holds the single process-wide pipe for up to the
+health floor, and every other owner queues behind it. The never-ran
+classification is the escape, but it only helps if the caller reaches it with
+budget left: waiting the whole deadline and then falling back is the same as not
+falling back. Subtracting the wait from the retry is worse still — a queued
+caller reaches the fallback precisely because its wait expired, so the
+subtraction hands the retry a millisecond and guarantees it fails.
+
+So the queue may consume only a fraction of a caller's budget, and a queue
+already at its depth cap refuses immediately. Both bound the same thing: how much
+of one owner's deadline another owner's slow operation can spend. The depth cap
+also bounds the queue's memory, since every waiting closure pins its request.
+This matters more than it looks — at the broker's snapshot call sites the budget
+is a constant equal to the library's own per-execution ceiling, so every clamp
+downstream is a no-op, and `restoreDeviceLabHyperVSnapshot` issues seven
+primitives.
+
+**One session is shared across all owners, and this reverses what the task plan
+said.** `PLAN.md` AC-004 required that the session "does not outlive the broker,
+and is not shared across owners". The first half holds — the pool is
+reference-counted and released on broker close. The second half does not: the
+pool keys sessions by PowerShell executable, so every owner on a broker shares
+one child.
+
+That was a deliberate choice and it should be judged as one rather than
+discovered in a code comment. Keying per owner reintroduces exactly the cost the
+slice exists to remove — a device lab serving N owners would hold N long-lived
+PowerShell children, each with its own loaded Hyper-V module, and each owner's
+first primitive would still pay a spawn and an import. The saving would survive
+only within a single owner's flow.
+
+An independent security review examined this and judged the deviation defensible,
+with a claim narrower and stronger than "the session carries no owner state":
+**owner isolation never rested on the process boundary.** It rests on
+owner-scoped lookup before the call — `findOwnerDeviceForTool` resolves the
+device inside the caller's own owner state, so a caller never supplies a raw VM
+id and cannot name a machine it does not own — and owner-scoped validation after
+it: the `notes` fence and disk-path allowlist in `reconcile.ts`, and
+`resolveOwnedHyperVSnapshot` requiring the owner-scoped `ccc-<ownerId>-<name>`.
+Neither changed in this slice. No credential enters the shared child either: the
+session serves only the ten allowlisted operations, whose requests are JSON
+selectors, and every credential-bearing path goes through
+`hyperVProviderCommandRunner` directly.
+
+Three residuals belong on the record next to that, because "no cross-owner path"
+alone would overstate it.
+
+**The isolation guarantee changed hands.** It used to be enforced by the OS; it
+is now enforced by the SHA-256 pin on the asset. Nothing an owner sends can leave
+state in that runspace *because the only code that runs there is the hashed asset
+and its fixed allowlist*. So the integrity check is now load-bearing for owner
+isolation, not only for supply-chain integrity. Read that sentence before
+relaxing the pin or widening the allowlist to admit anything that takes an
+expression. `Checkpoint-VM`'s `-SnapshotName` is the one allowlisted operation
+already taking a caller string; it is safe because it is a bound parameter rather
+than interpolated, and that is the property to preserve.
+
+Two amendments a later security review added to this residual. First, the pin is
+verified **once per child, not once per execution**: the one-shot transport calls
+`verifiedAsset` on every `execute`, while the session calls it only inside the
+`starting` closure, and `ensureChild` returns early for every subsequent request.
+An asset tampered with after a session is up is not detected until that child
+dies. This is not a TOCTOU — the digest covers the bytes actually sent, and the
+path is never re-read — but the checking *frequency* dropped, and since the pin is
+what carries owner isolation, that narrows this residual rather than merely
+detailing it. Second, the runspace hygiene between requests clears only
+`$global:CccHyperVJsonInput` and `$global:PSDefaultParameterValues`; global
+functions, aliases, variables and loaded modules persist across owners. Nothing
+exploits that today precisely because no code but the hashed asset ever executes
+there — the same load-bearing claim, stated from the other side.
+
+**Cross-owner interference now exists in availability terms**, where it did not.
+One owner's stale frame hard-fails whoever is in flight, and one owner can hold
+every queue slot and push the others onto the one-shot path. Both degrade to the
+pre-session behaviour rather than denying service — that is what the depth cap
+buys, and it is part of what AC-004's second clause was buying instead.
+
+One concrete instance worth naming, from the same review: the start budget is
+shared and exhaustible. Three unanswered starts inside five minutes make
+`ensureChild` return null, so *every* owner is demoted to the one-shot path for
+the rest of that window, and the counter resets only on an answered response. A
+start counts as unanswered whenever the child dies before replying — including on
+an oversized response frame. Still degradation rather than denial, exactly as this
+residual claims, but the blast radius is fleet-wide rather than per-owner.
+
+**Unverifiable from a container:** whatever process-wide state the Hyper-V
+PowerShell module itself keeps — CIM/WMI handles, internal caching — is now
+shared across owners rather than torn down between them. There is no reason to
+think it caches anything owner-sensitive, and every response is re-validated by
+the fences above, but it cannot be inspected here and is named rather than
+cleared. The Windows QA pass should alternate two owners' primitives against one
+session and confirm results track live host changes rather than a first-request
+snapshot.
+
+The pool is process-scoped and reference-counted. Sessions carry no per-server
+state, so two broker servers in one process share them; tearing them down on the
+first server's `close` would kill a child the second is mid-request on, and
+`hyper-v-windows-session-closed` is deliberately not retryable. Past the last
+release the pool stops handing out real sessions, because they are taken lazily
+from inside async tool handlers — a request still in flight at shutdown would
+otherwise start a child nothing would ever kill.
+
+Anything a session serves must remain visible to the recorder the broker uses for
+provider diagnostics. The session bypasses the injected command runner entirely,
+so a recorder that only wraps that runner sees nothing at all once a session is
+live, and the snapshot payloads that carry provider execution degrade to stubs
+exactly on the failures operators need them for.
+
+### What the session's QA has to exercise, and why the unit suite cannot
+
+Every defect found in this slice was an interaction defect at one seam: a single
+shared, long-lived, stateful child against many independent callers, each with
+its own deadline and its own idempotency requirement. Who owns the pipe, whose
+clock applies, and what may safely be re-issued. None was a local logic error,
+and none was reachable from the unit suite as written — the broker suite cannot
+reach the session branch at all, because `usesDefaultCommandRunner` makes it dead
+code in any test that injects a command runner. They were found by driving the
+compiled library directly.
+
+So a Windows QA pass that runs one flow at a time proves nothing about any of
+them. It has to run: several owners issuing primitives against one broker
+concurrently; at least one deliberately slow operation in the mix, so callers
+queue behind it and the queue-timeout/never-ran classification is exercised; and
+a deliberately unavailable PowerShell, so the start budget is exhausted and then
+recovers after its window.
+
+Two numbers in this design are guesses that only a real host can settle, and the
+QA pass should report both rather than confirm them.
+
+**The queue depth cap (8) decides where the optimisation stops.** Measured, 20
+concurrent primitives against a healthy idle session admit 8 and refuse 12 in
+2ms. The refusals are correct — immediate, classified never-ran, full budget
+preserved — but they mean 12 fresh PowerShell processes, so above 8-way
+concurrency the slice degrades to the one-shot behaviour it replaces. Whether
+that is the right place to stop depends on how concurrent a real broker actually
+is, which cannot be measured from a container.
+
+**A session failure is publicly indistinguishable from a one-shot failure.** No
+`hyper-v-windows-session-*` code is in `REDACTED_PROVIDER_DIAGNOSTIC_CODES`, so
+every session failure surfaces as the generic fallback `diagnosticCode`. That is
+exactly what makes the two transports' payloads identical, which is a property
+worth having — but it also means an operator reading a public payload cannot tell
+a session timeout from a one-shot timeout. The two goals are in tension and the
+current resolution favours payload identity. The typed paths are the exception:
+a session code the typed network client forwards is reported as
+`hyper-v-windows-transport-session-<reason>` in the create 502 and in network
+setup, cleanup and reconciliation details
+(`hyper-v-network-failure-diagnostics-v11`), because a failed create has to name
+what failed. A recorded execution still cannot report one.
+
+### The reviewer's recommendation: measure, then probably replace this
+
+After thirteen review rounds the code reviewer stopped reviewing lines and
+answered a design question instead. Recorded here because it is the strongest
+argument on file against this design, and the decision it points at is the user's.
+
+**Every hard problem in this slice descends from one property: the child outlives
+the request.** That single fact generates all three families of machinery — "did
+my frame reach the child?" (the readiness latch, `latchEvidenceLost`,
+`delivered`/`settled`, the death-code classification, the never-ran taxonomy),
+"whose deadline is this pipe spending?" (queue admission, two timers per request,
+the health floor, the start budget), and "what did the last owner leave behind?"
+(the runspace hygiene, and the security residual that owner isolation no longer
+rests on a process boundary). One process per primitive does not make those
+easier to answer. It makes them **unaskable**: a process serving one request and
+exiting reports what happened in its own exit status and stdout, which is exactly
+what the one-shot transport already does.
+
+Three measured supports, none of them rhetorical:
+
+1. **Eight of the twelve review findings were in machinery a warm pool deletes
+   outright** — the asset-write ordering, the premature latch read, the stderr
+   latch, the three marker routes, `close` never firing, and the grace path's
+   conservative choice. Not "easier to spot": would not have existed. The four
+   that survive — the retry budget, the record bypass, the parse check, the
+   capability list — are in code that stays either way.
+2. **The design declines to serve the case where its advantage would matter.**
+   Above 8-way concurrency the depth cap refuses and callers get fresh processes
+   anyway, so the shared session wins only between "enough concurrency to benefit
+   from reuse" and "fewer than eight". Below that band a warm pool captures the
+   same win by pre-paying the spawn and module import off the critical path.
+3. **Round 12 silently un-pinned round 11.** The flood test kept passing for two
+   reasons unrelated to the guard it was named for, so that guard could be deleted
+   with the suite green. Twelve rounds did not prevent that, and a thirteenth
+   would not have either — which is why the fix was structural.
+
+**What must happen first, and neither the reviewer nor I can do it here:** run
+the measurement this document already specifies — the same level-3 lane's
+duration with and without the session, on a Windows host. The reviewer's
+prediction is that the delta will be small against a 120s per-primitive ceiling
+on a seven-primitive chain, and that the number will make the call easy rather
+than close. If the saving turns out to be large, keep the session and treat the
+death-code table as a floor: the queue admission control and the
+`delivered`/`settled` discriminator are separate invariant clusters with their
+own unpinned rules and deserve the same treatment.
+
+The honest state of the code, in the reviewer's words: correct as measured, with
+no live duplicate-mutation path found — and fragile against the next edit in a
+way twelve rounds did not fix. `sessionProcess()` grew 34% in code while its
+comments nearly tripled, and that ratio is the signal: the reasoning stopped
+fitting in the code. That is not a statement about how it was written. It is what
+happens when a shared mutable child is placed under an idempotency requirement.
+
+The saving this slice buys is also still unmeasured. The round-trip count is
+recorded (90 → 105 for slice 1) but the wall-clock saving is not, and the
+measurement only exists on a Windows host: the same level-3 lane's duration with
+and without a session. It is worth stating, because the cost side has grown —
+a queue, two timers per request, a health floor, a decaying start budget, a
+reference-counted pool, a process-exit sweep, and a new error class in the retry
+taxonomy. If the saving turns out to be modest, one process per primitive with a
+warm pool is a materially simpler design with most of the win.
+
+### Known gap carried past slice 1
+
+`Invoke-HyperVWindowsOperation.ps1` bounds its error code with
+`-notmatch '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'`. In .NET regex `$` also matches
+before a final newline, so an exception message such as `"AccessDenied\n"`
+satisfies the guard and is emitted verbatim. The client's
+`NATIVE_ERROR_CODE_PATTERN` has no multiline flag and rejects it, so nothing
+leaks — but the native status is lost and the failure degrades to
+`response-envelope-invalid`. Anchoring both guards with `\z` closes it.
+
+This is pre-existing and outside the snapshot slice, so it is deliberately not
+fixed here: changing the script re-pins `HYPER_V_WINDOWS_POWERSHELL_ASSET.sha256`
+and breaks the correspondence between the pinned asset and the Windows host run
+that verified it. It belongs with slice 5, or with any other change that already
+re-pins the asset and re-runs hardware QA.
+
+**The session discards stderr.** `sessionProcess` drains the child's stderr
+without reading it, because leaving it unread eventually blocks the child on a
+full pipe. So `stderr` is always undefined on a session-served execution, and
+`hyperVProviderDiagnosticCode` can never derive a PowerShell-flavoured
+`diagnosticCode` from it. The damage is bounded: native failures already carry
+the asset's normalised `errorCode` through the envelope, and the session's own
+codes are filtered out of `diagnosticCode` by `REDACTED_PROVIDER_DIAGNOSTIC_CODES`
+anyway — so the loss is real only for transport-level failures, which is exactly
+where stderr would have been the only evidence. A bounded stderr ring buffer in
+`sessionProcess`, attached to the `frameError` results, closes it.
+
+## Packaging decision
+
+Both `low-level` and `lifecycle` will be extracted together when internal
+consumers and real Windows behavior stabilize. For now they remain internal and
+share the repository's TypeScript build, declaration generation, tests,
+integrity-pinned PowerShell assets, and release process.
+
+Publishing now is deferred because it would prematurely freeze names,
+compatibility policy, the default Windows executor, and supported native API
+surface. The internal entrypoint is nevertheless treated as a package boundary:
+intentional exports, injected transport, no upward dependencies, and no use of
+private parser/framing details by consumers.
+
+## Real-host proof boundary
+
+The standalone hardware proof imports the compiled public root
+`dist/hyper-v-windows/index.js`; it does not deep-import implementation modules
+or execute TypeScript source. In a source checkout the command first builds the
+isolated library subtree; in an installed archive it uses the prebuilt `dist`
+entrypoint and a Node-20-targeted bundled launcher because source/config inputs
+are intentionally absent. No runtime TypeScript loader is part of the package
+contract. A fixture-only PowerShell asset owns prerequisite
+checks, creation, attachment setup, and guarded teardown. It does not implement
+the VM observations, lifecycle assertions, or VM removal being tested. This
+keeps a real-host PASS attributable to the extractable library rather than to a
+parallel test implementation.
+
+The child-process bridge is local to the real-test harness for now. It implements the
+library's injected file-runner port with a bounded stdin envelope and process-tree
+termination. Keeping it outside the public library avoids prematurely choosing
+a default Windows process API while still proving that the published-shaped
+port works against native PowerShell. The library does export the fixed
+in-memory bootstrap and envelope constructor needed to execute its verified
+asset without a path-reopen race; process spawning remains consumer-injected.
+Its dependencies are injected so the
+same boundary has deterministic Linux tests.
+
+Destructive fixture cleanup uses capability-like evidence rather than a naming
+prefix: a random token is embedded in the exact VM name, Notes, fixture-root
+marker, and recorded cleanup request. Cleanup validates exact VM ID/name/Notes
+and every non-null attachment path before removing anything. `Remove-VM`
+retention is checked before file teardown. Ambiguity preserves evidence and
+turns the test red, which is preferable to a false green or deletion outside
+the fixture root.
+The fixture and production PowerShell files are integrity-pinned. The runner
+passes the exact verified bytes in a stdin envelope to a fixed in-memory
+PowerShell bootstrap, so the elevated process never reopens a mutable asset path
+after the digest check. Create failures retain their
+partial evidence for the ordinary guarded cleanup path instead of attempting a
+less-validated inline rollback.
+The bootstrap Base64-encodes its UTF-8 JSON envelope and uses the existing
+redirected Console streams. This avoids both mutable Console encoding properties
+and overload-sensitive custom stream constructors in a hidden Windows
+PowerShell process. The standalone fixture frames its one authoritative response as a
+fixed ASCII marker plus Base64-encoded UTF-8 JSON. This keeps incidental module
+or host output from corrupting the protocol while duplicate, absent, malformed,
+or non-UTF-8 frames still fail closed without exposing raw privileged output.
+
+In a source checkout the dedicated npm command runs one opt-in Vitest real-host
+spec, and Vitest owns test reporting and failure stacks. The spec remains
+skipped in ordinary test runs. Before that spec, the command performs only the
+isolated library compile and fixture-only PowerShell parse; X11 MCP, Device Lab
+MCP, and the generic full-project build are outside this test boundary.
+Extracted packages retain the prebuilt launcher
+as a fallback because test-framework devDependencies are deliberately absent.
+On Windows the command compiles, parses, and bundles the privileged scenario
+before checking its token through the absolute System32 Windows PowerShell
+executable. A filtered token keeps Vitest at medium integrity and causes one
+`Start-Process -Verb RunAs` request for a narrow privileged host. The parent
+waits, compacts the authenticated result into bounded Vitest input, and
+propagates failure. Cancellation and launch failure stay red instead of being
+mistaken for a platform skip.
+The outer, non-elevated PowerShell receives only a short fixed encoded bootstrap
+on its command line. Its Base64 JSON launch envelope, including the separately
+encoded elevated host, is written to redirected stdin. This avoids multiplying
+the large compiled capture helper through nested command-line encodings and keeps
+both PowerShell invocations below Windows' command-line ceiling.
+The separately built privileged bundle is sent as bytes through the authenticated
+duplex pipe with its digest fixed before UAC. Elevated PowerShell atomically
+creates an inheritance-protected SYSTEM/Administrators staging directory under
+ProgramData, verifies its exact DACL and non-reparse identity, writes the bundle,
+copies the currently running Node executable, verifies both pre-UAC SHA-256
+digests, and executes only those protected copies. The bundle embeds the two
+integrity-pinned PowerShell assets and the compiled typed library; no privileged
+process imports code or helpers from the writable checkout.
+The elevated host creates and verifies this protected staging root before
+compiling its embedded bounded-process helper with `Add-Type`, and immediately
+redirects its own TEMP/TMP there. This closes the Windows PowerShell 5.1 CodeDom
+temporary-file race at the UAC boundary, not only the later Node environment.
+Because Windows PowerShell 5.1 CodeDom can leave generated files behind, the
+host enumerates only canonical descendants of this exact protected root, uses
+explicit top-directory-only traversal, rejects every reparse point before
+enqueueing a directory, removes entries deepest-first, and deletes the root
+before publishing success. A cleanup failure therefore remains a failed
+privileged transaction rather than contradicting an already-published result.
+Before starting the protected Node copy, the native host clears
+`ProcessStartInfo.EnvironmentVariables`, then derives SystemRoot/WINDIR,
+SystemDrive, machine name, an absolute System32 COMSPEC, a trusted-system-only
+PATH, a fixed `.COM;.EXE;.BAT;.CMD` PATHEXT, and a System32-only PSModulePath,
+ProgramData, protected-root TEMP/TMP, and deterministic color values from the
+elevated OS context. It sets the working directory to the protected root. The
+fixed PATHEXT is required for Windows PowerShell 5.1 to activate the absolute
+System32 `icacls.exe` inside a pipeline as an executable rather than a document.
+This supplies the Windows process context needed by Hyper-V
+without copying caller values and prevents inherited
+`NODE_OPTIONS`, `NODE_PATH`, compile-cache, coverage, or REPL hooks from loading
+medium-integrity code before the bundle entrypoint.
+Fixture create/attach calls use direct command-local `try/catch` blocks to
+translate localized native failures into bounded stage codes before framing
+them. The integrity-label tool invocation has its own bounded stage code as
+well. Diagnostics can distinguish fixture protection, VM creation, VM
+configuration, default-DVD removal, VHD creation, and attachment failures
+without disclosing privileged stdout, exception text, or host paths.
+The fixture's outer catch forwards only a literal declared-code set. Any
+unwrapped exception is reduced to a fixed operation-level fallback, so a
+localized but regex-shaped message or fully-qualified error identifier cannot
+cross the boundary.
+The shared launcher guards its direct-execution block with both URL equality and
+the original leaf filename. Esbuild therefore cannot make the imported launcher
+mistake the privileged bundle for its own CLI entry; the bundle has one scenario
+owner and emits one privileged result frame.
+The elevated child sends bounded line-framed output and its final status through
+a random per-run named pipe authenticated by a separate random token. This
+preserves Vitest reporting in the invoking terminal without trusting PowerShell's
+CLIXML progress stream or creating an elevated result file in a user-writable
+temporary directory.
+Authentication is client-first: the parent does not disclose the privileged
+bundle until a bounded AUTH frame proves possession of the token. Invalid
+clients are discarded without claiming the sole authenticated slot. The parent
+tracks all accepted sockets, destroys them when the launcher finishes, and
+bounds server shutdown to prevent a racing client from holding the command open.
+The elevated PowerShell host and Node subtree are placed in nested Windows Job
+Objects configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; a native watchdog
+also contains pre/post-child host stalls. The host starts Node through `ProcessStartInfo` with
+separate UTF-8 stdout and stderr readers. Two concurrent fixed-size reads share
+one 16 MiB counter; overflow kills the child before any additional bytes are
+retained, and neither stream is materialized with `ReadToEnd`. Native stderr is
+therefore bounded test output, not a terminating PowerShell error, and a nonzero
+scenario exit remains a framed child result. Termination and stream waits are
+bounded, and incomplete closure is a distinct failure rather than a cleanup claim.
+Before even connecting to the pipe, the elevated host starts a separate trusted
+System32 PowerShell watchdog with a cleared environment and a fixed numeric PID
+target. It kills the elevated host if staging or `Add-Type` stalls, then is
+terminated once Job Object containment and the native watchdog are active.
+The watchdog validates the target start time and forces the target handle open
+before its bounded `WaitForExit`; it never sleeps and then reacquires a PID that
+could have been reused by an unrelated process.
+To stay below Windows' command-line ceiling, the full elevated host is gzip
+embedded in a short bootstrap; that bootstrap arms the watchdog before it
+decompresses and executes the bounded trusted source.
+On the parent side, launcher exit starts a bounded settlement window rather than
+immediate socket destruction; the authenticated terminal frame and EOF must both
+arrive before success is evaluated.
+
+The fixture filesystem root is placed under a dedicated `%ProgramData%`
+directory with SYSTEM/Administrators-only inheritance and a High mandatory
+integrity label. Protection replaces the DACL with exactly those two full-control
+rules and rechecks both DACL and label, so unrelated explicit ACEs cannot survive.
+The mandatory label is verified through the Win32
+`LABEL_SECURITY_INFORMATION` query and converted to bounded SDDL. Default and
+audit-mode `Get-Acl` views do not reliably expose this distinct label query.
+Hyper-V can add a VM-specific explicit ACE to the fixture root while a VHD is
+attached. Cleanup therefore requires the parent to remain exact and the root to
+remain non-reparse, inheritance-protected, and High integrity while it validates
+marker, contents, VM identity, and attachment containment. Only after confirmed
+VM removal does it replace and revalidate the root's exact DACL, before the first
+file deletion.
+An existing exact parent is accepted only when already protected; it is never
+repaired by path. Initial creation protects an unpredictable sibling and uses an
+atomic directory move, with collisions failing closed.
+The fixture rechecks that protected, non-reparse boundary at
+attachment setup and immediately before deletion. This prevents a
+medium-integrity process for the invoking user from rebinding an elevated
+cleanup path through a junction while Hyper-V removal is in progress.
+
+Interrupted PowerShell execution is not treated as stopped merely because a
+kill was requested. The runner captures the process start identity, rechecks it
+before PID-based tree termination, validates `taskkill`, and waits a bounded
+grace period for child closure. If tree termination cannot be proven, the run
+fails and deliberately preserves the fixture rather than racing cleanup
+against a still-running privileged mutation. PowerShell and `taskkill` are
+started only through absolute Windows-system paths derived from the kernel
+`GLOBALROOT\SystemRoot` alias rather than environment variables, excluding PATH/current-directory
+binary substitution in an elevated test process.
+Each independent PowerShell invocation also imports the absolute system Hyper-V
+manifest, verifies the loaded manifest path, and uses `Hyper-V\<cmdlet>` names;
+the preflight process is not assumed to establish module state for later calls.
+Windows installations may place that manifest directly under the Hyper-V
+module root or under a numeric version directory. The resolver accepts both
+layouts while remaining under the protected System32 root, rejecting reparse
+entries and non-version children, selecting the highest version, and verifying
+the imported module base.
+
+## Alternatives considered
+
+### Rename or move `src/host-control/hyper-v`
+
+Rejected. It is a small mechanical change but preserves CCC identity fields,
+single-disk observations, generated-command shapes, and combined deletion
+policy as if they were generic APIs. Package extraction would remain coupled to
+Device Lab.
+
+### Add interfaces without migrating a production path
+
+Rejected. A type-only facade would not prove execution, error, attachment, or
+journal semantics and would not fix the current zero-disk residue failure.
+
+### Keep lifecycle in Device Lab and extract only low-level
+
+Rejected by product direction. Generic retry and reconciliation are useful to
+non-Device-Lab consumers and are explicitly part of the desired future
+library. Device Lab persistence and ownership policy still remain outside.
+
+### Reimplement all WMI v2, HCS, and VHD APIs immediately
+
+Deferred. Full coverage would create a large unvalidated surface and delay the
+first usable boundary. Native primitives are added incrementally, beginning
+with the lifecycle/reconciliation slice that exercises the real defect.
+
+### Publish an npm package immediately
+
+Deferred. Internal-first permits contract refinement and Windows hardware
+validation without making unsupported public compatibility promises. Package
+metadata and a standalone default transport are follow-up work.
+
+### Preserve the scalar `diskPath` for compatibility
+
+Rejected inside the library. A scalar loses valid zero/many attachment states
+and created the current reconciliation bug. Compatibility translation, if
+needed for the existing journal, belongs only in the Device Lab adapter.
+
+### Let low-level delete VM artifacts for convenience
+
+Rejected. Combining `Remove-VM` with filesystem/network cleanup expands the
+blast radius of a native primitive and imports consumer ownership policy.
+Cleanup is an explicit post-removal Device Lab action with its existing path and
+symlink fences.
+
+## Consequences
+
+- Consumers can test low-level/native decoding and lifecycle decisions on Linux
+  with an injected fake executor.
+- Zero disks/DVDs are representable facts, so safe partial residue can settle;
+  foreign attachments still fail closed before destructive mutation.
+- Typed error categories distinguish caller, transport, protocol, and native
+  failures without leaking raw privileged-command data.
+- Device Lab keeps its version-1 journal and storage layout; this change needs
+  no on-disk migration.
+- VM removal and consumer cleanup become separate, observable stages. A failure
+  cannot be reported as full reconciliation until the owning layer completes
+  its stage.
+- Legacy host-control and new library paths coexist temporarily. This is a
+  bounded migration seam, not a second permanent architecture.
+- The first release surface is intentionally incomplete; additional native
+  functionality must be added one primitive at a time with typed contracts and
+  fake-executor coverage.
+- A future package split moves low-level and lifecycle together. Device Lab's
+  adapter, journal implementation, ownership naming, and cleanup remain in this
+  repository.
+- Real Windows Hyper-V validation is still required. Linux unit/static success
+  proves the boundary and decisions, not host compatibility.
+- A dedicated compiled-library host test can isolate native transport and
+  lifecycle defects from Device Lab, image, guest, and MCP failures while its
+  injected seams keep the same scenario mockable on Linux.
+- The network-only hardware proof is exposed as
+  `npm run test:level3:hyper-v:windows:network:library`; a non-Windows skip is
+  environment evidence, not a Windows PASS.
+
+## Compatibility and rollback
+
+Existing host-control exports remain for unmigrated callers. The Device Lab
+version-1 journal is translated rather than rewritten. There is no runtime
+schema cutover and no new persistent ownership authority.
+
+If the migrated reconciliation path must be rolled back, restore its legacy
+imports/call path while leaving the journal and persisted Device Lab state
+untouched. The new internal modules and assets can then be removed without data
+migration. This source-level rollback is sufficient for the bounded vertical
+slice; a runtime feature flag is not required.
+
+## What the asset digest pin does and does not protect
+
+`powershell-transport.ts` pins a SHA-256 of `Invoke-HyperVWindowsOperation.ps1`
+and refuses to run a source that does not match, before `spawn` and therefore
+before UAC is ever raised. That defends one thing: a tampered asset **on disk**.
+
+It does not cross the privilege boundary, and reading it as though it does
+would be a mistake. The elevated child's first act is to receive a PowerShell
+program over the pipe from the unelevated broker and run it — `ScriptBlock`
+from a base64 line, with no digest check on the elevated side. The verification
+happens in the medium-integrity Node process, which is the process an attacker
+would already control in any scenario where this mattered.
+
+So anything with same-user code execution — control of the broker, or a handle
+to the relay's stdin — can ride one legitimate UAC consent to Administrator.
+That is the standard position that UAC is not a security boundary, and it is
+not specific to this design; it is stated here so the pin is not mistaken for
+a stronger guarantee than it makes.
+
+Closing the narrow case, where only the relay's stdin is controlled and the
+broker's code is not, would mean having the elevated child re-verify the digest
+against a constant baked into its own `-EncodedCommand`. Not done, because the
+capability it defends against is a strict subset of one that already wins.
+
+What the boundary does defend, and what is pinned by test: the pipe exists
+before UAC launches the child, the peer's identity comes from
+`GetNamedPipeClientProcessId` and is checked before any byte the peer sent is
+trusted, and the pipe allows a single server instance so its name cannot be
+squatted.
+
+## Slice 4A: Windows guest execution and transfer
+
+`Invoke-Guest` is a typed, single target action with `exec`, `mkdir`, `upload`,
+and `download` variants. Its request carries an exact VM ID plus generic name
+and Notes preconditions. Device Lab computes those preconditions from its owned
+device and verifies the credential's owner-private path before calling the
+library. The low-level layer does not know CCC ownership or broker paths.
+
+Every credential-bearing action uses the one-shot PowerShell transport. The
+shared cross-owner session pool is never passed to the guest adapter. Native
+resolves the exact VM and Running state, checks the path-bound CLIXML value is a
+PSCredential, and creates and removes one PowerShell Direct session for the
+action. An uncertain response is an error and never triggers an automatic
+replay. Guest exec reports the guest exit code as a completed typed result;
+the broker maps a nonzero code to its existing HTTP 422 response.
+
+Upload creates the remote parent in one typed call, then copies the staged
+source in another. Download reads at most 16 MiB inside the guest session and
+writes directly to the broker's private staging path. Only byte counts cross
+the response envelope; Device Lab reads and verifies the staged bytes before
+publishing to the requested local file. Diagnostic and provisioning builders
+remain separate follow-up slices because their observation and rollback
+transactions remain coupled.
+
+### Windows guest readiness and media containment (slice 4B)
+
+The library exposes a one-shot `Invoke-Guest` job action and an exact
+`Remove-VMDvdDrive` operation. The job action starts PowerShell Direct with
+`-AsJob`, waits at most 15 seconds, receives one bounded string, and removes
+the job. Device Lab supplies the fixed first-logon probe and applies its own
+marker, secret, media and network policy. The one-shot process is limited by
+the remaining readiness budget, including credential loading and job startup.
+
+DVD removal requires VM ID, name, Notes and literal ISO path, rejects multiple
+matching attachments and reads back absence. If the response is uncertain,
+Device Lab makes read-only VM/DVD observations within the deadline and does not
+repeat the removal. Only confirmed scrub and detachment permit guarded host ISO
+deletion. The broker computes the ISO path from owner/device identity for
+containment; symlinks, unreadable paths and invalid ancestors count as retained.
+It captures a boot diagnostic before any required force stop, including when
+readiness did not start. The two proof latches remain separate in failure
+observations, and only both together veto retained-media containment.
+
+### Windows guest provisioning (slice 4D)
+
+Device Lab keeps the private DPAPI credential, three-file `CCC_UNATTEND` ISO,
+first-logon program, network policy and owner artifact layout. The media
+builder receives the new guest password through process input and emits only
+the expected VM identity and staged artifact paths. Device Lab checks that
+result before it asks the typed library to change the VM. Before writing the
+ISO, it reads the exact VM's DVD drives and rejects an already attached copy
+of that ISO; native configuration checks attachment absence again.
+
+`Configure-VMGuestBoot` receives an exact VM ID plus expected name and Notes,
+the OS disk and staged ISO paths, and an explicit generation-specific boot
+policy. Native code confirms identity, Off state, generation, sole OS disk and
+absence of the ISO attachment before adding one DVD. It then configures Gen 2
+firmware or Gen 1 BIOS, enables integration services and reads back the VM,
+media, boot and service state. A failed transaction removes only its newly
+attached DVD after rechecking exact identity and Off state, and the broker
+rolls back the owned VM and artifacts. An
+uncertain result is not replayed. The operation emits fixed error codes rather
+than PowerShell exception text or host paths. Device Lab retains the existing
+public response redaction and rollback behavior.
+
+## Follow-up
+
+### Boot diagnostic snapshot (slice 4C)
+
+`Get-VMDiagnostic` is one typed, read-only native operation. It verifies VM ID,
+exact name and opaque Notes before reading optional host evidence. The trusted
+PowerShell asset catches integration-service, firmware or BIOS, disk, VHD and
+DVD failures independently, preserving verified VM state and unaffected
+sections. The typed decoder bounds every public member and rejects unknown
+fields, paths and malformed responses. Device Lab supplies the owner marker,
+cleanup deadline and `lastBootCheck` persistence policy. Both Linux and Windows
+VM readiness failures use the same operation before any containment stop.
+
+The older diagnostic module remains as a compatibility reference until the
+remaining host-control operations migrate. This Linux build checks static
+source and TypeScript behavior; native parser and live VM evidence remain a
+parent Goal gate.
+
+### Typed status composition (slice 5A)
+
+The four production status reads share one Device Lab adapter over typed
+`Get-VM`, `Get-VMHardDiskDrive`, `Get-VHD` and `Get-VMSnapshot` operations. The
+low-level library remains independent of CCC ownership and snapshot naming;
+Device Lab checks exact VM ID, name and opaque Notes, then verifies later disk
+and snapshot records belong to that VM. The native ID selector uses
+`Get-VM -Id` so these reads do not enumerate the host VM inventory. The first disk's VHD parent chain is
+walked to its base with a bounded visited set, retaining the legacy active
+path fallback on a native VHD read error. Protocol and transport errors fail
+closed. The existing owner-root checks in snapshot
+flows still reject an unmatched base path. All reads consume one transaction
+deadline, and no partial status is published after a failed read. The legacy
+status builder remains for dry-run command projection.
+
+### Typed VM power lifecycle (slice 5B)
+
+Production `device_start`, `device_stop`, and `device_reboot` use a Device Lab
+power adapter over typed `Get-VM`, `Start-VM`, `Stop-VM`, and `Restart-VM` operations.
+Linux and Windows boot-failure containment use the same typed stop transaction.
+The adapter reads the stored VM GUID with exact owner-scoped name and Notes before
+and after mutation; native PowerShell repeats the name and Notes check on the
+selected GUID immediately before changing power state. Normal stop requests guest
+shutdown, while force stop turns the VM off. Running reboot invokes Restart-VM
+once; an Off VM starts only when `startIfStopped` is requested. Start admission
+uses current free host memory with the existing reserve and CPU limits. All calls
+share the broker deadline and return fixed, redacted error codes. Legacy power
+builders remain only for dry-run command projection. The Linux integration and
+static checks exercise the routing and contract; live Windows Hyper-V validation
+remains a parent Goal gate.
+
+### Typed VM deletion and orphan recovery (slice 5C)
+
+Production `device_delete`, pending delete reconciliation, create residue
+recovery, ID-conflict rollback, and creation compensation use guarded typed
+`Remove-VM`. Device Lab translates its owner/device/incarnation identity into
+the generic guard. Before mutation, native PowerShell re-resolves the VM GUID
+and checks its exact name, Notes, hard disks, and mounted DVD paths. Marked
+VMs may use expected disks or checkpoint differencing disks inside their owned
+disk directory. An unmarked partial-create VM must have only the expected root
+disk and may retain only the expected provisioning media. The guarded native call turns a live VM off,
+rechecks the same facts, and then removes it. A lost response is settled only
+by fresh reads proving both GUID and name absent.
+
+The separate `Remove-HostFiles` low-level primitive accepts explicit paths and
+an optional checkpoint disk directory, all contained by one caller-supplied
+root. Its native implementation checks every path component for reparse points,
+rejects non-files, and bounds retries. It carries no CCC naming or owner policy:
+Device Lab supplies the canonical root and expected files and invokes it only
+after VM absence is proved. Network allocation, private-root cleanup, and
+journal/state completion remain Device Lab responsibilities. Legacy generated
+delete and orphan commands remain solely for dry-run projection. Linux tests
+exercise the dispatch and guards; native PowerShell and live Hyper-V proof
+remain a parent Goal gate.
+
+Hyper-V delete is idempotent across the MCP boundary as well as inside the host
+broker. The implicit lifecycle router normally uses broker inventory to infer
+the backend before mutation. If an explicit `windows-vm` or `linux-vm` delete
+no longer appears in that inventory, the router still sends the exact delete to
+the broker, whose missing-device branch performs no provider operation and
+returns `alreadyMissing: true`. This closes the inventory/delete race during
+residue recovery. The exception is limited to explicit Hyper-V delete: missing
+status, start, stop, or reboot requests and ambiguous or mismatched backends
+remain fail-closed.
+
+
+After the first reconciliation slice passes focused Linux checks and Windows
+hardware validation, migrate additional Hyper-V operations behind the same
+boundary. Publish only after the API surface, compatibility/versioning policy,
+default Windows transport, package assets, and support matrix are explicit.
+
+The relay's own check on the executable it elevates is a `$`-anchored regex
+whose middle character class excludes only control characters, so it admits
+interior backslashes — `C:\Users\<user>\writable\System32\WindowsPowerShell\
+v1.0\powershell.exe` passes it. On the Node side this is harmless, because the
+regex is ANDed with equality against a `realpath` of the object-manager alias
+for System32. Inside the relay it stands alone. Deriving the expected path from
+`[Environment]::SystemDirectory` and comparing for equality, as the asset
+already does for its module root, would close it. Deliberately not done in this
+slice: it only matters to an attacker who already controls the relay's stdin
+envelope — who, per the section above, has won regardless — and it is a change
+to generated elevated PowerShell in the exact code that produced eight
+real-host defects here, so the risk outweighs the gain until it can be carried
+on a real host.
+
+### Residual route and package audit
+
+The current broker's default VM create, status, power, delete and orphan routes
+are typed. Linux seed-media attachment and boot setup also use the typed
+configuration transaction. Snapshot journal repair also uses one typed
+transaction. The VM bootstrap network seam now uses the typed client with the
+executable already selected for the lifecycle command. Its earlier legacy
+compatibility branch was retired; command builders remain exported but have no
+live broker caller. The setup/admin, Storage,
+filesystem, media-building and SSH commands have different ownership boundaries;
+their presence as PowerShell or provider commands alone is not evidence that a
+VM primitive is missing from the library. The detailed dispatch inventory is
+in `GUIDE__typed-library-support.md`.
+
+The typed teardown now refuses a named bootstrap adapter with a wrong or absent
+MAC, rather than calling it already absent. An adapter with a different name
+still counts as absence. This keeps a VM on the bootstrap switch from being
+reported contained when its named bootstrap adapter has drifted.
+
+Package verification now treats host-mutating Level 3 launchers as opt-in.
+The tarball consumer probe may compile and import current typed APIs, inspect
+packaged assets, and exercise fake transport integrity checks on Windows, but
+must not request UAC or start a VM. Only non-Windows hosts invoke the packaged
+Level 3 entrypoint to verify its explicit Windows-required SKIP. Windows CI
+can therefore run the package probe alongside parser/Pester checks. Neither
+CI job proves live Hyper-V behavior; a disposable Windows host remains the
+parent Goal's hardware gate, including guarded removal and file cleanup.
+
+### Typed Linux NoCloud seed attachment
+
+Device Lab now generates SSH keys, known hosts, cloud-init and the `cidata.iso`
+without direct VM cmdlets. Before writing those files, its typed reads check
+the exact VM ID/name/Notes/Off/generation and the unique bootstrap MAC both on
+the VM and across the host. It validates the media output and SSH host identity
+before the VM is changed.
+
+The existing typed `Configure-VMGuestBoot` transaction gained an explicit Linux
+policy. Its Windows default and integration-service behavior are unchanged.
+Linux rechecks the bootstrap MAC and VM identity immediately before DVD attach,
+keeps Secure Boot Off for generation 2 or IDE-first BIOS order for generation 1,
+and leaves integration-service state alone. Native readback stays in the shared
+transaction. Linux failure leaves an attachment untouched when its identity is
+uncertain, since a matching path or controller slot can belong to another
+attachment by cleanup time. Device Lab performs owner-scoped create rollback;
+an uncertain result is never replayed. Windows retains its prior cleanup path.
+The observable behavior and failure checks are in
+`doc/device-lab/REQ__hyper-v-typed-linux-seed.md`. Native Windows parser and
+disposable-host proof remain pending for the parent Goal.

@@ -54,6 +54,12 @@ function contractSnapshot(containerName: string, config: LabRunnerRunConfig): Co
     };
 }
 
+// Containers created where nested VMs cannot run get no lab state volume (REQ__lab-state-volume.md);
+// older containers may still carry it until they are recreated.
+function stateVolumeLabel(status: string, volumeName: string): string {
+    return status === "ready" ? volumeName : "not mounted for new containers (nested VM unavailable)";
+}
+
 export function labRunnerSnapshot(cwd = process.cwd()): LabRunnerSnapshot {
     const projectPath = resolve(cwd);
     const defaultContainerName = getContainerName(projectPath);
@@ -91,7 +97,7 @@ export function formatLabRunnerStatus(cwd = process.cwd()): string {
         "",
         `profile: ${snapshot.profile} (built-in)`,
         `container: ${snapshot.containerName}`,
-        `state volume: ${snapshot.stateVolumeName}`,
+        `state volume: ${stateVolumeLabel(snapshot.status, snapshot.stateVolumeName)}`,
         `state mount: ${snapshot.stateContainerDir}`,
         `runtime: ${snapshot.runtime}`,
         `status: ${snapshot.status}`,
@@ -100,7 +106,7 @@ export function formatLabRunnerStatus(cwd = process.cwd()): string {
     lines.push(`kvm: ${snapshot.kvmDevicePath ? `${snapshot.kvmDevicePath}${snapshot.kvmGroupId !== null ? ` group=${snapshot.kvmGroupId}` : ""}` : "not exposed"}`);
     lines.push(`vm networking: ${snapshot.networkMode} (QEMU user-mode; no host TUN exposure)`);
     lines.push(`default container: ${snapshot.defaultContainer.containerName}`);
-    lines.push(`default state volume: ${snapshot.defaultContainer.stateVolumeName}`);
+    lines.push(`default state volume: ${stateVolumeLabel(snapshot.defaultContainer.status, snapshot.defaultContainer.stateVolumeName)}`);
     lines.push(`default status: ${snapshot.defaultContainer.status}`);
     if (snapshot.defaultContainer.unsupportedReason) lines.push(`default unsupported reason: ${snapshot.defaultContainer.unsupportedReason}`);
     lines.push(`default kvm: ${snapshot.defaultContainer.kvmDevicePath ? `${snapshot.defaultContainer.kvmDevicePath}${snapshot.defaultContainer.kvmGroupId !== null ? ` group=${snapshot.defaultContainer.kvmGroupId}` : ""}` : "not exposed"}`);
@@ -121,19 +127,23 @@ export function formatLabRunnerSmoke(cwd = process.cwd()): string {
         "",
         "default-container-vm-config: PASS",
         "default-container-safety: PASS no --privileged or host TUN exposure",
-        `default-durable-lab-state: PASS ${snapshot.defaultContainer.stateVolumeName}:${snapshot.defaultContainer.stateContainerDir}`,
+        snapshot.defaultContainer.status === "ready"
+            ? `default-durable-lab-state: PASS ${snapshot.defaultContainer.stateVolumeName}:${snapshot.defaultContainer.stateContainerDir}`
+            : `default-durable-lab-state: SKIP ${snapshot.defaultContainer.unsupportedReason || "unsupported"}`,
         snapshot.defaultContainer.status === "ready"
             ? `default-nested-kvm: PASS ${snapshot.defaultContainer.kvmDevicePath}${snapshot.defaultContainer.kvmGroupId !== null ? ` group=${snapshot.defaultContainer.kvmGroupId}` : ""}`
             : `default-nested-kvm: SKIP ${snapshot.defaultContainer.unsupportedReason || "unsupported"}`,
         "built-in-profile: PASS",
-        `lab-runner-durable-lab-state: PASS ${snapshot.stateVolumeName}:${snapshot.stateContainerDir}`,
+        snapshot.status === "ready"
+            ? `lab-runner-durable-lab-state: PASS ${snapshot.stateVolumeName}:${snapshot.stateContainerDir}`
+            : `lab-runner-durable-lab-state: SKIP ${snapshot.unsupportedReason || "unsupported"}`,
         snapshot.status === "ready"
             ? `lab-runner-nested-kvm: PASS ${snapshot.kvmDevicePath}${snapshot.kvmGroupId !== null ? ` group=${snapshot.kvmGroupId}` : ""}`
             : `lab-runner-nested-kvm: SKIP ${snapshot.unsupportedReason || "unsupported"}`,
         `vm-network: PASS ${snapshot.networkMode} networking (no host TUN exposure)`,
         snapshot.defaultContainer.status === "ready"
-            ? "container-qemu-provider-gate: PASS lab-mcp can report ready when in-container qemu is present"
-            : "container-qemu-provider-gate: SKIP lab-mcp must report unsupported until CCC_LAB_RUNNER_STATUS=ready",
+            ? "container-qemu-provider-gate: PASS device-lab linux-vm can report ready when in-container qemu is present"
+            : "container-qemu-provider-gate: SKIP device-lab linux-vm must report unsupported until CCC_LAB_RUNNER_STATUS=ready",
         "vm-startup: not-run (smoke is non-starting)",
         `result: ${snapshot.defaultContainer.status === "ready" && snapshot.status === "ready" ? "PASS" : "SKIP"}`,
         "",

@@ -1,82 +1,51 @@
+import { availableDevices } from "./available-devices.mjs";
+import { cropScreenshotResult } from "./screenshot-region.mjs";
+import { finishStartReadiness, startBootTimeoutMs } from "./start-readiness.mjs";
+import { buildListFilesCommand, listFilesFromExecResult } from "@ccc/device-lab/providers/file-listing.mjs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { androidBackend, handleAndroidTool, listAndroidDevices } from "./backends/android.mjs";
-import { androidRealBackend, handleAndroidRealTool, listAndroidRealDevices } from "./backends/android-device.mjs";
-import { handleIosTool, iosBackend, listIosDevices } from "./backends/ios-simulator.mjs";
-import { handleIosRealTool, iosRealBackend, listIosRealDevices } from "./backends/ios-device.mjs";
-import { handleMacosTool, listMacosDevices, macosBackend } from "./backends/macos-vm.mjs";
-import { handleWindowsTool, listWindowsDevices, windowsBackend } from "./backends/windows-sandbox.mjs";
-import { brokerApple, brokerAppium, brokerCommand, brokerDeviceTool, brokerLease, brokerPhysical, brokerRpc, brokerShutdown, brokerStatus, implicitBrokerProbeOptions } from "./broker.mjs";
-import { ownerId } from "./context.mjs";
-import { currentDisplayTarget, handleDisplayTool, x11Available } from "./display/x11.mjs";
+import { androidBackend, androidDiscovery, handleAndroidTool, listAndroidDevices } from "@ccc/device-lab/providers/backends/android.mjs";
+import { androidRealBackend, handleAndroidRealTool, listAndroidRealDevices } from "@ccc/device-lab/providers/backends/android-device.mjs";
+import { handleIosTool, iosBackend, iosDiscovery, listIosDevices } from "@ccc/device-lab/providers/backends/ios-simulator.mjs";
+import { handleIosRealTool, iosRealBackend, iosRealDiscovery, listIosRealDevices } from "@ccc/device-lab/providers/backends/ios-device.mjs";
+import { handleMacosTool, listMacosDevices, macosBackend } from "@ccc/device-lab/providers/backends/macos-vm.mjs";
+import { handleLinuxVmManagementTool, handleLinuxVmTool, linuxVmBackend, listLinuxVmDevices } from "@ccc/device-lab/providers/backends/linux-vm.mjs";
+import { handleWindowsTool, listWindowsDevices, windowsBackend } from "@ccc/device-lab/providers/backends/windows-sandbox.mjs";
+import { listWindowsVmDevices, windowsVmBackend } from "@ccc/device-lab/providers/backends/windows-vm.mjs";
+import { brokerAppium, brokerCommand, brokerDeviceTool, brokerPhysical, brokerRpc, brokerStatus, implicitBrokerProbeOptions, withBrokerOperation } from "./broker.mjs";
+import { ownerId } from "@ccc/device-lab/providers/context.mjs";
+import { currentDisplayTarget, handleDisplayTool } from "@ccc/device-lab/providers/display/x11.mjs";
 import { evaluateDestructivePolicy } from "./policy/destructive.mjs";
-import { jsonResult, textResult } from "./responses.mjs";
-import { OWNER_DEVICE_ID_PATTERN } from "./state/owner-device-state.mjs";
-import { TOOLS } from "./tools.mjs";
+import { flowJsonResult, jsonResult, textResult } from "@ccc/device-lab/providers/responses.mjs";
+import { compactToolValue } from "./public-output.mjs";
+import { OWNER_DEVICE_ID_PATTERN } from "@ccc/device-lab/providers/state/owner-device-state.mjs";
+import { readOwnerDevices } from "@ccc/device-lab/providers/state/device-store.mjs";
+import { DEVICE_FLOW_TOOL_NAMES, TOOLS, toolOperation, flowOperationAllowed } from "./tools.mjs";
+import { TOOLS as OPERATION_TOOLS } from "./operation-tools.mjs";
+import { actionResult } from "./action-output.mjs";
+import { flowStepArguments, normalizeToolArgs, normalizePublicToolArgs, toolInputError } from "./tool-arguments.mjs";
+import { createWaitBudget } from "@ccc/device-lab/providers/wait-budget.mjs";
 
 const FLOW_MAX_STEPS = 50;
-const FLOW_BLOCKED_TOOLS = new Set(["mobile_run_flow", "device_run_flow"]);
-const MOBILE_FLOW_ALLOWED_DEVICE_TOOLS = new Set(["device_status", "device_screenshot"]);
-const DEVICE_FLOW_ALLOWED_TOOLS = new Set([
-    "device_inventory",
-    "device_record_video_status",
-    "device_status",
-    "device_screenshot",
-    "device_click",
-    "device_double_click",
-    "device_key",
-    "device_type",
-    "device_scroll",
-    "device_cursor_position",
-    "device_window_list",
-    "device_accessibility_snapshot",
-    "display_current",
-    "display_screenshot",
-    "display_click",
-    "display_double_click",
-    "display_key",
-    "display_type",
-    "display_scroll",
-    "display_cursor_position",
-]);
-const DEVICE_FLOW_ALLOWED_MOBILE_TOOLS = new Set([
-    "mobile_session_status",
-    "mobile_dump_ui",
-    "mobile_tap",
-    "mobile_double_tap",
-    "mobile_long_press",
-    "mobile_swipe",
-    "mobile_drag",
-    "mobile_type_text",
-    "mobile_key",
-    "mobile_home",
-    "mobile_back",
-    "mobile_forward",
-    "mobile_recents",
-    "mobile_power",
-    "mobile_lock",
-    "mobile_unlock",
-    "mobile_rotate_left",
-    "mobile_rotate_right",
-    "mobile_set_orientation",
-    "mobile_open_url",
-    "mobile_set_clipboard",
-    "mobile_get_clipboard",
-    "mobile_wait_for_text",
-    "mobile_wait_for_app",
-    "mobile_screenshot",
-]);
-const BROKER_LIFECYCLE_COMMANDS = new Set(["device_create", "device_status", "device_start", "device_stop", "device_delete"]);
+const DEVICE_REQUIRED_TOOLS = new Set(OPERATION_TOOLS
+    .filter((tool) => tool.inputSchema?.required?.includes("deviceId"))
+    .map((tool) => tool.name));
+DEVICE_REQUIRED_TOOLS.add("device_drag");
+const DEVICE_FLOW_ALLOWED_TOOLS = new Set(DEVICE_FLOW_TOOL_NAMES);
+const BROKER_LIFECYCLE_COMMANDS = new Set(["device_create", "device_status", "device_start", "device_stop", "device_reboot", "device_delete"]);
+const HYPER_V_LIFECYCLE_BACKENDS = new Set(["windows-vm", "linux-vm"]);
 const BROKER_READONLY_DEVICE_TOOLS = new Set([
+    "device_list_files",
     "device_inventory",
+    "device_snapshot_list",
     "device_record_video_status",
     "device_screenshot",
-    "device_cursor_position",
     "device_window_list",
     "device_accessibility_snapshot",
 ]);
 const BROKER_MUTATING_DEVICE_TOOLS = new Set([
+    "device_wireless",
     "device_record_video_start",
     "device_record_video_stop",
     "device_exec",
@@ -90,13 +59,33 @@ const BROKER_MUTATING_DEVICE_TOOLS = new Set([
     "device_key",
     "device_type",
     "device_scroll",
+    "device_cursor_position",
+    "device_drag",
+    "device_focus_window",
+    "device_snapshot_create",
+    "device_snapshot_restore",
+    "device_snapshot_delete",
 ]);
 const BROKER_PHYSICAL_TOOLS = new Set(["device_attach", "device_detach"]);
 const BROKER_PHYSICAL_BACKENDS = new Set(["android-device", "ios-device"]);
 const BROKER_FAST_DEVICE_TOOLS = new Set(["device_record_video_status"]);
 const BROKER_RECORDING_DEVICE_TOOLS = new Set(["device_record_video_start", "device_record_video_stop", "device_record_video_status"]);
 const DEFAULT_BROKER_DEVICE_TOOL_TIMEOUT_MS = 30000;
+const DEFAULT_BROKER_DISCOVERY_RPC_TIMEOUT_MS = 30000;
+export const HYPER_V_LINUX_GUI_TIMEOUT_MS = 17 * 60 * 1000;
 const DEFAULT_BROKER_LIFECYCLE_RPC_TIMEOUT_MS = 120000;
+// Image acquisition may consume the full four-hour provider budget. Reserve
+// another 30 minutes for hashing, VM creation, and guest provisioning.
+export const HYPER_V_IMAGE_ACQUIRE_RPC_TIMEOUT_MS = 21600000;
+export const HYPER_V_LIFECYCLE_RPC_BUFFER_MS = 15000;
+// Mirrors DEVICE_BROKER_HYPER_V_CLEANUP_RESERVE_MS in src/device-lab-broker.ts. The broker adds
+// this to its cleanup deadline for linux-vm and windows-vm start/reboot so containment has time to
+// run after the operation deadline; the caller has to wait at least as long or it drops the reply.
+export const HYPER_V_CLEANUP_RESERVE_MS = 5 * 60 * 1000;
+export const HYPER_V_CREATE_RPC_TIMEOUT_MS = HYPER_V_IMAGE_ACQUIRE_RPC_TIMEOUT_MS + HYPER_V_LIFECYCLE_RPC_BUFFER_MS;
+export const HYPER_V_HOST_LOCK_WAIT_MS = 10 * 60 * 1000;
+export const HYPER_V_PROVIDER_LIFECYCLE_TIMEOUT_MS = 120000;
+export const HYPER_V_MAX_BOOT_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_BROKER_PHYSICAL_RPC_TIMEOUT_MS = 30000;
 export const MAX_DEVICE_HELPER_TIMEOUT_MS = 300000;
 export const MAX_DEVICE_OPERATION_TIMEOUT_MS = 600000;
@@ -106,9 +95,18 @@ const BROKER_DEVICE_TOOL_RPC_BUFFER_MS = 30000;
 const MAX_DEVICE_TOOL_RPC_TIMEOUT_MS = MAX_DEVICE_OPERATION_TIMEOUT_MS + BROKER_DEVICE_TOOL_RPC_BUFFER_MS;
 const BROKER_BOUNDED_WAIT_TOOLS = new Set(["mobile_wait_for_text", "mobile_wait_for_app"]);
 const DIRECT_DEVICE_BACKEND_HINT_TOOLS = new Set([
+    "device_list_files",
     ...BROKER_LIFECYCLE_COMMANDS,
     "device_exec",
     "device_screenshot",
+    "device_click",
+    "device_double_click",
+    "device_key",
+    "device_type",
+    "device_scroll",
+    "device_cursor_position",
+    "device_drag",
+    "device_focus_window",
     "device_upload",
     "device_download",
     "device_reset",
@@ -117,12 +115,30 @@ const DIRECT_DEVICE_BACKEND_HINT_TOOLS = new Set([
     "device_record_video_status",
     "device_record_video_start",
     "device_record_video_stop",
+    "device_snapshot_list",
     "device_snapshot_create",
     "device_snapshot_restore",
     "device_snapshot_delete",
 ]);
 const CURRENT_DISPLAY_DEVICE_ID = "x11-current-display";
+const MOBILE_COMMON_OPERATIONS = new Map([
+    ["device_drag", "mobile_drag"],
+    ["device_click", "mobile_tap"], ["device_double_click", "mobile_double_tap"],
+    ["device_accessibility_snapshot", "mobile_dump_ui"], ["device_type", "mobile_type_text"], ["device_key", "mobile_key"],
+]);
+function commonOperation(name, backend, args) {
+    if (!["android-emulator", "android-device", "ios-simulator", "ios-device"].includes(backend)) {
+        if (name === "device_key" && args.keyCode !== undefined) return { error: "keyCode is supported only on Android; use key on this device" };
+        return { name };
+    }
+    if ((name === "device_click" || name === "device_double_click") && args.button !== undefined && args.button !== "left") return { error: "Mobile click supports only the left button" };
+    if (name === "device_key" && backend.startsWith("ios") && args.keyCode !== undefined) return { error: "keyCode is supported only on Android; use key on iOS" };
+    return { name: MOBILE_COMMON_OPERATIONS.get(name) || name };
+}
 const DISPLAY_DEVICE_TOOL_MAP = new Map([
+    ["device_drag", "display_drag"],
+    ["device_focus_window", "display_focus_window"],
+    ["device_window_list", "display_window_list"],
     ["device_screenshot", "display_screenshot"],
     ["device_click", "display_click"],
     ["device_double_click", "display_double_click"],
@@ -137,15 +153,11 @@ const LIFECYCLE_STATE_BACKENDS = new Map([
     ["ios", "ios-simulator"],
     ["ios-device", "ios-device"],
     ["windows", "windows-sandbox"],
+    ["windows-vm", "windows-vm"],
+    ["linux-vm", "linux-vm"],
     ["macos", "macos-vm"],
 ]);
 
-function normalizeToolArgs(args = {}) {
-    if (!args || typeof args !== "object" || Array.isArray(args)) return {};
-    const { options, ...rest } = args;
-    if (!options || typeof options !== "object" || Array.isArray(options)) return args;
-    return { ...options, ...rest };
-}
 
 const BROKER_MOBILE_ACTIONS = new Set([
     "mobile_session_status",
@@ -186,6 +198,7 @@ const BROKER_MOBILE_ACTIONS = new Set([
     "mobile_screenshot",
 ]);
 const BROKER_BACKEND_MOBILE_TOOLS = new Set([
+    "mobile_set_network",
     "mobile_clear_app_data",
     "mobile_grant_permission",
     "mobile_revoke_permission",
@@ -194,46 +207,37 @@ const BROKER_BACKEND_MOBILE_TOOLS = new Set([
 const BROKER_APPIUM_ROUTED_MOBILE_TOOLS = new Set(["mobile_session_status", "mobile_set_clipboard", "mobile_get_clipboard"]);
 const DEFAULT_BROKER_APPIUM_RPC_TIMEOUT_MS = 315000;
 
-function flowStepTool(step) {
-    return step?.tool || step?.name || "";
-}
-
-function mobileFlowToolAllowed(name) {
-    if (FLOW_BLOCKED_TOOLS.has(name)) return false;
-    if (name.startsWith("mobile_")) return true;
-    return MOBILE_FLOW_ALLOWED_DEVICE_TOOLS.has(name);
-}
-
-function deviceFlowToolAllowed(name) {
-    if (FLOW_BLOCKED_TOOLS.has(name)) return false;
-    if (DEVICE_FLOW_ALLOWED_MOBILE_TOOLS.has(name)) return true;
-    return DEVICE_FLOW_ALLOWED_TOOLS.has(name);
-}
-
 function summarizeContentItem(item) {
-    if (item.type === "image") {
-        return {
-            type: "image",
-            mimeType: item.mimeType || null,
-            bytes: item.data ? Buffer.byteLength(item.data, "base64") : 0,
-        };
+    const text = item.text || "";
+    try {
+        return { type: "json", value: JSON.parse(text) };
+    } catch {
+        return { type: "text", text };
     }
-    if (item.type === "text") {
-        const text = item.text || "";
-        try {
-            return { type: "json", value: JSON.parse(text) };
-        } catch {
-            return { type: "text", text };
-        }
-    }
-    return { type: item.type || "unknown" };
 }
 
-function summarizeToolResult(result) {
-    const content = (result?.content || []).map(summarizeContentItem);
+function summarizeToolResult(name, result, nativeContent) {
+    const content = [];
+    // A range stays small even for many native blocks and survives diagnostic
+    // truncation of step.content. Index 0 is the outer JSON summary.
+    const contentIndex = nativeContent.length + 1;
+    for (const item of result?.content || []) {
+        if (item.type === "text") content.push(summarizeContentItem(item));
+        else nativeContent.push(item);
+    }
+    const contentCount = nativeContent.length + 1 - contentIndex;
+    const isError = Boolean(result?.isError) || content.some((item) => item.type === "json" && item.value?.ok === false);
+    const unmetWait = !isError && content.some((item) => item.type === "json" && (
+        (["mobile_wait_for_text", "mobile_wait_for_app"].includes(name) && item.value?.matched === false)
+        ||
+        (name === "mobile_wait_for_text" && item.value?.found === false)
+        || (name === "mobile_wait_for_app" && (item.value?.found === false || item.value?.running === false))
+    ));
     return {
-        isError: Boolean(result?.isError) || content.some((item) => item.type === "json" && item.value?.ok === false),
-        content,
+        isError: isError || unmetWait,
+        ...(unmetWait ? { error: "wait-condition-not-met" } : {}),
+        ...(contentCount ? { contentIndex, contentCount } : {}),
+        ...(content.length ? { content } : {}),
     };
 }
 
@@ -264,6 +268,15 @@ function wantsBrokerPhysical(name, args) {
 
 function brokerRouteOptions(args = {}) {
     return { ...args, autolaunch: args?.autolaunch === false ? false : true };
+}
+
+function brokerDeviceToolRouteArgs(name, args = {}) {
+    if (name !== "device_wireless") return args;
+    return {
+        ...args,
+        devicePort: args?.port,
+        port: Number.isInteger(args?.brokerPort) ? args.brokerPort : undefined,
+    };
 }
 
 function boundedTimeoutMs(value, maximum, fallback) {
@@ -303,6 +316,32 @@ export function brokerDeviceToolExecutionTimeout(name, args) {
 }
 
 export function brokerLifecycleExecutionTimeout(args) {
+    const hyperVBackend = args?.backend === "windows-vm" || args?.backend === "linux-vm";
+    if (hyperVBackend && args?.command === "device_create") {
+        return { rpcTimeoutMs: HYPER_V_CREATE_RPC_TIMEOUT_MS };
+    }
+    if (hyperVBackend) {
+        const waitsForBoot = (args?.command === "device_start" || args?.command === "device_reboot")
+            && args?.waitForBoot !== false;
+        const bootTimeoutMs = waitsForBoot
+            ? Number.isFinite(args?.bootTimeoutMs)
+                ? Math.min(HYPER_V_MAX_BOOT_TIMEOUT_MS, Math.max(1000, Number(args.bootTimeoutMs)))
+                : 5 * 60 * 1000
+            : 0;
+        // The broker reserves cleanup time on top of the operation deadline for linux-vm AND
+        // windows-vm start/reboot, so its outer window is that much longer than the sum below.
+        // Without matching it here the caller can time out while containment is still running, and
+        // the response carrying scrubContainmentFailed — the one signal that a guest may still be
+        // up with a live autologon — is simply lost.
+        const containmentReserveMs = waitsForBoot ? HYPER_V_CLEANUP_RESERVE_MS : 0;
+        const automaticRpcTimeoutMs = HYPER_V_HOST_LOCK_WAIT_MS
+            + HYPER_V_PROVIDER_LIFECYCLE_TIMEOUT_MS
+            + bootTimeoutMs
+            + (waitsForBoot && args?.backend === "linux-vm" ? HYPER_V_LINUX_GUI_TIMEOUT_MS : 0)
+            + containmentReserveMs
+            + HYPER_V_LIFECYCLE_RPC_BUFFER_MS;
+        return { rpcTimeoutMs: automaticRpcTimeoutMs };
+    }
     if (Number.isFinite(args?.rpcTimeoutMs)) return { rpcTimeoutMs: boundedTimeoutMs(args.rpcTimeoutMs, MAX_DEVICE_TOOL_RPC_TIMEOUT_MS, DEFAULT_BROKER_LIFECYCLE_RPC_TIMEOUT_MS) };
     if (Number.isFinite(args?.timeoutMs)) return { rpcTimeoutMs: boundedTimeoutMs(args.timeoutMs, MAX_DEVICE_OPERATION_TIMEOUT_MS, DEFAULT_BROKER_LIFECYCLE_RPC_TIMEOUT_MS) };
     if (args?.backend === "android-emulator" && args?.createAvd === true) {
@@ -312,9 +351,7 @@ export function brokerLifecycleExecutionTimeout(args) {
         return { rpcTimeoutMs: 135000 };
     }
     if (args?.waitForBoot === true) {
-        const bootTimeoutMs = Number.isFinite(args?.bootTimeoutMs)
-            ? Math.min(600000, Math.max(1000, Number(args.bootTimeoutMs)))
-            : 60000;
+        const bootTimeoutMs = startBootTimeoutMs(args);
         return { rpcTimeoutMs: bootTimeoutMs + 15000 };
     }
     return { rpcTimeoutMs: DEFAULT_BROKER_LIFECYCLE_RPC_TIMEOUT_MS };
@@ -339,29 +376,38 @@ function lifecycleBackendDevices() {
     return [
         ["android-emulator", listAndroidDevices()],
         ["android-device", listAndroidRealDevices()],
-        ["ios-simulator", listIosDevices()],
+        ["ios-simulator", listIosDevices({ identityOnly: true })],
         ["ios-device", listIosRealDevices()],
         ["windows-sandbox", listWindowsDevices()],
-        ["macos-vm", listMacosDevices()],
+        ["windows-vm", listWindowsVmDevices()],
+        ["macos-vm", listMacosDevices({ identityOnly: true })],
+        ["linux-vm", listLinuxVmDevices()],
     ];
 }
 
-function directBackendList() {
+function directBackendList(includeLocalProviders = true) {
+    const display = currentDisplayTarget();
+    const android = includeLocalProviders ? androidDiscovery() : null;
+    const ios = includeLocalProviders ? iosDiscovery() : null;
     return [
         {
             name: "x11-current-display",
             host: "container",
             creatable: false,
-            available: x11Available(),
+            available: display.available,
             lazy: false,
-            capabilities: currentDisplayTarget().capabilities,
+            capabilities: display.capabilities,
         },
-        androidBackend(),
-        androidRealBackend(),
-        iosBackend(),
-        iosRealBackend(),
-        windowsBackend(),
-        macosBackend(),
+        ...(includeLocalProviders ? [
+            androidBackend(android),
+            androidRealBackend(android),
+            iosBackend(ios),
+            iosRealBackend(iosRealDiscovery(ios)),
+            windowsBackend(),
+            windowsVmBackend(),
+            macosBackend(),
+        ] : []),
+        linuxVmBackend(),
     ];
 }
 
@@ -369,10 +415,17 @@ function wantsBrokerBackends(args) {
     return args?.broker === true || args?.viaBroker === true || args?.autolaunch === true;
 }
 
-async function handleDeviceBackends(args = {}) {
-    const directBackends = directBackendList();
-    const explicitBroker = wantsBrokerBackends(args);
+function brokerDiscoveryExecutionTimeout(args = {}) {
+    return {
+        rpcTimeoutMs: boundedTimeoutMs(args.rpcTimeoutMs, MAX_DEVICE_TOOL_RPC_TIMEOUT_MS, DEFAULT_BROKER_DISCOVERY_RPC_TIMEOUT_MS),
+    };
+}
+
+async function handleDeviceBackends(args = {}, { detail = false } = {}) {
     const brokerOptOut = optsOutOfImplicitBroker(args);
+    const directBackends = directBackendList(brokerOptOut || detail);
+    const containerBackends = directBackends.filter((backend) => backend.host === "container");
+    const explicitBroker = wantsBrokerBackends(args);
     if (brokerOptOut) {
         const broker = await brokerStatus({ ...args, autolaunch: false, probe: false });
         return jsonResult({
@@ -386,16 +439,20 @@ async function handleDeviceBackends(args = {}) {
     const probe = explicitBroker ? { ...args, probe: true } : implicitProbe;
     const broker = await brokerStatus(probe ? { ...args, ...probe, probe: true } : { ...args, autolaunch: !brokerOptOut, probe: !brokerOptOut });
     if (probe && broker.available) {
-        const brokerBackends = await brokerRpc({ ...args, ...probe, method: "broker.backends" });
+        const brokerBackends = await brokerRpc({ ...args, ...probe, ...brokerDiscoveryExecutionTimeout(args), method: "broker.backends" });
         if (brokerBackends.ok && Array.isArray(brokerBackends.result?.backends)) {
+            const brokerBackendNames = new Set(brokerBackends.result.backends.map((backend) => backend?.name).filter(Boolean));
             return jsonResult({
                 ownerId: ownerId(),
                 broker,
                 source: "host-broker-provider-discovery",
                 routedBy: "device-backends-broker",
-                backends: [directBackends[0], ...brokerBackends.result.backends],
+                backends: [
+                    ...containerBackends.filter((backend) => !brokerBackendNames.has(backend.name)),
+                    ...brokerBackends.result.backends,
+                ],
                 hostBackends: brokerBackends.result,
-                localBackends: directBackends,
+                ...(detail ? { localBackends: directBackends } : {}),
             });
         }
         return jsonResult({
@@ -404,19 +461,20 @@ async function handleDeviceBackends(args = {}) {
             broker,
             source: "broker-provider-discovery-failed",
             routedBy: "device-backends-broker",
-            backends: [directBackends[0]],
+            backends: containerBackends,
             brokerBackendsError: brokerBackends,
-            localBackends: directBackends,
+            ...(detail ? { localBackends: directBackends } : {}),
         });
     }
     return jsonResult({
-        ok: broker.available === true,
+        ok: false,
+        error: broker.available ? "broker-provider-discovery-unavailable" : "broker-unavailable",
         ownerId: ownerId(),
         broker,
-        source: broker.available ? "host-broker-provider-discovery" : "broker-unavailable",
+        source: broker.available ? "broker-provider-discovery-failed" : "broker-unavailable",
         routedBy: "device-backends-broker",
-        backends: broker.available ? directBackends : [directBackends[0]],
-        localBackends: directBackends,
+        backends: containerBackends,
+        ...(detail ? { localBackends: directBackends } : {}),
     });
 }
 
@@ -449,7 +507,7 @@ function mobileBackendDevices() {
     return [
         ["android-emulator", listAndroidDevices()],
         ["android-device", listAndroidRealDevices()],
-        ["ios-simulator", listIosDevices()],
+        ["ios-simulator", listIosDevices({ identityOnly: true })],
         ["ios-device", listIosRealDevices()],
     ];
 }
@@ -684,20 +742,6 @@ function brokerMobileRequest(name, args, backend) {
             },
         };
     }
-    if (name === "mobile_set_network") {
-        if (!backend.startsWith("android")) return { error: "mobile_set_network is only supported by Android broker routing" };
-        const requests = [];
-        if (args.wifi !== undefined) {
-            if (typeof args.wifi !== "boolean") return { error: "mobile_set_network wifi must be boolean" };
-            requests.push(brokerAndroidShellRequest("svc", ["wifi", args.wifi ? "enable" : "disable"]));
-        }
-        if (args.data !== undefined) {
-            if (typeof args.data !== "boolean") return { error: "mobile_set_network data must be boolean" };
-            requests.push(brokerAndroidShellRequest("svc", ["data", args.data ? "enable" : "disable"]));
-        }
-        if (requests.length === 0) return { error: "mobile_set_network requires wifi or data" };
-        return requests.length === 1 ? requests[0] : { requests };
-    }
     if (name === "mobile_toggle_airplane_mode") {
         if (!backend.startsWith("android")) return { error: "mobile_toggle_airplane_mode is only supported by Android broker routing" };
         if (typeof args.enabled !== "boolean") return { error: "mobile_toggle_airplane_mode enabled must be boolean" };
@@ -760,8 +804,7 @@ function explicitBackendMismatchResult(name, args) {
 }
 
 function wantsCurrentDisplayDevice(name, args = {}) {
-    if (args?.deviceId === CURRENT_DISPLAY_DEVICE_ID) return name === "device_status" || DISPLAY_DEVICE_TOOL_MAP.has(name);
-    return args?.backend === CURRENT_DISPLAY_DEVICE_ID && DISPLAY_DEVICE_TOOL_MAP.has(name);
+    return args?.deviceId === CURRENT_DISPLAY_DEVICE_ID && (name === "device_status" || DISPLAY_DEVICE_TOOL_MAP.has(name));
 }
 
 async function handleCurrentDisplayDeviceTool(name, args = {}) {
@@ -772,6 +815,9 @@ async function handleCurrentDisplayDeviceTool(name, args = {}) {
 }
 
 async function handleBrokerLifecycleTool(name, args) {
+    if (name !== "device_create" && !args?.backend) {
+        return maybeHandleImplicitBrokerLifecycleTool(name, { ...args, implicitBroker: true, broker: true, viaBroker: true });
+    }
     const deviceId = typeof args?.deviceId === "string" ? args.deviceId : "";
     const backend = typeof args?.backend === "string" && args.backend ? args.backend : name === "device_create" ? { ok: false, error: "missing-backend", matches: [] } : inferLifecycleBackend(deviceId);
     if (backend?.ok === false) {
@@ -787,20 +833,32 @@ async function handleBrokerLifecycleTool(name, args) {
     const brokerArgs = name === "device_create" ? { ...routeArgs, devicePort: args?.port, port: args?.brokerPort } : routeArgs;
     const result = await brokerCommand({
         ...brokerArgs,
-        ...brokerLifecycleExecutionTimeout(args),
+        ...brokerLifecycleExecutionTimeout({ ...args, backend: typeof backend === "string" ? backend : backend.backend, command: name }),
         action: "invoke",
         backend: typeof backend === "string" ? backend : backend.backend,
         command: name,
         deviceId,
+        incarnationId: args?.incarnationId,
+        preserveNetwork: args?.preserveNetwork,
         dryRun: args?.dryRun === true,
     });
-    return jsonResult({ ...result, routedBy: "device-lifecycle-broker" });
+    return jsonResult(brokerLifecyclePublicResult(result, "device-lifecycle-broker"));
+}
+
+function brokerLifecyclePublicResult(result, routedBy) {
+    const body = result?.body && typeof result.body === "object" && !Array.isArray(result.body) ? result.body : null;
+    return {
+        ...result,
+        ...(typeof body?.detail === "string" && body.detail ? { detail: body.detail } : {}),
+        ...(typeof body?.remedy === "string" && body.remedy ? { remedy: body.remedy } : {}),
+        routedBy,
+    };
 }
 
 function implicitBrokerLifecycleResult(name, args, result) {
     const routedBy = "device-lifecycle-broker-implicit";
     if (!result?.ok || !result.result || typeof result.result !== "object" || Array.isArray(result.result)) {
-        return jsonResult({ ...result, routedBy });
+        return jsonResult(brokerLifecyclePublicResult(result, routedBy));
     }
     const payload = { ...result.result, routedBy };
     if (name === "device_delete") {
@@ -821,7 +879,7 @@ async function maybeHandleImplicitBrokerLifecycleTool(name, args) {
         const result = await brokerCommand({
             ...args,
             ...probe,
-            ...brokerLifecycleExecutionTimeout(args),
+            ...brokerLifecycleExecutionTimeout({ ...args, backend: requestedBackend, command: name }),
             devicePort: args?.port,
             action: "invoke",
             backend: requestedBackend,
@@ -836,36 +894,42 @@ async function maybeHandleImplicitBrokerLifecycleTool(name, args) {
     if (!probe) return implicitBrokerUnavailableResult("device-lifecycle-broker-implicit");
     const inventory = await brokerRpc({ ...probe, method: "broker.inventory" });
     if (!inventory.ok) return jsonResult({ ...inventory, routedBy: "device-lifecycle-broker-implicit" });
+    const requestedBackend = typeof args?.backend === "string" && args.backend ? args.backend : "";
     const inventoryBackend = inferBrokerInventoryLifecycleBackend(inventory, deviceId);
+    const explicitHyperVDeleteMiss = name === "device_delete"
+        && inventoryBackend.error === "device-backend-not-found"
+        && HYPER_V_LIFECYCLE_BACKENDS.has(requestedBackend);
     if (!inventoryBackend.ok) {
-        if (inventoryBackend.error === "device-backend-not-found") {
+        if (inventoryBackend.error === "device-backend-not-found" && !explicitHyperVDeleteMiss) {
             return jsonResult({ ok: false, error: "device-not-found", deviceId, routedBy: "device-lifecycle-broker-implicit" });
         }
-        return jsonResult({
-            ok: false,
-            error: inventoryBackend.error,
-            deviceId,
-            matches: inventoryBackend.matches || [],
-            routedBy: "device-lifecycle-broker-implicit",
-        });
+        if (!explicitHyperVDeleteMiss) {
+            return jsonResult({
+                ok: false,
+                error: inventoryBackend.error,
+                deviceId,
+                matches: inventoryBackend.matches || [],
+                routedBy: "device-lifecycle-broker-implicit",
+            });
+        }
     }
-    const requestedBackend = typeof args?.backend === "string" && args.backend ? args.backend : "";
-    if (requestedBackend && requestedBackend !== inventoryBackend.backend) {
+    const resolvedBackend = explicitHyperVDeleteMiss ? requestedBackend : inventoryBackend.backend;
+    if (requestedBackend && requestedBackend !== resolvedBackend) {
         return jsonResult({
             ok: false,
             error: "device-backend-mismatch",
             deviceId,
             requestedBackend,
-            actualBackend: inventoryBackend.backend,
+            actualBackend: resolvedBackend,
             routedBy: "device-lifecycle-broker-implicit",
         });
     }
     const result = await brokerCommand({
         ...args,
         ...selectedBrokerProbeOptions(probe, inventory),
-        ...brokerLifecycleExecutionTimeout(args),
+        ...brokerLifecycleExecutionTimeout({ ...args, backend: resolvedBackend, command: name }),
         action: "invoke",
-        backend: inventoryBackend.backend,
+        backend: resolvedBackend,
         command: name,
         deviceId,
         dryRun: args?.dryRun === true,
@@ -983,8 +1047,12 @@ async function maybeHandleImplicitBrokerPhysicalTool(name, args) {
 }
 
 async function handleBrokerDeviceTool(name, args) {
+    if (MOBILE_COMMON_OPERATIONS.has(name) || (args?.deviceId && !args?.backend)) {
+        // The shared operation needs the same owner inventory validation as implicit calls.
+        return maybeHandleImplicitBrokerDeviceTool(name, { ...args, implicitBroker: true, broker: true, viaBroker: true });
+    }
     const result = await brokerDeviceTool({
-        ...brokerRouteOptions(args),
+        ...brokerRouteOptions(brokerDeviceToolRouteArgs(name, args)),
         ...brokerDeviceToolExecutionTimeout(name, args),
         tool: name,
     });
@@ -995,12 +1063,14 @@ async function handleBrokerDeviceTool(name, args) {
 async function maybeHandleImplicitBrokerDeviceTool(name, args) {
     if (!(BROKER_READONLY_DEVICE_TOOLS.has(name) || BROKER_MUTATING_DEVICE_TOOLS.has(name)) || optsOutOfImplicitBroker(args)) return null;
     if (name === "device_inventory" && !(typeof args?.backend === "string" && args.backend)) return null;
-    if (name !== "device_inventory" && !(typeof args?.deviceId === "string" && args.deviceId)) return null;
-    const probe = implicitBrokerProbeOptions(args || {});
+    const isUnattachedPhysicalTool = name === "device_wireless" && BROKER_PHYSICAL_BACKENDS.has(args?.backend);
+    if (name !== "device_inventory" && !isUnattachedPhysicalTool && !(typeof args?.deviceId === "string" && args.deviceId)) return null;
+    const routedArgs = brokerDeviceToolRouteArgs(name, args);
+    const probe = implicitBrokerProbeOptions(routedArgs);
     if (!probe) return implicitBrokerUnavailableResult(BROKER_MUTATING_DEVICE_TOOLS.has(name) ? "device-mutating-broker-implicit" : "device-readonly-broker-implicit");
     let brokerBackend = typeof args?.backend === "string" && args.backend ? args.backend : "";
     let inventory = null;
-    if (name !== "device_inventory") {
+    if (name !== "device_inventory" && !isUnattachedPhysicalTool) {
         inventory = await brokerRpc({ ...probe, method: "broker.inventory" });
         if (!inventory.ok) return jsonResult({ ...inventory, routedBy: BROKER_MUTATING_DEVICE_TOOLS.has(name) ? "device-mutating-broker-implicit" : "device-readonly-broker-implicit" });
         const inventoryBackend = inferBrokerInventoryLifecycleBackend(inventory, args.deviceId);
@@ -1033,13 +1103,31 @@ async function maybeHandleImplicitBrokerDeviceTool(name, args) {
         }
         brokerBackend = inventoryBackend.backend;
     }
+    if (isCursorMove(name, args) && !["windows-vm", "linux-vm", "windows-sandbox", "macos-vm"].includes(brokerBackend)) {
+        return jsonResult({ ok: false, error: "device-cursor-move-backend-unsupported" });
+    }
+    const common = commonOperation(name, brokerBackend, args);
+    if (common.error) return textResult(false, common.error);
+    if (common.name !== name && wantsBrokerMobile(common.name, args)) {
+        return handleBrokerMobileTool(common.name, {
+            ...args, ...selectedBrokerProbeOptions(probe, inventory), backend: brokerBackend,
+        });
+    }
+    const listing = name === "device_list_files";
+    if (listing && brokerBackend === "ios-device") return jsonResult({ ok: false, error: "list-files-unsupported", detail: "The current Device Lab physical iOS adapter does not implement file listing.", deviceId: args.deviceId });
+    const composedListing = listing && brokerBackend !== "ios-simulator";
+    const listingCommand = composedListing ? buildListFilesCommand(brokerBackend, args) : undefined;
+    const executionArgs = { ...routedArgs };
+    if (composedListing) for (const key of ["path", "limit", "bundleId", "containerType"]) delete executionArgs[key];
     const result = await brokerDeviceTool({
-        ...args,
+        ...executionArgs,
         ...selectedBrokerProbeOptions(probe, inventory),
         ...brokerDeviceToolExecutionTimeout(name, args),
         ...(brokerBackend ? { backend: brokerBackend } : {}),
-        tool: name,
+        tool: composedListing ? "device_exec" : common.name,
+        ...(composedListing ? { command: listingCommand } : {}),
     });
+    if (composedListing) return listFilesFromExecResult(result.ok && result.result?.mcpResult?.content ? result.result.mcpResult : jsonResult(result), args);
     if (result.ok && result.result?.mcpResult?.content) return result.result.mcpResult;
     const routedBy = BROKER_MUTATING_DEVICE_TOOLS.has(name) ? "device-mutating-broker-implicit" : "device-readonly-broker-implicit";
     if (result.ok && BROKER_RECORDING_DEVICE_TOOLS.has(name) && result.result && typeof result.result === "object") {
@@ -1109,7 +1197,15 @@ async function maybeHandleImplicitBrokerMobileTool(name, args) {
 
 async function handleBrokerMobileTool(name, args) {
     const deviceId = typeof args?.deviceId === "string" ? args.deviceId : "";
-    const backend = typeof args?.backend === "string" && args.backend ? args.backend : inferMobileBackend(deviceId);
+    let backend = args?.backend;
+    if (!backend) {
+        const probe = implicitBrokerProbeOptions(args || {}, { allowDefault: true });
+        if (!probe) return implicitBrokerUnavailableResult("mobile-broker-appium");
+        const inventory = await brokerRpc({ ...probe, method: "broker.inventory" });
+        if (!inventory.ok) return jsonResult({ ...inventory, routedBy: "mobile-broker-appium" });
+        backend = inferBrokerInventoryLifecycleBackend(inventory, deviceId);
+        args = { ...args, ...selectedBrokerProbeOptions(probe, inventory) };
+    }
     if (backend?.ok === false) {
         return jsonResult({
             ok: false,
@@ -1120,6 +1216,9 @@ async function handleBrokerMobileTool(name, args) {
         });
     }
     const resolvedBackend = typeof backend === "string" ? backend : backend.backend;
+    if (!["android-emulator", "android-device", "ios-simulator", "ios-device"].includes(resolvedBackend)) {
+        return jsonResult({ ok: false, error: "unsupported-mobile-backend", deviceId });
+    }
     const routeArgs = brokerRouteOptions(args);
     const appiumOptions = brokerAppiumOptions(routeArgs);
     if (name === "mobile_clear_app_data" && resolvedBackend === "ios-device") {
@@ -1142,7 +1241,7 @@ async function handleBrokerMobileTool(name, args) {
             backend: resolvedBackend,
             deviceId,
         });
-        return jsonResult({ ...result, routedBy: "mobile-broker-appium" });
+        return jsonResult({ deviceId, ...result, routedBy: "mobile-broker-appium" });
     }
     const mapped = name === "mobile_wait_for_text" ? null : brokerMobileRequest(name, args || {}, resolvedBackend);
     if (mapped?.error) return textResult(false, mapped.error);
@@ -1158,13 +1257,15 @@ async function handleBrokerMobileTool(name, args) {
     if (name === "mobile_wait_for_text") {
         const text = args?.text;
         if (!text) return textResult(false, "mobile_wait_for_text requires text");
-        const timeoutMs = Math.max(0, Number(args?.timeoutMs ?? 10000));
-        const intervalMs = Math.max(50, Number(args?.intervalMs ?? 500));
-        const deadline = Date.now() + timeoutMs;
+        const wait = createWaitBudget(args?.timeoutMs, args?.intervalMs);
+        const timeoutMs = wait.timeoutMs;
+        let observed = false;
         let lastSource = "";
-        while (Date.now() <= deadline) {
+        while (wait.remaining() > 0) {
             const request = await brokerAppium({
-                ...appiumOptions,
+                ...selectedBrokerProbeOptions(appiumOptions, ensure),
+                autolaunch: false,
+                requestTimeoutMs: wait.requestTimeout(600000),
                 action: "request",
                 backend: resolvedBackend,
                 deviceId,
@@ -1172,22 +1273,27 @@ async function handleBrokerMobileTool(name, args) {
                 path: "/source",
             });
             if (!request.ok) return jsonResult({ ...request, routedBy: "mobile-broker-appium" });
+            if (wait.remaining() <= 0) return textResult(false, "Appium wait deadline exhausted during observation");
+            observed = true;
             lastSource = String(request.result?.response?.body?.value ?? "");
             if (lastSource.includes(text)) return jsonResult({ found: true, text, source: lastSource, provider: "broker-appium", backend: resolvedBackend, broker: request });
-            await new Promise((resolve) => setTimeout(resolve, intervalMs));
+            await wait.pause();
         }
+        if (!observed) return textResult(false, "Appium wait deadline exhausted before observation");
         return jsonResult({ found: false, text, source: lastSource, timeoutMs, provider: "broker-appium", backend: resolvedBackend });
     }
 
     if (name === "mobile_wait_for_app") {
-        const timeoutMs = Math.max(0, Number(args?.timeoutMs ?? 10000));
-        const intervalMs = Math.max(50, Number(args?.intervalMs ?? 500));
-        const deadline = Date.now() + timeoutMs;
+        const wait = createWaitBudget(args?.timeoutMs, args?.intervalMs);
+        const timeoutMs = wait.timeoutMs;
+        let observed = false;
         let lastState = null;
         const expectedAppId = appIdForBackend(args, resolvedBackend);
-        while (Date.now() <= deadline) {
+        while (wait.remaining() > 0) {
             const request = await brokerAppium({
-                ...appiumOptions,
+                ...selectedBrokerProbeOptions(appiumOptions, ensure),
+                autolaunch: false,
+                requestTimeoutMs: wait.requestTimeout(600000),
                 action: "request",
                 backend: resolvedBackend,
                 deviceId,
@@ -1196,6 +1302,8 @@ async function handleBrokerMobileTool(name, args) {
                 body: mapped.body,
             });
             if (!request.ok) return jsonResult({ ...request, routedBy: "mobile-broker-appium" });
+            if (wait.remaining() <= 0) return textResult(false, "Appium wait deadline exhausted during observation");
+            observed = true;
             lastState = request.result?.response?.body?.value ?? request.result?.response?.body ?? null;
             if (resolvedBackend.startsWith("ios")) {
                 const activeBundleId = lastState?.bundleId ?? lastState?.bundleID ?? null;
@@ -1203,8 +1311,9 @@ async function handleBrokerMobileTool(name, args) {
             } else if (Number(lastState) >= 3) {
                 return jsonResult({ found: true, packageName: expectedAppId, appState: lastState, provider: "broker-appium", backend: resolvedBackend, broker: request });
             }
-            await new Promise((resolve) => setTimeout(resolve, intervalMs));
+            await wait.pause();
         }
+        if (!observed) return textResult(false, "Appium wait deadline exhausted before observation");
         return jsonResult({ found: false, appState: lastState, timeoutMs, provider: "broker-appium", backend: resolvedBackend });
     }
 
@@ -1228,11 +1337,188 @@ async function handleBrokerMobileTool(name, args) {
         if (!value) return textResult(false, "Appium did not return screenshot data");
         return { content: [{ type: "image", data: String(value), mimeType: "image/png" }] };
     }
-    return jsonResult(brokerMobilePayload(name, resolvedBackend, request, { requests: requests.length }));
+    const appId = appIdForBackend(args, resolvedBackend);
+    return jsonResult(brokerMobilePayload(name, resolvedBackend, request, {
+        requests: requests.length,
+        ...(name === "mobile_open_url" ? { openedUrl: args.url } : {}),
+        ...(name === "mobile_install_app" ? { installed: args.path } : {}),
+        ...(name === "mobile_launch_app" ? { launched: appId } : {}),
+        ...(name === "mobile_uninstall_app" ? { uninstalled: appId } : {}),
+        ...(name === "mobile_stop_app" ? { stopped: appId } : {}),
+        ...(name === "mobile_set_location" ? { location: { latitude: Number(args.latitude), longitude: Number(args.longitude) } } : {}),
+    }));
 }
 
-async function dispatchTool(name, rawArgs) {
-    const args = normalizeToolArgs(rawArgs);
+const HYPER_V_LINUX_TOOLS = new Set([
+    ...BROKER_LIFECYCLE_COMMANDS,
+    "device_inventory",
+    "device_exec",
+    "device_upload",
+    "device_download",
+    "device_screenshot",
+    "device_click",
+    "device_double_click",
+    "device_key",
+    "device_type",
+    "device_scroll",
+    "device_cursor_position",
+    "device_drag",
+    "device_focus_window",
+    "device_snapshot_list",
+    "device_snapshot_create",
+    "device_snapshot_restore",
+    "device_snapshot_delete",
+]);
+
+async function maybeHandleHyperVLinuxVmTool(name, args = {}) {
+    if (args?.backend !== "linux-vm" || !HYPER_V_LINUX_TOOLS.has(name) || optsOutOfImplicitBroker(args)) return null;
+    const explicitHyperVBroker = args?.provider === "hyper-v"
+        || wantsBrokerLifecycle(name, args)
+        || wantsBrokerDeviceTool(name, args);
+    if (explicitHyperVBroker) {
+        return BROKER_LIFECYCLE_COMMANDS.has(name)
+            ? handleBrokerLifecycleTool(name, args)
+            : handleBrokerDeviceTool(name, args);
+    }
+    const probeArgs = name === "device_create"
+        ? { ...(args || {}), port: args?.brokerPort }
+        : args || {};
+    const probe = implicitBrokerProbeOptions(probeArgs);
+    if (!probe) return null;
+    const backends = await brokerRpc({ ...probe, ...brokerDiscoveryExecutionTimeout(args), method: "broker.backends" });
+    const advertised = backends.ok && Array.isArray(backends.result?.backends)
+        ? backends.result.backends.find((backend) => backend?.name === "linux-vm" && backend?.provider === "hyper-v")
+        : null;
+    if (!advertised) return null;
+    const route = { ...args, ...selectedBrokerProbeOptions(probe, backends), autolaunch: true };
+    if (BROKER_LIFECYCLE_COMMANDS.has(name)) return handleBrokerLifecycleTool(name, route);
+    return handleBrokerDeviceTool(name, route);
+}
+
+function directDeviceList() {
+    return [
+        currentDisplayTarget(),
+        ...listAndroidDevices(),
+        ...listAndroidRealDevices(),
+        ...listIosDevices(),
+        ...listIosRealDevices(),
+        ...listWindowsDevices(),
+        ...listWindowsVmDevices(),
+        ...listMacosDevices(),
+        ...listLinuxVmDevices(),
+    ];
+}
+
+async function handleDeviceList(args = {}) {
+    if (!optsOutOfImplicitBroker(args)) {
+        const probe = implicitBrokerProbeOptions(args);
+        if (probe) {
+            const inventory = await brokerRpc({ ...args, ...probe, method: "broker.inventory" });
+            if (!inventory.ok || !Array.isArray(inventory.result?.backends)) {
+                return jsonResult({ ...inventory, routedBy: "device-list-broker-implicit" });
+            }
+            const failedBackend = inventory.result.backends.find((entry) => entry?.error);
+            if (failedBackend) {
+                return jsonResult({
+                    ok: false,
+                    error: failedBackend.error,
+                    stateKey: failedBackend.stateKey,
+                    routedBy: "device-list-broker-implicit",
+                });
+            }
+            return jsonResult({
+                ownerId: ownerId(),
+                devices: [
+                    currentDisplayTarget(),
+                    ...inventory.result.backends.flatMap((entry) => Array.isArray(entry?.devices) ? entry.devices : []),
+                ].filter((device) => !args.backend || device.backend === args.backend || (args.backend === CURRENT_DISPLAY_DEVICE_ID && device.id === CURRENT_DISPLAY_DEVICE_ID)),
+                routedBy: "device-list-broker-implicit",
+            });
+        }
+    }
+    return jsonResult({ ownerId: ownerId(), devices: directDeviceList().filter((device) => !args.backend || device.backend === args.backend || (args.backend === CURRENT_DISPLAY_DEVICE_ID && device.id === CURRENT_DISPLAY_DEVICE_ID)), routedBy: "device-list-direct" });
+}
+
+function isCursorMove(name, args = {}) {
+    return name === "device_cursor_position" && (args.x !== undefined || args.y !== undefined);
+}
+
+function unhandledDeviceToolResult(name, args) {
+    if (!DEVICE_REQUIRED_TOOLS.has(name)) return null;
+    const deviceId = args.deviceId;
+    const detail = "Use devices to choose a device.";
+    let diagnostic;
+    if (deviceId === undefined) {
+        diagnostic = { ok: false, error: "missing-device-id", detail };
+    } else {
+        // Read only this owner's stored targets; diagnosing an unsupported action
+        // must not discover providers or turn an unreadable state into absence.
+        const matches = new Set();
+        if (deviceId === CURRENT_DISPLAY_DEVICE_ID) matches.add(CURRENT_DISPLAY_DEVICE_ID);
+        for (const [stateKey, backend] of LIFECYCLE_STATE_BACKENDS) {
+            if (readOwnerDevices(stateKey).some((device) => device.id === deviceId)) matches.add(backend);
+        }
+        if (listLinuxVmDevices({ strictState: true }).some((device) => device.id === deviceId)) matches.add("linux-vm");
+        if (matches.size === 0) {
+            diagnostic = { ok: false, error: "device-not-found", deviceId, detail };
+        } else if (matches.size > 1) {
+            diagnostic = { ok: false, error: "ambiguous-device-backend", deviceId, matches: [...matches] };
+        } else {
+            diagnostic = { ok: false, error: "device-tool-unsupported", tool: name, deviceId, backend: [...matches][0] };
+        }
+    }
+    return textResult(false, JSON.stringify(diagnostic));
+}
+
+async function handleFilteredBackends(args, detail) {
+    const result = await handleDeviceBackends(args, { detail });
+    if (!args.backend || result.isError) return result;
+    return { ...result, content: result.content.map(item => {
+        if (item.type !== "text") return item;
+        const value = JSON.parse(item.text);
+        for (const key of ["backends", "localBackends"]) {
+            if (Array.isArray(value[key])) value[key] = value[key].filter(backend => backend.name === args.backend);
+        }
+        if (Array.isArray(value.hostBackends?.backends)) value.hostBackends.backends = value.hostBackends.backends.filter(backend => backend.name === args.backend);
+        return { ...item, text: JSON.stringify(value) };
+    }) };
+}
+
+async function dispatchTool(name, rawArgs, options = {}) {
+    const { region, ...args } = rawArgs || {};
+    const startedAt = Date.now();
+    const result = await dispatchDeviceTool(name, args, options);
+    if (name === "device_start") return finishStartReadiness(result, args, startedAt,
+        (probe, probeArgs) => dispatchDeviceTool(probe, probeArgs, options));
+    return name === "device_screenshot" && region !== undefined ? cropScreenshotResult(result, region) : result;
+}
+
+async function dispatchDeviceTool(name, rawArgs, { detail = false } = {}) {
+    const args = normalizeToolArgs(rawArgs, name);
+    if (name === "device_list") return handleDeviceList(args);
+    if (name === "device_inventory" && args.backend === undefined) {
+        return availableDevices(backend => dispatchDeviceTool(name, { ...args, backend }, { detail }), { detail });
+    }
+    if (name === "device_backends") return handleFilteredBackends(args, detail);
+    if (MOBILE_COMMON_OPERATIONS.has(name) && args.backend !== undefined) {
+        const common = commonOperation(name, args.backend, args);
+        if (common.error) return textResult(false, common.error);
+    }
+    if (name === "mobile_key"
+        && !(typeof args.key === "string" && args.key.length > 0)
+        && !(typeof args.keyCode === "number" && Number.isFinite(args.keyCode))) {
+        return textResult(false, "mobile_key requires key or keyCode");
+    }
+    if (name === "mobile_wait_for_text" && !(typeof args.text === "string" && args.text.length > 0)) {
+        return textResult(false, "mobile_wait_for_text requires text");
+    }
+    if (isCursorMove(name, args)) {
+        if (!Number.isInteger(args.x) || args.x < 0 || !Number.isInteger(args.y) || args.y < 0) {
+            return jsonResult({ ok: false, error: "device-cursor-coordinates-invalid", detail: "Provide both x and y as nonnegative screenshot pixels." });
+        }
+        if (args.deviceId === CURRENT_DISPLAY_DEVICE_ID && (args.backend === undefined || args.backend === CURRENT_DISPLAY_DEVICE_ID)) return handleDisplayTool("display_move", args);
+
+    }
     if (args.deviceId !== undefined
         && (typeof args.deviceId !== "string" || !OWNER_DEVICE_ID_PATTERN.test(args.deviceId))) {
         return textResult(false, JSON.stringify({
@@ -1244,7 +1530,27 @@ async function dispatchTool(name, rawArgs) {
     const policy = evaluateDestructivePolicy(name, args);
     if (!policy.ok) return policyDeniedResult(policy);
 
-    if (wantsCurrentDisplayDevice(name, args)) return handleCurrentDisplayDeviceTool(name, args);
+    const directTarget = optsOutOfImplicitBroker(args) && args.deviceId && args.deviceId !== CURRENT_DISPLAY_DEVICE_ID
+        && name !== "device_create" && name !== "device_attach"
+        ? inferLifecycleBackend(args.deviceId) : null;
+    if (directTarget?.error === "ambiguous-device-backend") return jsonResult(directTarget);
+
+    if (name === "device_list_files" && args.deviceId === CURRENT_DISPLAY_DEVICE_ID) return jsonResult({ ok: false, error: "list-files-unsupported", detail: "Current-display targets do not provide a filesystem adapter." });
+    const hyperVLinuxResult = await maybeHandleHyperVLinuxVmTool(name, args);
+    if (hyperVLinuxResult) return hyperVLinuxResult;
+
+    const linuxVmManagementResult = await handleLinuxVmManagementTool(name, args);
+    if (linuxVmManagementResult) return linuxVmManagementResult;
+
+    const linuxVmResult = await handleLinuxVmTool(name, args);
+    if (linuxVmResult) return linuxVmResult;
+
+    if (wantsCurrentDisplayDevice(name, args)) {
+        if (args.backend !== undefined && args.backend !== CURRENT_DISPLAY_DEVICE_ID) return jsonResult({ ok: false, error: "device-backend-mismatch", actualBackend: CURRENT_DISPLAY_DEVICE_ID });
+        const common = commonOperation(name, CURRENT_DISPLAY_DEVICE_ID, args);
+        if (common.error) return textResult(false, common.error);
+        return handleCurrentDisplayDeviceTool(name, args);
+    }
 
     if (wantsBrokerLifecycle(name, args)) return handleBrokerLifecycleTool(name, args);
     if (wantsBrokerDeviceTool(name, args)) return handleBrokerDeviceTool(name, args);
@@ -1266,6 +1572,23 @@ async function dispatchTool(name, rawArgs) {
     const explicitMismatch = explicitBackendMismatchResult(name, args);
     if (explicitMismatch) return explicitMismatch;
 
+    if (MOBILE_COMMON_OPERATIONS.has(name)) {
+        const inferred = directTarget || inferLifecycleBackend(args.deviceId);
+        if (inferred.error === "ambiguous-device-backend") return jsonResult(inferred);
+        const common = commonOperation(name, inferred.ok ? inferred.backend : args.backend, args);
+        if (common.error) return textResult(false, common.error);
+        name = common.name;
+    }
+
+    if (name === "device_list_files") {
+        const owner = directTarget || inferLifecycleBackend(args.deviceId);
+        if (!owner.ok) return unhandledDeviceToolResult(name, args) || jsonResult(owner);
+        if (owner.backend === "ios-device") return jsonResult({ ok: false, error: "list-files-unsupported", detail: "The current Device Lab physical iOS adapter does not implement file listing.", deviceId: args.deviceId });
+        if (owner.backend !== "ios-simulator") {
+            const command = buildListFilesCommand(owner.backend, args);
+            return listFilesFromExecResult(await dispatchTool("device_exec", { ...args, command }), args);
+        }
+    }
     const androidResult = await handleAndroidTool(name, args);
     if (androidResult) return androidResult;
 
@@ -1287,47 +1610,78 @@ async function dispatchTool(name, rawArgs) {
     const displayResult = await handleDisplayTool(name, args);
     if (displayResult) return displayResult;
 
-    return textResult(false, `Unknown tool: ${name}`);
+    return unhandledDeviceToolResult(name, args) || textResult(false, `Unknown tool: ${name}`);
 }
 
-async function handleRunFlow(args, { toolName, toolAllowed }) {
+async function handleRunFlow(args, { toolName, toolAllowed, detail }) {
+    const nativeContent = [];
+    const finish = (value) => {
+        if (value && typeof value === "object" && value.ok === false) value = { error: "flow-step-failed", ...value };
+        const response = typeof value === "string"
+            ? textResult(false, value)
+            : flowJsonResult(detail ? value : compactToolValue(toolName, value), { detail });
+        response.content.push(...nativeContent);
+        return response;
+    };
     const { steps, stopOnError = true } = args;
-    if (!Array.isArray(steps)) return textResult(false, `${toolName} requires steps array`);
-    if (steps.length > FLOW_MAX_STEPS) return textResult(false, `${toolName} supports at most ${FLOW_MAX_STEPS} steps`);
+    if (!Array.isArray(steps)) return finish(`${toolName} requires steps array`);
+    if (steps.length === 0) return finish(`${toolName} requires at least one step`);
+    if (steps.length > FLOW_MAX_STEPS) return finish(`${toolName} supports at most ${FLOW_MAX_STEPS} steps`);
 
     const results = [];
     for (let index = 0; index < steps.length; index += 1) {
         const step = steps[index] || {};
-        const tool = flowStepTool(step);
-        const label = step.label || tool || `step-${index + 1}`;
-        if (!tool) {
-            const summary = { index, label, isError: true, error: "Flow step requires tool or name" };
+        const tool = typeof step.tool === "string" ? step.tool : "";
+        const label = (typeof step.label === "string" && step.label) || tool || `step-${index + 1}`;
+        if (!tool || Object.hasOwn(step, "name")) {
+            const summary = { index, label, isError: true, error: "Flow step requires tool; name is not supported" };
             results.push(summary);
-            if (stopOnError) return jsonResult({ ok: false, stoppedAt: index, results });
+            if (stopOnError) return finish({ ok: false, stoppedAt: index, results });
             continue;
         }
         if (!toolAllowed(tool)) {
             const summary = { index, label, tool, isError: true, error: `${toolName} does not allow step tool: ${tool}` };
             results.push(summary);
-            if (stopOnError) return jsonResult({ ok: false, stoppedAt: index, results });
+            if (stopOnError) return finish({ ok: false, stoppedAt: index, results });
             continue;
         }
 
-        const result = await dispatchTool(tool, step.arguments || {});
-        const summary = { index, label, tool, ...summarizeToolResult(result) };
+        if (step.arguments !== undefined && (!step.arguments || typeof step.arguments !== "object" || Array.isArray(step.arguments))) {
+            results.push({ index, label, tool, isError: true, error: "Flow step arguments must be an object" });
+            if (stopOnError) return finish({ ok: false, stoppedAt: index, results });
+            continue;
+        }
+        const inputError = toolInputError(tool, step.arguments) || (!flowOperationAllowed(tool, step.arguments) ? `${toolName} does not allow step action: ${tool}` : null);
+        if (inputError) {
+            if (inputError === `${tool} requires confirmDestructive:true`) {
+                const operation = toolOperation(tool, step.arguments);
+                const denied = policyDeniedResult(evaluateDestructivePolicy(operation, step.arguments));
+                results.push({ index, label, tool, ...summarizeToolResult(operation, actionResult(tool, operation, denied, { detail }), nativeContent) });
+            } else results.push({ index, label, tool, isError: true, error: inputError });
+            if (stopOnError) return finish({ ok: false, stoppedAt: index, results });
+            continue;
+        }
+        // A preceding step may have changed the broker or device state.
+        let result;
+        try {
+            result = await withBrokerOperation(() => dispatchTool(toolOperation(tool, step.arguments), normalizePublicToolArgs(tool, flowStepArguments(tool, args, step.arguments)), { detail }));
+        } catch (err) {
+            result = textResult(false, `Unexpected error: ${err.message}`);
+        }
+        const operation = toolOperation(tool, step.arguments);
+        const classified = summarizeToolResult(operation, result, []);
+        const presented = actionResult(tool, operation, result, { detail });
+        const summary = { index, label, tool, ...summarizeToolResult(operation, presented, nativeContent),
+            ...(classified.isError ? { isError: true } : {}) };
         results.push(summary);
-        if (summary.isError && stopOnError) return jsonResult({ ok: false, stoppedAt: index, results });
+        if (summary.isError && stopOnError) return finish({ ok: false, stoppedAt: index, results });
     }
 
-    return jsonResult({ ok: results.every((result) => !result.isError), results });
+    return finish({ ok: results.every((result) => !result.isError), results });
 }
 
-async function handleMobileRunFlow(args) {
-    return handleRunFlow(args, { toolName: "mobile_run_flow", toolAllowed: mobileFlowToolAllowed });
-}
-
-async function handleDeviceRunFlow(args) {
-    return handleRunFlow(args, { toolName: "device_run_flow", toolAllowed: deviceFlowToolAllowed });
+async function handleDeviceRunFlow(args, options) {
+    return handleRunFlow(args, { toolName: "device_run_flow", toolAllowed: (name) => DEVICE_FLOW_ALLOWED_TOOLS.has(name), ...options });
 }
 
 export async function startServer() {
@@ -1339,68 +1693,39 @@ export async function startServer() {
     server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
-        const { name, arguments: rawArgs = {} } = request.params;
-        const args = normalizeToolArgs(rawArgs);
-
-        try {
-            const policy = evaluateDestructivePolicy(name, args);
-            if (!policy.ok) return policyDeniedResult(policy);
-
-            switch (name) {
-                case "device_backends":
-                    return handleDeviceBackends(args);
-
-                case "device_broker_status":
-                    return jsonResult(await brokerStatus(args));
-
-                case "device_broker_shutdown":
-                    return jsonResult(await brokerShutdown(args));
-
-                case "device_broker_rpc":
-                    return jsonResult(await brokerRpc(args));
-
-                case "device_broker_lease":
-                    return jsonResult(await brokerLease(args));
-
-                case "device_broker_attach":
-                    return jsonResult(await brokerPhysical(args));
-
-                case "device_broker_apple":
-                    return jsonResult(await brokerApple(args));
-
-                case "device_broker_command":
-                    return jsonResult(await brokerCommand(args));
-
-                case "device_broker_appium":
-                    return jsonResult(await brokerAppium(args));
-
-                case "device_list":
-                    return jsonResult({
-                        ownerId: ownerId(),
-                        devices: [
-                            currentDisplayTarget(),
-                            ...listAndroidDevices(),
-                            ...listAndroidRealDevices(),
-                            ...listIosDevices(),
-                            ...listIosRealDevices(),
-                            ...listWindowsDevices(),
-                            ...listMacosDevices(),
-                        ],
-                    });
-
-                case "mobile_run_flow":
-                    return handleMobileRunFlow(args);
-
-                case "device_run_flow":
-                    return handleDeviceRunFlow(args);
-
-                default: {
-                    return dispatchTool(name, args);
-                }
+        const { name: publicName, arguments: rawArgs = {} } = request.params;
+        const inputError = toolInputError(publicName, rawArgs);
+        if (inputError) {
+            if (inputError === `${publicName} requires confirmDestructive:true`) {
+                return policyDeniedResult(evaluateDestructivePolicy(toolOperation(publicName, rawArgs), rawArgs));
             }
-        } catch (err) {
-            return textResult(false, `Unexpected error: ${err.message}`);
+            return jsonResult({ ok: false, error: inputError });
         }
+        const name = toolOperation(publicName, rawArgs);
+        const args = normalizePublicToolArgs(publicName, rawArgs);
+        const result = await withBrokerOperation(async () => {
+            try {
+                const policy = evaluateDestructivePolicy(name, args);
+                if (!policy.ok) return policyDeniedResult(policy);
+
+                switch (name) {
+
+                    case "device_broker_status":
+                        return jsonResult(await brokerStatus(args));
+
+                    case "device_run_flow":
+                        return handleDeviceRunFlow(args, { detail: rawArgs?.detail === true });
+
+                    default: {
+                        return dispatchTool(name, args, { detail: rawArgs?.detail === true });
+                    }
+                }
+            } catch (err) {
+                return textResult(false, `Unexpected error: ${err.message}`);
+            }
+        });
+        return name === "device_run_flow"
+            ? result : actionResult(publicName, name, result, { detail: rawArgs?.detail === true });
     });
 
     const transport = new StdioServerTransport();
