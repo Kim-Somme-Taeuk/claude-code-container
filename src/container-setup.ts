@@ -941,58 +941,88 @@ function ensureNpmTool(containerName: string, activeTool: ToolDefinition): void 
         return;
     }
 
-    console.log(`Installing ${tool.cmd}...`);
+    // A persisted npm binary can survive a recreated container without its wrapper.
+    // Probe the actual Node install offline, bypassing stale mise/PATH shims.
+    const cached = spawnSync(runtimeCli(), [
+        "exec", "-w", "/home/ccc", containerName, "sh", "-c",
+        `if [ ! -x /usr/bin/timeout ]; then echo "Tool verification requires timeout" >&2; exit 1; fi
+[ -x ~/.local/bin/mise ] || { echo "mise is unavailable for tool verification" >&2; exit 1; }
+node_installed=false
+for node_binary in "\${MISE_DATA_DIR:-$HOME/.local/share/mise}"/installs/node/22.*/bin/node; do
+    if [ -x "$node_binary" ]; then node_installed=true; break; fi
+done
+if [ "$node_installed" = false ]; then echo MISSING; exit 0; fi
+node_dir=$(MISE_OFFLINE=1 /usr/bin/timeout -k 1s 3s ~/.local/bin/mise where node@22) || exit $?
+[ -x "$node_dir/bin/node" ] || { echo "Installed Node 22 binary is unavailable" >&2; exit 1; }
+if [ ! -x "$node_dir/bin/${tool.cmd}" ]; then echo MISSING; exit 0; fi
+PATH="$node_dir/bin:$PATH" /usr/bin/timeout -k 1s 10s "$node_dir/bin/${tool.cmd}" --version >/dev/null
+status=$?
+case "$status" in
+    0) echo READY ;;
+    124) echo "Timed out verifying persisted ${tool.cmd}" >&2; exit "$status" ;;
+    137) echo "Verification of persisted ${tool.cmd} was killed (exit 137)" >&2; exit "$status" ;;
+    *) echo "Verification of persisted ${tool.cmd} failed (exit $status)" >&2; exit "$status" ;;
+esac`,
+    ], { encoding: "utf-8", timeout: 20_000 });
+    assertMutationSucceeded(cached, `Container ${tool.cmd} cached executable probe`);
+    const cachedState = cached.stdout.trim();
+    if (cachedState !== "READY" && cachedState !== "MISSING") {
+        throw new Error(`Container ${tool.cmd} cached executable probe returned an invalid result`);
+    }
+    if (cachedState === "MISSING") {
+        console.log(`Installing ${tool.cmd}...`);
 
-    const name = tool.pkg.split("/").pop();
-    const scope = tool.pkg.includes("/") ? tool.pkg.split("/")[0] + "/" : "";
-    const cleanupPattern = `"$gdir/${scope}.${name}-"*`;
+        const name = tool.pkg.split("/").pop();
+        const scope = tool.pkg.includes("/") ? tool.pkg.split("/")[0] + "/" : "";
+        const cleanupPattern = `"$gdir/${scope}.${name}-"*`;
 
-    const cleanupResult = spawnSync(
-        runtimeCli(),
-        [
-            "exec", "-w", "/home/ccc", containerName, "sh", "-c",
-            boundedShortContainerMutation(`gdir=$(~/.local/bin/mise exec node@22 -- npm root -g 2>/dev/null) && rm -rf ${cleanupPattern} 2>/dev/null`),
-        ],
-        { stdio: "ignore", timeout: CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS },
-    );
-    assertMutationSucceeded(cleanupResult, `Container ${tool.cmd} cleanup`);
+        const cleanupResult = spawnSync(
+            runtimeCli(),
+            [
+                "exec", "-w", "/home/ccc", containerName, "sh", "-c",
+                boundedShortContainerMutation(`gdir=$(~/.local/bin/mise exec node@22 -- npm root -g 2>/dev/null) && rm -rf ${cleanupPattern} 2>/dev/null`),
+            ],
+            { stdio: "ignore", timeout: CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS },
+        );
+        assertMutationSucceeded(cleanupResult, `Container ${tool.cmd} cleanup`);
 
-    // Drop any stale mise shims for the missing tools BEFORE install. If the
-    // mise volume persisted a shim from an earlier install whose underlying
-    // package no longer matches, the shim throws "not a valid shim" — and PATH
-    // would hit it if the wrapper at /home/ccc/.local/bin/<cmd> is gone.
-    const shimCleanupResult = spawnSync(
-        runtimeCli(),
-        ["exec", "-w", "/home/ccc", containerName, "sh", "-c", boundedShortContainerMutation(`rm -f ~/.local/share/mise/shims/${tool.cmd}`)],
-        { stdio: "ignore", timeout: CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS },
-    );
-    assertMutationSucceeded(shimCleanupResult, `Container ${tool.cmd} shim cleanup`);
+        // Drop any stale mise shims for the missing tools BEFORE install. If the
+        // mise volume persisted a shim from an earlier install whose underlying
+        // package no longer matches, the shim throws "not a valid shim" — and PATH
+        // would hit it if the wrapper at /home/ccc/.local/bin/<cmd> is gone.
+        const shimCleanupResult = spawnSync(
+            runtimeCli(),
+            ["exec", "-w", "/home/ccc", containerName, "sh", "-c", boundedShortContainerMutation(`rm -f ~/.local/share/mise/shims/${tool.cmd}`)],
+            { stdio: "ignore", timeout: CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS },
+        );
+        assertMutationSucceeded(shimCleanupResult, `Container ${tool.cmd} shim cleanup`);
 
-    const installResult = spawnSync(
-        runtimeCli(),
-        [
-            "exec", "-w", "/home/ccc", containerName, "sh", "-c",
-            boundedContainerMutation(`~/.local/bin/mise exec node@22 -- npm install -g ${tool.pkg}`),
-        ],
-        { stdio: "inherit", timeout: CONTAINER_TOOL_MUTATION_TIMEOUT_MS },
-    );
-    assertMutationSucceeded(installResult, `Container ${tool.cmd} installation`);
+        const installResult = spawnSync(
+            runtimeCli(),
+            [
+                "exec", "-w", "/home/ccc", containerName, "sh", "-c",
+                boundedContainerMutation(`~/.local/bin/mise exec node@22 -- npm install -g ${tool.pkg}`),
+            ],
+            { stdio: "inherit", timeout: CONTAINER_TOOL_MUTATION_TIMEOUT_MS },
+        );
+        assertMutationSucceeded(installResult, `Container ${tool.cmd} installation`);
 
-    // Regenerate mise shims so they reflect the freshly-installed binaries.
-    // Without this, an outdated shim from a prior install can shadow the new
-    // binary on PATH lookups that bypass the wrapper at /home/ccc/.local/bin.
-    const reshimResult = spawnSync(
-        runtimeCli(),
-        ["exec", "-w", "/home/ccc", containerName, "sh", "-c", boundedShortContainerMutation("~/.local/bin/mise reshim")],
-        { stdio: "ignore", timeout: CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS },
-    );
-    assertMutationSucceeded(reshimResult, `Container ${tool.cmd} reshim`);
+        // Regenerate mise shims so they reflect the freshly-installed binaries.
+        // Without this, an outdated shim from a prior install can shadow the new
+        // binary on PATH lookups that bypass the wrapper at /home/ccc/.local/bin.
+        const reshimResult = spawnSync(
+            runtimeCli(),
+            ["exec", "-w", "/home/ccc", containerName, "sh", "-c", boundedShortContainerMutation("~/.local/bin/mise reshim")],
+            { stdio: "ignore", timeout: CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS },
+        );
+        assertMutationSucceeded(reshimResult, `Container ${tool.cmd} reshim`);
+    }
 
     const wrapperResult = spawnSync(
         runtimeCli(),
         [
             "exec", "-w", "/home/ccc", containerName, "sh", "-c",
-            boundedShortContainerMutation(`cat > /home/ccc/.local/bin/${tool.cmd} << 'WRAPPER'\n#!/bin/sh\nexec ~/.local/bin/mise exec node@22 -- ${tool.cmd} "$@"\nWRAPPER\nchmod +x /home/ccc/.local/bin/${tool.cmd}`),
+            boundedShortContainerMutation(`if cat > /home/ccc/.local/bin/${tool.cmd} << 'WRAPPER'\n#!/bin/sh\nexec ~/.local/bin/mise exec node@22 -- ${tool.cmd} "$@"\nWRAPPER\nthen\n    chmod +x /home/ccc/.local/bin/${tool.cmd} && exit 0\nfi\nrm -f /home/ccc/.local/bin/${tool.cmd}\nexit 1`),
         ],
         { stdio: "pipe", timeout: CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS },
     );
