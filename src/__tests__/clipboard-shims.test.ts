@@ -35,7 +35,9 @@ describe.skipIf(process.platform === "win32").each(shims)("$name mounted clipboa
         try {
             const source = readFileSync(join(shimsDir, name), "utf-8");
             expect(source).toContain("/run/ccc/clipboard.port");
-            writeFileSync(shimFile, source.replaceAll("/run/ccc/clipboard.port", '"$CCC_TEST_PORT_FILE"'));
+            const isolated = source.replaceAll("/run/ccc/clipboard.port", '"$CCC_TEST_PORT_FILE"');
+            expect(isolated).not.toContain("/run/ccc/clipboard.port");
+            writeFileSync(shimFile, isolated);
             chmodSync(shimFile, 0o644);
             if (state === "a directory") {
                 mkdirSync(portFile);

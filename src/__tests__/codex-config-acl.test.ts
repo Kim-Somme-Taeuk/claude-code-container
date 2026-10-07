@@ -124,10 +124,12 @@ os.setxattr = unexpected_write`);
         expect(readAcl()).toBeNull();
     });
 
-    it("updates only the pinned inode when its path is replaced with a symlink", () => {
+    it("refuses a replaced entry without changing the pinned inode or symlink target", () => {
         const outside = join(state.home, "outside");
         const previous = join(configDir, "config.previous");
         writeFileSync(outside, "untouched", { mode: 0o400 });
+        const original = metadata();
+        const originalAcl = readAcl();
         const result = grant(`import os
 original_getxattr = os.getxattr
 def replace_path(*args):
@@ -135,11 +137,58 @@ def replace_path(*args):
     os.symlink(${JSON.stringify(outside)}, ${JSON.stringify(configFile)})
     return original_getxattr(*args)
 os.getxattr = replace_path`);
-        expect(result.status, result.stderr).toBe(0);
-        expect(readAcl(previous)).toContainEqual([2, 6, 2001]);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("config identity changed before ACL grant");
+        expect(realFs.statSync(previous)).toMatchObject(original);
+        expect(readAcl(previous)).toEqual(originalAcl);
+        expect(readFileSync(previous, "utf8")).toBe(userConfig);
         expect(readAcl(outside)).toBeNull();
         expect(realFs.statSync(outside).mode & 0o777).toBe(0o400);
         expect(readFileSync(outside, "utf8")).toBe("untouched");
+    });
+
+    it("refuses an existing hardlink alias without changing either path's ACL, owner, mode or contents", () => {
+        const alias = join(state.home, "external-alias");
+        realFs.linkSync(configFile, alias);
+        const before = metadata();
+        const originalAcl = readAcl();
+        expect(grant().status).toBe(1);
+        for (const path of [configFile, alias]) {
+            expect(realFs.statSync(path)).toMatchObject(before);
+            expect(readAcl(path)).toEqual(originalAcl);
+            expect(readFileSync(path, "utf8")).toBe(userConfig);
+        }
+    });
+
+    it("refuses a hardlink added during ACL observation without mutating the pinned inode", () => {
+        const alias = join(state.home, "late-alias");
+        const before = metadata();
+        const originalAcl = readAcl();
+        const result = grant(`import os
+original_getxattr = os.getxattr
+def add_alias(*args):
+    os.link(${JSON.stringify(configFile)}, ${JSON.stringify(alias)})
+    return original_getxattr(*args)
+os.getxattr = add_alias`);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("config identity changed before ACL grant");
+        for (const path of [configFile, alias]) {
+            expect(realFs.statSync(path)).toMatchObject(before);
+            expect(readAcl(path)).toEqual(originalAcl);
+            expect(readFileSync(path, "utf8")).toBe(userConfig);
+        }
+    });
+
+    it("rejects an intermediate directory symlink before reading or granting target ACLs", () => {
+        const linkedParent = join(state.home, "linked-parent");
+        realFs.symlinkSync(state.home, linkedParent, "dir");
+        const before = metadata();
+        const originalAcl = readAcl();
+        const result = runPython(CODEX_CONFIG_FILE_ACL.replace("/home/ccc/.codex", join(linkedParent, "codex")), "2001");
+        expect(result.status).toBe(1);
+        expect(metadata()).toEqual(before);
+        expect(readAcl()).toEqual(originalAcl);
+        expect(readFileSync(configFile, "utf8")).toBe(userConfig);
     });
 
     it("regrants access after atomic file replacement without changing either owner", () => {

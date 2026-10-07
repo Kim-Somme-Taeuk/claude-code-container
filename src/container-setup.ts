@@ -7,6 +7,8 @@ import { spawnSync } from "child_process";
 import { getNpmTools, getToolByName, type ToolDefinition } from "./tool-registry.js";
 import { prepareOpenCodeDataDirectory } from "./opencode-data-access.js";
 import { runtimeCli } from "./container-runtime.js";
+import { CLAUDE_BIN_PATH } from "./domain/tool-layout.js";
+import { createRequestedToolSetup } from "./application/requested-tool-setup.js";
 
 // Claude's native install layout inside the container.
 //
@@ -33,7 +35,7 @@ export const CLAUDE_DATA_DIR = "/home/ccc/.local/share/claude";
 // this change still hold it, so it is a migration donor, never a launcher source.
 export const CLAUDE_LEGACY_CACHE_FILE = "/home/ccc/.local/share/mise/.claude-bin/claude";
 export const CLAUDE_EXECUTABLE = "claude";
-export const CLAUDE_BIN_PATH = "/home/ccc/.local/bin/claude";
+export { CLAUDE_BIN_PATH };
 export const CONTAINER_TOOL_PROBE_TIMEOUT_MS = 15_000;
 export const CONTAINER_TOOL_SHORT_MUTATION_TIMEOUT_MS = 15_000;
 export const CONTAINER_TOOL_MUTATION_TIMEOUT_MS = 5 * 60_000;
@@ -871,30 +873,16 @@ export function ensureClaudeInContainer(containerName: string): void {
  */
 export function ensureTools(containerName: string, activeTool: ToolDefinition): void {
     if (activeTool.name === "opencode") prepareOpenCodeDataDirectory(containerName);
-    if (activeTool.name === "claude") {
-        ensureClaudeInContainer(containerName);
-    } else {
-        ensureNpmTool(containerName, activeTool);
-    }
-
-    // tool-registry and this module intentionally share the fixed Claude path;
-    // use it directly to avoid depending on that circular import's init order.
-    const configuredBinary = activeTool.binary || activeTool.name;
-    const executablePath = activeTool.name === "claude"
-        ? CLAUDE_BIN_PATH
-        : `/home/ccc/.local/bin/${configuredBinary}`;
-    const ready = spawnSync(
-        runtimeCli(),
-        ["exec", containerName, "test", "-x", executablePath],
-        { stdio: "ignore", timeout: CONTAINER_TOOL_PROBE_TIMEOUT_MS },
-    );
-    if ((ready.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") {
-        throw new Error(`Requested tool ${activeTool.name} readiness check timed out`);
-    }
-    if (ready.error || ready.status !== 0) {
-        throw new Error(`Requested tool ${activeTool.name} is unavailable after setup`);
-    }
-    if (activeTool.name === "codex") ensureCodexBubblewrap(containerName);
+    createRequestedToolSetup({
+        ensureClaudeLauncher: ensureClaudeInContainer,
+        ensureNpmTool,
+        probeLauncher: (target, path) => spawnSync(
+            runtimeCli(),
+            ["exec", target, "test", "-x", path],
+            { stdio: "ignore", timeout: CONTAINER_TOOL_PROBE_TIMEOUT_MS },
+        ),
+        ensureCodexSandbox: ensureCodexBubblewrap,
+    }).ensure(containerName, activeTool);
 }
 
 function ensureCodexBubblewrap(containerName: string): void {

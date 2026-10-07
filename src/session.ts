@@ -1,13 +1,18 @@
-import { spawnSync } from "child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
-import { basename, join } from "path";
-import { randomBytes } from "crypto";
-import { getProjectId } from "./utils.js";
+import { join } from "path";
 import { locksDir } from "./home-layout.js";
-import { runtimeCli } from "./container-runtime.js";
-import { cleanupOwnerDevices } from "./device-lab-admin.js";
 import { withSharedMutationLock, withSharedMutationLockAsync } from "@ccc/device-lab/device-lab-shared-state.js";
-import { observeProcessStarts, processStartToken, sessionLockLiveness, sessionLockOwner } from "./session-lock-liveness.js";
+import { createNativeSessionClaims, ensureNativeSessionClaimsDirectory } from "./composition/session-claims.js";
+import { armNativeSessionOwnership, assertNativeSessionOwnership, validateNativeSessionOwnership } from "./composition/session-ownership.js";
+import { captureNativeSessionOwnership, nativeSessionOwnershipMatches, removeCapturedNativeSessionOwnership } from "./adapters/session-ownership.js";
+import { createSessionAcquisition } from "./application/session-acquisition.js";
+import type { SessionAcquisitionPorts, SessionAcquisitionRequest } from "./ports/session-acquisition.js";
+import { runtimeCli } from "./container-runtime.js";
+import type { SessionOwnershipHandle, SessionOwnershipReceipt } from "./ports/session-ownership.js";
+import {
+    createNativeSessionCleanup,
+    removeNativeSessionClaim,
+    setupNativeSessionCleanupSignals,
+} from "./composition/session-cleanup.js";
 
 function containerLifecycleLock(containerPrefix: string): string {
     return join(locksDir(), `${containerPrefix}.container-lifecycle.guard`);
@@ -22,12 +27,7 @@ function projectFamilyLifecycleLock(projectId: string): string {
 }
 
 function ensureLocksDirectory(): void {
-    mkdirSync(locksDir(), { recursive: true, mode: 0o700 });
-    const observed = lstatSync(locksDir());
-    if (!observed.isDirectory() || observed.isSymbolicLink()) {
-        throw new Error("CCC session lock path must be a real directory");
-    }
-    if (process.platform !== "win32") chmodSync(locksDir(), 0o700);
+    ensureNativeSessionClaimsDirectory();
 }
 
 export function withContainerLifecycleLock<T>(containerPrefix: string, operation: () => T): T {
@@ -55,69 +55,223 @@ export async function withContainerSetupLockAsync<T>(containerPrefix: string, op
     return withSharedMutationLockAsync(containerSetupLock(containerPrefix), operation, { waitMs: 900_000 });
 }
 
-// Module state - managed via getter/setter for testability
-let currentSessionLockFile: string | null = null;
-let currentProjectPath: string | null = null;
-let currentProfile: string | undefined = undefined;
-let currentToolName: string | null = null;
-let currentContainerId: string | null = null;
-let sessionCleanupEnabled = true;
+const sessionClaims = createNativeSessionClaims((prefix, operation) =>
+    withContainerLifecycleLock(prefix, operation),
+);
 
-export function setSession(lockFile: string, projectPath: string, profile?: string, toolName?: string): void {
-    currentSessionLockFile = lockFile;
-    currentProjectPath = projectPath;
-    currentProfile = profile;
-    currentToolName = toolName ?? "claude";
-    currentContainerId = null;
-    sessionCleanupEnabled = true;
+const sessionCleanup = createNativeSessionCleanup(
+    (prefix, operation) => withContainerLifecycleLock(prefix, () => {
+        ownershipAuthorization?.();
+        return operation();
+    }),
+    (prefix, ownPath) => sessionClaims.hasOtherReconciledSessionClaims(prefix, ownPath),
+);
+
+let ownership: SessionOwnershipHandle | null = null;
+let armingOwnership = false;
+let acquiringOwnership = false;
+let acquisitionFailure: Error | null = null;
+let ownershipAuthorization: (() => void) | null = null;
+let capturedOwnership: SessionOwnershipReceipt | null = null;
+let pendingOwnershipUpdate: Promise<void> = Promise.resolve();
+let capturedContainerId: string | null = null;
+let sessionCleanupEnabled = true;
+let cleanupAuthorizationVersion = 0;
+
+function ownershipFailed(error: Error): void {
+    if (acquiringOwnership) { acquisitionFailure = error; return; }
+    console.error("[ccc] Host session ownership monitor failed; ending this session.");
+    process.exitCode = 1;
+    // Run the existing owned command interruption and session cleanup handlers.
+    process.emit("SIGTERM");
 }
 
-/** A failed join must release its claim without stopping existing background work. */
+async function armOwnershipInContext(rollback?: (binding: unknown, receipt: SessionOwnershipReceipt) => void): Promise<number | undefined> {
+    const current = sessionCleanup.getCurrentSession();
+    if (!current.lockFile || !current.projectPath || ownership || armingOwnership) {
+        throw new Error("Cannot arm host session ownership without a unique current session.");
+    }
+    armingOwnership = true;
+    if (!ownershipAuthorization) {
+        ownershipAuthorization = () => { throw new Error("Host session ownership was not established."); };
+    }
+    try {
+        if (capturedOwnership) ownershipAuthorization();
+        ownership = await armNativeSessionOwnership({
+            lockFile: current.lockFile, projectPath: current.projectPath,
+            profile: current.profile, toolName: current.toolName ?? undefined,
+        }, ownershipFailed, {
+            onCaptured: (receipt) => {
+                if (capturedOwnership) ownershipAuthorization!();
+                else {
+                    const captured = Object.freeze({ ...receipt });
+                    capturedOwnership = captured;
+                    ownershipAuthorization = () => assertNativeSessionOwnership(captured);
+                }
+            },
+            rollback,
+        });
+        return ownership.pid;
+    } finally {
+        armingOwnership = false;
+    }
+}
+
+export async function armSessionOwnership(): Promise<number | undefined> {
+    if (acquiringOwnership) throw new Error("Host session ownership is already being acquired.");
+    return armOwnershipInContext();
+}
+
+export async function acquireHostSessionOwnership(
+    request: SessionAcquisitionRequest,
+    inspectExisting: SessionAcquisitionPorts["inspectExisting"],
+): Promise<{ lockFile: string; existingId: string | null }> {
+    if (ownership || armingOwnership || acquiringOwnership || sessionCleanup.getCurrentSession().lockFile) {
+        throw new Error("Host session ownership is already being acquired.");
+    }
+    acquiringOwnership = true;
+    acquisitionFailure = null;
+    const rollbackOwn = (_binding: unknown, receipt: SessionOwnershipReceipt) => {
+        if (nativeSessionOwnershipMatches(receipt)) removeCapturedNativeSessionOwnership(receipt);
+    };
+    try {
+        const acquired = await createSessionAcquisition({
+            withLifecycleLock: withContainerLifecycleLockAsync,
+            reserve: sessionClaims.reserveSessionLockInHeldLifecycleLock,
+            initializeCapture(binding, lockFile) {
+                sessionCleanup.setSession(lockFile, binding.projectPath, binding.profile, binding.toolName);
+                capturedContainerId = null;
+                sessionCleanupEnabled = false;
+                sessionCleanup.setSessionCleanupEnabled(false);
+                cleanupAuthorizationVersion++;
+                ownershipAuthorization = () => { throw new Error("Host session ownership was not established."); };
+                const receipt = captureNativeSessionOwnership(lockFile);
+                validateNativeSessionOwnership({ ...binding, lockFile }, receipt, process.pid);
+                const captured = Object.freeze({ ...receipt });
+                capturedOwnership = captured;
+                ownershipAuthorization = () => assertNativeSessionOwnership(captured);
+                setupSignalHandlers();
+            },
+            inspectExisting,
+            async arm() {
+                await armOwnershipInContext(rollbackOwn);
+                if (acquisitionFailure) throw acquisitionFailure;
+            },
+            async acknowledge(id, runtime) {
+                await ownership!.updateContainer(id, runtime, false);
+                capturedContainerId = id;
+                sessionCleanup.setSessionContainerId(id);
+            },
+            reconcileForeign(prefix, lockFile) {
+                if (acquisitionFailure) throw acquisitionFailure;
+                return sessionClaims.reconcileForeignClaimsInHeldLifecycleLock(prefix, lockFile);
+            },
+            async rollback() {
+                try {
+                    if (capturedOwnership) rollbackOwn(undefined, capturedOwnership);
+                } catch (error) {
+                    ownershipAuthorization = () => { throw error; };
+                    throw error;
+                }
+                const previous = ownership;
+                ownership = null;
+                sessionCleanup.clearSession();
+                ownershipAuthorization = null;
+                capturedOwnership = null;
+                pendingOwnershipUpdate = Promise.resolve();
+                capturedContainerId = null;
+                sessionCleanupEnabled = true;
+                cleanupAuthorizationVersion++;
+                if (previous) await previous.release();
+            },
+        }).run(request);
+        if (acquisitionFailure) throw acquisitionFailure;
+        return acquired;
+    } finally {
+        acquiringOwnership = false;
+        acquisitionFailure = null;
+    }
+}
+
+export async function confirmSessionOwnership(): Promise<void> {
+    await pendingOwnershipUpdate;
+    ownership?.assertOwnership();
+}
+
+export function setSession(lockFile: string, projectPath: string, profile?: string, toolName?: string): void {
+    if (ownership || armingOwnership || acquiringOwnership || ownershipAuthorization) {
+        throw new Error("Cannot replace an owned host session before cleanup.");
+    }
+    sessionCleanup.setSession(lockFile, projectPath, profile, toolName);
+    capturedContainerId = null;
+    sessionCleanupEnabled = true;
+    cleanupAuthorizationVersion++;
+    ownershipAuthorization = null;
+    capturedOwnership = null;
+}
+
+/** Capture and shutdown authorization are separate; a failed join only drops its claim. */
 export function setSessionCleanupEnabled(enabled: boolean): void {
+    if (typeof enabled !== "boolean") throw new TypeError("Invalid session cleanup authorization.");
+    if (acquiringOwnership) throw new Error("Cannot update host session ownership during acquisition.");
     sessionCleanupEnabled = enabled;
+    const version = ++cleanupAuthorizationVersion;
+    if (!enabled || !ownership) sessionCleanup.setSessionCleanupEnabled(enabled);
+    queueOwnershipUpdate(version);
+}
+
+function queueOwnershipUpdate(version: number): void {
+    if (!ownership) return;
+    const activeOwnership = ownership;
+    const containerId = capturedContainerId;
+    const enabled = sessionCleanupEnabled;
+    const runtime = runtimeCli();
+    if (runtime !== "docker" && runtime !== "podman") throw new Error("Invalid session container runtime.");
+    pendingOwnershipUpdate = pendingOwnershipUpdate.then(async () => {
+        await activeOwnership.updateContainer(containerId, runtime, enabled);
+        // A stale successful ACK must not reauthorize a subsequently revoked session.
+        if (ownership === activeOwnership && cleanupAuthorizationVersion === version) {
+            sessionCleanup.setSessionCleanupEnabled(enabled);
+        }
+    });
+    // ACK failure invokes ownershipFailed; consume now while confirm retains rejection.
+    void pendingOwnershipUpdate.catch(() => undefined);
 }
 
 export function setSessionContainerId(containerId: string | null): void {
-    currentContainerId = containerId;
+    if (acquiringOwnership) throw new Error("Cannot update host session ownership during acquisition.");
+    // Permission belongs to the captured identity, never its replacement. Revoke
+    // before publishing a different ID so guardian EOF cannot stop a failed join.
+    if (ownership && capturedContainerId !== containerId) {
+        sessionCleanupEnabled = false;
+        sessionCleanup.setSessionCleanupEnabled(false);
+    }
+    capturedContainerId = containerId;
+    sessionCleanup.setSessionContainerId(containerId);
+    queueOwnershipUpdate(++cleanupAuthorizationVersion);
 }
 
 export function getCurrentSession(): { lockFile: string | null; projectPath: string | null; profile?: string; toolName: string | null } {
-    return { lockFile: currentSessionLockFile, projectPath: currentProjectPath, profile: currentProfile, toolName: currentToolName };
+    return sessionCleanup.getCurrentSession();
 }
 
 export function clearSession(): void {
-    currentSessionLockFile = null;
-    currentProjectPath = null;
-    currentProfile = undefined;
-    currentToolName = null;
-    currentContainerId = null;
-    cleanedUp = false;
+    if (armingOwnership || acquiringOwnership) throw new Error("Cannot clear host session ownership during acquisition.");
+    if (ownership) cleanupSession();
+    sessionCleanup.clearSession();
+    capturedContainerId = null;
     sessionCleanupEnabled = true;
+    cleanupAuthorizationVersion++;
+    ownershipAuthorization = null;
+    capturedOwnership = null;
 }
 
 export function createSessionLock(projectId: string, profile?: string): string {
-    ensureLocksDirectory();
-    const sessionId = randomBytes(16).toString("hex");
-    const prefix = profile ? `${projectId}--p--${profile}` : projectId;
-    const lockFile = join(locksDir(), `${prefix}--${sessionId}.lock`);
-    withContainerLifecycleLock(prefix, () => {
-        const startToken = processStartToken(process.pid);
-        const record = startToken
-            ? JSON.stringify({ version: 2, pid: process.pid, startToken })
-            : String(process.pid);
-        writeFileSync(lockFile, record, { mode: 0o600, flag: "wx" });
-    });
-    return lockFile;
+    return sessionClaims.createSessionLock(projectId, profile);
 }
 
 export function removeSessionLock(lockFile: string): void {
-    try {
-        if (existsSync(lockFile)) {
-            unlinkSync(lockFile);
-        }
-    } catch {
-        // Ignore errors during cleanup
-    }
+    removeNativeSessionClaim(lockFile);
 }
 
 /**
@@ -132,49 +286,14 @@ export function getActiveSessionsForContainer(
     containerPrefix: string,
     currentLockFile?: string,
 ): string[] {
-    let entries: string[];
-    try {
-        ensureLocksDirectory();
-        entries = readdirSync(locksDir());
-    } catch (error) {
-        // The directory was just established above. Any observation failure,
-        // including a concurrent ENOENT, must not authorize container cleanup.
-        throw error;
-    }
-    return filterLiveSessionLocks(
-        sessionLockClaimsForContainer(entries, containerPrefix),
-        currentLockFile,
-    );
+    return sessionClaims.getActiveSessionsForContainer(containerPrefix, currentLockFile);
 }
 
-function sessionLockClaimsForContainer(entries: string[], containerPrefix: string): string[] {
-    const isProfilePrefix = containerPrefix.includes("--p--");
-    return entries.filter((f) => {
-        if (!f.endsWith(".lock")) return false;
-
-        // New format: prefix--sessionId.lock
-        if (f.startsWith(`${containerPrefix}--`)) {
-            if (isProfilePrefix) {
-                const sessionId = f.slice(containerPrefix.length + 2, -".lock".length);
-                // Profile names may contain "--". Only the single session-id
-                // segment belongs to this exact profile prefix.
-                return sessionId.length > 0 && !sessionId.includes("--");
-            } else {
-                const afterPrefix = f.slice(containerPrefix.length + 2);
-                if (afterPrefix.startsWith("p--")) return false;
-            }
-            return true;
-        }
-
-        // Legacy fallback: prefix-sessionId.lock (single dash, non-profile only)
-        if (!isProfilePrefix && f.startsWith(`${containerPrefix}-`)) {
-            // Make sure it's not actually a new-format file with --
-            const afterPrefix = f.slice(containerPrefix.length + 1);
-            if (!afterPrefix.startsWith("-")) return true;
-        }
-
-        return false;
-    });
+export function observeActiveSessionsForContainer(
+    containerPrefix: string,
+    currentLockFile?: string,
+): string[] {
+    return sessionClaims.observeActiveSessionsForContainer(containerPrefix, currentLockFile);
 }
 
 /**
@@ -183,83 +302,11 @@ function sessionLockClaimsForContainer(entries: string[], containerPrefix: strin
  * observation into permission to terminate another session.
  */
 export function getSessionLockClaimsForContainer(containerPrefix: string): string[] {
-    ensureLocksDirectory();
-    return sessionLockClaimsForContainer(readdirSync(locksDir()), containerPrefix);
+    return sessionClaims.getSessionLockClaimsForContainer(containerPrefix);
 }
 
 export function getSessionLockClaimsForProjectFamily(projectId: string): string[] {
-    ensureLocksDirectory();
-    return readdirSync(locksDir()).filter((entry) =>
-        entry.endsWith(".lock") && entry.startsWith(`${projectId}--`),
-    );
-}
-
-function filterLiveSessionLocks(locks: string[], currentLockFile?: string): string[] {
-    const currentLockName = currentLockFile ? basename(currentLockFile) : null;
-    let currentOwnerPid: number | null = null;
-    if (currentLockName && locks.includes(currentLockName)) {
-        try {
-            const currentOwner = sessionLockOwner(
-                readFileSync(join(locksDir(), currentLockName), "utf-8").trim(),
-            );
-            if (currentOwner?.pid === process.pid) currentOwnerPid = currentOwner.pid;
-        } catch {
-            // Without a valid current ownership record, preserve every claim.
-        }
-    }
-    // Each lock is read ONCE, here, and the walk below works from what was read. The first
-    // version of this batching read every file a second time to collect the owners, which
-    // broke two existing tests outright — their `readFileSync` is mocked per call, so the
-    // extra reads consumed the sequence the walk depended on. A double read is a bad way to
-    // save a process launch in any case.
-    const claims = locks.map((name) => {
-        try {
-            return { name, content: readFileSync(join(locksDir(), name), "utf-8").trim() };
-        } catch {
-            // Unreadable here is not a decision: the walk preserves such a lock, fail-closed.
-            return { name, content: null as string | null };
-        }
-    });
-    // One observation for every candidate owner, in one process. Each `sessionLockLiveness`
-    // call otherwise costs its own `powershell.exe` on Windows, so this filter's price grew
-    // with the number of leftover lock files — paid on every `ccc` invocation, before any work
-    // began. The map can only save a launch: a pid it cannot answer for falls through to the
-    // single-pid probe inside `sessionLockLiveness`.
-    const observedOwners = observeProcessStarts(
-        claims.flatMap(({ content }) => {
-            const owner = content === null ? null : sessionLockOwner(content);
-            return owner ? [owner.pid] : [];
-        }),
-    );
-    return claims.filter(({ name: f, content }) => {
-        const lockPath = join(locksDir(), f);
-        if (content === null) return true;
-        try {
-            const owner = sessionLockOwner(content);
-            if (f !== currentLockName
-                && currentOwnerPid === process.pid
-                && owner?.pid === currentOwnerPid
-                && !owner.startToken) {
-                // Host PIDs are unique. Once this invocation's current lock
-                // proves ownership of the PID, an older PID-only claim for the
-                // same PID is a superseded legacy lock, not another process.
-                try { unlinkSync(lockPath); } catch { /* ignore */ }
-                return false;
-            }
-            const liveness = sessionLockLiveness(content, observedOwners);
-            if (liveness === "stale") {
-                try { unlinkSync(lockPath); } catch { /* ignore */ }
-                return false;
-            }
-            // Unknown observation is not proof that the owner exited.
-            return true;
-        } catch {
-            // Failure to read a candidate lock is not proof that its owner is
-            // dead. Preserve it and fail closed so transient Windows sharing,
-            // antivirus, or permission errors cannot authorize stop/rm.
-            return true;
-        }
-    }).map(({ name }) => name);
+    return sessionClaims.getSessionLockClaimsForProjectFamily(projectId);
 }
 
 /**
@@ -267,7 +314,7 @@ function filterLiveSessionLocks(locks: string[], currentLockFile?: string): stri
  * containers. This broader query is reserved for removing the project path.
  */
 export function getActiveSessionsForProjectFamily(projectId: string): string[] {
-    return filterLiveSessionLocks(getSessionLockClaimsForProjectFamily(projectId));
+    return sessionClaims.getActiveSessionsForProjectFamily(projectId);
 }
 
 /**
@@ -282,18 +329,14 @@ export function hasOtherActiveSessions(
     containerPrefix: string,
     currentLockFile: string,
 ): boolean {
-    const sessions = getActiveSessionsForContainer(containerPrefix);
-    const currentLockName = basename(currentLockFile);
-    return sessions.some((s) => s !== currentLockName);
+    return sessionClaims.hasOtherActiveSessions(containerPrefix, currentLockFile);
 }
 
 export function hasOtherSessionClaims(
     containerPrefix: string,
     currentLockFile: string,
 ): boolean {
-    const claims = getSessionLockClaimsForContainer(containerPrefix);
-    const currentLockName = basename(currentLockFile);
-    return claims.some((claim) => claim !== currentLockName);
+    return sessionClaims.hasOtherSessionClaims(containerPrefix, currentLockFile);
 }
 
 /**
@@ -308,62 +351,28 @@ export function recreateContainerWithoutInterruptingSessions(
     recreate: () => void,
     replacementAllowed: () => boolean = () => true,
 ): boolean {
-    return withContainerLifecycleLock(containerPrefix, () => {
-        if (!replacementAllowed()) return false;
-        // Replacement is already restricted to a caller-proven stopped
-        // container. Prune only locks whose PID/start-token observation proves
-        // that their owner exited; unreadable or unknown claims remain live and
-        // continue to block the destructive operation.
-        if (hasOtherActiveSessions(containerPrefix, currentLockFile)) return false;
-        recreate();
-        return true;
-    });
-}
-
-let cleanedUp = false;
-
-function cleanupDevicesBestEffort(projectPath: string, profile?: string): void {
-    try {
-        cleanupOwnerDevices(projectPath, 5000, profile);
-    } catch (err) {
-        console.error(`[ccc] device cleanup failed during session cleanup: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    return sessionClaims.recreateContainerWithoutInterruptingSessions(
+        containerPrefix, currentLockFile, recreate, replacementAllowed,
+    );
 }
 
 export function cleanupSession(): void {
-    if (cleanedUp || !currentSessionLockFile || !currentProjectPath) {
-        return;
+    if (acquiringOwnership) throw new Error("Cannot clean up host session ownership during acquisition.");
+    sessionCleanup.cleanupSession();
+    if (!sessionCleanup.getCurrentSession().lockFile) {
+        const previous = ownership;
+        ownership = null;
+        pendingOwnershipUpdate = Promise.resolve();
+        capturedContainerId = null;
+        sessionCleanupEnabled = true;
+        cleanupAuthorizationVersion++;
+        ownershipAuthorization = null;
+        capturedOwnership = null;
+        if (previous) void previous.release().catch(() => undefined);
     }
-    const projectId = getProjectId(currentProjectPath);
-    const containerPrefix = currentProfile ? `${projectId}--p--${currentProfile}` : projectId;
-    // Automatic shutdown requires the absence of every foreign ownership claim.
-    // Liveness inference is intentionally excluded from this destructive path.
-    withContainerLifecycleLock(containerPrefix, () => {
-        const hasOthers = hasOtherSessionClaims(containerPrefix, currentSessionLockFile!);
-        removeSessionLock(currentSessionLockFile!);
-        if (!hasOthers && sessionCleanupEnabled) {
-            cleanupDevicesBestEffort(currentProjectPath!, currentProfile);
-            if (currentContainerId) {
-                spawnSync(runtimeCli(), ["stop", currentContainerId], { stdio: "ignore" });
-            }
-        }
-    });
-
-    cleanedUp = true;
-
-    currentSessionLockFile = null;
-    currentProjectPath = null;
-    currentProfile = undefined;
 }
 
 // Setup signal handlers for cleanup
 export function setupSignalHandlers(): void {
-    const cleanup = () => {
-        cleanupSession();
-        process.exit(0);
-    };
-
-    process.once("SIGINT", cleanup);
-    process.once("SIGTERM", cleanup);
-    process.once("SIGHUP", cleanup);
+    setupNativeSessionCleanupSignals(() => cleanupSession());
 }

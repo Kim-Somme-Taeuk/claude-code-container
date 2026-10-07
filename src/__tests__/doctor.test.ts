@@ -11,12 +11,14 @@ vi.mock("child_process", async (importOriginal) => {
 // Mock fs
 const mockExistsSync = vi.fn().mockReturnValue(false);
 const mockReaddirSync = vi.fn<() => string[]>().mockReturnValue([]);
+const mockUnlinkSync = vi.fn();
 vi.mock("fs", async (importOriginal) => {
     const actual = (await importOriginal()) as Record<string, unknown>;
     return {
         ...actual,
         existsSync: (...args: unknown[]) => mockExistsSync(...args),
         readdirSync: (...args: unknown[]) => mockReaddirSync(...args),
+        unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
     };
 });
 
@@ -38,9 +40,12 @@ vi.mock("../docker.js", () => ({
 
 // Mock session.js
 const mockGetActiveSessionsForProject = vi.fn<() => string[]>().mockReturnValue([]);
+const mockObserveActiveSessionsForContainer = vi.fn<() => string[]>().mockReturnValue([]);
 vi.mock("../session.js", () => ({
     getActiveSessionsForProject: (...args: unknown[]) =>
         mockGetActiveSessionsForProject(...args),
+    observeActiveSessionsForContainer: (...args: unknown[]) =>
+        mockObserveActiveSessionsForContainer(...args),
 }));
 
 const mockIdentity = vi.hoisted(() => ({ uid: 2001, gid: 3001, mapping: "host" as "host" | "podman-keep-id", contractVersion: "1" }));
@@ -73,13 +78,15 @@ describe("runDoctor", () => {
         spawnSyncMock.mockReset();
         mockExistsSync.mockReset().mockReturnValue(false);
         mockReaddirSync.mockReset().mockReturnValue([]);
+        mockUnlinkSync.mockReset();
         mockIsDockerRunning.mockReturnValue(true);
         mockIsImageExists.mockReturnValue(true);
         mockGetImageLabel.mockReturnValue(null);
         mockIsContainerRunning.mockReturnValue(true);
         mockIsContainerExists.mockReturnValue(true);
         mockGetContainerName.mockReturnValue("ccc-myproject-abc123");
-        mockGetActiveSessionsForProject.mockReturnValue([]);
+        mockGetActiveSessionsForProject.mockReset().mockImplementation(() => { throw new Error("Doctor must not prune ownership receipts"); });
+        mockObserveActiveSessionsForContainer.mockReset().mockReturnValue([]);
         vi.spyOn(console, "log").mockImplementation(() => {});
         vi.spyOn(console, "error").mockImplementation(() => {});
     });
@@ -206,7 +213,7 @@ describe("runDoctor", () => {
 
     it("shows warning when stale lock files are detected", () => {
         // 2 total lock files on disk, 1 active session → 1 stale
-        mockGetActiveSessionsForProject.mockReturnValue(["myproject-abc123-session1.lock"]);
+        mockObserveActiveSessionsForContainer.mockReturnValue(["myproject-abc123-session1.lock"]);
         mockExistsSync.mockReturnValue(true); // locksDir exists
         mockReaddirSync.mockReturnValue([
             "myproject-abc123-session1.lock",
@@ -230,6 +237,9 @@ describe("runDoctor", () => {
             .join("\n");
         expect(logCalls).toContain("Stale locks");
         expect(logCalls).toContain("1 stale lock file(s)");
+        expect(mockObserveActiveSessionsForContainer).toHaveBeenCalledExactlyOnceWith("myproject-abc123");
+        expect(mockGetActiveSessionsForProject).not.toHaveBeenCalled();
+        expect(mockUnlinkSync).not.toHaveBeenCalled();
     });
 
     it("handles mix of ok/warn/error: image missing (error) and container stopped (warn)", () => {
@@ -336,7 +346,7 @@ describe("runDoctor", () => {
     });
 
     it("shows active session count when sessions exist", () => {
-        mockGetActiveSessionsForProject.mockReturnValue([
+        mockObserveActiveSessionsForContainer.mockReturnValue([
             "myproject-abc123-aaa.lock",
             "myproject-abc123-bbb.lock",
         ]);
@@ -365,7 +375,7 @@ describe("runDoctor", () => {
 
     it("recognizes new -- separator lock file format", () => {
         // 2 lock files with new format (--), 1 active → 1 stale
-        mockGetActiveSessionsForProject.mockReturnValue(["myproject-abc123--session1.lock"]);
+        mockObserveActiveSessionsForContainer.mockReturnValue(["myproject-abc123--session1.lock"]);
         mockExistsSync.mockReturnValue(true);
         mockReaddirSync.mockReturnValue([
             "myproject-abc123--session1.lock",
@@ -387,7 +397,7 @@ describe("runDoctor", () => {
 
     it("recognizes profile lock file format (projectId--p--profile--sessionId.lock)", () => {
         // 1 profile lock file, 0 active → 1 stale
-        mockGetActiveSessionsForProject.mockReturnValue([]);
+        mockObserveActiveSessionsForContainer.mockReturnValue([]);
         mockExistsSync.mockReturnValue(true);
         mockReaddirSync.mockReturnValue([
             "myproject-abc123--p--work--session1.lock",
@@ -407,7 +417,7 @@ describe("runDoctor", () => {
     });
 
     it("does not count lock files from different projects", () => {
-        mockGetActiveSessionsForProject.mockReturnValue([]);
+        mockObserveActiveSessionsForContainer.mockReturnValue([]);
         mockExistsSync.mockReturnValue(true);
         mockReaddirSync.mockReturnValue([
             "otherproject-xyz789--session1.lock",  // different project

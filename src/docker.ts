@@ -25,8 +25,18 @@ import {
 import { homedir } from "os";
 import { dirname, join, normalize, posix, resolve } from "path";
 import { fileURLToPath } from "url";
-import { ContainerRestartRequiredError } from "./container-restart-guidance.js";
+import { createContainerSessionHandoff } from "./application/container-session-handoff.js";
+import { createContainerRuntimeReadiness } from "./application/container-runtime-readiness.js";
+import { createContainerExecReadiness } from "./application/container-exec-readiness.js";
+import { createContainerSocketAccess } from "./application/container-socket-access.js";
+import { createCodexConfigPreparation } from "./application/codex-config-preparation.js";
+import { createNativeContainerExistingLifecycle } from "./composition/container-existing-lifecycle.js";
+import { createNativeContainerCreateLifecycle } from "./composition/container-create-lifecycle.js";
+import { createNativeContainerDestructiveLifecycle } from "./composition/container-destructive-lifecycle.js";
+import { createNativeContainerImagePreparation } from "./composition/container-image-preparation.js";
+import type { ContainerDestructiveLifecycleOptions } from "./ports/container-destructive-lifecycle.js";
 import { cccHome, clipboardFilesDir } from "./home-layout.js";
+import { ContainerRestartRequiredError } from "./container-restart-guidance.js";
 import {
     getProjectId,
     projectPathsEquivalent,
@@ -1233,40 +1243,32 @@ export const CONTAINER_MANAGER_SOCKET_GRANT =
     + 'if getent group ccc-host-socket >/dev/null; then groupmod -g "$g" ccc-host-socket; else groupadd -g "$g" ccc-host-socket; fi; '
     + 'n=ccc-host-socket; fi; usermod -aG "$n" "$u"';
 
-let socketAccessWarned = false;
+const containerSocketAccess = createContainerSocketAccess({
+    probe: target => spawnSync(runtimeCli(), ["exec", target, "sh", "-c", CONTAINER_MANAGER_SOCKET_PROBE], {
+        encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: SOCKET_ACCESS_TIMEOUT_MS,
+    }),
+    grant: (target, user, gid) => spawnSync(runtimeCli(), [
+        "exec", "--user", "root", target,
+        "timeout", "-k", "2s", "8s", "sh", "-c", CONTAINER_MANAGER_SOCKET_GRANT, "ccc-socket-grant", user, gid,
+    ], { stdio: "ignore", timeout: SOCKET_ACCESS_TIMEOUT_MS }),
+    warn: () => {
+        console.warn("[ccc] Could not grant the container user access to the container-manager socket; "
+            + "docker commands inside the container may need sudo.");
+        return undefined;
+    },
+});
 
 /**
  * Let the container's default exec user use the mounted container-manager socket. New execs pick
- * up the group; processes already running keep theirs. Failures only warn: the session still works.
+ * up the group; processes already running keep theirs. Returned failures warn; thrown failures propagate.
  */
 export function ensureContainerManagerSocketAccess(containerName: string): void {
-    const warn = () => {
-        if (socketAccessWarned) return;
-        socketAccessWarned = true;
-        console.warn("[ccc] Could not grant the container user access to the container-manager socket; "
-            + "docker commands inside the container may need sudo.");
-    };
-    const probe = spawnSync(runtimeCli(), ["exec", containerName, "sh", "-c", CONTAINER_MANAGER_SOCKET_PROBE], {
-        encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: SOCKET_ACCESS_TIMEOUT_MS,
-    });
-    if (probe.status === 0) return;
-    const [user, gid] = String(probe.stdout ?? "").trim().split(/\s+/);
-    if (probe.status !== SOCKET_ACCESS_NEEDS_GROUP_EXIT
-        || !/^[a-z_][a-z0-9_-]{0,31}$/.test(user ?? "")
-        || !/^\d{1,10}$/.test(gid ?? "")) {
-        warn();
-        return;
-    }
-    const grant = spawnSync(runtimeCli(), [
-        "exec", "--user", "root", containerName,
-        "timeout", "-k", "2s", "8s", "sh", "-c", CONTAINER_MANAGER_SOCKET_GRANT, "ccc-socket-grant", user, gid,
-    ], { stdio: "ignore", timeout: SOCKET_ACCESS_TIMEOUT_MS });
-    if (grant.status !== 0) warn();
+    containerSocketAccess.run(containerName);
 }
 
 /** Test hook: forget that the one-time warning was printed. */
 export function resetContainerManagerSocketAccessWarningForTest(): void {
-    socketAccessWarned = false;
+    containerSocketAccess.resetWarning();
 }
 
 export function prepareCodexConfigForContainer(containerName: string, profile?: string): void {
@@ -1295,8 +1297,9 @@ export function prepareCodexConfigForContainer(containerName: string, profile?: 
     };
     const validateHostConfig = (allowAbsent = false): void => {
         try {
-            if (!lstatSync(configFile).isFile()) {
-                throw new Error("Unable to prepare Codex credentials: automatic repair requires a regular non-symlink config file");
+            const metadata = lstatSync(configFile);
+            if (!metadata.isFile() || metadata.nlink !== 1) {
+                throw new Error("Unable to prepare Codex credentials: automatic repair requires a regular non-symlink, single-link config file");
             }
         } catch (error) {
             if (allowAbsent && (error as NodeJS.ErrnoException).code === "ENOENT") return;
@@ -1311,23 +1314,24 @@ export function prepareCodexConfigForContainer(containerName: string, profile?: 
         return containerUid;
     };
 
-    // Check the parent first: an inaccessible 0700 directory can make a
-    // config-only existence test incorrectly report that config.toml is absent.
-    if (run("directory access check", directoryProbe, false, true).status !== 0) {
-        validateHostDirectory();
-        validateHostConfig(true);
-        const uid = getContainerUid();
-        run("directory ACL grant", codexConfigDirectoryAclScript(uid), true);
-        run("directory access verification", directoryProbe);
-    }
-
-    if (run("config access check", configProbe, false, true).status !== 0) {
-        validateHostDirectory();
-        validateHostConfig();
-        const uid = getContainerUid();
-        run("config ACL grant", codexConfigFileAclScript(uid), true);
-        run("config access verification", configProbe);
-    }
+    // Parent access must be established before a file-only probe can report absence.
+    // Both resources use the existing semantic probe/repair/finalize policy.
+    const prepareAccess = (probeScript: string, repairScript: () => string, allowAbsent: boolean,
+        probeOperation: string, repairOperation: string, verifyOperation: string): void => {
+        createCodexConfigPreparation({
+            probe: () => run(probeOperation, probeScript, false, true),
+            repair: () => {
+                validateHostDirectory();
+                validateHostConfig(allowAbsent);
+                return run(repairOperation, repairScript(), true);
+            },
+            finalize: () => run(verifyOperation, probeScript),
+        }).run(containerName);
+    };
+    prepareAccess(directoryProbe, () => codexConfigDirectoryAclScript(getContainerUid()), true,
+        "directory access check", "directory ACL grant", "directory access verification");
+    prepareAccess(configProbe, () => codexConfigFileAclScript(getContainerUid()), false,
+        "config access check", "config ACL grant", "config access verification");
 }
 
 export function isDockerRunning(): boolean {
@@ -1343,26 +1347,18 @@ export function isDockerRunning(): boolean {
 }
 
 export function ensureDockerRunning(): void {
-    if (!isDockerRunning()) {
-        const info = getRuntimeInfo();
-        console.error(`Error: ${info.runtime} is not running.`);
-        if (info.runtime === "docker") {
-            if (info.flavor === "docker-desktop") {
-                console.error("Please start Docker Desktop and try again.");
-            } else {
-                console.error("Please start the docker service (e.g. `sudo systemctl start docker`) and try again.");
-            }
-        } else {
-            if (info.flavor === "podman-machine") {
-                console.error("Please start the Podman machine (`podman machine start`) and try again.");
-            } else if (info.flavor === "podman-rootless") {
-                console.error("Please start the rootless Podman service (`systemctl --user start podman.socket`) and try again.");
-            } else {
-                console.error("Please start the Podman service (`sudo systemctl start podman.socket`) and try again.");
-            }
-        }
-        process.exit(1);
-    }
+    createContainerRuntimeReadiness({
+        isRunning: () => isDockerRunning(),
+        runtimeInfo: () => getRuntimeInfo(),
+        reportError: message => {
+            console.error(message());
+            return undefined;
+        },
+        exitFailure: () => {
+            process.exit(1);
+            return undefined;
+        },
+    }).run();
 }
 
 export function isContainerRunning(
@@ -1481,17 +1477,14 @@ export function canExecContainer(containerName: string, timeoutMs = CONTAINER_EX
 
 function canExecContainerAfterBriefRetry(containerName: string): boolean {
     const sleeper = new Int32Array(new SharedArrayBuffer(4));
-    // Docker exec startup can take longer than a subsecond readiness poll even
-    // when healthy. Use the normal probe budget, with one shared retry deadline.
-    const deadline = Date.now() + 3 * CONTAINER_EXEC_TIMEOUT_MS + 2 * 75;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-        const remainingMs = deadline - Date.now();
-        if (remainingMs <= 0) break;
-        if (canExecContainer(containerName, Math.min(CONTAINER_EXEC_TIMEOUT_MS, remainingMs))) return true;
-        const sleepMs = Math.min(75, deadline - Date.now());
-        if (attempt < 2 && sleepMs > 0) Atomics.wait(sleeper, 0, 0, sleepMs);
-    }
-    return false;
+    return createContainerExecReadiness({
+        now: () => Date.now(),
+        canExec: (target, timeoutMs) => canExecContainer(target, timeoutMs),
+        sleep: ms => {
+            Atomics.wait(sleeper, 0, 0, ms);
+            return undefined;
+        },
+    }).run(containerName);
 }
 
 export function isContainerExists(containerName: string): boolean {
@@ -1518,6 +1511,15 @@ function getListedContainerId(containerName: string): { known: boolean; containe
     if (ids.length === 0) return { known: true, containerId: null };
     if (ids.length !== 1 || !/^[a-f0-9]{64}$/i.test(ids[0])) return { known: false, containerId: null };
     return { known: true, containerId: ids[0] };
+}
+
+export function inspectSessionContainerOwnership(projectPath: string, profile?: string): { known: boolean; containerId: string | null } {
+    const listed = getListedContainerId(getContainerName(projectPath, profile));
+    if (!listed.known || listed.containerId === null) return listed;
+    const managed = getManagedProjectContainerIdentity(listed.containerId, projectPath);
+    return managed?.containerId === listed.containerId
+        ? listed
+        : { known: false, containerId: null };
 }
 
 export function isImageExists(): boolean {
@@ -1635,30 +1637,10 @@ export function qualifyImageRefForRuntime(imageRef: string): string {
 }
 
 export function ensureImage(): void {
-    const localExists = isImageExists();
-
-    if (localExists) {
-        const label = getImageLabel(IMAGE_NAME, "cli.version");
-        if (label === null) return;
-        if (label === CLI_VERSION) return;
-        console.log(`Image version mismatch (have v${label}, need v${CLI_VERSION}). Pulling update...`);
-    } else {
-        console.log(`Pulling ccc image v${CLI_VERSION} from registry...`);
-    }
-
-    const remoteRef = qualifyImageRefForRuntime(`${DOCKER_REGISTRY_IMAGE}:${CLI_VERSION}`);
-    if (pullImage(remoteRef)) {
-        tagImage(remoteRef, IMAGE_NAME);
-        return;
-    }
-
-    if (localExists) {
-        console.warn(`Warning: Failed to pull ${remoteRef}. Using existing image.`);
-        return;
-    }
-
-    // Unwind startup locks before the CLI reports failure.
-    throw new Error(`Failed to pull ${remoteRef}. You can build locally instead: ${runtimeCli()} build -t ccc .`);
+    createNativeContainerImagePreparation({
+        get registryImage() { return DOCKER_REGISTRY_IMAGE; },
+        isImageExists, getImageLabel, qualifyImageRefForRuntime, pullImage, tagImage,
+    }).run();
 }
 
 // === Clipboard Shim Sync ===
@@ -2490,57 +2472,6 @@ export function syncManagedMcpBundles(containerName: string): void {
     }
 }
 
-function recreateContainer(containerId: string, reason: string, onRecreate?: () => void): void {
-    console.log(`Recreating container (${reason})...`);
-    const cli = runtimeCli();
-    // Do not stop here. The caller confirmed the container was stopped under
-    // the lifecycle lock; plain `rm` fails if an external actor starts it in
-    // the meantime, closing the destructive TOCTOU window.
-    const removed = spawnSync(cli, ["rm", containerId], {
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "pipe"],
-    });
-    if (removed.error || removed.status !== 0) {
-        throw new Error("Container replacement aborted because the stopped container could not be removed.");
-    }
-    onRecreate?.();
-}
-
-interface ContainerReplacementContext {
-    expectedContainerId?: string;
-    managedProjectPath?: string;
-    initiallyRunningContainerId?: string;
-    beforeRemove?: () => void;
-}
-
-function recreateContainerWithSessionGuard(
-    containerName: string,
-    reason: string,
-    onRecreate: (() => void) | undefined,
-    guard: ((recreate: () => void) => boolean) | undefined,
-    context: ContainerReplacementContext = {},
-): boolean {
-    if (!guard) {
-        throw new Error("Container replacement requires a lifecycle/session guard.");
-    }
-    const initialIdentity = getContainerIdentity(containerName);
-    if (!initialIdentity) return false;
-    const pinnedContainerId = context.expectedContainerId ?? initialIdentity.containerId;
-    if (initialIdentity.containerId !== pinnedContainerId) return false;
-    let replacementConfirmed = false;
-    const guarded = guard(() => {
-        // A sole CLI session does not prove there is no background work.
-        // Never stop a container automatically, even if it stopped after startup.
-        if (context.initiallyRunningContainerId === pinnedContainerId || initialIdentity.running) return;
-        const currentIdentity = getContainerIdentity(pinnedContainerId);
-        if (!currentIdentity || currentIdentity.containerId !== pinnedContainerId || currentIdentity.running) return;
-        context.beforeRemove?.();
-        recreateContainer(pinnedContainerId, reason, onRecreate);
-        replacementConfirmed = true;
-    });
-    return guarded && replacementConfirmed;
-}
-
 /** Validate the effective exec user, never infer it from mutable labels alone. */
 function containerExecIdentityMatches(containerId: string, identity: ContainerUserIdentity): boolean {
     const result = spawnSync(runtimeCli(), ["exec", containerId, "sh", "-c",
@@ -2557,14 +2488,6 @@ export function startProjectContainer(...args: Parameters<typeof startProjectCon
 }
 
 // === Container Lifecycle ===
-
-function cleanupDevicesBestEffort(projectPath: string, profile?: string): void {
-    try {
-        cleanupOwnerDevices(projectPath, 5000, profile);
-    } catch (err) {
-        console.error(`[ccc] device cleanup failed before container stop: ${err instanceof Error ? err.message : String(err)}`);
-    }
-}
 
 function startProjectContainerLocked(
     projectPath: string,
@@ -2594,6 +2517,8 @@ function startProjectContainerLocked(
     onContainerReady?: (containerId: string, handoff: { startedByInvocation: boolean }) => void,
     /** Existing container ID observed running before this lifecycle operation began. */
     initiallyRunningContainerId?: string,
+    /** Publishes this invocation's exact started ID before helper setup can fail. */
+    onContainerStarted?: (containerId: string) => void,
 ): string {
     ensureDirs();
     mkdirSync(clipboardFilesDir(), { recursive: true, mode: 0o700 });
@@ -2763,13 +2688,7 @@ function startProjectContainerLocked(
     };
     assertRequiredFilesystemMountSources();
 
-    // Recreate the container if it's missing any required mount destination.
-    // Required = credential mounts for every registered tool (claude, gemini,
-    // codex, opencode) + any worktree git mounts the caller passed in.
-    // Otherwise an old container created before a tool was added to the
-    // registry would silently miss that tool's auth dir on subsequent runs.
     const listedContainer = getListedContainerId(containerName);
-    let lifecycleContainerId = listedContainer.containerId;
     // Retain immutable provenance before a guarded replacement removes the old container.
     const previousContainer = listedContainer.containerId
         ? inspectContainerJsonWithRetry(listedContainer.containerId) : null;
@@ -2797,41 +2716,36 @@ function startProjectContainerLocked(
         && !containerExecIdentityMatches(listedContainer.containerId!, identity)) {
         throw new ContainerRestartRequiredError("container UID/GID does not match the host identity", fullPath, cli, profile);
     }
-    const markRecreated = () => {
-        lifecycleContainerId = null;
-        onRecreate?.();
+    let restartedByInvocation = false;
+    const publishStarted = (containerId: string): void => {
+        if (!onContainerStarted) return;
+        const startedIdentity = getContainerIdentity(containerId);
+        if (!startedIdentity?.running || startedIdentity.containerId !== containerId) {
+            throw new Error("Container identity changed before start authorization handoff; refusing cleanup authority.");
+        }
+        onContainerStarted(containerId);
     };
     const finish = (containerId: string, startedByInvocation: boolean): string => {
         if (!containerExecIdentityMatches(containerId, identity)) {
             throw new Error("Container UID/GID validation failed; refusing a session that could change host project ownership.");
         }
-        assertPreparedProjectMountSources();
-        assertRequiredFilesystemMountSources();
-        if (onContainerReady) {
-            const finalIdentity = getContainerIdentity(containerId);
-            if (!finalIdentity?.running || finalIdentity.containerId !== containerId) {
-                throw new Error("Container identity changed before session handoff; refusing to join.");
-            }
-            onContainerReady(containerId, { startedByInvocation });
-        }
-        return containerName;
+        return createContainerSessionHandoff({
+            assertProjectSources: () => { assertPreparedProjectMountSources(); },
+            assertFilesystemSources: () => { assertRequiredFilesystemMountSources(); },
+            identity: getContainerIdentity,
+        }).run(containerId, containerName, onContainerReady
+            ? (id) => onContainerReady(id, { startedByInvocation })
+            : undefined);
     };
-    if (!listedContainer.known) {
-        throw new Error("Container identity inspection failed; the existing container was preserved.");
-    }
-    if (initiallyRunningContainerId && listedContainer.containerId !== initiallyRunningContainerId) {
-        throw new Error(
-            "Container observed running at startup became unavailable or changed identity; "
-            + "refusing to create a replacement in the same invocation.",
-        );
-    }
-    if (listedContainer.containerId) {
-        assertPreparedProjectMountSources();
-        assertPreparedDeviceLabMountSources(preparedDeviceLabSources);
-        assertRequiredFilesystemMountSources();
-        let contractMismatchReason = "container contract changed";
-        const contractMatches = containerMatchesRunContract(
-            listedContainer.containerId,
+    const existingLifecycle = createNativeContainerExistingLifecycle({
+        listContainer: getListedContainerId,
+        identity: getContainerIdentity,
+        managedIdentity: getManagedProjectContainerIdentity,
+        assertProjectSources: () => { assertPreparedProjectMountSources(); },
+        assertDeviceSources: () => { assertPreparedDeviceLabMountSources(preparedDeviceLabSources); },
+        assertFilesystemSources: () => { assertRequiredFilesystemMountSources(); },
+        inspectContract: (id, reportReason) => containerMatchesRunContract(
+            id,
             requiredMounts,
             labRunner,
             preparedDeviceLabSources.contractIdentity,
@@ -2839,218 +2753,50 @@ function startProjectContainerLocked(
             projectMountIdentity,
             imageId,
             identity,
-            (reason) => { contractMismatchReason = reason; },
-        );
-        assertPreparedProjectMountSources();
-        assertPreparedDeviceLabMountSources(preparedDeviceLabSources);
-        assertRequiredFilesystemMountSources();
-        if (contractMatches === null) {
-            throw new Error(
-                `Container contract verification is temporarily unavailable (${contractMismatchReason}); `
-                + "the existing container was preserved without replacement or join.",
-            );
-        }
-        if (!contractMatches) {
-            if (debug) {
-                console.error(`[ccc:debug] Container ${containerName} missing required mounts or VM run contract:`);
-                for (const m of requiredMounts) {
-                    console.error(`[ccc:debug]   required destination: ${m.containerPath}`);
-                }
-            }
-            if (recreateRunningContainer) {
-                const recreated = recreateContainerWithSessionGuard(
-                    containerName,
-                    contractMismatchReason,
-                    markRecreated,
-                    recreateRunningContainer,
-                    {
-                        expectedContainerId: listedContainer.containerId,
-                        managedProjectPath: fullPath,
-                        initiallyRunningContainerId,
-                        beforeRemove: prepareRetainedState,
-                    },
-                );
-                if (!recreated) {
-                    let unsafeDeferReason = "unknown safety mismatch";
-                    if (!containerRunContractIsSafeToDefer(
-                        listedContainer.containerId,
-                        requiredMounts,
-                        labRunner,
-                        fullPath,
-                        projectMountIdentity,
-                        identity,
-                        (reason) => { unsafeDeferReason = reason; },
-                    )) {
-                        throw new ContainerRestartRequiredError(unsafeDeferReason, fullPath, runtimeCli(), profile);
-                    }
-                    if (!isContainerRunning(containerName)) {
-                        throw new Error("Container contract update is required, but automatic replacement was not authorized.");
-                    }
-                    if (!canExecContainerAfterBriefRetry(listedContainer.containerId)) {
-                        throw new Error("Running container is unavailable; automatic destructive recovery was refused.");
-                    }
-                    console.warn(`[ccc] Container update deferred (${contractMismatchReason}) because the existing container is running. It will be applied after the container stops.`);
-                    fixSshPermissions(listedContainer.containerId);
-                    syncHostGitConfig(listedContainer.containerId);
-                    return finish(listedContainer.containerId, false);
-                }
-            } else {
-                recreateContainerWithSessionGuard(containerName, contractMismatchReason, onRecreate, undefined);
-            }
-        } else if (debug) {
-            console.error(`[ccc:debug] Container ${containerName} has all required mounts`);
-        }
-    }
+            reportReason,
+        ),
+        safeToDefer: (id, reportReason) => containerRunContractIsSafeToDefer(
+            id, requiredMounts, labRunner, fullPath, projectMountIdentity, identity, reportReason,
+        ),
+        isRunning: isContainerRunning,
+        canExec: canExecContainer,
+        canExecAfterBriefRetry: canExecContainerAfterBriefRetry,
+        deviceSourcesMatch: () => preparedDeviceLabMountSourcesMatch(preparedDeviceLabSources),
+        syncMcp: (id) => { syncManagedMcpBundles(id); },
+        fixSsh: (id) => { fixSshPermissions(id); },
+        syncGit: (id) => { syncHostGitConfig(id); },
+        finish: (id) => { finish(id, restartedByInvocation); },
+    }, {
+        startCli: cli,
+        beforeStart: prepareRetainedState,
+        afterStart: (id) => {
+            restartedByInvocation = true;
+            publishStarted(id);
+        },
+        beforeRemove: prepareRetainedState,
+        requiredMountDestinations: () => requiredMounts.map(mount => mount.containerPath),
+        projectPath: fullPath,
+        profile,
+    }).run({
+        containerName,
+        debug,
+        managedProjectPath: fullPath,
+        initiallyRunningContainerId,
+        replacementGuard: recreateRunningContainer,
+        onRecreate,
+    });
+    if (existingLifecycle.kind === "joined") return containerName;
 
-    const namedContainerIsRunning = isContainerRunning(containerName);
-    if (lifecycleContainerId && namedContainerIsRunning) {
-        const execReady = recreateRunningContainer
-            ? canExecContainerAfterBriefRetry(lifecycleContainerId)
-            : canExecContainer(lifecycleContainerId);
-        if (execReady) {
-            if (!preparedDeviceLabMountSourcesMatch(preparedDeviceLabSources)) {
-                if (recreateRunningContainer) {
-                    const recreated = recreateContainerWithSessionGuard(
-                        containerName,
-                        "device-lab mount source identity changed",
-                        markRecreated,
-                        recreateRunningContainer,
-                        {
-                            expectedContainerId: lifecycleContainerId,
-                            managedProjectPath: fullPath,
-                            initiallyRunningContainerId,
-                        beforeRemove: prepareRetainedState,
-                        },
-                    );
-                    if (!recreated) {
-                        throw new Error("Device-lab mount source changed during validation; preserving the existing running container without joining it.");
-                    }
-                } else {
-                    recreateContainerWithSessionGuard(containerName, "device-lab mount source identity changed", onRecreate, undefined);
-                }
-            } else {
-                syncManagedMcpBundles(lifecycleContainerId);
-                fixSshPermissions(lifecycleContainerId);
-                syncHostGitConfig(lifecycleContainerId);
-                if (preparedDeviceLabMountSourcesMatch(preparedDeviceLabSources)) return finish(lifecycleContainerId, false);
-                if (recreateRunningContainer) {
-                    const recreated = recreateContainerWithSessionGuard(
-                        containerName,
-                        "device-lab mount source identity changed",
-                        markRecreated,
-                        recreateRunningContainer,
-                        {
-                            expectedContainerId: lifecycleContainerId,
-                            managedProjectPath: fullPath,
-                            initiallyRunningContainerId,
-                        beforeRemove: prepareRetainedState,
-                        },
-                    );
-                    if (!recreated) {
-                        throw new Error("Device-lab mount source changed during synchronization; preserving the existing running container without joining it.");
-                    }
-                } else {
-                    recreateContainerWithSessionGuard(containerName, "device-lab mount source identity changed", onRecreate, undefined);
-                }
-            }
-        } else {
-            if (recreateRunningContainer) {
-                const recreated = recreateContainerWithSessionGuard(
-                    containerName,
-                    "container exec failed",
-                    markRecreated,
-                    recreateRunningContainer,
-                    {
-                        expectedContainerId: lifecycleContainerId,
-                        managedProjectPath: fullPath,
-                        initiallyRunningContainerId,
-                        beforeRemove: prepareRetainedState,
-                    },
-                );
-                if (!recreated) {
-                    throw new Error("Running container is unavailable; automatic destructive recovery was refused.");
-                }
-            } else {
-                recreateContainerWithSessionGuard(containerName, "container exec failed", onRecreate, undefined);
-            }
-        }
-    }
-
-    if (lifecycleContainerId) {
-        if (debug) console.error(`[ccc:debug] Container ${containerName} exists, restarting`);
-        assertPreparedProjectMountSources();
-        if (!preparedDeviceLabMountSourcesMatch(preparedDeviceLabSources)) {
-            const recreated = recreateContainerWithSessionGuard(
-                containerName,
-                "device-lab mount source identity changed",
-                markRecreated,
-                recreateRunningContainer,
-                {
-                    expectedContainerId: lifecycleContainerId,
-                    managedProjectPath: fullPath,
-                    initiallyRunningContainerId,
-                    beforeRemove: prepareRetainedState,
-                },
-            );
-            if (!recreated) {
-                throw new Error("Device-lab mount source changed; automatic replacement was not authorized.");
-            }
-        } else {
-            const started = spawnSync(cli, ["start", lifecycleContainerId], { stdio: "inherit" });
-            if (started.error || started.status !== 0) {
-                throw new Error("Stopped container could not be restarted; automatic replacement was refused.");
-            }
-            const execReady = recreateRunningContainer
-                ? canExecContainerAfterBriefRetry(lifecycleContainerId)
-                : canExecContainer(lifecycleContainerId);
-            if (!execReady) {
-                throw new Error(
-                    "Restarted container is unavailable; preserving it without automatic replacement.",
-                );
-            } else {
-                syncManagedMcpBundles(lifecycleContainerId);
-                fixSshPermissions(lifecycleContainerId);
-                syncHostGitConfig(lifecycleContainerId);
-                if (preparedDeviceLabMountSourcesMatch(preparedDeviceLabSources)) return finish(lifecycleContainerId, true);
-                throw new Error(
-                    "Device-lab mount source changed during restart; preserving the restarted container without replacement.",
-                );
-            }
-        }
-    }
-
-    return withProjectFamilyLifecycleLock(`mount-${projectMountIdentity}`, () => {
-        if (lifecycleContainerId || isContainerExists(containerName)) {
-            throw new Error(
-                `Container namespace ${containerName} appeared during creation preflight; refusing replacement.`,
-            );
-        }
-        const collision = findManagedProjectNamespaceCollision(
+    return createNativeContainerCreateLifecycle({
+        withFamilyLock: withProjectFamilyLifecycleLock,
+        namespaceExists: isContainerExists,
+        findCollision: () => findManagedProjectNamespaceCollision(
             fullPath,
             projectMountIdentity,
             projectMountSourceIdentity,
             profile,
-        );
-        if (collision) {
-            const profileName = profile ?? "default";
-            throw new Error(
-                `CCC container ${collision.containerName} already owns this physical project `
-                + `for profile ${profileName}; refusing duplicate container creation. `
-                + "The existing container was preserved.",
-            );
-        }
-        if (debug) {
-            console.error(`[ccc:debug] Container ${containerName} not found, creating`);
-        }
-        prepareRetainedState();
-        console.log("Creating container...");
-
-        if (isLabRunnerProfile(profile) && labRunner.status === "unsupported") {
-            console.warn(`[ccc] lab-runner profile requested but nested VM support is unavailable: ${labRunner.unsupportedReason}`);
-            console.warn("[ccc] no lab state volume is mounted; device-lab reports linux-vm as unsupported/SKIP.");
-        }
-
-        const args = buildDockerRunArgs({
+        ),
+        prepareRunArgs: () => buildDockerRunArgs({
             containerName,
             fullPath,
             projectMountPath,
@@ -3079,136 +2825,58 @@ function startProjectContainerLocked(
             // mode we failed to recognize, etc).
             proxyEnabled: (process.platform !== "linux" || isContainerHostRemote()) && process.env.CCC_DISABLE_PROXY !== "1",
             containerHostRemote: process.platform !== "linux" || isContainerHostRemote(),
-        });
-
-        assertPreparedProjectMountSources();
-        assertPreparedDeviceLabMountSources(preparedDeviceLabSources);
-        assertRequiredFilesystemMountSources();
-        const result = spawnSync(cli, args, {
-            encoding: "utf-8",
-            stdio: ["inherit", "pipe", "inherit"],
-        });
-        if (result.status !== 0) {
-            // The runtime's own error is already on the terminal (stderr stays live for pulls).
-            console.error(CONTAINER_INIT_UNAVAILABLE_HINT);
-            throw new Error("Failed to create container");
-        }
-        const createdContainerId = (result.stdout ?? "").trim().split(/\s+/)
-            .find((line) => /^[a-f0-9]{64}$/i.test(line)) ?? null;
-
-        try {
-            assertPreparedProjectMountSources();
-            assertPreparedDeviceLabMountSources(preparedDeviceLabSources);
-            assertRequiredFilesystemMountSources();
-            const verification = createdContainerId
-                ? verifyCreatedContainerBindMounts(
-                    createdContainerId,
-                    requiredMounts.filter((mount) => mount.sourceProof?.kind === "filesystem"),
-                    projectMountIdentity,
-                )
-                : { kind: "mismatch", reason: "container runtime did not return an exact 64-hex container ID" } as const;
-            if (verification.kind !== "verified") {
-                throw new Error(
-                    `created container bind mount identity verification failed (${verification.reason})`,
-                );
-            }
-        } catch (error) {
-            if (createdContainerId) {
-                spawnSync(
-                    cli,
-                    ["rm", "-f", createdContainerId],
-                    { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-                );
-                const remaining = spawnSync(
-                    cli,
-                    ["inspect", "-f", "{{.Id}}", createdContainerId],
-                    { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-                );
-                if (!containerInspectExplicitlyNotFound(remaining)) {
-                    throw new Error(
-                        `${(error as Error).message}; failed to remove rejected container ${createdContainerId}`,
-                        { cause: error },
-                    );
-                }
-            }
-            throw error;
-        }
-
-        if (!createdContainerId) {
-            throw new Error("Container runtime did not return the created container ID; refusing an unpinned session.");
-        }
-        syncManagedMcpBundles(createdContainerId);
-        fixSshPermissions(createdContainerId);
-        syncHostGitConfig(createdContainerId);
-
-        return finish(createdContainerId, true);
+        }),
+        assertProjectSources: () => { assertPreparedProjectMountSources(); },
+        assertDeviceSources: () => { assertPreparedDeviceLabMountSources(preparedDeviceLabSources); },
+        assertFilesystemSources: () => { assertRequiredFilesystemMountSources(); },
+        verifyCreated: (id) => {
+            const verification = verifyCreatedContainerBindMounts(
+                id,
+                requiredMounts.filter((mount) => mount.sourceProof?.kind === "filesystem"),
+                projectMountIdentity,
+            );
+            if (verification.kind === "verified") publishStarted(id);
+            return verification;
+        },
+        syncMcp: (id) => { syncManagedMcpBundles(id); },
+        fixSsh: (id) => { fixSshPermissions(id); },
+        syncGit: (id) => { syncHostGitConfig(id); },
+        finish: (id) => finish(id, true),
+    }, {
+        createCli: cli,
+        beforeCreating: prepareRetainedState,
+        createFailureHint: CONTAINER_INIT_UNAVAILABLE_HINT,
+        labWarning: () => isLabRunnerProfile(profile) && labRunner.status === "unsupported"
+            ? { unsupportedReason: labRunner.unsupportedReason }
+            : null,
+        explicitlyNotFound: containerInspectExplicitlyNotFound,
+    }).run({
+        containerName,
+        projectMountIdentity,
+        profile,
+        debug,
     });
 }
 
-type DestructiveContainerOptions = { force?: boolean };
+type DestructiveContainerOptions = ContainerDestructiveLifecycleOptions;
 
-function stopProjectContainerUnlocked(projectPath: string, profile?: string): void {
-    ensureDockerRunning();
-    const fullPath = resolve(projectPath);
-    const containerName = getContainerName(fullPath, profile);
-
-    const identity = getManagedProjectContainerIdentity(containerName, fullPath);
-    if (!identity) {
-        console.log("Container not found");
-        return;
-    }
-
-    cleanupDevicesBestEffort(fullPath, profile);
-    if (identity.running) {
-        console.log("Stopping container...");
-        const stopped = spawnSync(runtimeCli(), ["stop", identity.containerId], { stdio: "inherit" });
-        if (stopped.error || stopped.status !== 0) throw new Error("Failed to stop container.");
-    }
-    console.log("Container stopped");
-}
-
-function withDestructiveContainerGuard<T>(
-    projectPath: string,
-    profile: string | undefined,
-    options: DestructiveContainerOptions,
-    operation: () => T,
-): T {
-    const projectId = getProjectId(resolve(projectPath));
-    const containerPrefix = profile ? `${projectId}--p--${profile}` : projectId;
-    return withContainerLifecycleLock(containerPrefix, () => {
-        const sessionClaims = getSessionLockClaimsForContainer(containerPrefix);
-        if (sessionClaims.length > 0 && options.force !== true) {
-            throw new Error(`Container has ${sessionClaims.length} session ownership claim(s); use --force to continue.`);
-        }
-        return operation();
+function projectContainerDestructiveLifecycle() {
+    return createNativeContainerDestructiveLifecycle({
+        resolvePath: resolve,
+        projectId: getProjectId,
+        containerName: getContainerName,
+        withLifecycleLock: (prefix, operation) => { withContainerLifecycleLock(prefix, operation); },
+        sessionClaims: getSessionLockClaimsForContainer,
+        ensureRuntime: () => { ensureDockerRunning(); },
+        managedIdentity: getManagedProjectContainerIdentity,
+        cleanupDevices: (fullPath, timeoutMs, profile) => { cleanupOwnerDevices(fullPath, timeoutMs, profile); },
     });
 }
 
 export function stopProjectContainer(projectPath: string, profile?: string, options: DestructiveContainerOptions = {}): void {
-    withDestructiveContainerGuard(projectPath, profile, options, () => stopProjectContainerUnlocked(projectPath, profile));
+    projectContainerDestructiveLifecycle().stop(projectPath, profile, options);
 }
 
 export function removeProjectContainer(projectPath: string, profile?: string, options: DestructiveContainerOptions = {}): void {
-    withDestructiveContainerGuard(projectPath, profile, options, () => {
-        ensureDockerRunning();
-        const containerName = getContainerName(resolve(projectPath), profile);
-
-        const identity = getManagedProjectContainerIdentity(containerName, resolve(projectPath));
-        if (!identity) {
-            console.log("Container not found");
-            return;
-        }
-
-        cleanupDevicesBestEffort(resolve(projectPath), profile);
-        if (identity.running) {
-            console.log("Stopping container...");
-            const stopped = spawnSync(runtimeCli(), ["stop", identity.containerId], { stdio: "inherit" });
-            if (stopped.error || stopped.status !== 0) throw new Error("Failed to stop container.");
-            console.log("Container stopped");
-        }
-        console.log("Removing container...");
-        const removed = spawnSync(runtimeCli(), ["rm", identity.containerId], { stdio: "inherit" });
-        if (removed.error || removed.status !== 0) throw new Error("Failed to remove container.");
-        console.log("Container removed");
-    });
+    projectContainerDestructiveLifecycle().remove(projectPath, profile, options);
 }

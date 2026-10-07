@@ -8,17 +8,10 @@ import { join } from "path";
 import { LAB_RUNNER_PROFILE_NAME } from "./utils.js";
 import { DEFAULT_PROFILE_NAME, profilesDir } from "./home-layout.js";
 
-// === Types ===
+import { createProfileCatalog, validateProfileName as validateCatalogProfileName } from "./application/profile-catalog.js";
+import type { BuiltinProfile, ProfileSettings } from "./ports/profile-catalog.js";
 
-export interface ProfileSettings {
-    env?: Record<string, string>;
-    [key: string]: unknown;
-}
-
-export interface BuiltinProfile {
-    description: string;
-    settings?: ProfileSettings;
-}
+export type { BuiltinProfile, ProfileSettings } from "./ports/profile-catalog.js";
 
 // === Built-in profiles ===
 
@@ -36,6 +29,47 @@ export const BUILTIN_PROFILES: Readonly<Record<string, BuiltinProfile>> = {
     },
 };
 
+function profileCatalog() {
+    return createProfileCatalog({
+        listProfileDirectoryNames() {
+            return existsSync(profilesDir())
+                ? readdirSync(profilesDir(), { withFileTypes: true })
+                    .filter((d) => d.isDirectory())
+                    .map((d) => d.name)
+                : [];
+        },
+        profileEntryExists(name) {
+            return existsSync(join(profilesDir(), name));
+        },
+        writeProfile(name, settings) {
+            const profileDir = join(profilesDir(), name);
+            const claudeDir = join(profileDir, "claude");
+
+            mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+            mkdirSync(join(profileDir, "codex"), { recursive: true, mode: 0o700 });
+            writeFileSync(join(profileDir, "claude.json"), "{}", { mode: 0o600 });
+
+            if (settings) {
+                writeFileSync(
+                    join(claudeDir, "settings.json"),
+                    JSON.stringify(settings, null, 2),
+                    { mode: 0o600 },
+                );
+            }
+        },
+        removeProfileDirectory(name) {
+            const profileDir = join(profilesDir(), name);
+            rmSync(profileDir, { recursive: true, force: true });
+        },
+        hasBuiltinProfile(name) {
+            return Object.prototype.hasOwnProperty.call(BUILTIN_PROFILES, name);
+        },
+        readBuiltinSettings(name) {
+            return BUILTIN_PROFILES[name].settings;
+        },
+    }, DEFAULT_PROFILE_NAME);
+}
+
 // === Validation ===
 
 /**
@@ -44,7 +78,7 @@ export const BUILTIN_PROFILES: Readonly<Record<string, BuiltinProfile>> = {
  * alphanumeric or [._-] characters (total max 64 chars).
  */
 export function validateProfileName(name: string): boolean {
-    return /^[a-z0-9][a-z0-9_.\-]{0,63}$/.test(name);
+    return validateCatalogProfileName(name);
 }
 
 // === Queries ===
@@ -53,26 +87,21 @@ export function validateProfileName(name: string): boolean {
  * List all profile names: "default" first, then the named profile directories.
  */
 export function listProfiles(): string[] {
-    const named = existsSync(profilesDir())
-        ? readdirSync(profilesDir(), { withFileTypes: true })
-            .filter((d) => d.isDirectory() && d.name !== DEFAULT_PROFILE_NAME)
-            .map((d) => d.name)
-        : [];
-    return [DEFAULT_PROFILE_NAME, ...named];
+    return profileCatalog().list();
 }
 
 /**
  * Check if a profile exists.
  */
 export function profileExists(name: string): boolean {
-    return name === DEFAULT_PROFILE_NAME || existsSync(join(profilesDir(), name));
+    return profileCatalog().exists(name);
 }
 
 /**
  * Check if a name is a built-in profile.
  */
 export function isBuiltinProfile(name: string): boolean {
-    return Object.prototype.hasOwnProperty.call(BUILTIN_PROFILES, name);
+    return profileCatalog().isBuiltin(name);
 }
 
 // === Mutations ===
@@ -82,21 +111,7 @@ export function isBuiltinProfile(name: string): boolean {
  * When settings are provided, also writes claude/settings.json.
  */
 export function createProfile(name: string, settings?: ProfileSettings): void {
-    if (name === DEFAULT_PROFILE_NAME) throw new Error(`Profile "${DEFAULT_PROFILE_NAME}" is reserved.`);
-    const profileDir = join(profilesDir(), name);
-    const claudeDir = join(profileDir, "claude");
-
-    mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
-    mkdirSync(join(profileDir, "codex"), { recursive: true, mode: 0o700 });
-    writeFileSync(join(profileDir, "claude.json"), "{}", { mode: 0o600 });
-
-    if (settings) {
-        writeFileSync(
-            join(claudeDir, "settings.json"),
-            JSON.stringify(settings, null, 2),
-            { mode: 0o600 },
-        );
-    }
+    profileCatalog().create(name, settings);
 }
 
 /**
@@ -105,19 +120,12 @@ export function createProfile(name: string, settings?: ProfileSettings): void {
  * Throws for unknown non-builtin profiles.
  */
 export function ensureProfile(name: string): boolean {
-    if (profileExists(name)) return false;
-    if (!isBuiltinProfile(name)) {
-        throw new Error(`Profile "${name}" does not exist. Create it with: ccc profile add ${name}`);
-    }
-    createProfile(name, BUILTIN_PROFILES[name].settings);
-    return true;
+    return profileCatalog().ensure(name);
 }
 
 /**
  * Remove a profile directory recursively.
  */
 export function removeProfile(name: string): void {
-    if (name === DEFAULT_PROFILE_NAME) throw new Error(`Profile "${DEFAULT_PROFILE_NAME}" cannot be removed.`);
-    const profileDir = join(profilesDir(), name);
-    rmSync(profileDir, { recursive: true, force: true });
+    profileCatalog().remove(name);
 }

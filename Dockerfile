@@ -26,7 +26,7 @@ COPY device-lab-mcp/package.json ./device-lab-mcp/package.json
 RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY packages ./packages
 COPY device-lab-mcp ./device-lab-mcp
-COPY scripts/workspace-build.mjs ./scripts/workspace-build.mjs
+COPY scripts/workspace-build.mjs scripts/windows-lx-workspace-link.mjs ./scripts/
 RUN node scripts/workspace-build.mjs build && npm run build:device-lab-mcp && node scripts/workspace-build.mjs assemble
 
 # ==========================================================

@@ -32,12 +32,24 @@ symlink traversal, unrelated owner changes or concurrent active users. Access
 checks must cover the resolved default or named profile, not a hardcoded path.
 
 Configuration access repair retains contents, ownership and user settings
-without expanding unrelated principals’ effective ACL permissions. A required
+without expanding unrelated principals’ effective ACL permissions. File ACL
+mutation requires a pinned regular single-link inode and rejects symlinked
+ancestors before mutation; neither a hardlinked alias nor a substituted pathname
+may receive the grant. A required
 ACL mask change can affect the numeric group mode representation. Coordinate host/config writers across projects
 using the stable legacy root lock for the default profile and locks keyed by
 the resolved config for named profiles; host access restoration runs
 inside the writer lock.
 Reject unsafe targets rather than broadening access or resetting state.
+
+Current image-resolution failure aborts startup instead of reusing an unknown
+image. Host session acquisition starts with cleanup disabled: capturing an ID
+does not grant stop authority. Guardian acknowledgement precedes a true grant,
+and changing the captured ID revokes the previous grant. Failed joins release
+only their own claims. A successful existing-container start is captured before
+helpers; fresh creation requires verified managed and running identity before
+capture. Owned environment files are disposed on all protected launch paths,
+including errors and handled exit, while the container command remains awaited.
 
 ## Startup, authentication and bridges
 
@@ -95,6 +107,13 @@ recovery guard produces a bounded refusal and requires inspection. Automatic
 recovery requires proof that the recorded owner is dead; elapsed time alone is
 not sufficient.
 
+Host cleanup requires capture and acknowledged permission; forced termination
+before capture is not covered, and no arbitrary container scan repairs that gap.
+POSIX ACL xattr support is required by the native access adapter. Unsupported
+filesystems fail rather than broadening access. Mocked lock facades do not prove
+native concurrent lock behavior; portable results do not certify Windows/macOS
+or hardware providers.
+
 ## Harness boundary
 
 CCC bootstrap is preserved only as installation/readiness integration: use
@@ -120,7 +139,7 @@ watcher and receipt fixes remain in the separately installed Harness repository.
 | 86f9e45/f77e009, Harness integration | Preserve readiness semantics, use current Harness runtime separately |
 | b7f3f5b/9ffcf15/f9fecc1/8b281dc | Retain intent in adapted tests and ownership documentation |
 | 90bd161, original DeviceLab snapshot | Use newer upstream package implementation |
-| f154462, orphan cleanup | Remove still-unreferenced helper/test and obsolete metadata |
+| f154462, orphan cleanup | Remove only still-unreferenced product helpers/tests; retain active controller and editor metadata |
 
 ## Verification and deployment
 

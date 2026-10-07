@@ -1,14 +1,11 @@
 import { spawnSync } from "child_process";
 import { readFileSync } from "fs";
 import { canonicalWindowsPowerShellPath, canonicalWindowsTasklistPath, hiddenWindowsPowerShellArgs } from "@ccc/device-lab/windows-system-powershell.js";
+import { createSessionLockLiveness } from "./application/session-lock-liveness.js";
+import { parseProcessStartObservations, type ProcessStartObservation, type SessionLockLiveness } from "./domain/session-lock.js";
 
-export type SessionLockLiveness = "active" | "stale" | "unknown";
-
-type ProcessStartObservation =
-    | { status: "found"; token: string }
-    | { status: "present" }
-    | { status: "missing" }
-    | { status: "unknown" };
+export { parseProcessStartObservations, sessionLockOwner } from "./domain/session-lock.js";
+export type { SessionLockLiveness, SessionLockOwner } from "./domain/session-lock.js";
 
 function observeWindowsProcessPresence(pid: number): ProcessStartObservation {
     const tasklist = canonicalWindowsTasklistPath();
@@ -94,32 +91,6 @@ function observeProcessStart(pid: number): ProcessStartObservation {
 }
 
 /**
- * The batch script's stdout, as observations. Exported because the script itself only runs on
- * Windows, so this is the only part of the batch a test on any other host can reach — the same
- * split `parseWindowsBrokerNetstatListenerForTest` already uses for netstat in this codebase.
- *
- * Anything unrecognised is simply absent from the map, which the caller reads as "ask the
- * single-pid probe" — the batch is never the authority on whether a lock may be deleted.
- */
-export function parseProcessStartObservations(
-    stdout: string,
-    pids: readonly number[],
-): Map<number, ProcessStartObservation> {
-    const observations = new Map<number, ProcessStartObservation>();
-    const wanted = new Set(pids);
-    for (const line of stdout.split(/\r?\n/)) {
-        const row = /^([0-9]+) (MISSING|UNKNOWN|FOUND:[0-9]+)$/.exec(line.trim());
-        if (!row) continue;
-        const pid = Number(row[1]);
-        if (!wanted.has(pid) || observations.has(pid)) continue;
-        if (row[2] === "MISSING") observations.set(pid, { status: "missing" });
-        else if (row[2] === "UNKNOWN") observations.set(pid, { status: "unknown" });
-        else observations.set(pid, { status: "found", token: `windows:${row[2].slice("FOUND:".length)}` });
-    }
-    return observations;
-}
-
-/**
  * One observation for many pids, in a single process.
  *
  * `observeProcessStart` costs one `powershell.exe` per pid on Windows, and the session-lock
@@ -190,88 +161,19 @@ export function processStartToken(pid: number): string | null {
     return observed.status === "found" ? observed.token : null;
 }
 
-export interface SessionLockOwner {
-    pid: number;
-    startToken?: string;
-}
-
-export function sessionLockOwner(content: string): SessionLockOwner | null {
-    try {
-        const parsed = JSON.parse(content) as unknown;
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-            const record = parsed as { version?: unknown; pid?: unknown; startToken?: unknown };
-            if (record.version !== 2 || !Number.isSafeInteger(record.pid) || Number(record.pid) <= 0
-                || typeof record.startToken !== "string" || record.startToken.length === 0
-                || record.startToken.length > 256) {
-                return null;
-            }
-            return { pid: Number(record.pid), startToken: record.startToken };
-        }
-    } catch {
-        // Legacy lock files contain only the decimal PID.
-    }
-    const legacy = content.trim();
-    if (!/^[1-9]\d*$/.test(legacy)) return null;
-    const pid = Number(legacy);
-    return Number.isSafeInteger(pid) ? { pid } : null;
-}
-
-/**
- * The batch's answer for one pid, or a fresh single-pid probe.
- *
- * An `unknown` from the batch is NOT an answer. The single-pid path has a `tasklist` fallback
- * behind it that can still report the process present — which is what happens on Windows for an
- * elevated, protected or System process whose `StartTime` cannot be read. Taking `unknown` from
- * the map skipped that fallback and turned a legacy lock's owner from "active" into "unknown".
- * Both preserve the lock at today's only caller, so nothing broke; but the comment here claimed
- * the map "can only ever save a launch, never change an answer", and that was false. It is true
- * again now.
- */
-function observationFor(
-    pid: number,
-    observed?: ReadonlyMap<number, ProcessStartObservation>,
-): ProcessStartObservation {
-    const batched = observed?.get(pid);
-    return batched && batched.status !== "unknown" ? batched : observeProcessStart(pid);
-}
-function legacyProcessLiveness(
-    pid: number,
-    observed?: ReadonlyMap<number, ProcessStartObservation>,
-): SessionLockLiveness {
-    if (process.platform === "win32") {
-        const observation = observationFor(pid, observed);
-        return observation.status === "found" || observation.status === "present"
-            ? "active"
-            : observation.status === "missing" ? "stale" : "unknown";
-    }
-    try {
-        process.kill(pid, 0);
-        return "active";
-    } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code === "ESRCH") return "stale";
-        if (code === "EPERM") return "active";
-        return "unknown";
-    }
-}
-
 export function sessionLockLiveness(
     content: string,
     // Pre-observed pids, when the caller had several locks to examine and asked for them in one
-    // process. Absent, missing, or `unknown` entries fall through to the single-pid path — see
-    // `observationFor` — so this can only ever save a launch, never change an answer. That
-    // sentence was untrue for one release of this function; `unknown` is the case it missed.
+    // process. Absent or `unknown` entries fall through to the single-pid path; every other
+    // observation is reused by the application classifier.
     observed?: ReadonlyMap<number, ProcessStartObservation>,
 ): SessionLockLiveness {
-    const record = sessionLockOwner(content.trim());
-    if (!record) return "unknown";
-    if (!record.startToken) return legacyProcessLiveness(record.pid, observed);
-
-    const observation = observationFor(record.pid, observed);
-    if (observation.status === "missing") return "stale";
-    if (observation.status === "found") {
-        return observation.token === record.startToken ? "active" : "stale";
-    }
-    if (observation.status === "present") return "unknown";
-    return "unknown";
+    return createSessionLockLiveness({
+        getPlatform: () => process.platform,
+        observeProcessStart: (pid) => observeProcessStart(pid),
+        probeLegacyProcess: (pid) => {
+            process.kill(pid, 0);
+            return undefined;
+        },
+    })(content, observed);
 }

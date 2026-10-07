@@ -19,10 +19,15 @@ import {
     getClaudeJsonFile,
     getCodexDir,
     getCodexConfigFile,
+    writeEnvFile,
+    writeOwnedEnvFile,
 } from '../utils.js';
 import { homedir, tmpdir } from 'os';
-import { mkdtempSync, rmSync } from 'fs';
-import { join } from 'path';
+import { mkdtempSync, readFileSync, statSync, existsSync, unlinkSync, rmSync, realpathSync } from 'fs';
+import { join, basename, dirname } from 'path';
+
+// Keep the native environment proxy: older suites replace process.env with snapshots.
+const nativeProcessEnv = process.env;
 
 // readline mock (hoisted at module level)
 const mockQuestion = vi.fn();
@@ -425,5 +430,51 @@ describe('prompt', () => {
 
         const result = await prompt('Enter value: ', true);
         expect(result).toBe('n');
+    });
+});
+
+describe('public env-file writers', () => {
+    let root: string;
+    let previousProcessEnv: NodeJS.ProcessEnv;
+    beforeEach(() => {
+        previousProcessEnv = process.env;
+        process.env = nativeProcessEnv;
+        root = mkdtempSync(join(tmpdir(), 'ccc-utils-env-'));
+        vi.stubEnv('TMPDIR', root);
+        vi.stubEnv('TMP', root);
+        vi.stubEnv('TEMP', root);
+    });
+    afterEach(() => {
+        vi.unstubAllEnvs();
+        process.env = previousProcessEnv;
+        rmSync(root, { recursive: true, force: true });
+    });
+
+    it('keeps legacy bytes, entry order, native temp naming and caller-owned deletion', () => {
+        const baseline = process.listenerCount('exit');
+        const path = writeEnvFile([
+            ['SECOND', 'two=parts'], ['FIRST', ''], ['LF', 'a\nb'],
+            ['CR', 'a\rb'], ['NUL', 'a\0b'], ['UNICODE', '봄'],
+        ]);
+        try {
+            expect(typeof path).toBe('string');
+            expect(realpathSync(dirname(path))).toBe(realpathSync(root));
+            expect(basename(path)).toMatch(/^ccc-env-[a-f0-9]{12}$/);
+            expect(readFileSync(path, 'utf8')).toBe('SECOND=two=parts\nFIRST=\nUNICODE=봄\n');
+            if (process.platform !== 'win32') expect(statSync(path).mode & 0o777).toBe(0o600);
+            expect(process.listenerCount('exit')).toBe(baseline);
+        } finally { unlinkSync(path); }
+        expect(existsSync(path)).toBe(false);
+    });
+
+    it('retains the empty-file trailing newline and exposes an owned facade', () => {
+        const baseline = process.listenerCount('exit');
+        const owned = writeOwnedEnvFile([]);
+        try {
+            expect(readFileSync(owned.path, 'utf8')).toBe('\n');
+            expect(process.listenerCount('exit')).toBe(baseline + 1);
+        } finally { owned.dispose(); }
+        expect(existsSync(owned.path)).toBe(false);
+        expect(process.listenerCount('exit')).toBe(baseline);
     });
 });

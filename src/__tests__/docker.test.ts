@@ -502,6 +502,7 @@ describe("docker.ts module exports", () => {
             ino: 1,
             size: 1024,
             uid: process.getuid?.() ?? 1000,
+            nlink: 1,
         });
         mockFstatSync.mockReset().mockReturnValue({
             isFile: () => true,
@@ -1257,6 +1258,24 @@ describe("docker.ts module exports", () => {
             expect(repair.at(-1)).not.toContain("chown");
             expect(repair.at(-1)).not.toContain("chmod");
             expect(spawnSyncMock.mock.calls[4][1]).not.toContain("--user");
+        });
+
+        it.each(["hardlink", "nonregular"])("refuses config ACL repair for a %s before invoking root", kind => {
+            mockLstatSync.mockImplementation((path: string) => ({
+                isDirectory: () => !path.endsWith("config.toml"),
+                isFile: () => path.endsWith("config.toml") && kind !== "nonregular",
+                isSymbolicLink: () => false,
+                nlink: kind === "hardlink" ? 2 : 1,
+                uid: process.getuid?.() ?? 1000,
+            }));
+            spawnSyncMock.mockReturnValueOnce(makeResult(0)) // directory accessible
+                .mockReturnValueOnce(makeResult(1)); // config access denied
+
+            expect(() => prepareCodexConfigForContainer("ccc-test", "work"))
+                .toThrow("regular non-symlink, single-link config file");
+            expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+            expect(spawnSyncMock.mock.calls.every(([, args]) => !(args as string[]).includes("--user"))).toBe(true);
+            expect(mockLstatSync).toHaveBeenCalledWith(expect.stringContaining("profiles/work/codex/config.toml"));
         });
 
         it("repairs a denied directory before checking the config", () => {
@@ -2019,6 +2038,22 @@ describe("docker.ts module exports", () => {
             })).toBe(false);
         }
 
+        function mockValidProvenanceThenContractFault(fault: SpawnSyncReturns<string>): string[] {
+            const inspectedIds: string[] = [];
+            spawnSyncMock.mockImplementation((_command: unknown, argsValue: unknown) => {
+                const args = argsValue as string[];
+                if (args[0] === "images") return makeResult(0, "sha256:abc\n");
+                if (args[0] === "image" && args[1] === "inspect") return makeResult(0, "<no value>\n");
+                if (args[0] === "ps" && args[1] === "-aq") return makeResult(0, "abc123\n");
+                if (args[0] === "inspect" && args.includes("{{json .}}")) {
+                    inspectedIds.push(args.at(-1)!);
+                    return inspectedIds.length === 1 ? makeResult(0, fullCredentialMountsJson()) : fault;
+                }
+                return makeResult(0);
+            });
+            return inspectedIds;
+        }
+
         function makeMountedBindProofDisagree(): void {
             mismatchingMountChallengeContainerIds.add(TEST_CONTAINER_ID);
         }
@@ -2180,6 +2215,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson())) // previous immutable provenance
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson())) // inspect -> all cred mounts present
                 .mockReturnValueOnce(makeResult(0, "abc123\n"));              // isContainerRunning -> running
 
@@ -2760,7 +2796,9 @@ describe("docker.ts module exports", () => {
         });
 
         it.each(["running", "stopped", "missing"])("reports lifecycle cleanup authority for %s handoff", (initial) => {
-            const ready = vi.fn();
+            const events: string[] = [];
+            const ready = vi.fn(() => { events.push("ready"); });
+            const started = vi.fn(() => { events.push("started-authority"); });
             let exists = initial !== "missing";
             let running = initial === "running";
             spawnSyncMock.mockImplementation((_command: unknown, argsValue: unknown) => {
@@ -2769,15 +2807,28 @@ describe("docker.ts module exports", () => {
                 if (args[0] === "image" && args[1] === "inspect") return makeResult(0, "<no value>\n");
                 if (args[0] === "ps" && args[1] === "-aq") return makeResult(0, exists ? `${TEST_CONTAINER_ID}\n` : "");
                 if (args[0] === "ps" && args[1] === "-q") return makeResult(0, running ? `${TEST_CONTAINER_ID}\n` : "");
-                if (args[0] === "inspect" && args.includes("{{.Id}}|{{.State.Running}}")) return makeResult(0, `${TEST_CONTAINER_ID}|${running}\n`);
+                if (args[0] === "inspect" && args.includes("{{.Id}}|{{.State.Running}}")) {
+                    events.push("pinned-running-identity");
+                    return makeResult(0, `${TEST_CONTAINER_ID}|${running}\n`);
+                }
                 if (args[0] === "inspect") return makeResult(0, JSON.stringify({ ...JSON.parse(fullCredentialMountsJson()), State: { Running: running } }));
-                if (args[0] === "start") { running = true; return makeResult(0, TEST_CONTAINER_ID); }
-                if (args[0] === "run") { exists = true; running = true; return makeResult(0, TEST_CONTAINER_ID); }
+                if (args[0] === "start") { events.push("start"); running = true; return makeResult(0, TEST_CONTAINER_ID); }
+                if (args[0] === "run") { events.push("run"); exists = true; running = true; return makeResult(0, TEST_CONTAINER_ID); }
+                if (args[0] === "cp") events.push("helper-copy");
                 return makeResult(0);
             });
-            startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, undefined, undefined, ready);
+            startProjectContainer(projectPath, ensureDirs, undefined, undefined, undefined, undefined, undefined, ready, undefined, started);
             expect(ready).toHaveBeenCalledWith(TEST_CONTAINER_ID, { startedByInvocation: initial !== "running" });
-            if (initial === "running") expect(spawnSyncMock.mock.calls.some(([, args]) => ["start", "run", "stop", "rm"].includes(args[0]))).toBe(false);
+            if (initial === "running") {
+                expect(started).not.toHaveBeenCalled();
+                expect(spawnSyncMock.mock.calls.some(([, args]) => ["start", "run", "stop", "rm"].includes(args[0]))).toBe(false);
+            } else {
+                expect(started).toHaveBeenCalledExactlyOnceWith(TEST_CONTAINER_ID);
+                expect(events.indexOf(initial === "stopped" ? "start" : "run")).toBeLessThan(events.indexOf("pinned-running-identity"));
+                expect(events.indexOf("pinned-running-identity")).toBeLessThan(events.indexOf("started-authority"));
+                expect(events.indexOf("started-authority")).toBeLessThan(events.indexOf("helper-copy"));
+                expect(events.indexOf("helper-copy")).toBeLessThan(events.indexOf("ready"));
+            }
         });
 
         it.each([false, true])("uses the normal exec budget without destructive recovery (deadline exhausted=%s)", exhausted => {
@@ -2892,6 +2943,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson())) // previous immutable provenance
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson())) // inspect -> all cred mounts present
                 .mockReturnValueOnce(makeResult(0, ""))                       // isContainerRunning -> false
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))               // isContainerExists -> true
@@ -2926,6 +2978,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, driftMountsJson)) // previous immutable provenance
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, driftMountsJson))  // inspect -> missing codex/gemini/opencode mounts
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
@@ -2956,6 +3009,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, driftMountsJson))
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, driftMountsJson));
 
             expect(() => startProjectContainer(projectPath, ensureDirs)).toThrow(
@@ -2979,6 +3033,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, driftMountsJson))
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, driftMountsJson))
                 .mockReturnValueOnce(makeResult(0, "abc123|true\n"))
                 .mockReturnValueOnce(makeResult(0, driftMountsJson))
@@ -3096,7 +3151,10 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 .mockReturnValueOnce(makeResult(0, privilegedContract))
-                .mockReturnValueOnce(makeResult(0, privilegedContract));
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // repeat pinned listing
+                .mockReturnValueOnce(makeResult(0, privilegedContract)) // intended contract fault
+                .mockReturnValueOnce(makeResult(0, "abc123|true\n")) // replacement preserves running identity
+                .mockReturnValueOnce(makeResult(0, privilegedContract)); // deferred safety refuses privileged
 
             expect(() => startProjectContainer(
                     projectPath,
@@ -3653,6 +3711,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected))) // previous immutable provenance
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected))) // inspect -> foreign lab volume
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
@@ -4287,6 +4346,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson()))
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson()))
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 .mockReturnValueOnce(makeResult(1))
@@ -4549,6 +4609,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n"))
@@ -4580,6 +4641,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n"))
@@ -4607,6 +4669,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n"))
@@ -4632,6 +4695,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n"))
@@ -4711,8 +4775,9 @@ describe("docker.ts module exports", () => {
                 }));
                 spawnSyncMock
                     .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
-                    .mockReturnValueOnce(makeResult(0, "<no value>\n"))
-                    .mockReturnValueOnce(makeResult(0, ""))
+                .mockReturnValueOnce(makeResult(0, "<no value>\n"))
+                .mockReturnValueOnce(makeResult(0, ""))
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                     .mockReturnValueOnce(makeResult(0, ""))
                     .mockReturnValueOnce(makeResult(0, ""))
                     .mockReturnValue(makeResult(0));
@@ -4840,6 +4905,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected)))
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n"))
@@ -4865,6 +4931,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists (extraMounts guard) -> false
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerRunning -> false
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
                 .mockReturnValue(makeResult(0, "c0ffee123456\n")); // docker run (and any extra calls)
@@ -4913,6 +4980,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, ""))
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))
                 .mockReturnValueOnce(makeResult(0, ""))
                 .mockReturnValue(makeResult(0, `${TEST_CREATED_CONTAINER_ID}\n`));
@@ -4946,6 +5014,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, ""))
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))
                 .mockReturnValueOnce(makeResult(0, ""))
                 .mockReturnValue(makeResult(0, `${TEST_CREATED_CONTAINER_ID}\n`));
@@ -4985,6 +5054,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, ""))
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))
                 .mockReturnValueOnce(makeResult(0, ""))
                 .mockReturnValue(makeResult(0, `${TEST_CREATED_CONTAINER_ID}\n`));
@@ -5009,6 +5079,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, ""))
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))
                 .mockReturnValueOnce(makeResult(0, ""))
                 .mockReturnValue(makeResult(0, `${TEST_CREATED_CONTAINER_SHORT_ID}\n`));
@@ -5029,6 +5100,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, ""))
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))
                 .mockReturnValueOnce(makeResult(0, ""))
                 .mockReturnValue(makeResult(0, `${createdId}\n`));
@@ -5050,6 +5122,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, ""))
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))
                 .mockReturnValueOnce(makeResult(0, ""))
                 .mockReturnValue(makeResult(0, `${createdId}\n`));
@@ -5067,6 +5140,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, ""))
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))
                 .mockReturnValueOnce(makeResult(0, ""))
                 .mockReturnValue(makeResult(0, `${createdId}\n`));
@@ -5092,6 +5166,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n"))
                 .mockReturnValueOnce(makeResult(0, "<no value>\n"))
                 .mockReturnValueOnce(makeResult(0, ""))
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))
                 .mockReturnValueOnce(makeResult(0, ""))
                 .mockReturnValue(makeResult(0, `${createdId}\n`));
@@ -5336,6 +5411,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerRunning -> false
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
                 .mockReturnValue(makeResult(0, "c0ffee123456\n")); // docker run
@@ -5374,6 +5450,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerRunning -> false
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
                 .mockReturnValue(makeResult(0, "c0ffee123456\n")); // docker run
@@ -5410,6 +5487,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerRunning -> false
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
                 .mockReturnValue(makeResult(0, "c0ffee123456\n")); // docker run
@@ -5437,6 +5515,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerRunning -> false
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
                 .mockReturnValue(makeResult(0, "c0ffee123456\n")); // docker run
@@ -5462,6 +5541,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerRunning -> false
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
                 .mockReturnValue(makeResult(0, "c0ffee123456\n")); // docker run
@@ -5498,6 +5578,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists (extraMounts guard) -> false (no extraMounts)
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerRunning -> false
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
                 .mockReturnValueOnce(makeResult(0, "c0ffee123456\n")) // docker run
@@ -5542,6 +5623,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists (extraMounts guard) -> false
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerRunning -> false
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
                 .mockReturnValue(makeResult(1));                     // docker run -> fail
@@ -5565,6 +5647,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists (extraMounts guard)
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerRunning -> false
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
                 .mockReturnValue(makeResult(0, "c0ffee123456\n")); // docker run (and any extra)
@@ -5593,6 +5676,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists (extraMounts guard)
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerRunning -> false
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
                 .mockReturnValue(makeResult(0, "c0ffee123456\n")); // docker run (and any extra)
@@ -5624,6 +5708,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, missingMountsJson)) // previous immutable provenance
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, missingMountsJson)) // docker inspect (containerHasMounts)
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
@@ -5657,6 +5742,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, missingGitIdentityMountsJson)) // previous immutable provenance
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, missingGitIdentityMountsJson)) // inspect -> missing git identity mount
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
@@ -5692,6 +5778,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected))) // previous immutable provenance
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected))) // inspect -> pre-init container
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
@@ -5730,6 +5817,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected))) // previous immutable provenance
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, JSON.stringify(inspected))) // inspect -> no packages volume
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
@@ -5764,6 +5852,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], { labState: false }))) // previous immutable provenance
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], { labState: false }))) // inspect -> missing lab state mount
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
@@ -5801,6 +5890,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], { deviceLabState: false }))) // previous immutable provenance
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], { deviceLabState: false }))) // inspect -> missing device state mount
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
@@ -5842,6 +5932,7 @@ describe("docker.ts module exports", () => {
                     unsupportedReason: "/dev/kvm is not available on the container host",
                     kvmDevice: false,
                 })))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], {
                     status: "unsupported",
                     unsupportedReason: "/dev/kvm is not available on the container host",
@@ -5878,6 +5969,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson())) // previous immutable provenance
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson())) // inspect -> stale ready VM contract
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
@@ -5911,6 +6003,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], { groupAdd: ["108", "999"] }))) // previous immutable provenance
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], { groupAdd: ["108", "999"] }))) // inspect -> extra group-add
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
@@ -5949,6 +6042,7 @@ describe("docker.ts module exports", () => {
                         { PathOnHost: "/dev/net/tun", PathInContainer: "/dev/net/tun" },
                     ],
                 })))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], {
                     devices: [
                         { PathOnHost: "/dev/kvm", PathInContainer: "/dev/kvm" },
@@ -5991,6 +6085,7 @@ describe("docker.ts module exports", () => {
                     groupAdd: [],
                     devices: [{ PathOnHost: "/dev/net/tun", PathInContainer: "/dev/net/tun" }],
                 })))     // isContainerExists -> exists
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], {
                     status: "unsupported",
                     unsupportedReason: "/dev/kvm is not available on the container host",
@@ -6029,6 +6124,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], { privileged: true }))) // previous immutable provenance
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, fullCredentialMountsJson([], { privileged: true }))) // inspect -> privileged
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // initial stopped identity
                 .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
@@ -6057,6 +6153,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))
                 // Immutable provenance read precedes contract verification.
                 .mockReturnValueOnce(makeResult(0, mountsJson)) // previous immutable provenance
+                .mockReturnValueOnce(makeResult(0, "abc123\n")) // lifecycle repeats pinned namespace observation
                 .mockReturnValueOnce(makeResult(0, mountsJson))     // docker inspect -> all present
                 .mockReturnValueOnce(makeResult(0, "abc123\n"));    // isContainerRunning -> true
 
@@ -6081,7 +6178,9 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
                 .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists -> exists
-                .mockReturnValueOnce(makeResult(0, mountsJson))     // contract inspect -> substituted source
+                .mockReturnValueOnce(makeResult(0, mountsJson))     // immutable prior provenance
+                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // repeat pinned listing
+                .mockReturnValueOnce(makeResult(0, mountsJson))     // intended contract inspect -> substituted source
                 .mockReturnValueOnce(makeResult(0, "abc123|true\n")) // confirmed stopped probe -> running
                 .mockReturnValueOnce(makeResult(0, mountsJson))     // deferred safety inspect
                 .mockReturnValueOnce(makeResult(0, "abc123\n"));    // isContainerRunning -> true
@@ -6107,6 +6206,7 @@ describe("docker.ts module exports", () => {
                 .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
                 .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> not exists, skip inspect
+                .mockReturnValueOnce(makeResult(0, "")) // lifecycle repeats absent namespace before final create preflight
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerRunning -> false
                 .mockReturnValueOnce(makeResult(0, ""))             // isContainerExists -> false
                 .mockReturnValue(makeResult(0, "c0ffee123456\n")); // docker run (and any extra)
@@ -6120,20 +6220,13 @@ describe("docker.ts module exports", () => {
 
             mockExistsSync.mockReturnValue(false);
 
-            spawnSyncMock
-                .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
-                .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists (extraMounts guard) -> exists
-                .mockReturnValueOnce(makeResult(1, ""))             // docker inspect -> fails (containerHasMounts false)
-                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
-                .mockReturnValueOnce(makeResult(0))                  // docker rm
-                .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
-                .mockReturnValueOnce(makeResult(0, ""))              // isContainerExists -> false
-                .mockReturnValueOnce(makeResult(0));                  // docker run
+            const inspectedIds = mockValidProvenanceThenContractFault(makeResult(1, "", "inspection unavailable"));
 
             expect(() => startWithApprovedReplacement(extraMounts)).toThrow(
                 "Container contract verification is temporarily unavailable",
             );
+            expect(inspectedIds.length).toBeGreaterThan(1);
+            expect(new Set(inspectedIds)).toEqual(new Set(["abc123"]));
             expectNoContainerReplacement();
         });
 
@@ -6142,20 +6235,13 @@ describe("docker.ts module exports", () => {
 
             mockExistsSync.mockReturnValue(false);
 
-            spawnSyncMock
-                .mockReturnValueOnce(makeResult(0, "sha256:abc\n")) // isImageExists
-                .mockReturnValueOnce(makeResult(0, "<no value>\n")) // getImageLabel -> dev build
-                .mockReturnValueOnce(makeResult(0, "abc123\n"))     // isContainerExists (extraMounts guard) -> exists
-                .mockReturnValueOnce(makeResult(0, "not-json"))     // docker inspect -> bad JSON
-                .mockReturnValueOnce(makeResult(0, "abc123|false\n")) // confirmed stopped container
-                .mockReturnValueOnce(makeResult(0))                  // docker rm
-                .mockReturnValueOnce(makeResult(0, ""))              // isContainerRunning -> false
-                .mockReturnValueOnce(makeResult(0, ""))              // isContainerExists -> false
-                .mockReturnValueOnce(makeResult(0));                  // docker run
+            const inspectedIds = mockValidProvenanceThenContractFault(makeResult(0, "not-json"));
 
             expect(() => startWithApprovedReplacement(extraMounts)).toThrow(
                 "Container contract verification is temporarily unavailable",
             );
+            expect(inspectedIds.length).toBeGreaterThan(1);
+            expect(new Set(inspectedIds)).toEqual(new Set(["abc123"]));
             expectNoContainerReplacement();
         });
     });

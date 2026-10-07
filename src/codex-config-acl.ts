@@ -9,14 +9,21 @@ container_uid = int(sys.argv[1])
 if not 0 <= container_uid < UNDEFINED:
     raise RuntimeError("invalid container user identity")
 
-directory = os.open("/home/ccc/.codex", os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW)
+flags = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW
+directory = os.open("/", flags)
 try:
+    # Pin every directory component; O_NOFOLLOW on only the final path would
+    # still allow /home or /home/ccc to redirect the root ACL effect elsewhere.
+    for component in "/home/ccc/.codex".strip("/").split("/"):
+        child = os.open(component, flags, dir_fd=directory)
+        os.close(directory)
+        directory = child
     host_uid = os.fstat(directory).st_uid
     file = os.open("config.toml", os.O_PATH | os.O_NOFOLLOW, dir_fd=directory)
     try:
         metadata = os.fstat(file)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise RuntimeError("config must be a regular non-symlink file")
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise RuntimeError("config must be a regular non-symlink, single-link file")
         # O_PATH pins even an unreadable file. xattr calls through its procfs
         # descriptor link operate on that inode, including after a rename.
         target = "/proc/self/fd/" + str(file)
@@ -61,6 +68,13 @@ try:
             acl[MASK, UNDEFINED] = new_mask
         encoded = struct.pack("<I", 2) + b"".join(
             struct.pack("<HHI", tag, acl[tag, uid], uid) for tag, uid in sorted(acl))
+        # Refuse an observed link/entry replacement before changing access.
+        current = os.fstat(file)
+        entry = os.stat("config.toml", dir_fd=directory, follow_symlinks=False)
+        if (not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1 or current.st_nlink != 1
+                or (entry.st_dev, entry.st_ino) != (metadata.st_dev, metadata.st_ino)
+                or (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino)):
+            raise RuntimeError("config identity changed before ACL grant")
         os.setxattr(target, attribute, encoded)
     finally:
         os.close(file)

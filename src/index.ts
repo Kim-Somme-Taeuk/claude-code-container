@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "child_process";
+import { runContainerCommand } from "./container-command.js";
 import {
     existsSync,
     mkdirSync,
     writeFileSync,
     readFileSync,
-    unlinkSync,
 } from "fs";
 import { basename, dirname, join, relative, resolve } from "path";
 import { fileURLToPath } from "url";
@@ -32,7 +32,7 @@ import {
     getClaudeDir,
     getClaudeJsonFile,
     collectForwardedEnv,
-    writeEnvFile,
+    writeOwnedEnvFile,
     LAB_RUNNER_PROFILE_NAME,
 } from "./utils.js";
 
@@ -86,6 +86,7 @@ import {
     isContainerExists,
     getContainerIdentity,
     getManagedProjectContainerIdentity,
+    inspectSessionContainerOwnership,
     type ContainerIdentity,
     isImageExists,
     getImageLabel,
@@ -119,9 +120,9 @@ import {
     withProjectFamilyLifecycleLock,
     withProjectFamilyLifecycleLockAsync,
     cleanupSession,
-    setupSignalHandlers,
-    setSession,
     setSessionContainerId,
+    acquireHostSessionOwnership,
+    confirmSessionOwnership,
     setSessionCleanupEnabled,
 } from "./session.js";
 
@@ -559,21 +560,20 @@ async function exec(
     const { setupTool, commandTool } = resolveExecTools(cmd, options.tool);
     const shouldEnsureTool = commandTool !== undefined || options.tool !== undefined;
     const worktreeBranch = options.expectedWorktreeBranch ?? detectWorktreeWorkspaceBranch(fullPath);
-    const sessionLockFile = worktreeBranch
-        ? createWorktreeSessionLock(
-            projectId,
-            fullPath,
-            worktreeBranch,
-            profile,
-            withProjectFamilyLifecycleLock,
-            assertWorkspaceBranch,
-            createSessionLock,
-            options.expectedWorktreeSourcePath,
-        )
-        : createSessionLock(projectId, profile);
-    setSession(sessionLockFile, fullPath, profile, (commandTool ?? options.tool)?.name ?? "command");
-    setSessionCleanupEnabled(false);
-    setupSignalHandlers();
+    const acquire = () => acquireHostSessionOwnership({
+        projectId, projectPath: fullPath, profile,
+        toolName: (commandTool ?? options.tool)?.name ?? "command",
+    }, (request) => {
+        const runtime = runtimeCli();
+        if (runtime !== "docker" && runtime !== "podman") throw new Error("Invalid session container runtime.");
+        return { ...inspectSessionContainerOwnership(request.projectPath, request.profile), runtime };
+    });
+    const { lockFile: sessionLockFile } = worktreeBranch
+        ? await withProjectFamilyLifecycleLockAsync(projectId, () => {
+            assertWorkspaceBranch(fullPath, worktreeBranch, spawnSync, options.expectedWorktreeSourcePath);
+            return acquire();
+        })
+        : await acquire();
 
     // Start clipboard server early — must complete before container creation so
     // the port file exists and can be bind-mounted (file mount requires the file
@@ -649,6 +649,11 @@ async function exec(
                     setSessionCleanupEnabled(invocationStartedContainers.has(containerId));
                 },
                 containerStatus.running ? containerStatus.containerId ?? undefined : undefined,
+                (containerId) => {
+                    invocationStartedContainers.add(containerId);
+                    setSessionContainerId(containerId);
+                    setSessionCleanupEnabled(true);
+                },
             );
             if (!readyContainerId) {
                 throw new Error("Container became unavailable before the session handoff.");
@@ -677,6 +682,7 @@ async function exec(
     progress("Synchronizing container setup...");
     let containerName = await withContainerSetupReadiness(sessionContainerPrefix, async () => {
         let readyContainerName = startContainer();
+        await confirmSessionOwnership();
         withCodexConfigLock(() => restoreCodexConfigHostOwnership(readyContainerName, profile), profile);
 
         // Skip heavy setup if the container was already running before this
@@ -704,6 +710,7 @@ async function exec(
                 readyContainerName,
                 () => startContainer(undefined, undefined, undefined),
             );
+            await confirmSessionOwnership();
         } else {
             // Container already running — only rebuild MCP config (lightweight, may have changed)
             const forwardedMcp = await buildMcpConfig(profile, () => restoreCodexConfigHostOwnership(readyContainerName, profile));
@@ -727,6 +734,7 @@ async function exec(
                 setupTool,
                 () => startContainer(undefined, undefined, undefined),
             );
+            await confirmSessionOwnership();
         }
         if (commandTool?.name === "claude") {
             // Re-verify after mise because a project shim can replace the fixed
@@ -742,7 +750,16 @@ async function exec(
         // Runs for new, restarted, reused and deferred containers alike, on the final ID.
         ensureContainerManagerSocketAccess(readyContainerName);
         return readyContainerName;
-    }).catch((error) => {
+    }).catch(async (error) => {
+        // A native start may succeed before its subsequent setup helper fails.
+        // Settle that captured start's guardian authorization before cleanup.
+        try {
+            await confirmSessionOwnership();
+        } catch {
+            try {
+                console.warn("[ccc] Unable to confirm session ownership after setup failure.");
+            } catch { /* A diagnostic must not replace the setup failure. */ }
+        }
         if (error instanceof ContainerRestartRequiredError) throw error;
         const detail = error instanceof Error ? `: ${error.message}` : "";
         throw new Error(`Container setup failed${detail}`, { cause: error });
@@ -846,12 +863,12 @@ async function exec(
         }
     }
 
-    const envFile = writeEnvFile(envEntries);
-    execArgs.push("--env-file", envFile);
-
-    let resultStatus = 1;
+    let preparationStatus: number | null = null;
+    let resultStatus: number;
+    const envFile = writeOwnedEnvFile(envEntries);
     try {
-        let preparationStatus: number | null = null;
+        execArgs.push("--env-file", envFile.path);
+
         if (commandTool?.name === "codex" && options.interactive !== false) {
             const preparation = prepareCodexLaunch(runtimeCli(), [...execArgs, containerName], resolvedCmd);
             if (!preparation.ok) {
@@ -879,9 +896,11 @@ async function exec(
             execArgs.push(...resolvedCmd);
         }
 
+        await confirmSessionOwnership();
         if (preparationStatus === null) {
             setSessionCleanupEnabled(true);
-            resultStatus = spawnSync(runtimeCli(), execArgs, { stdio: "inherit" }).status ?? 1;
+            await confirmSessionOwnership();
+            resultStatus = await runContainerCommand(runtimeCli(), execArgs, options.interactive !== false);
         } else {
             resultStatus = preparationStatus;
         }
@@ -889,10 +908,21 @@ async function exec(
         try {
             withCodexConfigLock(() => restoreCodexConfigHostOwnership(containerName, profile), profile);
         } catch (error) {
-            console.warn(`[ccc] Unable to restore Codex config access after command exit: ${error instanceof Error ? error.message : String(error)}`);
+            try {
+                console.warn(`[ccc] Unable to restore Codex config access after command exit: ${error instanceof Error ? error.message : String(error)}`);
+            } catch { /* A diagnostic must not replace the command outcome. */ }
         } finally {
-            try { unlinkSync(envFile); } catch { /* ignore cleanup error */ }
-            cleanupSession();
+            try {
+                envFile.dispose();
+            } finally {
+                try {
+                    cleanupSession();
+                } catch {
+                    try {
+                        console.warn("[ccc] Session cleanup failed after command exit.");
+                    } catch { /* A diagnostic must not replace the command outcome. */ }
+                }
+            }
         }
     }
 

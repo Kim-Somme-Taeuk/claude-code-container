@@ -1,4 +1,5 @@
 import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync } from "fs";
+import { validateOwnerDevicePayload } from "../domain/owner-device-payload.mjs";
 
 export const OWNER_DEVICE_STATE_FILE_LIMIT_BYTES = 256 * 1024;
 export const OWNER_DEVICE_ID_PATTERN = /^(?!\.\.?$)[A-Za-z0-9._-]{1,128}$/;
@@ -35,31 +36,9 @@ function readBounded(descriptor, limitBytes) {
 }
 
 function validateDevicesPayload(parsed) {
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !Array.isArray(parsed.devices)) {
-        throw stateError("owner-devices-state-invalid");
-    }
-    const ids = new Set();
-    const avdNames = new Set();
-    for (const device of parsed.devices) {
-        if (!device || typeof device !== "object" || Array.isArray(device)) {
-            throw stateError("owner-devices-state-invalid");
-        }
-        const id = device.id;
-        if (typeof id !== "string" || !OWNER_DEVICE_ID_PATTERN.test(id) || ids.has(id)) {
-            throw stateError("owner-devices-state-invalid");
-        }
-        ids.add(id);
-        if (device.avdName !== undefined) {
-            if (typeof device.avdName !== "string"
-                || device.avdName.length === 0
-                || device.avdName.length > 128
-                || avdNames.has(device.avdName)) {
-                throw stateError("owner-devices-state-invalid");
-            }
-            avdNames.add(device.avdName);
-        }
-    }
-    return parsed.devices;
+    const result = validateOwnerDevicePayload(parsed, OWNER_DEVICE_ID_PATTERN);
+    if (result.kind === "invalid") throw stateError("owner-devices-state-invalid");
+    return result.devices;
 }
 
 export function readOwnerDeviceStateFile(file, limitBytes = OWNER_DEVICE_STATE_FILE_LIMIT_BYTES) {

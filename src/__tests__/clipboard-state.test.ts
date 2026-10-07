@@ -4,7 +4,7 @@ import { chownSync, closeSync, existsSync, fstatSync, linkSync, lstatSync, mkdir
 import { request } from "http";
 import { connect, type Socket } from "net";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
 
@@ -17,13 +17,19 @@ describe.each(["legacy", "run"])("clipboard state across real daemon restarts (%
     let children: ChildProcess[];
     let sockets: Socket[];
     let descriptors: number[];
+    let startupFailures: string[];
 
     beforeAll(() => {
         fixtureRoot = mkdtempSync(join(tmpdir(), "ccc-clipboard-state-"));
         writeFileSync(join(fixtureRoot, "package.json"), '{"type":"module"}');
         symlinkSync(fileURLToPath(new URL("../../node_modules", import.meta.url)), join(fixtureRoot, "node_modules"), "junction");
-        for (const name of ["clipboard-server", "clipboard-startup-lock", "utils", "home-layout", "session-lock-liveness"]) {
+        // Compile the real relative dependency closure, including modules moved
+        // behind architecture seams. A missing fixture module is not a daemon
+        // publication timeout.
+        for (const name of ["clipboard-server", "clipboard-startup-lock", "utils", "home-layout", "session-lock-liveness",
+            "adapters/session-env-file", "application/session-lock-liveness", "domain/session-lock"]) {
             const source = readFileSync(fileURLToPath(new URL(`../${name}.ts`, import.meta.url)), "utf8");
+            mkdirSync(dirname(join(fixtureRoot, `${name}.js`)), { recursive: true });
             writeFileSync(join(fixtureRoot, `${name}.js`), transpileModule(source, {
                 compilerOptions: { target: ScriptTarget.ES2022, module: ModuleKind.ES2022 },
             }).outputText);
@@ -131,6 +137,7 @@ describe.each(["legacy", "run"])("clipboard state across real daemon restarts (%
         children = [];
         sockets = [];
         descriptors = [];
+        startupFailures = [];
     });
 
     afterEach(async () => {
@@ -157,9 +164,14 @@ describe.each(["legacy", "run"])("clipboard state across real daemon restarts (%
         const child = spawn(process.execPath, [join(fixtureRoot, script), ...args], {
             env: {
                 ...process.env,
+                HOME: home,
+                USERPROFILE: home,
+                TMPDIR: home,
+                TMP: home,
+                TEMP: home,
                 CCC_CLIPBOARD_TEST_HOME: home,
                 CCC_CLIPBOARD_TEST_LAYOUT: layout,
-                NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --require=${JSON.stringify(join(fixtureRoot, "home.cjs"))}`,
+                NODE_OPTIONS: `--require=${JSON.stringify(join(fixtureRoot, "home.cjs"))}`,
             },
             stdio: ["ignore", "pipe", "pipe"],
         });
@@ -170,7 +182,18 @@ describe.each(["legacy", "run"])("clipboard state across real daemon restarts (%
         child.stderr.on("data", (data) => { stderr += data; });
         const exited = new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
             child.on("error", reject);
-            child.on("close", (code) => resolve({ code, stdout, stderr }));
+            child.on("close", (code) => {
+                if (script === "clipboard-server.js" && args.includes("--serve") && code !== 0) {
+                    // Keep raw stderr in the child result for assertions, but
+                    // never publish its potentially sensitive contents in the
+                    // diagnostic. Only a bounded Node error identifier leaves it.
+                    const nodeCode = stderr.match(/\b(ERR_[A-Z_]{1,64})\b/)?.[1] || "unclassified";
+                    const failure = `clipboard fixture daemon exited: status=${code}, error=${nodeCode}`;
+                    startupFailures.push(failure);
+                    writeFileSync(join(home, "startup-diagnostic.json"), JSON.stringify({ status: code, error: nodeCode }), { mode: 0o600 });
+                }
+                resolve({ code, stdout, stderr });
+            });
         });
         return { child, exited };
     }
@@ -184,6 +207,7 @@ describe.each(["legacy", "run"])("clipboard state across real daemon restarts (%
     async function waitFor(check: () => boolean | Promise<boolean>) {
         const deadline = Date.now() + 5000;
         while (Date.now() < deadline) {
+            if (startupFailures.length) throw new Error(startupFailures[startupFailures.length - 1]);
             try { if (await check()) return; } catch { /* publication may be in progress */ }
             await new Promise((resolve) => setTimeout(resolve, 20));
         }

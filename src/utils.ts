@@ -1,11 +1,10 @@
 // src/utils.ts - Shared utilities for ccc
 
-import {randomBytes} from "crypto";
 import {createInterface} from "readline";
-import {writeFileSync} from "fs";
-import {homedir, tmpdir} from "os";
+import {homedir} from "os";
 import {join} from "path";
 import {normalizeProfile, profileClaudeDir, profileClaudeJsonFile, profileCodexDir} from "./home-layout.js";
+import {writeNativeEnvFile, writeOwnedNativeEnvFile} from "./adapters/session-env-file.js";
 
 // === CLI Version (injected at build time) ===
 export const CLI_VERSION: string = "__CLI_VERSION__";
@@ -188,14 +187,12 @@ export function collectForwardedEnv(
  * The caller is responsible for deleting the returned path after use.
  */
 export function writeEnvFile(entries: Array<[string, string]>): string {
-    const tmpFile = join(tmpdir(), `ccc-env-${randomBytes(6).toString("hex")}`);
-    const lines: string[] = [];
-    for (const [key, value] of entries) {
-        if (value.includes("\n") || value.includes("\r") || value.includes("\0")) continue;
-        lines.push(`${key}=${value}`);
-    }
-    writeFileSync(tmpFile, lines.join("\n") + "\n", { mode: 0o600 });
-    return tmpFile;
+    return writeNativeEnvFile(entries);
+}
+
+/** Write an environment file owned until explicit disposal or process exit. */
+export function writeOwnedEnvFile(entries: Array<[string, string]>): { path: string; dispose(): void } {
+    return writeOwnedNativeEnvFile(entries);
 }
 
 /**

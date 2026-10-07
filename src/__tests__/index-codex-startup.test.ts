@@ -4,15 +4,24 @@ const f = vi.hoisted(() => ({
     handoffStarted: undefined as boolean | undefined,
     realCleanup: false, devices: vi.fn(),
     locked: false, failPostExitLock: false, failTool: false, failState: false, launchFailure: false,
-    probeRunning: vi.fn(), spawn: vi.fn(), start: vi.fn(), prepare: vi.fn(), restore: vi.fn(), state: vi.fn(), harness: vi.fn(),
+    probeRunning: vi.fn(), spawn: vi.fn(), start: vi.fn(), prepare: vi.fn(), restore: vi.fn(), state: vi.fn(), harness: vi.fn(), confirm: vi.fn(), command: vi.fn(),
 }));
 vi.mock("child_process", async original => ({ ...await original<typeof import("child_process")>(), spawnSync: f.spawn }));
-vi.mock("fs", async original => ({ ...await original<typeof import("fs")>(), existsSync: () => true, mkdirSync: vi.fn(), readdirSync: () => [], lstatSync: () => ({ isDirectory: () => true, isSymbolicLink: () => false }), chmodSync: vi.fn(), writeFileSync: vi.fn(), unlinkSync: () => f.events.push("unlink") }));
+// Native filesystem metadata stays real. Only the exact synthetic claim is removed
+// by a fixture; the isolated verification HOME contains all config directories.
+vi.mock("fs", async original => {
+    const actual = await original<typeof import("fs")>();
+    return { ...actual, unlinkSync: (path: import("fs").PathLike) => {
+        if (path === "/fixture/session.lock") return;
+        return actual.unlinkSync(path);
+    } };
+});
 vi.mock("../utils.js", async original => ({
     ...await original<typeof import("../utils.js")>(),
     collectForwardedEnv: () => ({ forwarded: [], skippedDueToLimit: [], totalBytes: 0 }),
-    writeEnvFile: () => "/fixture/exec.env",
+    writeOwnedEnvFile: () => ({ path: "/fixture/exec.env", dispose: () => f.events.push("unlink") }),
 }));
+vi.mock("../container-command.js", () => ({ runContainerCommand: f.command }));
 vi.mock("../docker.js", () => ({
     ensureDockerRunning: vi.fn(), ensureCredentialHostDir: vi.fn(),
     getContainerName: () => "ccc-fixture", getContainerStatus: () => ({ exists: f.exists, running: f.running, imageId: "sha256:old", containerId: "old-id" }),
@@ -32,6 +41,12 @@ vi.mock("../device-lab-admin.js", () => ({ cleanupOwnerDevices: f.devices }));
 vi.mock("../session.js", async original => {
     const actual = await original<typeof import("../session.js")>();
     return { ...actual,
+    acquireHostSessionOwnership: async (request: import("../ports/session-acquisition.js").SessionAcquisitionRequest) => {
+        actual.setSession("/fixture/session.lock", request.projectPath, request.profile, request.toolName);
+        actual.setSessionCleanupEnabled(false);
+        return { lockFile: "/fixture/session.lock", existingId: f.running ? "old-id" : null };
+    },
+    confirmSessionOwnership: f.confirm,
     createSessionLock: () => "/fixture/session.lock", setupSignalHandlers: vi.fn(),
     getActiveSessionsForContainer: () => [], cleanupSession: () => { f.events.push("cleanup"); if (f.realCleanup) actual.cleanupSession(); },
     withContainerLifecycleLock: (_key: string, operation: () => unknown) => operation(),
@@ -70,7 +85,16 @@ beforeEach(() => {
     vi.spyOn(process, "exit").mockImplementation(code => { throw new Exit(Number(code)); });
     vi.spyOn(process.stderr, "write").mockReturnValue(true); vi.spyOn(console, "error").mockImplementation(() => {});
     f.probeRunning.mockReturnValue(true);
-    f.start.mockImplementation((...args: unknown[]) => { f.events.push("start"); (args[7] as (id: string, handoff: { startedByInvocation: boolean }) => void)("final-id", { startedByInvocation: f.handoffStarted ?? !f.running }); return "ccc-fixture"; });
+    f.confirm.mockImplementation(async () => { f.events.push("confirm"); });
+    f.command.mockImplementation(async (_runtime: string, args: string[]) => {
+        expect(args).toContain("final-id");
+        expect(f.events.at(-1)).toBe("confirm");
+        f.events.push("command"); return 0;
+    });
+    f.start.mockImplementation((...args: unknown[]) => { f.events.push("start");
+        const started = f.handoffStarted ?? !f.running;
+        if (started) (args[9] as (id: string) => void)("final-id");
+        (args[7] as (id: string, handoff: { startedByInvocation: boolean }) => void)("final-id", { startedByInvocation: started }); return "ccc-fixture"; });
     f.restore.mockImplementation((id, profile) => { expect(id).toBe("final-id"); expect(profile).toBe(f.profile); expect(f.locked).toBe(true); f.events.push("restore"); });
     f.prepare.mockImplementation((id, profile) => { expect(id).toBe("final-id"); expect(profile).toBe(f.profile); expect(f.locked).toBe(true); f.events.push("prepare"); });
     f.state.mockImplementation((id, profile) => { expect(id).toBe("final-id"); expect(profile).toBe(f.profile); f.events.push("state"); if (f.failState) throw new Error("state inaccessible"); });
@@ -88,7 +112,7 @@ it.each([false, true])("preserves final-ID Codex setup and resume ordering when 
     expect(f.events.slice(-4)).toEqual(["command", "restore", "unlink", "cleanup"]);
     expect(f.spawn.mock.calls.some(([, args]) => args[0] === "rm" || args[0] === "rmi")).toBe(false);
     expect(f.start).toHaveBeenCalledOnce();
-    const command = f.spawn.mock.calls.find(([, args]) => args.includes("codex"))![1];
+    const command = f.command.mock.calls[0][1];
     expect(command).toContain("resume"); expect(command).toContain("--last");
 });
 it.each(["tool", "state"])("stops before launch after %s setup failure without retrying a live container", async failure => {
@@ -105,7 +129,7 @@ it("preserves upstream daemon-preparation failure status and cleans invocation s
 
 it("cleans the environment file and session after post-command config lock failure", async () => {
     f.failPostExitLock = true;
-    await expect(main()).rejects.toBeInstanceOf(Error);
+    await expect(main()).rejects.toMatchObject({ status: 0 });
     expect(f.events).toContain("command");
     expect(f.events).toContain("unlink");
     expect(f.events).toContain("cleanup");
@@ -119,7 +143,8 @@ it("normalizes CCC_PROFILE=default before selecting config/state/Harness", async
     expect(f.harness).toHaveBeenCalledWith("final-id", undefined);
 });
 
-// Exercise the actual CLI catch and real session cleanup; Docker/filesystem effects remain bounded fixtures.
+// Exercise exported main/runCli and the real cleanup policy. Acquisition and ACK
+// are controlled ports here; native guardian authentication/EOF has separate tests.
 it.each(["tool", "state", "config", "restore", "daemon"])("CLI error cleanup preserves existing running work after %s startup failure", async failure => {
     f.realCleanup = true; f.running = true;
     f.failTool = failure === "tool"; f.failState = failure === "state"; f.launchFailure = failure === "daemon";
@@ -127,7 +152,7 @@ it.each(["tool", "state", "config", "restore", "daemon"])("CLI error cleanup pre
     if (failure === "config") f.prepare.mockImplementation(() => { throw new Error("config denied"); });
     await expect(runCli()).rejects.toMatchObject({ status: 1 });
     expect(f.events).not.toContain("command");
-    expect(f.events).toContain("unlink");
+    expect(f.events.includes("unlink")).toBe(failure === "daemon");
     expect(getCurrentSession().lockFile).toBeNull();
     expect(f.devices).not.toHaveBeenCalled();
     expect(f.spawn.mock.calls.some(([, args]) => args[0] === "stop")).toBe(false);
@@ -136,7 +161,7 @@ it("CLI startup failure still cleans a container started by this invocation", as
     f.realCleanup = true; f.failState = true;
     await expect(runCli()).rejects.toMatchObject({ status: 1 });
     expect(f.devices).toHaveBeenCalledOnce();
-    expect(f.spawn).toHaveBeenCalledWith("docker", ["stop", "final-id"], { stdio: "ignore" });
+    expect(f.spawn).toHaveBeenCalledWith("docker", ["stop", "final-id"], { stdio: "ignore", timeout: 30_000, killSignal: "SIGKILL" });
     expect(getCurrentSession().lockFile).toBeNull();
 });
 it("a successfully launched session retains normal final container/device cleanup", async () => {
@@ -144,7 +169,7 @@ it("a successfully launched session retains normal final container/device cleanu
     await expect(main()).rejects.toMatchObject({ status: 0 });
     expect(f.events).toContain("command");
     expect(f.devices).toHaveBeenCalledOnce();
-    expect(f.spawn).toHaveBeenCalledWith("docker", ["stop", "final-id"], { stdio: "ignore" });
+    expect(f.spawn).toHaveBeenCalledWith("docker", ["stop", "final-id"], { stdio: "ignore", timeout: 30_000, killSignal: "SIGKILL" });
 });
 
 it.each([false, true])("preserves another caller's running container after initial exists=%s", async exists => {
@@ -152,7 +177,7 @@ it.each([false, true])("preserves another caller's running container after initi
     await expect(runCli()).rejects.toMatchObject({ status: 1 });
     expect(f.start).toHaveBeenCalledOnce();
     expect(getCurrentSession().lockFile).toBeNull();
-    expect(f.events).toContain("unlink");
+    expect(f.events).not.toContain("unlink");
     expect(f.devices).not.toHaveBeenCalled();
     expect(f.spawn.mock.calls.some(([, args]) => args[0] === "stop")).toBe(false);
 });
@@ -169,5 +194,31 @@ it("retains this invocation's start authority across a later same-ID readiness h
     await expect(runCli()).rejects.toMatchObject({ status: 1 });
     expect(f.start).toHaveBeenCalledTimes(2);
     expect(f.devices).toHaveBeenCalledOnce();
-    expect(f.spawn).toHaveBeenCalledWith("docker", ["stop", "final-id"], { stdio: "ignore" });
+    expect(f.spawn).toHaveBeenCalledWith("docker", ["stop", "final-id"], { stdio: "ignore", timeout: 30_000, killSignal: "SIGKILL" });
+});
+
+it("awaits the captured start acknowledgement before CLI cleanup after a helper failure", async () => {
+    f.realCleanup = true;
+    const cause = new Error("post-start helper failed");
+    let acknowledge!: () => void;
+    const acknowledgement = new Promise<void>(resolve => { acknowledge = resolve; });
+    let reached!: () => void;
+    const confirming = new Promise<void>(resolve => { reached = resolve; });
+    f.confirm.mockImplementation(() => { f.events.push("confirm"); reached(); return acknowledgement; });
+    f.start.mockImplementation((...args: unknown[]) => {
+        (args[9] as (id: string) => void)("final-id");
+        throw cause;
+    });
+    const launch = main();
+    const rejected = expect(launch).rejects.toMatchObject({ cause });
+    await confirming;
+    expect(f.devices).not.toHaveBeenCalled();
+    expect(f.events).not.toContain("cleanup");
+    acknowledge();
+    await rejected;
+    // main preserves the setup cause; the real CLI error boundary owns cleanup.
+    const { cleanupSession } = await import("../session.js");
+    cleanupSession();
+    expect(f.devices).toHaveBeenCalledOnce();
+    expect(f.spawn).toHaveBeenCalledWith("docker", ["stop", "final-id"], { stdio: "ignore", timeout: 30_000, killSignal: "SIGKILL" });
 });

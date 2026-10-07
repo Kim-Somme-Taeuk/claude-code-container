@@ -1,12 +1,11 @@
 import { createHash } from "crypto";
 import { AsyncLocalStorage } from "async_hooks";
-import { existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { isDeepStrictEqual } from "util";
 import { ownerId } from "../context.mjs";
-import { assertOwnerDeviceStateWritable, readOwnerDeviceStateFile } from "./owner-device-state.mjs";
-import { withSharedMutationLock, withSharedMutationLockAsync, writeJsonFileAtomically } from "./shared-mutation-lock.mjs";
+import { createOwnerDeviceRepository } from "../application/owner-device-repository.mjs";
+import { createFileOwnerDeviceRepositoryPorts } from "../adapters/state/owner-device-repository.mjs";
+import { withSharedMutationLockAsync } from "./shared-mutation-lock.mjs";
 
 const ownerDeviceOperationContext = new AsyncLocalStorage();
 
@@ -62,117 +61,48 @@ export function withOwnerDeviceOperations(backend, deviceIds, operation, options
     return acquire(0);
 }
 
-export function readOwnerDevices(backend) {
-    return readOwnerDeviceStateFile(ownerStateFile(backend));
+// Bind trusted paths on the first storage operation of each public call.
+// Claim input validation retains precedence over path resolution/acquisition.
+// The binding is call-local, never a module-global home/owner cache.
+function ownerRepository(backend) {
+    let ports;
+    const storage = () => ports ??= createFileOwnerDeviceRepositoryPorts({
+        stateFile: ownerStateFile(backend), mutationLockFile: ownerStateMutationLockFile(backend),
+    });
+    return createOwnerDeviceRepository({
+        read: () => storage().read(),
+        exists: () => storage().exists(),
+        validate: (devices) => storage().validate(devices),
+        publish: (devices) => storage().publish(devices),
+        withMutationLock: (operation) => storage().withMutationLock(operation),
+        equals: (left, right) => storage().equals(left, right),
+    });
 }
 
-function assertUniqueOwnerDeviceIds(devices) {
-    const ids = new Set();
-    for (const device of devices) {
-        const id = device && typeof device === "object" ? device.id : null;
-        if (typeof id !== "string" || !id) continue;
-        if (ids.has(id)) {
-            const error = new Error(`Owner device state contains duplicate id: ${id}`);
-            error.code = "owner-device-id-conflict";
-            error.deviceId = id;
-            throw error;
-        }
-        ids.add(id);
-    }
+export function readOwnerDevices(backend) {
+    return ownerRepository(backend).read();
 }
 
 export function writeOwnerDevices(backend, devices) {
-    return withSharedMutationLock(ownerStateMutationLockFile(backend), () => {
-        if (!Array.isArray(devices)) throw new TypeError("Owner device state must be an array");
-        readOwnerDevices(backend);
-        assertUniqueOwnerDeviceIds(devices);
-        assertOwnerDeviceStateWritable(devices);
-        writeJsonFileAtomically(ownerStateFile(backend), { devices });
-        return devices;
-    });
+    return ownerRepository(backend).write(devices);
 }
 
 export function mutateOwnerDevices(backend, updater) {
-    return withSharedMutationLock(ownerStateMutationLockFile(backend), () => {
-        const current = readOwnerDevices(backend);
-        const before = JSON.stringify(current);
-        const existed = existsSync(ownerStateFile(backend));
-        const next = updater(current);
-        if (!Array.isArray(next)) throw new TypeError("Owner device mutation must return an array");
-        assertUniqueOwnerDeviceIds(next);
-        assertOwnerDeviceStateWritable(next);
-        // Validate even a no-op, and compare a snapshot taken before an updater
-        // that may mutate its input. Preserve creation of an initially absent file.
-        if (!existed || JSON.stringify(next) !== before) {
-            writeJsonFileAtomically(ownerStateFile(backend), { devices: next });
-        }
-        return next;
-    });
+    return ownerRepository(backend).mutate(updater);
 }
 
 export function claimOwnerDevice(backend, device, uniqueFields = ["id"]) {
-    if (!device || typeof device !== "object" || Array.isArray(device)) {
-        throw new TypeError("Owner device claim requires a device object");
-    }
-    if (!Array.isArray(uniqueFields) || uniqueFields.length === 0 || uniqueFields.some((selector) => {
-        const fields = Array.isArray(selector) ? selector : [selector];
-        return fields.length === 0 || fields.some((field) => typeof field !== "string" || !field);
-    })) {
-        throw new TypeError("Owner device claim requires at least one unique field");
-    }
-    return withSharedMutationLock(ownerStateMutationLockFile(backend), () => {
-        const devices = readOwnerDevices(backend);
-        for (const selector of uniqueFields) {
-            const fields = Array.isArray(selector) ? selector : [selector];
-            const values = fields.map((field) => device[field]);
-            if (values.some((value) => value === null || value === undefined || value === "")) continue;
-            const existing = devices.find((candidate) => candidate && typeof candidate === "object" && fields.every((field, index) => candidate[field] === values[index]));
-            if (existing) {
-                const field = fields.join("+");
-                const value = fields.length === 1 ? values[0] : Object.fromEntries(fields.map((key, index) => [key, values[index]]));
-                return {
-                    ok: false,
-                    error: field === "id" ? "owner-device-id-conflict" : "owner-device-identity-conflict",
-                    field,
-                    value,
-                    existing,
-                };
-            }
-        }
-        const next = [...devices, device];
-        assertOwnerDeviceStateWritable(next);
-        writeJsonFileAtomically(ownerStateFile(backend), { devices: next });
-        return { ok: true, device };
-    });
+    return ownerRepository(backend).claim(device, uniqueFields);
 }
 
 export function findOwnerDevice(backend, id) {
-    return readOwnerDevices(backend).find((device) => device.id === id);
+    return ownerRepository(backend).find(id);
 }
 
 export function updateOwnerDevice(backend, id, updater) {
-    let updated = null;
-    mutateOwnerDevices(backend, (devices) => devices.map((device) => {
-        if (device.id !== id) return device;
-        updated = updater(device);
-        return updated;
-    }));
-    return updated;
+    return ownerRepository(backend).update(id, updater);
 }
 
 export function transitionOwnerDeviceRecord(backend, id, expected, replacement) {
-    let found = false;
-    let matched = false;
-    let currentDevice = null;
-    let updatedDevice = null;
-    mutateOwnerDevices(backend, (devices) => devices.flatMap((device) => {
-        if (device.id !== id) return [device];
-        found = true;
-        currentDevice = device;
-        if (!isDeepStrictEqual(device, expected)) return [device];
-        matched = true;
-        updatedDevice = typeof replacement === "function" ? replacement(device) : replacement;
-        return updatedDevice === null ? [] : [updatedDevice];
-    }));
-    return { found, matched, currentDevice, device: updatedDevice };
+    return ownerRepository(backend).transition(id, expected, replacement);
 }
